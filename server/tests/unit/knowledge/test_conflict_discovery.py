@@ -405,6 +405,7 @@ async def test_job_persists_grounded_candidates_and_advances_cursor_together():
     assert [candidate.evidence_ids for candidate in candidates] == [[101, 104]]
     assert job.snapshot_for_health() == {
         "mode": "assisted",
+        "configured_enabled": True,
         "scheduler_enabled": True,
         "interval_hours": 48,
         "llm_available": True,

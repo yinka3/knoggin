@@ -13,6 +13,11 @@ class KnogginError(Exception):
         self.details = details or {}
 
 
+class PayloadTooLargeError(KnogginError):
+    def __init__(self):
+        super().__init__("The upload exceeds the permitted size.", code="payload_too_large")
+
+
 class ConfigurationError(KnogginError):
     """Raised when the system is misconfigured or missing required settings."""
 
@@ -115,6 +120,17 @@ class WorkspaceConflictError(KnogginError, ValueError):
             message,
             code="workspace_conflict",
             details=details,
+        )
+
+
+class EpisodeEditConflictError(KnogginError, ValueError):
+    """An optimistic episode edit no longer matches the owned revision."""
+
+    def __init__(self):
+        KnogginError.__init__(
+            self,
+            "Episode is unavailable or has changed since it was read",
+            code="episode_conflict",
         )
 
 

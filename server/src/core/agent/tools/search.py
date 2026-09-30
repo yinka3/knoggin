@@ -15,10 +15,6 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 
 if TYPE_CHECKING:
     from core.knowledge.documents import DocumentService
-    from core.knowledge.entity.resolver import EntityResolver
-    from core.knowledge.services.embedding_service import EmbeddingService
-    from core.knowledge.store import KnowledgeStore
-    from infrastructure.postgres_client import PostgresClient
 
 import httpcore
 import httpx
@@ -427,17 +423,13 @@ def _canonical_search_url(value) -> Optional[str]:
     )
 
 
-class SearchTools:
-    knowledge_store: KnowledgeStore
-    postgres: PostgresClient
-    embedding_service: EmbeddingService
-    search_cfg: Dict
+class DocumentSearchTools:
+    """Project-document discovery and provenance adapters."""
+
     document_service: Optional[DocumentService]
     document_focus: Optional[Dict] = None
     user_name: str
     session_id: str
-    entities: EntityResolver
-    readable_project_ids: Optional[List[str]]
 
     _CONTENT_HASH_RE = re.compile(r"[0-9a-f]{64}")
 
@@ -703,7 +695,7 @@ class SearchTools:
             result.get("section_path"),
         )
 
-    async def list_documents(
+    async def list_project_documents(
         self,
         path_prefix: str = None,
         limit: int = 50,
@@ -711,7 +703,10 @@ class SearchTools:
     ) -> List[Dict]:
         """List documents visible to the current project/session."""
         if not self.document_service:
-            return [{"error": "No project document service available"}]
+            raise ToolExecutionError(
+                "list_project_documents",
+                "No project document service is available",
+            )
         if (
             not isinstance(limit, int)
             or isinstance(limit, bool)
@@ -731,7 +726,7 @@ class SearchTools:
                     return [document]
                 focused_prefix = self.document_focus.get("path_prefix")
                 if restrictive and path_prefix is not None and not self._focus_path_contains(path_prefix):
-                    raise ValueError("list_documents is restricted to the focused subtree")
+                    raise ValueError("list_project_documents is restricted to the focused subtree")
                 if path_prefix is None:
                     path_prefix = focused_prefix
             elif path_prefix is not None:
@@ -743,7 +738,7 @@ class SearchTools:
         )
         return documents
 
-    async def get_document_info(
+    async def get_project_document_info(
         self,
         document_id: str = None,
         relative_path: str = None,
@@ -751,7 +746,10 @@ class SearchTools:
     ) -> Dict:
         """Get metadata for one visible document."""
         if not self.document_service:
-            return {"error": "No project document service available"}
+            raise ToolExecutionError(
+                "get_project_document_info",
+                "No project document service is available",
+            )
         if self.document_focus and self._focus_is_restrictive():
             await self._require_focus_document(document_id=document_id, relative_path=relative_path)
         if (
@@ -769,13 +767,13 @@ class SearchTools:
             and self._focus_is_restrictive()
             and self.document_focus["target_type"] == "subtree"
         ):
-            raise ValueError("get_document_info requires a selector within the focused subtree")
+            raise ValueError("get_project_document_info requires a selector within the focused subtree")
         return await self.document_service.get_document_info(
             document_id=document_id,
             relative_path=relative_path,
         )
 
-    async def read_document(
+    async def read_project_document(
         self,
         document_id: str = None,
         relative_path: str = None,
@@ -786,21 +784,24 @@ class SearchTools:
     ) -> List[Dict]:
         """Read a bounded line range from one visible document."""
         if not self.document_service:
-            return [{"error": "No project document service available"}]
+            raise ToolExecutionError(
+                "read_project_document",
+                "No project document service is available",
+            )
         request_document_id = self._request_focus_document_id()
         if self.document_focus and self._focus_is_restrictive():
             await self._require_focus_document(document_id=document_id, relative_path=relative_path)
         if request_document_id is not None:
             if document_id is not None and document_id != request_document_id:
                 raise ValueError(
-                    "read_document is restricted to the selected document"
+                    "read_project_document is restricted to the selected document"
                 )
             if (
                 relative_path is not None
                 and relative_path != self.document_focus["relative_path"]
             ):
                 raise ValueError(
-                    "read_document is restricted to the selected document"
+                    "read_project_document is restricted to the selected document"
                 )
             document_id = request_document_id
             relative_path = None
@@ -819,7 +820,7 @@ class SearchTools:
             and self._focus_is_restrictive()
             and self.document_focus["target_type"] == "subtree"
         ):
-            raise ValueError("read_document requires a selector within the focused subtree")
+            raise ValueError("read_project_document requires a selector within the focused subtree")
         page_number, start_line, end_line = self._request_selection_defaults(
             page_number=page_number,
             start_line=start_line,
@@ -838,7 +839,7 @@ class SearchTools:
         )
         return [self._with_document_source_context(result)]
 
-    async def search_documents(
+    async def search_project_documents(
         self,
         query: str,
         document_name: str = None,
@@ -861,7 +862,10 @@ class SearchTools:
             Matching chunks with document metadata and relevance scores.
         """
         if not self.document_service:
-            return [{"error": "No project document service available"}]
+            raise ToolExecutionError(
+                "search_project_documents",
+                "No project document service is available",
+            )
         if (
             not isinstance(limit, int)
             or isinstance(limit, bool)
@@ -886,14 +890,14 @@ class SearchTools:
                 relative_path=relative_path,
             )
             if path_prefix is not None and self.document_focus["target_type"] == "subtree" and not self._focus_path_contains(path_prefix):
-                raise ValueError("search_documents is restricted to the focused subtree")
+                raise ValueError("search_project_documents is restricted to the focused subtree")
         if request_document_id is not None:
             if (
                 relative_path is not None
                 and relative_path != self.document_focus["relative_path"]
             ):
                 raise ValueError(
-                    "search_documents is restricted to the selected document"
+                    "search_project_documents is restricted to the selected document"
                 )
             relative_path = None
             path_prefix = None
@@ -929,7 +933,7 @@ class SearchTools:
         ]
 
         if not documents:
-            return [{"error": "No indexed documents available in this project"}]
+            return []
 
         if document_name:
             requested = document_name.lower()
@@ -948,26 +952,20 @@ class SearchTools:
                 document_filter = matches[0]["document_id"]
             elif len(matches) > 1:
                 paths = [document["relative_path"] for document in matches]
-                return [
-                    {
-                        "error": (
-                            f"Document name '{document_name}' is ambiguous. "
-                            f"Use one of these paths: {', '.join(paths)}"
-                        )
-                    }
-                ]
+                raise ToolExecutionError(
+                    "search_project_documents",
+                    f"Document name '{document_name}' is ambiguous. "
+                    f"Use one of these paths: {', '.join(paths)}",
+                )
             else:
                 available = [
                     document["relative_path"] for document in documents
                 ]
-                return [
-                    {
-                        "error": (
-                            f"Document '{document_name}' not found. Available: "
-                            f"{', '.join(available)}"
-                        )
-                    }
-                ]
+                raise ToolExecutionError(
+                    "search_project_documents",
+                    f"Document '{document_name}' not found. Available: "
+                    f"{', '.join(available)}",
+                )
 
         results = await self.document_service.search(
             query,
@@ -984,7 +982,26 @@ class SearchTools:
 
         return [self._with_document_source_context(result) for result in results]
 
-    async def web_search(
+class WebTools:
+    """External web discovery, safe fetching, and run-local snapshots."""
+
+    search_cfg: Dict
+
+    def _get_http_client(self) -> httpx.AsyncClient:
+        client = getattr(self, "_http_client", None)
+        if client is None:
+            client = httpx.AsyncClient(timeout=10.0)
+            self._http_client = client
+        return client
+
+    def _get_web_page_client(self) -> httpx.AsyncClient:
+        client = getattr(self, "_web_page_client", None)
+        if client is None:
+            client = create_web_page_http_client()
+            self._web_page_client = client
+        return client
+
+    async def search_web(
         self, query: str, limit: int = 5, freshness: str = None
     ) -> List[Dict]:
         """
@@ -1020,7 +1037,7 @@ class SearchTools:
             fallback_provider=fallback_provider,
         )
 
-    async def news_search(
+    async def search_news(
         self, query: str, limit: int = 5, freshness: str = None
     ) -> List[Dict]:
         """
@@ -1181,7 +1198,7 @@ class SearchTools:
             )
         end_line = min(total_lines, start_line + max_lines - 1)
         excerpt = "\n".join(lines[start_line - 1 : end_line])
-        metadata = SearchTools._web_pdf_metadata(snapshot)
+        metadata = WebTools._web_pdf_metadata(snapshot)
         metadata.update(
             {
                 "page_start_line": start_line,
@@ -1293,14 +1310,14 @@ class SearchTools:
 
     @staticmethod
     def _web_page_metadata(snapshot: _WebPageSnapshot) -> Dict:
-        metadata = SearchTools._web_read_metadata(snapshot)
+        metadata = WebTools._web_read_metadata(snapshot)
         if snapshot.html_canonical_url:
             metadata["html_canonical_url"] = snapshot.html_canonical_url
         return metadata
 
     @staticmethod
     def _web_pdf_metadata(snapshot: _WebPdfSnapshot) -> Dict:
-        return SearchTools._web_read_metadata(snapshot)
+        return WebTools._web_read_metadata(snapshot)
 
     @staticmethod
     def _web_read_metadata(snapshot: _WebPageSnapshot | _WebPdfSnapshot) -> Dict:
@@ -1317,9 +1334,7 @@ class SearchTools:
     async def _fetch_web_page_snapshot(
         self, requested_url: str
     ) -> _WebPageSnapshot | _WebPdfSnapshot:
-        client = getattr(self, "_web_page_client", None)
-        if client is None:
-            raise _web_page_error("webpage fetch client is unavailable")
+        client = self._get_web_page_client()
 
         current_url = requested_url
         for redirect_count in range(_WEB_PAGE_MAX_REDIRECTS + 1):
@@ -1410,7 +1425,7 @@ class SearchTools:
             extracted_characters = 0
             extracted_lines = 0
             for page in reader.pages:
-                text = SearchTools._normalize_web_text(page.extract_text() or "")
+                text = WebTools._normalize_web_text(page.extract_text() or "")
                 if text:
                     extracted_characters += len(text)
                     extracted_lines += len(text.splitlines())
@@ -1476,7 +1491,7 @@ class SearchTools:
             )
             for tag in soup.find_all(_WEB_PAGE_REMOVE_TAGS):
                 tag.decompose()
-            html_canonical_url = SearchTools._html_canonical_url(soup, final_url)
+            html_canonical_url = WebTools._html_canonical_url(soup, final_url)
             content_root = soup.find("main") or soup.find("article") or soup.body or soup
             extracted = MarkItDown().convert_stream(
                 BytesIO(str(content_root).encode("utf-8")),
@@ -1484,7 +1499,7 @@ class SearchTools:
                 url=final_url,
             ).text_content
 
-        canonical_text = SearchTools._normalize_web_text(extracted)
+        canonical_text = WebTools._normalize_web_text(extracted)
         if not canonical_text:
             raise _web_page_error("webpage did not contain readable text")
         return title, canonical_text, html_canonical_url
@@ -1527,13 +1542,10 @@ class SearchTools:
         loop = asyncio.get_running_loop()
         try:
             if DDGS is None:
-                return [
-                    {
-                        "title": "Search Error",
-                        "url": "",
-                        "snippet": "duckduckgo_search is not installed",
-                    }
-                ]
+                raise ToolExecutionError(
+                    "search_web",
+                    "DuckDuckGo search dependency is unavailable",
+                )
             ddgs = DDGS()
             timelimit = {"pd": "d", "pw": "w", "pm": "m", "py": "y"}.get(freshness)
 
@@ -1545,13 +1557,7 @@ class SearchTools:
             )
 
             if not raw:
-                return [
-                    {
-                        "title": "No Results",
-                        "url": "",
-                        "snippet": f"No web results found for: {query}",
-                    }
-                ]
+                return []
 
             results = []
             for r in raw:
@@ -1564,15 +1570,15 @@ class SearchTools:
                     }
                 )
             return results
+        except ToolExecutionError:
+            raise
         except Exception as e:
             logger.error(f"DuckDuckGo search failed: {e}")
-            return [
-                {
-                    "title": "Search Error",
-                    "url": "",
-                    "snippet": f"DuckDuckGo search failed: {e}",
-                }
-            ]
+            raise ToolExecutionError(
+                "search_web",
+                "DuckDuckGo search failed",
+                retryable=True,
+            ) from e
 
     async def _search_tavily(self, query: str, limit: int, api_key: str) -> List[Dict]:
         """Web search via Tavily API"""
@@ -1586,7 +1592,9 @@ class SearchTools:
         }
 
         try:
-            response = await self._http_client.post(url, json=payload, timeout=10.0)
+            response = await self._get_http_client().post(
+                url, json=payload, timeout=10.0
+            )
 
             if response.status_code == 401:
                 logger.warning("Tavily API key invalid, falling back to DuckDuckGo")
@@ -1610,13 +1618,7 @@ class SearchTools:
                 )
 
             if not results:
-                return [
-                    {
-                        "title": "No Results",
-                        "url": "",
-                        "snippet": f"No web results found for: {query}",
-                    }
-                ]
+                return []
             return results
         except httpx.TimeoutException:
             logger.warning("Tavily timed out, falling back to DuckDuckGo")
@@ -1645,7 +1647,9 @@ class SearchTools:
             params["freshness"] = freshness
 
         try:
-            response = await self._http_client.get(url, headers=headers, params=params)
+            response = await self._get_http_client().get(
+                url, headers=headers, params=params
+            )
 
             if response.status_code == 401:
                 logger.warning("Brave API key invalid, falling back")
@@ -1689,13 +1693,7 @@ class SearchTools:
                 )
 
             if not results:
-                return [
-                    {
-                        "title": "No Results",
-                        "url": "",
-                        "snippet": f"No web results found for: {query}",
-                    }
-                ]
+                return []
             return results
         except httpx.TimeoutException:
             logger.warning("Brave timed out, falling back to DuckDuckGo")
@@ -1722,20 +1720,17 @@ class SearchTools:
         }
 
         try:
-            response = await self._http_client.get(url, headers=headers, params=params)
+            response = await self._get_http_client().get(
+                url, headers=headers, params=params
+            )
 
             if response.status_code in (401, 429):
                 logger.warning(f"Brave news API returned {response.status_code}")
-                return [
-                    {
-                        "title": "Error",
-                        "url": "",
-                        "snippet": (
-                            f"Brave News API error ({response.status_code}). "
-                            "Check your API key in Settings."
-                        ),
-                    }
-                ]
+                raise ToolExecutionError(
+                    "search_news",
+                    "Brave News API rejected the request",
+                    retryable=response.status_code == 429,
+                )
 
             response.raise_for_status()
             data = response.json()
@@ -1756,29 +1751,21 @@ class SearchTools:
                 )
 
             if not results:
-                return [
-                    {
-                        "title": "No Results",
-                        "url": "",
-                        "snippet": f"No news found for: {query}",
-                    }
-                ]
+                return []
             return results
-        except httpx.TimeoutException:
+        except ToolExecutionError:
+            raise
+        except httpx.TimeoutException as exc:
             logger.warning("Brave news timed out")
-            return [
-                {
-                    "title": "Timeout",
-                    "url": "",
-                    "snippet": "News search timed out. Try a simpler query.",
-                }
-            ]
+            raise ToolExecutionError(
+                "search_news", "News search timed out", retryable=True
+            ) from exc
         except Exception as e:
             logger.error(f"Brave news search failed: {e}")
-            return [
-                {
-                    "title": "Search Error",
-                    "url": "",
-                    "snippet": f"News search failed: {e}",
-                }
-            ]
+            raise ToolExecutionError(
+                "search_news", "News search failed", retryable=True
+            ) from e
+
+
+class SearchTools(DocumentSearchTools, WebTools):
+    """Combined tool surface used by the agent executor."""

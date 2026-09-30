@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -9,6 +10,7 @@ from pathlib import Path
 from loguru import logger
 
 from common.conf.manager import ConfigManager
+from common.utils.lifecycle import settle_owned_task
 from common.utils.time_utils import get_now
 from core.agent.orchestrator import AgentOrchestrator
 from core.agent.services.agent_manager import AgentManager
@@ -37,6 +39,35 @@ class ApplicationShutdownError(RuntimeError):
         super().__init__(f"Application shutdown failed in phase(s): {phases}")
 
 
+class _StartupCleanup:
+    """Retain partially constructed application owners until unwind succeeds."""
+
+    def __init__(self, resources):
+        self.owners = {"resources": resources}
+        self._lock = asyncio.Lock()
+
+    async def shutdown(self):
+        async with self._lock:
+            failures = []
+            for phase in ("aac", "sessions", "projects", "resources"):
+                if phase not in self.owners:
+                    continue
+                if phase == "projects" and "sessions" in self.owners:
+                    continue
+                if phase == "resources" and any(
+                    name in self.owners for name in ("aac", "sessions", "projects")
+                ):
+                    continue
+                try:
+                    await self.owners[phase].shutdown()
+                except Exception as exc:
+                    failures.append(ShutdownFailure(phase, exc))
+                else:
+                    del self.owners[phase]
+            if failures:
+                raise ApplicationShutdownError(tuple(failures))
+
+
 @dataclass(slots=True)
 class ApplicationRuntime:
     """The root owner of shared resources, projects, sessions, and health."""
@@ -51,6 +82,8 @@ class ApplicationRuntime:
     health_service: RuntimeHealthService = field(init=False)
     started_at: datetime = field(init=False)
     _shutdown_complete: bool = field(init=False, default=False, repr=False)
+    _shutdown_lock: asyncio.Lock = field(init=False, default_factory=asyncio.Lock, repr=False)
+    _completed_shutdown_phases: set[str] = field(init=False, default_factory=set, repr=False)
     _shutdown_error: ApplicationShutdownError | None = field(
         init=False,
         default=None,
@@ -78,7 +111,8 @@ class ApplicationRuntime:
         """Build the canonical runtime whose shutdown owns every live layer."""
 
         config_manager = ConfigManager.initialize(config_dir)
-        resources = await RuntimeResources.create(num_workers=num_workers)
+        resources = await RuntimeResources.create(num_workers=num_workers, config_manager=config_manager)
+        startup_cleanup = _StartupCleanup(resources)
         try:
             knowledge_store = resources.knowledge_store
             if knowledge_store is None:
@@ -97,6 +131,7 @@ class ApplicationRuntime:
                 ),
                 config_manager=config_manager,
             )
+            startup_cleanup.owners["projects"] = projects
             await projects.start()
             agent_manager = AgentManager(resources, user_name)
             await agent_manager.ensure_default_agent()
@@ -104,19 +139,23 @@ class ApplicationRuntime:
                 agent_manager,
                 config_manager=config_manager,
                 entity_maintenance_service=projects.entity_maintenance_service,
+                project_maintenance_service=projects.maintenance_service,
             )
             sessions = SessionManager(
                 resources=resources,
                 user_name=user_name,
                 project_manager=projects,
                 agent_orchestrator=agent_orchestrator,
+                config_manager=config_manager,
             )
+            startup_cleanup.owners["sessions"] = sessions
             aac_runtime = await AACRuntime.create(
                 user_name=user_name,
                 resources=resources,
                 agent_manager=agent_manager,
-                config_provider=ConfigManager,
+                config_provider=config_manager,
             )
+            startup_cleanup.owners["aac"] = aac_runtime
             await aac_runtime.start()
             return cls(
                 config_manager=config_manager,
@@ -127,29 +166,32 @@ class ApplicationRuntime:
                 agent_orchestrator=agent_orchestrator,
                 aac_runtime=aac_runtime,
             )
-        except Exception:
-            if "aac_runtime" in locals() and aac_runtime is not None:
-                try:
-                    await aac_runtime.shutdown()
-                except Exception:
-                    logger.exception("AAC runtime cleanup failed during application startup")
-            if "projects" in locals() and projects is not None:
-                try:
-                    await projects.shutdown()
-                except Exception:
-                    logger.exception("Project manager cleanup failed during application startup")
+        except BaseException as exc:
+            cleanup = asyncio.create_task(startup_cleanup.shutdown())
             try:
-                await resources.shutdown()
+                await settle_owned_task(cleanup)
             except Exception:
-                logger.exception("Runtime resource cleanup failed during application startup")
+                logger.exception("Application startup cleanup failed; owner retained")
+                exc.cleanup_owner = startup_cleanup
             raise
 
     async def shutdown(self) -> None:
-        """Release application-owned work in the only safe dependency order."""
+        """Retry failed cleanup without closing dependencies of live consumers."""
+
+        async with self._shutdown_lock:
+            cleanup = asyncio.create_task(self._shutdown_locked())
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                try:
+                    await settle_owned_task(cleanup)
+                except Exception:
+                    logger.exception("Application cleanup failed while caller was cancelled")
+                raise
+
+    async def _shutdown_locked(self) -> None:
 
         if self._shutdown_complete:
-            if self._shutdown_error is not None:
-                raise self._shutdown_error
             return
 
         self.health_service.mark_closing()
@@ -160,19 +202,29 @@ class ApplicationRuntime:
             ("projects", self.projects),
             ("resources", self.resources),
         ):
+            if phase in self._completed_shutdown_phases:
+                continue
+            if phase == "projects" and "sessions" not in self._completed_shutdown_phases:
+                continue
+            if phase == "resources" and not {"aac", "sessions", "projects"}.issubset(
+                self._completed_shutdown_phases
+            ):
+                continue
             try:
                 logger.info(f"Application shutdown phase started: {phase}")
                 await owner.shutdown()
+                self._completed_shutdown_phases.add(phase)
                 logger.info(f"Application shutdown phase completed: {phase}")
             except Exception as exc:
                 logger.exception(f"Application shutdown phase failed: {phase}")
                 failures.append(ShutdownFailure(phase=phase, error=exc))
 
-        self._shutdown_complete = True
         if failures:
             error = ApplicationShutdownError(tuple(failures))
             self._shutdown_error = error
             raise error from failures[0].error
+        self._shutdown_error = None
+        self._shutdown_complete = True
 
     def application_port(self, *, default_domain_config=None):
         """Return the public application adapter for this live runtime."""

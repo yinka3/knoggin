@@ -6,6 +6,7 @@ import asyncio
 import uuid
 from dataclasses import dataclass
 from enum import Enum
+from functools import partial
 from typing import Any, Callable, Optional
 
 from loguru import logger
@@ -17,11 +18,13 @@ from common.schema.agent.community_tools import (
     AAC_SPECIFIC_SCHEMAS,
 )
 from common.schema.agent.identity import AgentConfig
+from common.utils.lifecycle import settle_owned_task
 from core.agent.executor import AgentExecutor
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 from core.agent.services.agent_manager import AgentManager
 from core.agent.tools.registry import Tools
 from core.community.aac_store import AACStore
+from core.community.execution import config_owner, execute_aac_run
 from core.community.read_context import AACReadContext
 from core.community.seeding import AACSeeder
 from core.community.token_budget import AACTokenBudget
@@ -51,34 +54,34 @@ class AACRuntime:
         max_consecutive_errors=3,
         tool_limits=tuple(
             {
-                "search_entity": 4,
-                "get_connections": 3,
-                "find_path": 3,
-                "get_recent_activity": 3,
-                "search_messages": 3,
-                "episode_check": 4,
-                "read_episode": 4,
+                "search_knowledge_entities": 4,
+                "get_entity_relationships": 3,
+                "find_relationship_path": 3,
+                "get_entity_recent_activity": 3,
+                "search_knowledge_messages": 3,
+                "search_episodes": 4,
+                "read_episode_messages": 4,
                 "read_recent_episodes": 4,
-                "search_documents": 4,
-                "read_document": 4,
-                "list_documents": 2,
-                "search_insights": 3,
-                "save_insight": 4,
-                "vote_insight": 4,
-                "remove_insight_vote": 4,
-                "spawn_specialist": 2,
-                "consult_specialist": 2,
-                "edit_brain": 2,
-                "restore_brain_section": 2,
+                "search_project_documents": 4,
+                "read_project_document": 4,
+                "list_project_documents": 2,
+                "search_community_insights": 3,
+                "save_community_insight": 4,
+                "vote_community_insight": 4,
+                "remove_community_insight_vote": 4,
+                "spawn_community_specialist": 2,
+                "consult_community_specialist": 2,
+                "edit_agent_brain": 2,
+                "restore_agent_brain_section": 2,
             }.items()
         ),
     )
     _SPECIALIST_ENABLED_TOOLS = frozenset(
         [
             *AAC_READ_TOOL_NAMES,
-            "search_insights",
-            "edit_brain",
-            "restore_brain_section",
+            "search_community_insights",
+            "edit_agent_brain",
+            "restore_agent_brain_section",
         ]
     )
 
@@ -91,16 +94,13 @@ class AACRuntime:
         agent_manager: AgentManager,
         config_provider=ConfigManager,
     ) -> "AACRuntime":
-        config = config_provider.get().config
+        config = config_owner(config_provider).config
         read_context = await AACReadContext.create(
             user_name=user_name,
             postgres=resources.postgres,
             knowledge_store=resources.knowledge_store,
             embedding_service=resources.embedding,
-            search_config={
-                **config.developer_settings.search.model_dump(),
-                **config.search.model_dump(),
-            },
+            search_settings=config.developer_settings.search,
         )
         return cls(
             user_name=user_name,
@@ -138,6 +138,8 @@ class AACRuntime:
         )
         self._ownership_lock = asyncio.Lock()
         self._participants_lock = asyncio.Lock()
+        self._participation_write_lock = asyncio.Lock()
+        self._pending_participation_events: dict[str, dict] = {}
         self._shutdown_event = asyncio.Event()
         self._discussion_stop_event = asyncio.Event()
         self._opportunity_wake_event = asyncio.Event()
@@ -148,6 +150,10 @@ class AACRuntime:
         self._discussion_history: Optional[list[dict[str, str]]] = None
         self._config_unsubscribe: Optional[Callable[[], None]] = None
         self._stopping = False
+        self._started = False
+        self._shutdown_lock = asyncio.Lock()
+        self._pending_finalizations: dict[str, dict] = {}
+        self._pending_stop_events: dict[str, dict] = {}
 
     @property
     def active_discussion_id(self) -> Optional[str]:
@@ -155,15 +161,14 @@ class AACRuntime:
 
     async def start(self) -> None:
         """Recover stale rows and start the local, config-reactive opportunity loop."""
-
-        self._stopping = False
-        self._shutdown_event.clear()
-        self._discussion_stop_event.clear()
-        self._opportunity_wake_event.clear()
-        await self.store.interrupt_active_discussions(user_name=self.user_name)
-        self._subscribe_to_config()
-        self._opportunity_wake_event.clear()
-        if self._opportunity_task is None:
+        async with self._ownership_lock:
+            if self._started:
+                return
+            if self._stopping:
+                raise RuntimeError("AAC runtime is shutting down")
+            await self.store.interrupt_active_discussions(user_name=self.user_name)
+            self._subscribe_to_config()
+            self._started = True
             self._opportunity_task = asyncio.create_task(
                 self._opportunity_loop(),
                 name=f"aac-opportunities:{self.user_name}",
@@ -172,30 +177,86 @@ class AACRuntime:
     async def shutdown(self) -> None:
         """Stop future opportunities and let the current participant turn finish."""
 
+        # Close admission before scheduling owned cleanup or waiting for its lock.
         self._stopping = True
         self._shutdown_event.set()
         self._discussion_stop_event.set()
         self._opportunity_wake_event.set()
-        unsubscribe, self._config_unsubscribe = self._config_unsubscribe, None
+        async with self._shutdown_lock:
+            cleanup = asyncio.create_task(self._shutdown_owned())
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                try:
+                    await settle_owned_task(cleanup)
+                except Exception:
+                    logger.exception("AAC cleanup failed while caller was cancelled")
+                raise
+
+    async def _shutdown_owned(self) -> None:
+
+        self._stopping = True
+        self._shutdown_event.set()
+        self._discussion_stop_event.set()
+        self._opportunity_wake_event.set()
+        async with self._ownership_lock:
+            pass  # Wait for a pending durable admission to publish its task.
+        failures = []
+        unsubscribe = self._config_unsubscribe
         if unsubscribe is not None:
             try:
                 unsubscribe()
-            except Exception:
+            except Exception as exc:
                 logger.exception("Failed to unsubscribe AAC config listener")
+                failures.append(exc)
+            else:
+                self._config_unsubscribe = None
         opportunity = self._opportunity_task
-        self._opportunity_task = None
         if opportunity is not None and not opportunity.done():
             opportunity.cancel()
             await asyncio.gather(opportunity, return_exceptions=True)
+        self._opportunity_task = None
 
         discussion = self._discussion_task
         if discussion is not None and not discussion.done():
             await asyncio.gather(discussion, return_exceptions=True)
+        try:
+            await self._retry_finalizations()
+        except Exception as exc:
+            failures.append(exc)
+        if failures:
+            raise RuntimeError("AAC shutdown cleanup failed") from failures[0]
+
+    async def _retry_finalizations(self) -> None:
+        failures = []
+        try:
+            await self._retry_participation_events()
+        except Exception as exc:
+            failures.append(exc)
+        for discussion_id, event in tuple(self._pending_stop_events.items()):
+            try:
+                await self.store.append_timeline(**event)
+            except Exception as exc:
+                failures.append(exc)
+            else:
+                del self._pending_stop_events[discussion_id]
+        for discussion_id, outcome in tuple(self._pending_finalizations.items()):
+            try:
+                await self.store.finish_discussion(**outcome)
+            except Exception as exc:
+                failures.append(exc)
+            else:
+                del self._pending_finalizations[discussion_id]
+        if failures:
+            raise RuntimeError("AAC discussion finalization failed") from failures[0]
 
     async def trigger_discussion(self) -> AACAdmission:
         """Run one seed check and admit at most one local discussion."""
 
         async with self._ownership_lock:
+            if self._stopping:
+                return AACAdmission(AACAdmissionOutcome.SKIPPED, "shutting_down")
+            await self._retry_finalizations()
             if not self._community_settings().enabled:
                 return AACAdmission(AACAdmissionOutcome.SKIPPED, "disabled")
             if self._discussion_task is not None and not self._discussion_task.done():
@@ -211,13 +272,27 @@ class AACRuntime:
             if decision.action != "START" or not decision.topic:
                 return AACAdmission(AACAdmissionOutcome.SKIPPED, "no_seed")
 
+            if self._stopping:
+                return AACAdmission(AACAdmissionOutcome.SKIPPED, "shutting_down")
+            if not self._community_settings().enabled:
+                return AACAdmission(AACAdmissionOutcome.SKIPPED, "disabled")
+            participants = await self._enabled_participants()
+            if not participants:
+                return AACAdmission(AACAdmissionOutcome.SKIPPED, "no_enabled_agents")
+
             discussion_id = str(uuid.uuid4())
-            await self.store.create_discussion(
+            write = asyncio.create_task(self.store.create_discussion(
                 discussion_id=discussion_id,
                 user_name=self.user_name,
                 topic=decision.topic,
                 token_budget=budget.limit,
-            )
+            ))
+            cancelled = False
+            try:
+                await asyncio.shield(write)
+            except asyncio.CancelledError:
+                await settle_owned_task(write)
+                cancelled = True
             self._discussion_id = discussion_id
             self._participants = participants
             self._discussion_task = asyncio.create_task(
@@ -230,6 +305,8 @@ class AACRuntime:
                 name=f"aac-discussion:{self.user_name}:{discussion_id}",
             )
             self._discussion_task.add_done_callback(self._clear_discussion)
+            if cancelled:
+                raise asyncio.CancelledError
             return AACAdmission(
                 AACAdmissionOutcome.STARTED,
                 "admitted",
@@ -243,13 +320,21 @@ class AACRuntime:
         discussion = self._discussion_task
         if discussion_id is None or discussion is None or discussion.done():
             return False
-        if self._discussion_stop_event.is_set():
-            return True
-        self._discussion_stop_event.set()
-        await self._append_event(
-            "AAC discussion stop requested by user.",
-            history=self._discussion_history,
-        )
+        if not self._discussion_stop_event.is_set():
+            self._discussion_stop_event.set()
+            content = "AAC discussion stop requested by user."
+            self._pending_stop_events[discussion_id] = dict(
+                discussion_id=discussion_id, user_name=self.user_name,
+                kind="system_event", content=content,
+                timeline_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"aac:{discussion_id}:user-stop")),
+            )
+            if self._discussion_history is not None:
+                self._discussion_history.append({"role": "system", "content": content})
+                del self._discussion_history[:-8]
+        event = self._pending_stop_events.get(discussion_id)
+        if event is not None:
+            await self.store.append_timeline(**event)
+            self._pending_stop_events.pop(discussion_id, None)
         return True
 
     async def list_discussions(self, *, limit: int = 20) -> list[dict[str, Any]]:
@@ -262,6 +347,7 @@ class AACRuntime:
         discussion_id: str,
         *,
         limit: int = 100,
+        after_sequence: int = 0,
     ) -> list[dict[str, Any]]:
         """Expose one user-owned AAC transcript and its system events."""
 
@@ -269,6 +355,7 @@ class AACRuntime:
             discussion_id=discussion_id,
             user_name=self.user_name,
             limit=limit,
+            after_sequence=after_sequence,
         )
 
     async def list_insights(
@@ -411,16 +498,15 @@ class AACRuntime:
                     logger.exception(
                         "Failed to record AAC user-stop event for {}", discussion_id
                     )
+            outcome = dict(discussion_id=discussion_id, user_name=self.user_name,
+                           status=status, end_reason=end_reason, tokens_used=budget.used)
+            self._pending_finalizations[discussion_id] = outcome
             try:
-                await self.store.finish_discussion(
-                    discussion_id=discussion_id,
-                    user_name=self.user_name,
-                    status=status,
-                    end_reason=end_reason,
-                    tokens_used=budget.used,
-                )
+                await self.store.finish_discussion(**outcome)
             except Exception:
                 logger.exception("Failed to finalize AAC discussion {}", discussion_id)
+            else:
+                self._pending_finalizations.pop(discussion_id, None)
             finally:
                 if self._discussion_history is history:
                     self._discussion_history = None
@@ -440,7 +526,7 @@ class AACRuntime:
         run_id = f"aac_run_{uuid.uuid4().hex}"
         base_tools = Tools(
             user_name=self.user_name,
-            entities=self.read_context.entities,
+            project_id=self.read_context.knowledge_retrieval.project_id,
             session_id=f"aac:{discussion_id}",
             compiled_domain=None,
             search_config={},
@@ -468,7 +554,9 @@ class AACRuntime:
                 )
             ),
         )
-        configured_tools = agent.enabled_tools or AAC_DEFAULT_ENABLED_TOOLS
+        configured_tools = (
+            AAC_DEFAULT_ENABLED_TOOLS if agent.enabled_tools is None else agent.enabled_tools
+        )
         enabled = [
             name for name in configured_tools if name in AAC_DEFAULT_ENABLED_TOOLS
         ]
@@ -481,7 +569,7 @@ class AACRuntime:
             for schema in AAC_SPECIFIC_SCHEMAS
             if schema["function"]["name"] in enabled
         ]
-        run = AgentRun.open_aac(
+        open_run = partial(AgentRun.open_aac,
             user_name=self.user_name,
             session_id=f"aac:{discussion_id}",
             user_query=(
@@ -507,20 +595,11 @@ class AACRuntime:
             is_community=not is_specialist,
             current_participants=participants,
         )
-        response: Optional[str] = None
-        executor = AgentExecutor(
-            run,
-            self.resources.llm_service,
-            tools,
-            on_successful_completion=self.agent_manager.mark_turn_completed,
-            aac_budget=budget,
+        response = await execute_aac_run(
+            open_run=open_run, executor_factory=AgentExecutor,
+            llm=self.resources.llm_service, tools=tools,
+            on_completion=self.agent_manager.mark_turn_completed, budget=budget,
         )
-        try:
-            async for event in executor.execute():
-                if event.get("event") == "response":
-                    response = event.get("data", {}).get("content")
-        finally:
-            await tools.close()
         return response.strip() if isinstance(response, str) and response.strip() else None
 
     def _specialist_runner(self, *, discussion_id: str, topic: str, budget: AACTokenBudget):
@@ -556,25 +635,39 @@ class AACRuntime:
             left = sorted(previous - current)
             self._participants = enabled
 
-        for agent_id in joined:
-            await self._append_event(
-                f"Agent {agent_id} joined the discussion.",
-                history=history,
-            )
-        for agent_id in left:
-            await self._append_event(
-                f"Agent {agent_id} left the discussion.",
-                history=history,
-            )
+            if self._discussion_id:
+                for agents, action in ((joined, "joined"), (left, "left")):
+                    for agent_id in agents:
+                        content = f"Agent {agent_id} {action} the discussion."
+                        event_id = str(uuid.uuid4())
+                        self._pending_participation_events[event_id] = dict(
+                            discussion_id=self._discussion_id,
+                            user_name=self.user_name,
+                            kind="system_event",
+                            content=content,
+                            timeline_id=event_id,
+                        )
+                        # Membership is effective even if transcript storage fails.
+                        if history is not None:
+                            history.append({"role": "system", "content": content})
+                            del history[:-8]
+        await self._retry_participation_events()
         return list(enabled)
 
+    async def _retry_participation_events(self) -> None:
+        """Save each transition once, retaining ordered retries after failure."""
+        async with self._participation_write_lock:
+            for event_id, event in tuple(self._pending_participation_events.items()):
+                await self.store.append_timeline(**event)
+                del self._pending_participation_events[event_id]
+
     def _community_settings(self):
-        return self.config_provider.get().config.developer_settings.community
+        return config_owner(self.config_provider).config.developer_settings.community
 
     def _subscribe_to_config(self) -> None:
         if self._config_unsubscribe is not None:
             return
-        subscribe = getattr(self.config_provider.get(), "subscribe", None)
+        subscribe = getattr(config_owner(self.config_provider), "subscribe", None)
         if callable(subscribe):
             self._config_unsubscribe = subscribe(
                 self._on_community_settings_changed,
@@ -584,21 +677,20 @@ class AACRuntime:
     def _on_community_settings_changed(self, _settings: object) -> None:
         """Wake the local loop so enabled/cadence changes take effect promptly."""
 
+        # Disabling AAC blocks future opportunities; an admitted discussion
+        # continues until its budget ends or the user requests a graceful stop.
         self._opportunity_wake_event.set()
 
     async def _refresh_read_context(self) -> None:
         """Refresh user project visibility before each AAC decision or run."""
 
-        config = self.config_provider.get().config
+        config = config_owner(self.config_provider).config
         context = await AACReadContext.create(
             user_name=self.user_name,
             postgres=self.resources.postgres,
             knowledge_store=self.resources.knowledge_store,
             embedding_service=self.resources.embedding,
-            search_config={
-                **config.developer_settings.search.model_dump(),
-                **config.search.model_dump(),
-            },
+            search_settings=config.developer_settings.search,
         )
         self.read_context = context
         if isinstance(self.seeder, AACSeeder):

@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from common.schema.evidence import EvidenceBundle
+from common.schema.settings import SearchSettings
 from core.knowledge.retrieval import KnowledgeRetrieval
 
 
@@ -20,7 +21,7 @@ def _retrieval(store, *, readable_project_ids=None):
         entities=Entities(),
         embedding_service=SimpleNamespace(),
         knowledge_store=store,
-        search_config={"default_activity_hours": 72},
+        search_settings=SearchSettings(default_activity_hours=72),
     )
 
 
@@ -62,9 +63,7 @@ async def test_recent_activity_uses_stable_id_and_message_evidence():
             ]
 
     store = Store()
-    result = await _retrieval(store).get_recent_activity(
-        2, session_id="session-1", hours=0
-    )
+    result = await _retrieval(store).get_recent_activity(2, session_id="session-1")
 
     assert store.calls == [
         (
@@ -116,6 +115,103 @@ async def test_connections_keep_stored_direction_when_selected_from_target():
 
 
 @pytest.mark.no_network
+async def test_result_hydration_batches_messages_without_mutating_store_results():
+    class Store:
+        def __init__(self):
+            self.message_calls = []
+            self.results = [
+                {
+                    "relationship_id": "r1",
+                    "evidence_refs": [
+                        {
+                            "user_name": "ada",
+                            "session_id": "session-1",
+                            "message_id": 7,
+                        }
+                    ],
+                },
+                {
+                    "relationship_id": "r2",
+                    "evidence_refs": [
+                        {
+                            "user_name": "ada",
+                            "session_id": "session-1",
+                            "message_id": 8,
+                        }
+                    ],
+                },
+            ]
+
+        async def get_related_entities(self, _entity_ids, **_kwargs):
+            return self.results
+
+        async def get_messages_by_ids(self, message_ids, **kwargs):
+            self.message_calls.append((message_ids, kwargs))
+            return [
+                {
+                    "id": message_id,
+                    "user_name": "ada",
+                    "session_id": "session-1",
+                    "content": f"evidence-{message_id}",
+                }
+                for message_id in message_ids
+            ]
+
+    store = Store()
+    result = await _retrieval(store).get_connections(3, session_id="session-1")
+
+    assert len(store.message_calls) == 1
+    assert store.message_calls[0][0] == [7, 8]
+    assert [item["evidence"][0]["id"] for item in result] == ["msg_7", "msg_8"]
+    assert all("evidence_refs" in item for item in store.results)
+
+
+@pytest.mark.no_network
+async def test_failed_result_hydration_leaves_store_results_unchanged():
+    original = {
+        "relationship_id": "r1",
+        "evidence_refs": [
+            {
+                "user_name": "ada",
+                "session_id": "session-1",
+                "message_id": 7,
+            }
+        ],
+    }
+
+    class Store:
+        async def get_messages_by_ids(self, _message_ids, **_kwargs):
+            raise RuntimeError("storage unavailable")
+
+    with pytest.raises(RuntimeError, match="storage unavailable"):
+        await _retrieval(Store())._hydrate_result_evidence(
+            [original], session_id="session-1"
+        )
+
+    assert original["evidence_refs"][0]["message_id"] == 7
+    assert "evidence" not in original
+
+
+@pytest.mark.no_network
+async def test_message_evidence_rejects_a_different_user_scope():
+    class Store:
+        async def get_messages_by_ids(self, _message_ids, **_kwargs):
+            raise AssertionError("mismatched user refs must fail before storage")
+
+    with pytest.raises(ValueError, match="outside retrieval user scope"):
+        await _retrieval(Store())._hydrate_evidence(
+            [
+                {
+                    "user_name": "grace",
+                    "session_id": "session-1",
+                    "message_id": 7,
+                }
+            ],
+            session_id="session-1",
+        )
+
+
+@pytest.mark.no_network
 async def test_path_returns_canonical_direction_and_project_attribution():
     class Store:
         def __init__(self):
@@ -162,34 +258,27 @@ async def test_path_returns_canonical_direction_and_project_attribution():
             return (_observation_bundle(17), _missing_observation_bundle(18))
 
     store = Store()
-    result = await _retrieval(store).find_path(3, 2, session_id="session-1")
+    result = await _retrieval(store).find_relationship_path(
+        3, 2, session_id="session-1"
+    )
 
     assert result[0]["source"] == "Ade"
     assert result[0]["target"] == "Acme"
     assert result[0]["project_id"] == "project-1"
-    assert store.evidence_calls == [
-        ([17, 18], {"user_name": "ada", "project_id": "project-1"})
-    ]
+    assert store.evidence_calls == []
     evidence = result[0]["evidence"]
-    assert [item["subject"]["identifier"] for item in evidence] == ["17", "18"]
-    evidence = evidence[0]
-    assert evidence["subject"] == {
-        "kind": "relationship_observation",
-        "identifier": "17",
-    }
-    assert [node["pointer"]["kind"] for node in evidence["nodes"]] == [
-        "relationship_observation",
-        "context_block",
-        "message",
-        "source_reference",
+    assert evidence == [
+        {
+            "kind": "relationship_observation",
+            "observation_id": 17,
+            "project_id": "project-1",
+        },
+        {
+            "kind": "relationship_observation",
+            "observation_id": 18,
+            "project_id": "project-1",
+        },
     ]
-    assert evidence["nodes"][0]["status"] == "active"
-    evidence = result[0]["evidence"][1]
-    assert evidence["subject"] == {
-        "kind": "relationship_observation",
-        "identifier": "18",
-    }
-    assert evidence["nodes"][0]["status"] == "missing"
 
 
 @pytest.mark.no_network

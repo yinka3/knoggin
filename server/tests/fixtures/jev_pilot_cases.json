@@ -1,0 +1,93 @@
+{
+  "version": 1,
+  "review_status": "pending_human_review",
+  "note": "Proposed expectations, not reviewed ground truth or live model outputs. Existing test anchors supply fake-backed baseline behavior.",
+  "identity": [
+    {
+      "id": "ambiguous_bob",
+      "mention": "Bob",
+      "context": "Bob joined the project planning meeting.",
+      "candidates": [
+        {"handle": "candidate_1", "name": "Robert Chen", "aliases": ["Bob"], "type": "Person"},
+        {"handle": "candidate_2", "name": "Bob Smith", "aliases": ["Bob"], "type": "Person"}
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "baseline_anchor": "test_ambiguous_alias_abstains_when_candidates_have_no_meaningful_lead",
+      "baseline_expected": "abstained_then_new_id"
+    },
+    {
+      "id": "explicit_bob",
+      "mention": "Bob",
+      "context": "Bob, whose full name is Robert Chen, joined the planning meeting.",
+      "candidates": [
+        {"handle": "candidate_1", "name": "Robert Chen", "aliases": ["Bob"], "type": "Person"},
+        {"handle": "candidate_2", "name": "Bob Smith", "aliases": ["Bob"], "type": "Person"}
+      ],
+      "proposed_choice": "candidate_1",
+      "baseline_anchor": "test_ambiguous_alias_uses_explicit_context_name_to_select_owner",
+      "baseline_expected": "reused_701"
+    },
+    {
+      "id": "foreign_project_neutrality",
+      "mention": "Sarah",
+      "context": "Sarah Johnson is our colleague on this project.",
+      "candidates": [{"handle": "candidate_1", "name": "Sarah Johnson", "aliases": ["Sarah"], "foreign_type": "Friend"}],
+      "proposed_choice": "candidate_1",
+      "constraint": "Foreign type must not become current-project classification."
+    },
+    {
+      "id": "candidate_recall",
+      "mention": "Postgres",
+      "context": "Postgres is the database we use.",
+      "candidates": [],
+      "proposed_choice": "none_of_these",
+      "constraint": "Correct stored PostgreSQL identity cannot be selected if candidate search omitted it."
+    }
+  ],
+  "extraction": [
+    {
+      "id": "endpoint_recovery",
+      "context": "Project Delta needs another reviewer.",
+      "candidates": [{"name": "Delta", "origin": "unknown_endpoint"}],
+      "proposed_mentions": [{"name": "Delta", "type": "Project"}],
+      "constraint": "Literal/domain validation and residual gap policy determine recovery."
+    },
+    {
+      "id": "incomplete_block_recovery",
+      "context": "Delta uses PostgreSQL, and Maya owns the rollout.",
+      "candidates": [{"name": "Delta", "origin": "unknown_endpoint"}],
+      "proposed_mentions": [{"name": "Delta", "type": "Project"}, {"name": "PostgreSQL", "type": "Database"}, {"name": "Maya", "type": "Person"}],
+      "constraint": "Bounded request can recover only Delta; it cannot establish exhaustive coverage."
+    },
+    {
+      "id": "no_candidates",
+      "context": "Acme Labs is the selected provider.",
+      "candidates": [],
+      "proposed_mentions": [{"name": "Acme Labs", "type": "Company"}],
+      "constraint": "Retain generative fallback when a baseline gap remains and LLM mode permits it."
+    },
+    {
+      "id": "ordinary_word",
+      "context": "The delta between the two estimates is small.",
+      "candidates": [{"name": "delta", "origin": "unknown_endpoint"}],
+      "proposed_choice": "not_an_entity",
+      "constraint": "A negative JEV answer initially does not suppress baseline fallback."
+    }
+  ],
+  "classification": [
+    {
+      "id": "first_project_entry",
+      "context": "Stripe processes our payments.",
+      "type": "Organization",
+      "proposed_topic": "Finance",
+      "constraint": "Topic alternatives require Phase D domain extension; current one-topic mapping remains baseline."
+    },
+    {
+      "id": "existing_project_classification",
+      "context": "Stripe is a competitor we track.",
+      "existing_type": "Organization",
+      "existing_topic": "Finance",
+      "constraint": "Identity reuse retains Finance; record conflicting suggestion without automatic reclassification."
+    }
+  ]
+}

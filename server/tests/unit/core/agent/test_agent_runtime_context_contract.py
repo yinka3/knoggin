@@ -46,11 +46,11 @@ def test_build_user_message_trims_history_and_includes_runtime_context():
     ctx.call_count = 1
     ctx.last_error = "Duplicate call skipped"
     ctx.notebook.apply(
-        "search_entity",
+        "search_knowledge_entities",
         {"data": [{"id": 8, "canonical_name": "Grace"}]},
     )
     ctx.notebook.apply(
-        "search_entity",
+        "search_knowledge_entities",
         {"data": [{"id": 7, "canonical_name": "Ada"}]},
     )
 
@@ -58,11 +58,11 @@ def test_build_user_message_trims_history_and_includes_runtime_context():
         ctx,
         last_result=[
             {
-                "tool": "search_entity",
+                "tool": "search_knowledge_entities",
                 "result": {"data": [{"id": 7, "canonical_name": "Ada"}]},
             },
             {
-                "tool": "edit_brain",
+                "tool": "edit_agent_brain",
                 "result": {
                     "data": {
                         "success": True,
@@ -71,9 +71,9 @@ def test_build_user_message_trims_history_and_includes_runtime_context():
                     }
                 },
             },
-            {"tool": "episode_check", "result": {"data": []}},
+            {"tool": "search_episodes", "result": {"data": []}},
             {
-                "tool": "read_observation_evidence",
+                "tool": "read_relationship_observation_evidence",
                 "result": {
                     "data": {
                         "subject": {
@@ -83,7 +83,7 @@ def test_build_user_message_trims_history_and_includes_runtime_context():
                     }
                 },
             },
-            {"tool": "search_messages", "error": "boom"},
+            {"tool": "search_knowledge_messages", "error": "boom"},
         ],
     )
 
@@ -94,17 +94,17 @@ def test_build_user_message_trims_history_and_includes_runtime_context():
     assert "**Query:** What changed in profile behavior?" in message
     assert "**Calls remaining:** 11" in message
     assert "**Last action rejected:** Duplicate call skipped" in message
-    assert "`search_entity`: Found 1 items" in message
-    assert '`edit_brain`: {\n  "success": true,' in message
+    assert "`search_knowledge_entities`: Found 1 items" in message
+    assert '`edit_agent_brain`: {\n  "success": true,' in message
     assert '"section": "Project Context"' in message
-    assert "`episode_check`: No results found on this retrieval surface." in message
+    assert "`search_episodes`: No results found on this retrieval surface." in message
     assert "Simplify or paraphrase the query" in message
     assert (
-        "`read_observation_evidence`: Loaded observation support. "
+        "`read_relationship_observation_evidence`: Loaded observation support. "
         "(See accumulated notebook below)"
     ) in message
     assert '"relationship_observation"' not in message
-    assert "`search_messages`: Error - boom" in message
+    assert "`search_knowledge_messages`: Error - boom" in message
     assert "**Accumulated context:**" in message
     assert "RUN NOTEBOOK" in message
     assert "E1 Grace" in message
@@ -133,9 +133,9 @@ def test_topic_context_tool_accumulates_messages_as_evidence():
         }
     }
 
-    assert ctx.accumulate_tool_result("load_topic_context", result).changed is True
+    assert ctx.accumulate_tool_result("load_project_topic_context", result).changed is True
     assert ctx.new_evidence_gathered is True
-    assert summarize_result("load_topic_context", result) == (
+    assert summarize_result("load_project_topic_context", result) == (
         "Loaded context for 2 topic(s) with 1 supporting message(s)",
         2,
     )
@@ -158,7 +158,7 @@ def test_topic_context_tool_accumulates_messages_as_evidence():
 
     message = build_user_message(
         ctx,
-        last_result=[{"tool": "load_topic_context", "result": result}],
+        last_result=[{"tool": "load_project_topic_context", "result": result}],
     )
 
     assert "Loaded context for 2 topic(s)" in message
@@ -171,7 +171,7 @@ def test_topic_context_without_messages_does_not_count_as_new_evidence():
     ctx = make_ctx()
 
     admission = ctx.accumulate_tool_result(
-        "load_topic_context",
+        "load_project_topic_context",
         {"data": {"Work": {"entities": [{"name": "Acme"}], "messages": []}}},
     )
 
@@ -186,8 +186,8 @@ def test_build_user_message_explains_empty_specialized_tool_results():
     message = build_user_message(
         make_ctx(),
         last_result=[
-            {"tool": "read_observation_evidence", "result": {"data": {}}},
-            {"tool": "load_topic_context", "result": {"data": []}},
+            {"tool": "read_relationship_observation_evidence", "result": {"data": {}}},
+            {"tool": "load_project_topic_context", "result": {"data": []}},
             {"tool": "custom_lookup", "result": {"data": None}},
         ],
     )
@@ -200,8 +200,8 @@ def test_duplicate_evidence_is_accepted_without_a_new_notebook_contribution():
     ctx = make_ctx()
     result = {"data": [{"id": "msg-7", "message": "Already retained."}]}
 
-    first = ctx.accumulate_tool_result("search_messages", result)
-    duplicate = ctx.accumulate_tool_result("search_messages", result)
+    first = ctx.accumulate_tool_result("search_knowledge_messages", result)
+    duplicate = ctx.accumulate_tool_result("search_knowledge_messages", result)
 
     assert first.accepted is True
     assert first.changed is True
@@ -253,12 +253,12 @@ def test_build_user_message_renders_an_episode_with_its_usable_local_handle():
         }
     }
 
-    assert ctx.accumulate_tool_result("episode_check", result).changed is True
-    model_result = localize_agent_tool_result(ctx, "episode_check", result)
+    assert ctx.accumulate_tool_result("search_episodes", result).changed is True
+    model_result = localize_agent_tool_result(ctx, "search_episodes", result)
 
     message = build_user_message(
         ctx,
-        last_result={"tool": "episode_check", "result": model_result},
+        last_result={"tool": "search_episodes", "result": model_result},
     )
 
     assert "ep_a3f91c: The durable launch phrase is violet." in message
@@ -270,7 +270,7 @@ def test_build_user_message_renders_an_episode_with_its_usable_local_handle():
     assert "web search result (search result snippet)" in message
     assert "[search result 1]" in message
     assert "The launch phrase is violet." in message
-    assert "\nPossible next steps:\n- [system] read_episode" in message
+    assert "\nPossible next steps:\n- [system] read_episode_messages" in message
     assert '"episode_id": "ep_a3f91c"' in message
     assert episode_id not in message
     assert "contributing_message_id" not in message
@@ -301,14 +301,14 @@ def test_build_user_message_renders_discovered_sources_for_next_step():
             "source_kind": "news_search_result",
         },
     ]
-    ctx.accumulate_tool_result("web_search", {"data": result_data[:1]})
-    ctx.accumulate_tool_result("news_search", {"data": result_data[1:]})
+    ctx.accumulate_tool_result("search_web", {"data": result_data[:1]})
+    ctx.accumulate_tool_result("search_news", {"data": result_data[1:]})
 
     message = build_user_message(
         ctx,
         last_result=[
-            {"tool": "web_search", "result": {"data": result_data[:1]}},
-            {"tool": "news_search", "result": {"data": result_data[1:]}},
+            {"tool": "search_web", "result": {"data": result_data[:1]}},
+            {"tool": "search_news", "result": {"data": result_data[1:]}},
         ],
     )
 
@@ -331,16 +331,16 @@ def test_build_user_message_keeps_sources_after_a_later_non_web_tool_call():
         "query": "useful context",
         "rank": 1,
     }
-    ctx.accumulate_tool_result("web_search", {"data": [source]})
+    ctx.accumulate_tool_result("search_web", {"data": [source]})
     ctx.accumulate_tool_result(
-        "search_entity",
+        "search_knowledge_entities",
         {"data": [{"id": 1, "canonical_name": "Ada"}]},
     )
 
     message = build_user_message(
         ctx,
         last_result={
-            "tool": "search_entity",
+            "tool": "search_knowledge_entities",
             "result": {"data": [{"id": 1, "canonical_name": "Ada"}]},
         },
     )
@@ -356,7 +356,7 @@ def test_notebook_skips_non_source_search_status_items():
     ctx = make_ctx()
 
     ctx.accumulate_tool_result(
-        "web_search",
+        "search_web",
         {
             "data": [
                 {"title": "No Results", "url": "", "snippet": "Nothing found."},
@@ -369,7 +369,9 @@ def test_notebook_skips_non_source_search_status_items():
         },
     )
 
-    assert [item["url"] for item in ctx.notebook.model_view()["sources"]] == [
+    assert [
+        item["url"] for item in ctx.notebook.section_items("web_discoveries")
+    ] == [
         "https://example.test/source"
     ]
 
@@ -385,13 +387,15 @@ def test_rollover_evidence_preserves_sources_and_summary_references():
         }
         for index in range(6)
     ]
-    assert ctx.accumulate_tool_result("web_search", {"data": sources}).changed is True
+    assert ctx.accumulate_tool_result("search_web", {"data": sources}).changed is True
 
     rollover = ctx.rollover_notebook("Condensed source evidence")
 
     assert ctx.notebook.summary.text == "Condensed source evidence"
     assert rollover.generation == 2
-    assert [item["title"] for item in ctx.notebook.model_view()["sources"]] == [
+    assert [
+        item["title"] for item in ctx.notebook.section_items("web_discoveries")
+    ] == [
         f"Source {index}" for index in range(6)
     ]
     assert ctx.notebook.summary.references
@@ -422,14 +426,14 @@ def test_read_web_page_ranges_remain_distinct_and_visible_after_later_tool_calls
     ctx.accumulate_tool_result("read_web_page", {"data": [first_range]})
     ctx.accumulate_tool_result("read_web_page", {"data": [second_range]})
     ctx.accumulate_tool_result(
-        "search_entity",
+        "search_knowledge_entities",
         {"data": [{"id": 1, "canonical_name": "Ada"}]},
     )
 
     later_message = build_user_message(
         ctx,
         last_result={
-            "tool": "search_entity",
+            "tool": "search_knowledge_entities",
             "result": {"data": [{"id": 1, "canonical_name": "Ada"}]},
         },
     )
@@ -506,7 +510,7 @@ def test_notebook_dedupes_without_blind_tail_trimming():
     ctx = make_ctx()
 
     ctx.accumulate_tool_result(
-        "search_messages",
+        "search_knowledge_messages",
         {
             "data": [
                 {
@@ -530,8 +534,8 @@ def test_notebook_dedupes_without_blind_tail_trimming():
             ]
         },
     )
-    ctx.accumulate_tool_result(
-        "search_messages",
+    admission = ctx.accumulate_tool_result(
+        "search_knowledge_messages",
         {
             "data": [
                 {
@@ -544,11 +548,11 @@ def test_notebook_dedupes_without_blind_tail_trimming():
         },
     )
 
-    messages = ctx.notebook.model_view()["messages"]
+    messages = ctx.notebook.section_items("messages")
     assert [msg["id"] for msg in messages] == ["msg_1", "msg_2"]
     assert messages[0]["score"] == 1.0
-    assert ctx.notebook.last_apply_result.accepted is False
-    assert ctx.notebook.last_apply_result.reason == "capacity"
+    assert admission.accepted is False
+    assert admission.reason == "capacity"
 
 
 @pytest.mark.no_network
@@ -556,11 +560,11 @@ def test_notebook_dedupes_profiles_graph_files_and_sources():
     ctx = make_ctx()
 
     ctx.accumulate_tool_result(
-        "search_entity",
+        "search_knowledge_entities",
         {"data": [{"id": 1, "canonical_name": "Ada"}, {"id": 1}]},
     )
     ctx.accumulate_tool_result(
-        "get_connections",
+        "get_entity_relationships",
         {
             "data": [
                 {"source": "Ada", "target": "Knoggin", "score": 0.8},
@@ -569,7 +573,7 @@ def test_notebook_dedupes_profiles_graph_files_and_sources():
         },
     )
     ctx.accumulate_tool_result(
-        "get_recent_activity",
+        "get_entity_recent_activity",
         {
             "data": [
                 {
@@ -589,11 +593,11 @@ def test_notebook_dedupes_profiles_graph_files_and_sources():
         },
     )
     ctx.accumulate_tool_result(
-        "find_path",
+        "find_relationship_path",
         {"data": [{"entity_a": "Ada", "entity_b": "Knoggin"}]},
     )
     ctx.accumulate_tool_result(
-        "find_path",
+        "find_relationship_path",
         {"data": [{"entity_a": "Ada", "entity_b": "Knoggin"}]},
     )
     episode_result = {
@@ -604,10 +608,10 @@ def test_notebook_dedupes_profiles_graph_files_and_sources():
             ],
         }
     }
-    ctx.accumulate_tool_result("episode_check", episode_result)
-    ctx.accumulate_tool_result("episode_check", episode_result)
+    ctx.accumulate_tool_result("search_episodes", episode_result)
+    ctx.accumulate_tool_result("search_episodes", episode_result)
     ctx.accumulate_tool_result(
-        "search_documents",
+        "search_project_documents",
         {
             "data": [
                 {
@@ -627,7 +631,7 @@ def test_notebook_dedupes_profiles_graph_files_and_sources():
         },
     )
     ctx.accumulate_tool_result(
-        "read_document",
+        "read_project_document",
         {
             "data": [
                 {
@@ -640,7 +644,7 @@ def test_notebook_dedupes_profiles_graph_files_and_sources():
         },
     )
     ctx.accumulate_tool_result(
-        "web_search",
+        "search_web",
         {
             "data": [
                 {
@@ -663,7 +667,7 @@ def test_notebook_dedupes_profiles_graph_files_and_sources():
         },
     )
     ctx.accumulate_tool_result(
-        "news_search",
+        "search_news",
         {
             "data": [
                 {
@@ -704,21 +708,20 @@ def test_notebook_dedupes_profiles_graph_files_and_sources():
         },
     )
     assert [
-        (msg["id"], msg.get("source_type"), msg["message"])
-        for msg in ctx.notebook.model_view()["messages"]
+        (msg["id"], msg["message"])
+        for msg in ctx.notebook.section_items("messages")
+    ] == [("msg_17", "Ada reviewed the testing plan.")]
+    assert [
+        (document["document_id"], document["chunk_index"], document["content"])
+        for document in ctx.notebook.section_items("documents")
     ] == [
-        ("msg_17", None, "Ada reviewed the testing plan."),
-        ("document:file-1:2", "document", "profile plan"),
-        (
-            "document:file-1:lines:10-12",
-            "document",
-            "10: exact content",
-        ),
+        ("file-1", 2, "profile plan"),
+        ("file-1", "lines:10-12", "10: exact content"),
     ]
     rendered = build_evidence_context(ctx)
     assert "Activities:" in rendered
     assert "ACT1 E1 Ada at 1700000000000 (evidence: M1)" in rendered
-    assert ctx.notebook.model_view()["sources"] == [
+    assert list(ctx.notebook.section_items("web_discoveries")) == [
         {
             "title": "Example A",
             "url": "https://example.test/a",
@@ -744,7 +747,7 @@ def test_notebook_dedupes_profiles_graph_files_and_sources():
 def test_notebook_rejects_oversized_buckets_atomically():
     ctx = make_ctx(limits=AgentRunLimits(max_accumulated_profiles=2))
     admission = ctx.accumulate_tool_result(
-        "search_entity",
+        "search_knowledge_entities",
         {
             "data": [
                 {"id": 1, "canonical_name": "Ada"},
@@ -758,15 +761,14 @@ def test_notebook_rejects_oversized_buckets_atomically():
     assert admission.accepted is False
     assert admission.changed is False
     assert admission.reason == "capacity"
-    assert ctx.notebook.last_apply_result == admission
 
 
 @pytest.mark.no_network
 def test_notebook_ignores_errors_and_empty_results():
     ctx = make_ctx()
 
-    ctx.accumulate_tool_result("search_messages", {"error": "failed"})
-    ctx.accumulate_tool_result("search_messages", {"data": []})
+    ctx.accumulate_tool_result("search_knowledge_messages", {"error": "failed"})
+    ctx.accumulate_tool_result("search_knowledge_messages", {"data": []})
     ctx.accumulate_tool_result("unknown", {"data": [{"id": "x"}]})
 
     assert ctx.has_any() is False
@@ -776,32 +778,32 @@ def test_notebook_ignores_errors_and_empty_results():
 @pytest.mark.parametrize(
     ("tool_name", "result", "expected"),
     [
-        ("search_messages", {"data": [{"id": 1}, {"id": 2}]}, ("Found 2 results", 2)),
-        ("search_entity", {"data": []}, ("Found 0 results", 0)),
-        ("find_path", {"data": [{"hop": 1}]}, ("Path found: 1 hops", 1)),
-        ("find_path", {"data": []}, ("No path", 0)),
+        ("search_knowledge_messages", {"data": [{"id": 1}, {"id": 2}]}, ("Found 2 results", 2)),
+        ("search_knowledge_entities", {"data": []}, ("Found 0 results", 0)),
+        ("find_relationship_path", {"data": [{"hop": 1}]}, ("Path found: 1 hops", 1)),
+        ("find_relationship_path", {"data": []}, ("No path", 0)),
         (
-            "read_observation_evidence",
+            "read_relationship_observation_evidence",
             {"data": {"subject": {"identifier": "17"}}},
             ("Loaded observation support", 1),
         ),
         (
-            "episode_check",
+            "search_episodes",
             {"data": {"resolution": "exact", "results": [{}, {}]}},
             ("Resolved via exact (2 matches)", 2),
         ),
-        ("episode_check", {"data": []}, ("No results", 0)),
-        ("edit_brain", {"data": {"success": True}}, ("Brain updated", 1)),
-        ("read_brain", {"data": {"content": "brain"}}, ("Brain loaded", 1)),
+        ("search_episodes", {"data": []}, ("No results", 0)),
+        ("edit_agent_brain", {"data": {"success": True}}, ("Brain updated", 1)),
+        ("read_agent_brain", {"data": {"content": "brain"}}, ("Brain loaded", 1)),
         (
-            "search_documents",
+            "search_project_documents",
             {"data": [{"id": "chunk"}]},
             ("Found 1 relevant chunks", 1),
         ),
-        ("search_documents", {"data": [{"error": "nope"}]}, ("No results", 0)),
-        ("list_documents", {"data": [{"document_id": "doc-1"}]}, ("Found 1 items", 1)),
+        ("search_project_documents", {"data": [{"error": "nope"}]}, ("No results", 0)),
+        ("list_project_documents", {"data": [{"document_id": "doc-1"}]}, ("Found 1 items", 1)),
         (
-            "read_document",
+            "read_project_document",
             {"data": [{"content": "lines"}]},
             ("Read document content", 1),
         ),

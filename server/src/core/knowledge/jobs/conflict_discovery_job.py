@@ -138,6 +138,7 @@ class ConflictDiscoveryJob(BaseJob):
 
     def update_settings(self, settings: ConflictDiscoverySettings) -> None:
         self._mode = settings.mode
+        self._configured_enabled = settings.enabled
         self.enabled = (
             settings.enabled and self._mode == "assisted" and self.llm is not None
         )
@@ -150,6 +151,7 @@ class ConflictDiscoveryJob(BaseJob):
 
         return {
             "mode": self._mode,
+            "configured_enabled": self._configured_enabled,
             "scheduler_enabled": self.enabled,
             "interval_hours": self._interval_seconds // 3600,
             "llm_available": self.llm is not None,

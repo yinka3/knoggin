@@ -14,10 +14,10 @@ if TYPE_CHECKING:
 
 
 _TOOL_SOURCE_ENCOUNTERS = {
-    "search_documents": "document_search",
-    "read_document": "document_read",
-    "web_search": "web_search",
-    "news_search": "news_search",
+    "search_project_documents": "document_search",
+    "read_project_document": "document_read",
+    "search_web": "web_search",
+    "search_news": "news_search",
     "read_web_page": "web_read",
 }
 

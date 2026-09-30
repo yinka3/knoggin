@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
@@ -22,16 +24,83 @@ from common.schema.document import DocumentFocus
 from common.schema.primitives import Message
 from common.schema.settings import RootConfig
 from common.schema.source.references import SourceReferenceCandidate
-from common.utils.core_utils import (
-    fetch_conversation_turns,
-)
 from common.utils.events import emit
-from common.utils.time_utils import get_now, parse_iso_time_or_now
+from common.utils.time_utils import get_now
 from core.knowledge.documents import DocumentService
 from runtime.project_runtime import ProjectRuntime
 from runtime.resources import RuntimeResources
 
 _REQUEST_FINGERPRINT_METADATA_KEY = "request_fingerprint"
+
+
+@dataclass(frozen=True)
+class SessionRunSettings:
+    config: RootConfig
+    model: str | None
+    agent_id: str | None
+    enabled_tools: tuple[str, ...] | None
+    document_focus: DocumentFocus | None
+    readable_project_ids: tuple[str, ...]
+
+
+class _AdmittedAgentStream:
+    """Own one accepted exchange, including before the first iteration."""
+
+    def __init__(self, session, accepted, **kwargs):
+        self.session = session
+        self.accepted = accepted
+        self.stream = session._run_admitted_agent_stream(accepted, **kwargs)
+        self.started = False
+        self.closed = False
+        self.executing_task = None
+        self.close_lock = asyncio.Lock()
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self.closed:
+            raise StopAsyncIteration
+        self.started = True
+        self.executing_task = asyncio.current_task()
+        try:
+            event = await anext(self.stream)
+        except BaseException:
+            self.executing_task = None
+            await self.aclose()
+            raise
+        finally:
+            self.executing_task = None
+        if event["event"] in {"response", "clarification", "error"}:
+            await anext(self.stream, None)
+            self.closed = True
+        return event
+
+    async def aclose(self):
+        async with self.close_lock:
+            if self.closed:
+                return
+            task = self.executing_task
+            if task is not None and task is not asyncio.current_task():
+                task.cancel()
+                # The iterator's cancellation handler owns its own cleanup.
+                # Release this lock before waiting for that handler.
+            else:
+                if self.started:
+                    await self.stream.aclose()
+                else:
+                    await self.session._close_user_exchange(
+                        self.accepted.id,
+                        outcome="cancelled",
+                        terminal_error={"code": "run_cancelled", "retryable": False},
+                    )
+                    await self.session._release_agent_run(None)
+                self.closed = True
+                return
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 class SessionRuntime:
@@ -42,7 +111,7 @@ class SessionRuntime:
     state and dynamic configuration. Semantic processing is owned solely by the
     project runtime's durable semantic-window job.
 
-    Initialization and wiring logic is encapsulated in SessionRuntimeFactory to decouple
+    Initialization and wiring logic is owned by SessionManager to decouple
     the construction of these services from the state container itself.
     """
 
@@ -60,34 +129,37 @@ class SessionRuntime:
         document_focus: Optional[DocumentFocus] = None,
         health_service: Any | None = None,
         agent_orchestrator: Any | None = None,
+        config_manager: ConfigManager | None = None,
     ):
         self.resources = resources
         self.health_service = health_service
         self.agent_orchestrator = agent_orchestrator
+        self._config_manager = config_manager
         self.user_name: str = user_name
         self.model = model
         self.agent_id = agent_id
         self.enabled_tools = list(enabled_tools) if enabled_tools is not None else None
         self.document_focus = document_focus
-        self.document_service: Optional[DocumentService] = None
+        self.document_service: Optional[DocumentService] = getattr(project, "document_service", None)
 
         self.session_id = session_id
         self.project_id = project_id
         self.project = project
 
-        self.config_unsubscribers: List = []
         self._agent_run_lock = asyncio.Lock()
         self._shutdown_lock = asyncio.Lock()
         self._agent_run_reserved = False
         self._active_agent_task: Optional[asyncio.Task] = None
+        self._active_agent_stream: _AdmittedAgentStream | None = None
         self._active_idempotency_key: str | None = None
         self._active_request_fingerprint: str | None = None
         self._agent_runs_closed = False
         self._closed = False
+        self._shutdown_event_emitted = False
 
     @property
     def current_config(self) -> RootConfig:
-        return ConfigManager.get().config
+        return (self._config_manager or ConfigManager.get()).config
 
     @property
     def knowledge_store(self):
@@ -102,6 +174,10 @@ class SessionRuntime:
 
         async with self._agent_run_lock:
             task = self._active_agent_task
+            stream = self._active_agent_stream
+        if stream is not None and not stream.closed:
+            await stream.aclose()
+            return True
         if task is None or task.done() or task is asyncio.current_task():
             return False
 
@@ -111,37 +187,6 @@ class SessionRuntime:
         except asyncio.CancelledError:
             pass
         return True
-
-    async def run_agent_stream(
-        self,
-        message: Message,
-        *,
-        orchestrator: Any = None,
-        user_timezone: Optional[str] = None,
-        model: Optional[str] = None,
-        agent_id: Optional[str] = None,
-        enabled_tools: Optional[List[str]] = None,
-        document_focus: Optional[DocumentFocus] = None,
-        pasted_text_spans: Optional[List[Dict]] = None,
-        idempotency_key: Optional[str] = None,
-        research_mode: ResearchMode = "normal",
-    ) -> AsyncGenerator[AgentExecutionEvent, None]:
-        """Run one admitted canonical user-message-to-answer workflow."""
-
-        stream = await self.open_agent_run_stream(
-            message,
-            orchestrator=orchestrator,
-            user_timezone=user_timezone,
-            model=model,
-            agent_id=agent_id,
-            enabled_tools=enabled_tools,
-            document_focus=document_focus,
-            pasted_text_spans=pasted_text_spans,
-            idempotency_key=idempotency_key,
-            research_mode=research_mode,
-        )
-        async for event in stream:
-            yield event
 
     async def open_agent_run_stream(
         self,
@@ -211,15 +256,45 @@ class SessionRuntime:
                         raise IdempotencyConflictError()
                     raise RequestInProgressError()
                 raise SessionBusyError()
+            run_settings = SessionRunSettings(
+                config=deepcopy(self.current_config),
+                model=self.model,
+                agent_id=self.agent_id,
+                enabled_tools=tuple(self.enabled_tools)
+                if self.enabled_tools is not None
+                else None,
+                document_focus=deepcopy(self.document_focus),
+                readable_project_ids=tuple(self.project.readable_project_ids),
+            )
+            enabled_tools = list(enabled_tools) if enabled_tools is not None else None
+            document_focus = deepcopy(document_focus)
+            pasted_text_spans = deepcopy(pasted_text_spans)
             self._agent_run_reserved = True
             self._active_idempotency_key = normalized_idempotency_key
             self._active_request_fingerprint = request_fingerprint
+            self._active_agent_task = asyncio.current_task()
 
-        try:
-            accepted, created = await self._accept_user_message(
+        acceptance_task = asyncio.create_task(
+            self._accept_user_message(
                 message,
                 request_fingerprint=request_fingerprint,
+                edit_window_seconds=run_settings.config.developer_settings.ingestion.message_edit_window_seconds,
             )
+        )
+        try:
+            accepted, created = await asyncio.shield(acceptance_task)
+        except asyncio.CancelledError:
+            try:
+                accepted, created = await acceptance_task
+                if created:
+                    await self._close_user_exchange(
+                        accepted.id,
+                        outcome="cancelled",
+                        terminal_error={"code": "run_cancelled", "retryable": False},
+                    )
+            finally:
+                await self._release_agent_run(None)
+            raise
         except Exception:
             await self._release_agent_run(None)
             raise
@@ -244,7 +319,8 @@ class SessionRuntime:
             finally:
                 await self._release_agent_run(None)
 
-        return self._run_admitted_agent_stream(
+        stream = _AdmittedAgentStream(
+            self,
             accepted,
             orchestrator=orchestrator,
             user_timezone=user_timezone,
@@ -254,7 +330,11 @@ class SessionRuntime:
             document_focus=document_focus,
             pasted_text_spans=pasted_text_spans,
             research_mode=research_mode,
+            run_settings=run_settings,
         )
+        self._active_agent_stream = stream
+        self._active_agent_task = None
+        return stream
 
     def _require_message_ingestion_ready(self) -> None:
         if (
@@ -275,6 +355,7 @@ class SessionRuntime:
         document_focus: Optional[DocumentFocus],
         pasted_text_spans: Optional[List[Dict]],
         research_mode: ResearchMode,
+        run_settings: SessionRunSettings,
     ) -> AsyncGenerator[AgentExecutionEvent, None]:
         """Execute one already-persisted, exclusively admitted run."""
 
@@ -286,21 +367,21 @@ class SessionRuntime:
         # Source candidates are authorized while the Agent run is admitted.
         # Keep that scope through finalization retries instead of consulting a
         # mutable runtime list after the response has been produced.
-        captured_readable_project_ids = list(self.project.readable_project_ids)
+        captured_readable_project_ids = list(run_settings.readable_project_ids)
         task = asyncio.current_task()
         if task is None:
             await self._release_agent_run(None)
             raise RuntimeError("Agent stream must run in an asyncio task")
 
         async with self._agent_run_lock:
-            if self._agent_runs_closed:
-                self._agent_run_reserved = False
-                raise RuntimeError("Session is shutting down")
+            shutting_down = self._agent_runs_closed
             self._active_agent_task = task
 
         try:
+            if shutting_down:
+                raise asyncio.CancelledError
             history = await self.get_conversation_context(
-                self.current_config.developer_settings.limits.conversation_context_turns,
+                run_settings.config.developer_settings.limits.conversation_context_turns,
                 up_to_msg_id=accepted.id - 1,
             )
             orchestrator = orchestrator or self.agent_orchestrator
@@ -320,6 +401,7 @@ class SessionRuntime:
                 user_message_id=accepted.id,
                 pasted_text_spans=pasted_text_spans,
                 research_mode=research_mode,
+                run_settings=run_settings,
             ):
                 if event["event"] == "response":
                     if response_seen:
@@ -338,13 +420,14 @@ class SessionRuntime:
                         artifact=self._response_artifact(response),
                         readable_project_ids=captured_readable_project_ids,
                     )
+                    exchange_outcome = "assistant_final"
                     await self._record_durable_agent_turn(
                         orchestrator,
                         agent_id=(
                             resolved_agent_id
                             if isinstance(resolved_agent_id, str)
                             and resolved_agent_id.strip()
-                            else agent_id or self.agent_id
+                            else agent_id or run_settings.agent_id
                         ),
                     )
                     response = dict(response)
@@ -383,11 +466,18 @@ class SessionRuntime:
                     self.session_id,
                 )
         except asyncio.CancelledError:
-            exchange_outcome = "cancelled"
-            terminal_error = {"code": "run_cancelled", "retryable": False}
+            if exchange_outcome not in {"assistant_final", "clarification"}:
+                exchange_outcome = "cancelled"
+                terminal_error = {"code": "run_cancelled", "retryable": False}
+            raise
+        except GeneratorExit:
+            if exchange_outcome not in {"assistant_final", "clarification"}:
+                exchange_outcome = "cancelled"
+                terminal_error = {"code": "run_cancelled", "retryable": False}
             raise
         except Exception:
-            exchange_outcome = "failed"
+            if exchange_outcome not in {"assistant_final", "clarification"}:
+                exchange_outcome = "failed"
             logger.exception(
                 "Canonical agent turn failed for session {}", self.session_id
             )
@@ -419,11 +509,14 @@ class SessionRuntime:
 
     async def _release_agent_run(self, task: Optional[asyncio.Task]) -> None:
         async with self._agent_run_lock:
+            if task is not None and self._active_agent_task is not task:
+                return
             if task is None or self._active_agent_task is task:
                 self._active_agent_task = None
             self._agent_run_reserved = False
             self._active_idempotency_key = None
             self._active_request_fingerprint = None
+            self._active_agent_stream = None
 
     @staticmethod
     def _assistant_response_metadata(response: Dict[str, Any]) -> dict:
@@ -492,6 +585,7 @@ class SessionRuntime:
         msg: Message,
         *,
         request_fingerprint: str | None = None,
+        edit_window_seconds: int | None = None,
     ) -> tuple[Message, bool]:
         """Persist one user message and report whether it was newly created."""
 
@@ -515,16 +609,18 @@ class SessionRuntime:
         # acceptance without a separate cache protocol.
         timestamp_ns = int(msg.timestamp.timestamp() * 1e9)
         fallback_key = hashlib.sha256(
-            (
-                f"{self.session_id}:{msg.content.strip()}:{timestamp_ns}"
-            ).encode()
+            (f"{self.session_id}:{msg.content.strip()}:{timestamp_ns}").encode()
         ).hexdigest()
         acceptance_key = (
-            f"request:{idempotency_key}" if idempotency_key else f"content:{fallback_key}"
+            f"request:{idempotency_key}"
+            if idempotency_key
+            else f"content:{fallback_key}"
         )
         msg.id = await self.knowledge_store.allocate_message_id()
 
         persistence_kwargs = {"acceptance_key": acceptance_key}
+        if edit_window_seconds is not None:
+            persistence_kwargs["edit_window_seconds"] = edit_window_seconds
         if request_fingerprint is not None:
             persistence_kwargs["request_fingerprint"] = request_fingerprint
         acceptance = await self._persist_user_turn(msg, **persistence_kwargs)
@@ -580,7 +676,9 @@ class SessionRuntime:
                 key: value
                 for key, value in focus.items()
                 if key != "created_at"
-                and not (focus.get("target_type") == "document" and key == "relative_path")
+                and not (
+                    focus.get("target_type") == "document" and key == "relative_path"
+                )
             }
         payload = {
             "query": message.content.strip(),
@@ -624,6 +722,7 @@ class SessionRuntime:
         *,
         acceptance_key: str,
         request_fingerprint: str | None = None,
+        edit_window_seconds: int | None = None,
     ):
         """Durably create an editable canonical user message and revision one."""
         payload = {
@@ -643,13 +742,15 @@ class SessionRuntime:
         return await self.knowledge_store.create_editable_user_message(
             payload,
             edit_window_seconds=(
-                self.current_config.developer_settings.ingestion.message_edit_window_seconds
+                edit_window_seconds
+                if edit_window_seconds is not None
+                else self.current_config.developer_settings.ingestion.message_edit_window_seconds
             ),
         )
 
-    async def _replay_terminal_exchange(self, exchange) -> AsyncGenerator[
-        AgentExecutionEvent, None
-    ]:
+    async def _replay_terminal_exchange(
+        self, exchange
+    ) -> AsyncGenerator[AgentExecutionEvent, None]:
         """Return the durable result for a duplicate submission without rerunning it."""
 
         outcome = exchange.exchange_outcome
@@ -660,7 +761,9 @@ class SessionRuntime:
                 or exchange.assistant_content is None
                 or not isinstance(metadata.get("usage"), dict)
             ):
-                raise RuntimeError("Completed request is missing its canonical response")
+                raise RuntimeError(
+                    "Completed request is missing its canonical response"
+                )
             response = {
                 "content": exchange.assistant_content,
                 "usage": metadata["usage"],
@@ -690,7 +793,9 @@ class SessionRuntime:
             yield {"event": "clarification", "data": clarification}
             return
         if outcome == "cancelled":
-            message = "The original request was cancelled. Submit a new request to retry."
+            message = (
+                "The original request was cancelled. Submit a new request to retry."
+            )
         elif outcome == "failed":
             message = "The original request failed. Submit a new request to retry."
         elif outcome == "user_only":
@@ -722,7 +827,10 @@ class SessionRuntime:
         message_id = await self.knowledge_store.allocate_message_id()
         if user_msg_id is None:
             raise ValueError("Assistant turns must be linked to a user exchange")
-        persisted_message_id, source_ref_ids = await self._persist_assistant_message_log(
+        (
+            persisted_message_id,
+            source_ref_ids,
+        ) = await self._persist_assistant_message_log(
             message_id,
             content,
             timestamp,
@@ -753,8 +861,6 @@ class SessionRuntime:
     ) -> tuple[int, list[str]]:
         """Atomically persist an assistant response and close its user exchange."""
         max_retries = 3
-        if self.project is None:
-            raise RuntimeError("Session project runtime is unavailable")
         captured_readable_project_ids = list(
             readable_project_ids
             if readable_project_ids is not None
@@ -785,12 +891,14 @@ class SessionRuntime:
                 }
                 if outcome != "assistant_final":
                     finalization["outcome"] = outcome
-                persisted_id, source_ref_ids, _created = (
-                    await self.knowledge_store.finalize_assistant_exchange(
-                        agent_msg_batch[0],
-                        source_candidates or [],
-                        **finalization,
-                    )
+                (
+                    persisted_id,
+                    source_ref_ids,
+                    _created,
+                ) = await self.knowledge_store.finalize_assistant_exchange(
+                    agent_msg_batch[0],
+                    source_candidates or [],
+                    **finalization,
                 )
                 return persisted_id, source_ref_ids
 
@@ -850,28 +958,33 @@ class SessionRuntime:
 
         signal_semantic_work = getattr(self.project, "signal_semantic_work", None)
         if callable(signal_semantic_work):
-            signal_semantic_work()
+            try:
+                signal_semantic_work()
+            except Exception:
+                # The committed terminal result remains canonical; the project's
+                # periodic durable scan can recover this missed wake.
+                logger.exception(
+                    "Failed to signal semantic work for {}", self.session_id
+                )
 
     async def get_conversation_context(
         self, num_turns: int, up_to_msg_id: Optional[int] = None
     ) -> List[Dict]:
         """Returns list of conversation turns in chronological order."""
-        turns = await fetch_conversation_turns(
-            self.resources.postgres,
-            self.user_name,
-            self.session_id,
-            num_turns,
-            up_to_msg_id,
+        turns = await self.knowledge_store.get_session_history(
+            user_name=self.user_name, session_id=self.session_id,
+            limit=num_turns, up_to_msg_id=up_to_msg_id,
         )
 
         results = []
         for turn in turns:
             role_label = "USER" if turn["role"] == "user" else "AGENT"
-            ts = parse_iso_time_or_now(turn["timestamp"])
+            ts = datetime.fromtimestamp(turn["timestamp"] / 1000, tz=timezone.utc)
             date_str = ts.strftime("%Y-%m-%d %H:%M")
             results.append(
                 {
                     **turn,
+                    "timestamp": ts.isoformat(),
                     "message": turn["content"],
                     "role_label": role_label,
                     "relative": f"[{date_str}]",
@@ -894,29 +1007,23 @@ class SessionRuntime:
             try:
                 await self.cancel_active_agent_run()
             except Exception as exc:
-                logger.exception("Failed to cancel agent run for session {}", self.session_id)
-                failures.append(exc)
-
-            unsubscribers, self.config_unsubscribers = self.config_unsubscribers, []
-            for unsubscribe in unsubscribers:
-                try:
-                    unsubscribe()
-                except Exception as exc:
-                    logger.exception(
-                        "Session configuration cleanup failed for {}", self.session_id
-                    )
-                    failures.append(exc)
-
-            self._closed = True
-            try:
-                await emit(self.session_id, "system", "session_shutdown", {})
-            except Exception as exc:
                 logger.exception(
-                    "Failed to emit shutdown event for session {}", self.session_id
+                    "Failed to cancel agent run for session {}", self.session_id
                 )
                 failures.append(exc)
+
+            if not self._shutdown_event_emitted:
+                try:
+                    await emit(self.session_id, "system", "session_shutdown", {})
+                    self._shutdown_event_emitted = True
+                except Exception as exc:
+                    logger.exception(
+                        "Failed to emit shutdown event for session {}", self.session_id
+                    )
+                    failures.append(exc)
 
             if failures:
                 raise RuntimeError(
                     f"SessionRuntime shutdown failed for {self.session_id}"
                 ) from failures[0]
+            self._closed = True

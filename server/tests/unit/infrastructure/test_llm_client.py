@@ -28,6 +28,45 @@ class DummyModel(BaseModel):
     name: str
 
 
+async def test_jev_and_llm_use_one_spending_balance(llm_service):
+    from common.schema.jev import JevSettings, NoulQuestion
+    from infrastructure.jev_client import JevClient, JevWorkBudget
+
+    service, raw_client, *_ = llm_service
+    await service.spending_ledger.update_settings(LLMSpendingBudgetSettings(
+        fallback_pricing=LLMModelPricing(input_usd_per_million_tokens=0.042, output_usd_per_million_tokens=0),
+    ))
+    raw_client.chat.completions.create.return_value = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))],
+        usage=SimpleNamespace(prompt_tokens=100, completion_tokens=20),
+    )
+    assert await service.generate_text(system="system", user="user") == "ok"
+    settings = JevSettings(api_key="fake", identity_mode="observe")
+    client = JevClient(settings, spending_ledger=service.spending_ledger,
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json={
+            "model": "jev-1.13.0", "answers": {"support": {"type": "noul", "noul": 0.8}},
+            "usage": {"input_tokens": 100, "output_tokens": 20},
+        })))
+    result = await client.evaluate(state="Synthetic input", questions={"support": NoulQuestion(instructions="Evidence is sufficient.")},
+        capability="identity", policy=settings.capture_policy(), work_budget=JevWorkBudget(1))
+    assert result.outcome == "available"
+    snapshot = await service.spending_snapshot()
+    assert snapshot["request_count"] == 2
+    assert snapshot["spent_usd"] == pytest.approx(0.0000084)
+    await client.close()
+
+
+async def test_failed_client_close_retains_handle_for_retry(llm_service):
+    service, raw, *_ = llm_service
+    raw.close.side_effect = [RuntimeError("close failed"), None]
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        await service.close()
+    assert raw in service._retired_clients
+    await service.close()
+    assert raw not in service._retired_clients
+    assert raw.close.await_count == 2
+
+
 async def async_chunks(*chunks):
     for chunk in chunks:
         yield chunk

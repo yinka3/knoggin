@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import math
 
-from core.knowledge.documents.storage import DocumentChunk, embedding_text
+from core.knowledge.documents.extraction import DocumentChunk, embedding_text
 from core.knowledge.episodes.embedding import build_episode_embedding_text_from_fields
 from core.knowledge.services.embedding_service import EmbeddingService
 from infrastructure.postgres_client import PostgresClient

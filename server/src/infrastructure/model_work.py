@@ -91,6 +91,7 @@ class ModelWorkCoordinator:
         self._sequence = itertools.count()
         self._workers: list[asyncio.Task] = []
         self._closed = False
+        self._shutdown_task: asyncio.Task | None = None
         self._in_flight_by_priority = {
             priority.name.lower(): 0 for priority in ModelWorkPriority
         }
@@ -324,9 +325,12 @@ class ModelWorkCoordinator:
         return sanitize_health_details(self.snapshot())
 
     async def shutdown(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
+        if self._shutdown_task is None:
+            self._closed = True
+            self._shutdown_task = asyncio.create_task(self._finish_shutdown())
+        await asyncio.shield(self._shutdown_task)
+
+    async def _finish_shutdown(self) -> None:
 
         for lane, queue in self._queues.items():
             while not queue.empty():

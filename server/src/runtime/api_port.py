@@ -8,43 +8,98 @@ internal agent event stream back into the versioned public stream contract.
 
 from __future__ import annotations
 
+import asyncio
+import base64
 from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+from loguru import logger
+from pydantic import ValidationError
+
 from common.conf.domain_config import DomainConfig
-from common.exceptions import NotFoundError
-from common.schema.document import DocumentSelection, create_document_focus
+from common.document_limits import MAX_DOCUMENT_BASE64_LENGTH, MAX_DOCUMENT_SIZE
+from common.exceptions import (
+    EpisodeEditConflictError,
+    NotFoundError,
+    PayloadTooLargeError,
+)
+from common.schema.document import (
+    DocumentSelection,
+    FolderScanSettings,
+    create_document_focus,
+)
+from common.schema.health import HealthSnapshot
 from common.schema.primitives import Message
 from common.schema.public import (
+    AACAdmissionResponse,
+    AACDiscussionResponse,
+    AACInsightResponse,
+    AACInsightVoteResponse,
+    AACParticipationResponse,
+    AACStopResponse,
+    AACTimelineResponse,
     ArtifactListResponse,
     ArtifactResponse,
+    BatchDocumentAccepted,
+    BatchDocumentItem,
+    BatchSourceFailed,
+    BatchSourceRequest,
+    BatchSourceResponse,
+    BatchWebLinkAccepted,
     CreateProjectRequest,
     CreateSessionRequest,
+    DocumentContentResponse,
+    DocumentDeletedResponse,
     DocumentFocusResponse,
+    DocumentResponse,
     EntityMergeRollbackRequest,
+    EpisodeEditedResponse,
+    EpisodeResponse,
     MaintenanceReviewDecisionRequest,
     MaintenanceReviewDetailResponse,
     MaintenanceReviewPreviewResponse,
     MaintenanceReviewResponse,
     MessageDeltaEvent,
+    ProjectDeletedResponse,
     ProjectResponse,
     PromoteSourceRequest,
     PublicError,
+    PublicLLMSettings,
+    PublicSearchSettings,
     RunCompletedEvent,
     RunFailedEvent,
     RunResult,
     RunStartedEvent,
+    SavedWebLinkDeletedResponse,
+    SavedWebLinkResponse,
+    SessionDeletedResponse,
+    SessionHistoryMessage,
+    SessionResponse,
     SetDocumentFocusRequest,
+    SettingsApplyStatusResponse,
+    SettingsOperationResponse,
+    SettingsResponse,
+    SettingsUpdateRequest,
     SourceAddedEvent,
     StartRunRequest,
     ToolCompletedEvent,
     ToolStartedEvent,
+    UpdateEpisodeRequest,
+    UpdateProjectRequest,
+    UpdateSavedWebLinkRequest,
+    UpdateSessionRequest,
+    UploadDocumentRequest,
     Usage,
     UsageUpdatedEvent,
+    project_public_model,
+    to_public_error,
 )
 from common.schema.source.references import SourceConsulted
+from common.scoping import require_scope_value
+from common.utils.lifecycle import settle_owned_task
 from runtime.application import ApplicationRuntime
 
 
@@ -88,6 +143,40 @@ class ApplicationRuntimePort:
             raise PermissionError("Request user does not match the running application")
         return configured_user
 
+    async def _require_health_project(self, user_name: str, project_id: str) -> None:
+        self._require_user(user_name)
+        if await self.runtime.projects.get_project(project_id) is None:
+            raise NotFoundError("project")
+
+    async def get_engine_health(self, *, user_name: str) -> HealthSnapshot:
+        self._require_user(user_name)
+        return await self.runtime.health_service.get_engine_health()
+
+    async def get_resource_health(
+        self, *, user_name: str, project_id: str
+    ) -> HealthSnapshot:
+        await self._require_health_project(user_name, project_id)
+        return await self.runtime.health_service.get_resource_health(
+            project_id=project_id
+        )
+
+    async def get_ingestion_health(
+        self, *, user_name: str, project_id: str
+    ) -> HealthSnapshot:
+        await self._require_health_project(user_name, project_id)
+        return await self.runtime.health_service.get_ingestion_health(
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def get_background_health(
+        self, *, user_name: str, project_id: str
+    ) -> HealthSnapshot:
+        await self._require_health_project(user_name, project_id)
+        return await self.runtime.health_service.get_background_health(
+            project_id=project_id
+        )
+
     async def create_project(
         self,
         *,
@@ -107,6 +196,194 @@ class ApplicationRuntimePort:
                 "allowed_projects": tuple(project.get("allowed_projects") or ()),
             }
         )
+
+    async def get_settings(self, *, user_name: str) -> SettingsResponse:
+        self._require_user(user_name)
+        config = self.runtime.config_manager.config
+        return SettingsResponse(
+            user_aliases=tuple(config.user_aliases),
+            llm=PublicLLMSettings(
+                agent_model=config.llm.agent_model, extraction_model=config.llm.extraction_model,
+                merge_model=config.llm.merge_model, spending_budget=config.llm.spending_budget,
+                api_key_configured=bool(config.llm.api_key),
+            ),
+            search=PublicSearchSettings(provider=config.search.provider,
+                brave_api_key_configured=bool(config.search.brave_api_key),
+                tavily_api_key_configured=bool(config.search.tavily_api_key)),
+            developer_settings=config.developer_settings,
+        )
+
+    async def get_settings_status(self, *, user_name: str) -> SettingsApplyStatusResponse:
+        self._require_user(user_name)
+        status = self.runtime.config_manager.last_apply_status
+        return SettingsApplyStatusResponse(
+            generation=status.generation, persisted=status.persisted, activated=status.activated,
+            failed_subscriptions=status.failed_subscriptions, pending_subscriptions=status.pending_subscriptions,
+            fully_applied=status.fully_applied,
+        )
+
+    async def update_settings(self, *, user_name: str, request: SettingsUpdateRequest) -> SettingsOperationResponse:
+        self._require_user(user_name)
+        manager = self.runtime.config_manager
+        try:
+            manager.validate_updates(request.updates)
+        except (ValidationError, ValueError, TypeError):
+            raise ValueError("Invalid settings update") from None
+        # These calls must stay on the subscriber thread; never use to_thread.
+        accepted = manager.update_settings(request.updates)
+        return SettingsOperationResponse(accepted=accepted, status=await self.get_settings_status(user_name=user_name))
+
+    async def reload_settings(self, *, user_name: str) -> SettingsOperationResponse:
+        self._require_user(user_name)
+        accepted = self.runtime.config_manager.load()
+        return SettingsOperationResponse(accepted=accepted, status=await self.get_settings_status(user_name=user_name))
+
+    async def retry_settings_applies(self, *, user_name: str) -> SettingsApplyStatusResponse:
+        self._require_user(user_name)
+        self.runtime.config_manager.retry_failed_applies()
+        return await self.get_settings_status(user_name=user_name)
+
+    def _aac(self, user_name: str):
+        self._require_user(user_name)
+        return self.runtime.aac_runtime
+
+    async def trigger_aac(self, *, user_name: str) -> AACAdmissionResponse:
+        admission = await self._aac(user_name).trigger_discussion()
+        return AACAdmissionResponse(outcome=admission.outcome, reason=admission.reason,
+                                    discussion_id=admission.discussion_id)
+
+    async def stop_aac(self, *, user_name: str) -> AACStopResponse:
+        return AACStopResponse(stop_requested=await self._aac(user_name).request_stop())
+
+    async def set_aac_participation(self, *, user_name: str, agent_id: str, enabled: bool) -> AACParticipationResponse:
+        agent = await self._aac(user_name).set_participation(agent_id, enabled)
+        if agent is None:
+            raise NotFoundError("agent")
+        return AACParticipationResponse(agent_id=agent.id, enabled=agent.aac_enabled)
+
+    async def list_aac_discussions(self, *, user_name: str, limit: int = 20) -> list[AACDiscussionResponse]:
+        rows = await self._aac(user_name).list_discussions(limit=limit)
+        return [project_public_model(AACDiscussionResponse, row) for row in rows]
+
+    async def list_aac_timeline(self, *, user_name: str, discussion_id: str, limit: int = 100, after_sequence: int = 0) -> list[AACTimelineResponse]:
+        rows = await self._aac(user_name).list_timeline(discussion_id, limit=limit, after_sequence=after_sequence)
+        return [project_public_model(AACTimelineResponse, row) for row in rows]
+
+    async def list_aac_insights(self, *, user_name: str, query: str | None = None, limit: int = 20) -> list[AACInsightResponse]:
+        rows = await self._aac(user_name).list_insights(query=query, limit=limit)
+        return [project_public_model(AACInsightResponse, row) for row in rows]
+
+    async def list_aac_insight_votes(self, *, user_name: str, insight_id: str) -> list[AACInsightVoteResponse]:
+        rows = await self._aac(user_name).list_insight_votes(insight_id)
+        return [project_public_model(AACInsightVoteResponse, row) for row in rows]
+
+    async def list_projects(self, *, user_name: str) -> list[ProjectResponse]:
+        self._require_user(user_name)
+        rows = await self.runtime.projects.list_projects()
+        return [project_public_model(ProjectResponse, row) for row in rows]
+
+    async def get_project(self, *, user_name: str, project_id: str) -> ProjectResponse:
+        self._require_user(user_name)
+        row = await self.runtime.projects.get_project(project_id)
+        if row is None:
+            raise NotFoundError("project")
+        return project_public_model(ProjectResponse, row)
+
+    async def update_project(
+        self, *, user_name: str, project_id: str, request: UpdateProjectRequest
+    ) -> ProjectResponse:
+        self._require_user(user_name)
+        row = await self.runtime.projects.update_project(
+            project_id, **request.model_dump(exclude_unset=True)
+        )
+        if row is None:
+            raise NotFoundError("project")
+        return project_public_model(ProjectResponse, row)
+
+    async def archive_project(self, *, user_name: str, project_id: str) -> ProjectResponse:
+        self._require_user(user_name)
+        row = await self.runtime.projects.archive_project(project_id)
+        if row is None:
+            raise NotFoundError("project")
+        return project_public_model(ProjectResponse, row)
+
+    async def delete_project(self, *, user_name: str, project_id: str) -> ProjectDeletedResponse:
+        self._require_user(user_name)
+        # Do not pre-read: a retry may only have pending file cleanup left.
+        row = await self.runtime.projects.delete_project(project_id)
+        if row is None:
+            raise NotFoundError("project")
+        return ProjectDeletedResponse(
+            project_id=project_id, file_cleanup_status=row["file_cleanup_status"]
+        )
+
+    async def _owned_episode(self, *, user_name: str, project_id: str, episode_id: str):
+        episode = await self.runtime.resources.knowledge_store.get_project_episode(
+            episode_id, user_name=user_name, project_id=project_id,
+            visible_project_ids=[project_id],
+        )
+        if episode is None or episode.project_id != project_id or episode.episode_id != episode_id:
+            raise NotFoundError("episode")
+        return episode
+
+    async def get_episode(
+        self, *, user_name: str, project_id: str, episode_id: str,
+    ) -> EpisodeResponse:
+        self._require_user(user_name)
+        project_id = require_scope_value(project_id, "project_id", "get_episode")
+        episode_id = require_scope_value(episode_id, "episode_id", "get_episode")
+        project = await self.runtime.projects.get_project(project_id)
+        if project is None or project["status"] not in {"active", "archived"}:
+            raise NotFoundError("project")
+        episode = await self._owned_episode(
+            user_name=user_name, project_id=project_id, episode_id=episode_id,
+        )
+        return project_public_model(EpisodeResponse, episode)
+
+    async def update_episode(
+        self, *, user_name: str, project_id: str, episode_id: str,
+        request: UpdateEpisodeRequest,
+    ) -> EpisodeEditedResponse:
+        self._require_user(user_name)
+        project_id = require_scope_value(project_id, "project_id", "update_episode")
+        episode_id = require_scope_value(episode_id, "episode_id", "update_episode")
+        project = await self.runtime.projects.get_project(project_id)
+        if project is None or project["status"] == "deleted":
+            raise NotFoundError("project")
+        if project["status"] != "active":
+            raise PermissionError("Archived projects are read-only")
+        maximum = self.runtime.config_manager.config.developer_settings.jobs.episode.max_narrative_chars
+        if request.narrative_character_count() > maximum:
+            raise ValueError("Episode narrative exceeds the configured character limit")
+
+        # The exact lease blocks archive/delete while embedding and CAS persist.
+        # This is project-owned editing; no session is resumed or fabricated.
+        async with self._project_runtime(
+            user_name=user_name, project_id=project_id, lease_prefix="api-episode-edit",
+        ):
+            episode = await self._owned_episode(
+                user_name=user_name, project_id=project_id, episode_id=episode_id,
+            )
+            if episode.updated_at != request.expected_updated_at:
+                raise EpisodeEditConflictError()
+            worker = asyncio.create_task(self.runtime.resources.knowledge_store.edit_episode(
+                episode_id=episode_id, user_name=user_name, project_id=project_id,
+                summary=request.summary, new_developments=request.new_developments,
+                updates=request.updates, unresolved=request.unresolved,
+                expected_updated_at=request.expected_updated_at,
+            ))
+            try:
+                updated_at = await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                try:
+                    await settle_owned_task(worker)
+                except Exception:
+                    # Preserve caller cancellation, not a worker's raw failure.
+                    logger.error("Cancelled episode edit worker failed")
+                raise
+            return EpisodeEditedResponse(
+                episode_id=episode_id, project_id=project_id, updated_at=updated_at,
+            )
 
     async def create_session(
         self,
@@ -129,6 +406,44 @@ class ApplicationRuntimePort:
             "agent_id": session.agent_id,
             "enabled_tools": session.enabled_tools,
         }
+
+    async def list_sessions(self, *, user_name: str) -> list[SessionResponse]:
+        self._require_user(user_name)
+        rows = await self.runtime.sessions.list_sessions()
+        return [project_public_model(SessionResponse, row) for row in rows.values()]
+
+    async def _session_metadata(self, *, user_name: str, session_id: str) -> SessionResponse:
+        # Durable metadata read only: do not resume a runtime or acquire a lease.
+        rows = await self.list_sessions(user_name=user_name)
+        for row in rows:
+            if row.session_id == session_id:
+                return row
+        raise NotFoundError("session")
+
+    async def get_session_history(
+        self, *, user_name: str, session_id: str, limit: int = 100
+    ) -> list[SessionHistoryMessage]:
+        if not 1 <= limit <= 1000:
+            raise ValueError("History limit must be between 1 and 1000")
+        await self._session_metadata(user_name=user_name, session_id=session_id)
+        rows = await self.runtime.sessions.get_session_history_readonly(session_id, limit=limit)
+        return [project_public_model(SessionHistoryMessage, row) for row in rows]
+
+    async def update_session(
+        self, *, user_name: str, session_id: str, request: UpdateSessionRequest
+    ) -> SessionResponse:
+        await self._session_metadata(user_name=user_name, session_id=session_id)
+        await self.runtime.sessions.update_session(
+            session_id, request.model_dump(exclude_unset=True)
+        )
+        return await self._session_metadata(user_name=user_name, session_id=session_id)
+
+    async def delete_session(
+        self, *, user_name: str, session_id: str
+    ) -> SessionDeletedResponse:
+        await self._session_metadata(user_name=user_name, session_id=session_id)
+        await self.runtime.sessions.delete_session(session_id)
+        return SessionDeletedResponse(session_id=session_id)
 
     async def _session(self, *, user_name: str, session_id: str):
         self._require_user(user_name)
@@ -196,29 +511,181 @@ class ApplicationRuntimePort:
         user_name: str,
         project_id: str,
         request: PromoteSourceRequest,
-    ) -> dict:
+    ) -> SavedWebLinkResponse:
         """Promote a cited assistant source only after an explicit user action."""
-        session = await self._session(
-            user_name=user_name,
-            session_id=request.session_id,
-        )
-        if session.project_id != project_id:
-            raise PermissionError("Source promotion must target the session project")
-        source = await self.runtime.resources.knowledge_store.get_source_reference(
-            request.source_ref_id,
-            user_name=user_name,
-            project_id=project_id,
-            session_id=request.session_id,
-        )
-        if source is None:
-            raise NotFoundError("source")
-        if session.document_service is None:
-            raise RuntimeError("Session document service is unavailable")
-        return await session.document_service.promote_source(
-            source,
-            title=request.title,
-            summary=request.summary,
-        )
+        self._require_user(user_name)
+        project = await self.runtime.projects.get_project(project_id)
+        if project is None or project["status"] == "deleted":
+            raise NotFoundError("project")
+        if project["status"] != "active":
+            raise PermissionError("Archived projects are read-only")
+
+        # Source provenance survives session deletion. The project lease keeps
+        # archive/delete from crossing the lookup and bookmark write; no session
+        # runtime is resumed or fabricated for this project-owned mutation.
+        async with self._project_runtime(
+            user_name=user_name, project_id=project_id, lease_prefix="api-source-promote",
+        ) as project_runtime:
+            source = await self.runtime.resources.knowledge_store.get_source_reference(
+                request.source_ref_id,
+                user_name=user_name,
+                project_id=project_id,
+                session_id=request.session_id,
+            )
+            if source is None:
+                raise NotFoundError("source")
+            if project_runtime.document_service is None:
+                raise RuntimeError("Project document service is unavailable")
+            return project_public_model(SavedWebLinkResponse, await project_runtime.document_service.promote_source(
+                source,
+                title=request.title,
+                summary=request.summary,
+            ))
+
+    @asynccontextmanager
+    async def _project_runtime(
+        self, *, user_name: str, project_id: str, lease_prefix: str = "api-documents",
+    ):
+        self._require_user(user_name)
+        lease_id = f"{lease_prefix}:{uuid4()}"
+        try:
+            project = await self.runtime.projects.acquire_project_for_session(
+                project_id,
+                lease_id,
+            )
+        except ValueError as exc:
+            raise NotFoundError("project") from exc
+        try:
+            yield project
+        finally:
+            cleanup = asyncio.create_task(
+                self.runtime.projects.release_project_for_session(project_id, lease_id)
+            )
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                await settle_owned_task(cleanup)
+                raise
+
+    @asynccontextmanager
+    async def _project_documents(self, *, user_name: str, project_id: str):
+        async with self._project_runtime(user_name=user_name, project_id=project_id) as project:
+            yield project.document_service
+
+    async def list_documents(self, *, user_name: str, project_id: str, limit: int = 100) -> list[DocumentResponse]:
+        async with self._project_documents(user_name=user_name, project_id=project_id) as service:
+            return [project_public_model(DocumentResponse, row) for row in await service.list_documents(limit=limit)]
+
+    async def get_document(self, *, user_name: str, project_id: str, document_id: str) -> DocumentResponse:
+        async with self._project_documents(user_name=user_name, project_id=project_id) as service:
+            return project_public_model(DocumentResponse, await service.get_document_info(document_id=document_id))
+
+    async def read_document(
+        self, *, user_name: str, project_id: str, document_id: str,
+        start_line: int = 1, end_line: int | None = None,
+    ) -> DocumentContentResponse:
+        async with self._project_documents(user_name=user_name, project_id=project_id) as service:
+            return project_public_model(DocumentContentResponse, await service.read_document(
+                document_id=document_id, start_line=start_line, end_line=end_line
+            ))
+
+    async def admit_sources_batch(
+        self, *, user_name: str, project_id: str, request: BatchSourceRequest
+    ) -> BatchSourceResponse:
+        self._require_user(user_name)
+        decoded = {}
+        failures = {}
+        total_bytes = 0
+        for index, item in enumerate(request.items):
+            if isinstance(item, BatchDocumentItem):
+                try:
+                    content = base64.b64decode(item.content_base64, validate=True)
+                except ValueError:
+                    failures[index] = ValueError("Invalid base64 content")
+                    continue
+                total_bytes += len(content)
+                if total_bytes > MAX_DOCUMENT_SIZE:
+                    raise PayloadTooLargeError()
+                decoded[index] = content
+        results = []
+        # One exact project lease covers the bounded sequential batch.
+        async with self._project_documents(user_name=user_name, project_id=project_id) as service:
+            for index, item in enumerate(request.items):
+                try:
+                    if index in failures:
+                        raise failures[index]
+                    if isinstance(item, BatchDocumentItem):
+                        row = await service.submit_document(content=decoded[index], original_name=item.original_name,
+                                                            relative_path=item.relative_path)
+                        results.append(BatchDocumentAccepted(index=index, document=project_public_model(DocumentResponse, row)))
+                    else:
+                        try:
+                            row = await service.save_web_link(url=item.url, title=item.title, summary=item.summary)
+                        except ValidationError:
+                            raise ValueError("Invalid web link") from None
+                        results.append(BatchWebLinkAccepted(index=index, link=project_public_model(SavedWebLinkResponse, row)))
+                except Exception as error:
+                    # Cancellation is not swallowed; accepted items are not rolled back.
+                    results.append(BatchSourceFailed(index=index, error=to_public_error(error)))
+        return BatchSourceResponse(results=tuple(results))
+
+    async def upload_document(
+        self, *, user_name: str, project_id: str, request: UploadDocumentRequest,
+    ) -> DocumentResponse:
+        if len(request.content_base64) > MAX_DOCUMENT_BASE64_LENGTH:
+            raise PayloadTooLargeError()
+        try:
+            content = base64.b64decode(request.content_base64, validate=True)
+        except ValueError as exc:
+            raise ValueError("content_base64 must be valid base64") from exc
+        if len(content) > MAX_DOCUMENT_SIZE:
+            raise PayloadTooLargeError()
+        async with self._project_documents(user_name=user_name, project_id=project_id) as service:
+            return project_public_model(DocumentResponse, await service.submit_document(
+                content=content,
+                original_name=request.original_name,
+                relative_path=request.relative_path,
+            ))
+
+    async def reindex_document(self, *, user_name: str, project_id: str, document_id: str) -> DocumentResponse:
+        async with self._project_documents(user_name=user_name, project_id=project_id) as service:
+            return project_public_model(DocumentResponse, await service.reindex_document(document_id=document_id))
+
+    async def delete_document(self, *, user_name: str, project_id: str, document_id: str) -> DocumentDeletedResponse:
+        async with self._project_documents(user_name=user_name, project_id=project_id) as service:
+            return project_public_model(DocumentDeletedResponse, await service.delete_document(document_id=document_id))
+
+    async def list_saved_web_links(self, *, user_name: str, project_id: str, limit: int = 50) -> list[SavedWebLinkResponse]:
+        async with self._project_documents(user_name=user_name, project_id=project_id) as service:
+            return [project_public_model(SavedWebLinkResponse, row) for row in await service.list_saved_web_links(limit=limit)]
+
+    async def update_saved_web_link(
+        self, *, user_name: str, project_id: str, link_id: str,
+        request: UpdateSavedWebLinkRequest,
+    ) -> SavedWebLinkResponse:
+        async with self._project_documents(user_name=user_name, project_id=project_id) as service:
+            return project_public_model(SavedWebLinkResponse, await service.update_saved_web_link(
+                link_id=link_id,
+                **request.model_dump(exclude_unset=True),
+            ))
+
+    async def delete_saved_web_link(self, *, user_name: str, project_id: str, link_id: str) -> SavedWebLinkDeletedResponse:
+        async with self._project_documents(user_name=user_name, project_id=project_id) as service:
+            return project_public_model(SavedWebLinkDeletedResponse, await service.delete_saved_web_link(link_id=link_id))
+
+    async def get_document_scan_settings(self, *, user_name: str, project_id: str) -> FolderScanSettings:
+        async with self._project_documents(user_name=user_name, project_id=project_id) as service:
+            return await service.get_scan_settings()
+
+    async def set_document_scan_settings(
+        self, *, user_name: str, project_id: str, settings: FolderScanSettings,
+    ) -> FolderScanSettings:
+        async with self._project_documents(user_name=user_name, project_id=project_id) as service:
+            return await service.save_scan_settings(settings)
+
+    async def reset_document_scan_settings(self, *, user_name: str, project_id: str) -> FolderScanSettings:
+        async with self._project_documents(user_name=user_name, project_id=project_id) as service:
+            return await service.reset_scan_settings()
 
     @staticmethod
     def _maintenance_review_response(review: Any) -> MaintenanceReviewResponse:
@@ -414,6 +881,7 @@ class ApplicationRuntimePort:
         artifacts = await self.runtime.resources.knowledge_store.list_project_artifacts(
             user_name=user_name,
             project_id=project_id,
+            session_id=session_id,
             limit=limit,
         )
         return ArtifactListResponse(
@@ -433,6 +901,7 @@ class ApplicationRuntimePort:
             artifact_id,
             user_name=user_name,
             project_id=project_id,
+            session_id=session_id,
         )
         return None if artifact is None else self._artifact_response(artifact)
 
@@ -451,6 +920,7 @@ class ApplicationRuntimePort:
             revision,
             user_name=user_name,
             project_id=project_id,
+            session_id=session_id,
         )
 
     async def open_run_stream(
@@ -478,10 +948,13 @@ class ApplicationRuntimePort:
             idempotency_key=request.idempotency_key,
             research_mode=request.research_mode,
         )
-        return self._public_run_stream(
-            session=session,
-            request=request,
-            agent_stream=agent_stream,
+        from common.utils.streams import ClosingAsyncIterator
+
+        return ClosingAsyncIterator(
+            self._public_run_stream(
+                session=session, request=request, agent_stream=agent_stream,
+            ),
+            agent_stream,
         )
 
     async def run_stream(
@@ -491,8 +964,11 @@ class ApplicationRuntimePort:
         request: StartRunRequest,
     ) -> AsyncIterator[object]:
         stream = await self.open_run_stream(user_name=user_name, request=request)
-        async for event in stream:
-            yield event
+        try:
+            async for event in stream:
+                yield event
+        finally:
+            await stream.aclose()
 
     async def _public_run_stream(
         self,

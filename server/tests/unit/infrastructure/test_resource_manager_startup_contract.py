@@ -7,6 +7,7 @@ import pytest
 
 from common.exceptions import DependencyError
 from common.schema.settings import LLMSettings, RootConfig
+from infrastructure.external_model_budget import ExternalModelSpendingLedger
 from runtime import resources as resources_module
 
 
@@ -73,6 +74,7 @@ async def test_resource_manager_cleans_every_partial_startup_stage(
     class FakeLLM:
         def __init__(self, **_kwargs):
             self.closed = False
+            self.spending_ledger = ExternalModelSpendingLedger()
             created.llm.append(self)
 
         async def load_tokenizer(self):
@@ -149,8 +151,9 @@ async def test_resource_manager_cleans_every_partial_startup_stage(
     config_manager = SimpleNamespace(
         config=config,
         subscribe=lambda *_args, **_kwargs: lambda: None,
-        resolve_path=lambda configured_path: Path("/tmp/knoggin-config")
-        / configured_path,
+        resolve_path=lambda configured_path: (
+            Path("/tmp/knoggin-config") / configured_path
+        ),
     )
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
     monkeypatch.setenv("KNOGGIN_GPU", "false")
@@ -180,7 +183,7 @@ async def test_resource_manager_cleans_every_partial_startup_stage(
     assert all(resource.closed for resource in created.llm)
     assert all(resource.cleaned for resource in created.embedding)
     assert all(resource.closed for resource in created.postgres)
-    assert all(executor.shutdown_calls == [False] for executor in created.executors)
+    assert all(executor.shutdown_calls == [True] for executor in created.executors)
 
 
 @pytest.mark.no_network

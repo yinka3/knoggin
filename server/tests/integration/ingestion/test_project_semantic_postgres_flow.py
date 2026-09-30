@@ -733,16 +733,11 @@ async def test_semantic_participation_claim_and_runtime_policy_are_coherent(
         user_name=user_name,
         readable_project_ids=[project_id],
         domain_config=initial_domain,
+        compiled_domain=initial_domain.compile(),
         document_service=SimpleNamespace(),
         domain_config_store=domain_store,
-    )
-    monkeypatch.setattr(
-        "runtime.project_runtime.ConfigManager.get",
-        staticmethod(
-            lambda: SimpleNamespace(
-                config=RootConfig(developer_settings=DeveloperSettings()),
-                subscribe=lambda *_args, **_kwargs: lambda: None,
-            )
+        config_manager=SimpleNamespace(
+            config=RootConfig(developer_settings=DeveloperSettings()),
         ),
     )
     before_activation = await runtime.capture_semantic_policy()

@@ -1,28 +1,28 @@
 """Community-agent tool contracts and default tool policy."""
 
 AAC_READ_TOOL_NAMES = [
-    "search_entity",
-    "find_path",
-    "episode_check",
-    "read_episode",
+    "search_knowledge_entities",
+    "find_relationship_path",
+    "search_episodes",
+    "read_episode_messages",
     "read_recent_episodes",
-    "get_connections",
-    "get_recent_activity",
-    "search_messages",
-    "search_documents",
-    "read_document",
-    "list_documents",
-    "get_document_info",
-    "read_brain",
-    "list_brain_snapshots",
-    "read_brain_snapshot",
+    "get_entity_relationships",
+    "get_entity_recent_activity",
+    "search_knowledge_messages",
+    "search_project_documents",
+    "read_project_document",
+    "list_project_documents",
+    "get_project_document_info",
+    "read_agent_brain",
+    "list_agent_brain_snapshots",
+    "read_agent_brain_snapshot",
 ]
 
 AAC_SPECIFIC_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "save_insight",
+            "name": "save_community_insight",
             "description": (
                 "Persist a meaningful insight discovered during this discussion "
                 "to the community's knowledge space. Use this when you've found "
@@ -55,10 +55,10 @@ AAC_SPECIFIC_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "edit_brain",
+            "name": "edit_agent_brain",
             "description": (
                 "Update one editable section of your persistent identity. "
-                "Call read_brain first and pass its revision."
+                "Call read_agent_brain first and pass its revision."
             ),
             "parameters": {
                 "type": "object",
@@ -77,7 +77,7 @@ AAC_SPECIFIC_SCHEMAS = [
                     },
                     "expected_revision": {
                         "type": "integer",
-                        "description": "Revision returned by read_brain.",
+                        "description": "Revision returned by read_agent_brain.",
                     },
                     "change_note": {
                         "type": "string",
@@ -94,7 +94,7 @@ AAC_SPECIFIC_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "spawn_specialist",
+            "name": "spawn_community_specialist",
             "description": (
                 "Create a persistent private specialist when the topic requires "
                 "expertise outside your own scope or persona. It does not join "
@@ -154,7 +154,7 @@ AAC_SPECIFIC_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "search_insights",
+            "name": "search_community_insights",
             "description": "Search shared AAC Insights and your own private Insights.",
             "parameters": {
                 "type": "object",
@@ -171,7 +171,7 @@ AAC_SPECIFIC_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "vote_insight",
+            "name": "vote_community_insight",
             "description": "Upvote or downvote another agent's shared Insight with a reason.",
             "parameters": {
                 "type": "object",
@@ -189,7 +189,7 @@ AAC_SPECIFIC_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "remove_insight_vote",
+            "name": "remove_community_insight_vote",
             "description": "Remove your vote from a shared AAC Insight.",
             "parameters": {
                 "type": "object",
@@ -203,7 +203,7 @@ AAC_SPECIFIC_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "consult_specialist",
+            "name": "consult_community_specialist",
             "description": "Privately ask one of your own spawned specialists for help.",
             "parameters": {
                 "type": "object",
@@ -220,7 +220,7 @@ AAC_SPECIFIC_SCHEMAS = [
 ]
 
 AAC_TOOL_NAMES = [
-    "restore_brain_section",
+    "restore_agent_brain_section",
     *[schema["function"]["name"] for schema in AAC_SPECIFIC_SCHEMAS],
 ]
 AAC_DEFAULT_ENABLED_TOOLS = AAC_READ_TOOL_NAMES + AAC_TOOL_NAMES

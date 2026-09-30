@@ -62,7 +62,6 @@ from core.agent.tools.registry import (
 from core.knowledge.context.render import render_context_model_input
 from infrastructure.llm_client import LLMService
 
-MAX_TOKEN_CHUNK_SIZE = 10000
 MAX_PROJECT_CONTEXT_CHARS = 24_000
 PUBLIC_AGENT_FAILURE_MESSAGE = (
     "The agent couldn't complete this request. Please try again."
@@ -123,20 +122,14 @@ class _ToolCall:
     call_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
 
-def _is_local_reference_resolution_error(message: str) -> bool:
-    """Recognize resolver failures without exposing the supplied ID in metrics."""
-
-    return "Unknown local ID" in message or "UUID handle" in message
-
-
 def _local_reference_type(tool_name: str) -> str:
-    if tool_name in {"read_episode", "propose_entity_merge"}:
+    if tool_name in {"read_episode_messages", "propose_entity_merge"}:
         return "episode"
-    if tool_name in {"get_document_info", "read_document"}:
+    if tool_name in {"get_project_document_info", "read_project_document"}:
         return "document"
     if tool_name in {
-        "list_documents",
-        "search_documents",
+        "list_project_documents",
+        "search_project_documents",
     }:
         return "folder"
     return "tool_argument"
@@ -169,6 +162,7 @@ class AgentExecutor:
             ctx.tool_runtime,
             ctx.short_uuid_references,
         )
+        tools.run_notebook = ctx.notebook
         for candidate in ctx.initial_source_candidates:
             ctx.record_source(candidate)
 
@@ -483,7 +477,7 @@ class AgentExecutor:
                         yield tool_event
 
                     last_result = current_results
-                    await self._manage_context_size()
+                    self._refresh_evidence_token_count()
 
                     if self.ctx.needs_deep_research_gap_review():
                         needs_deep_research_gap_review = True
@@ -586,6 +580,9 @@ class AgentExecutor:
         allowed_names = {
             schema["function"]["name"] for schema in self._tool_schemas_for_phase(phase)
         }
+        call_ids = [call.call_id for call in tool_calls]
+        if len(call_ids) != len(set(call_ids)):
+            return "Returned tool calls contain duplicate correlation IDs."
         has_terminal_protocol = False
         for call in tool_calls:
             definition = get_tool_definition(call.name)
@@ -968,20 +965,6 @@ class AgentExecutor:
 
                 self.ctx.record_tool_call(call.name, call.args)
 
-                if call.args.get("_parse_error"):
-                    error_message = f"Failed to parse arguments for '{call.name}'"
-                    self.ctx.note_nonfatal_error(error_message)
-                    results_out.append({"tool": call.name, "error": error_message})
-                    yield {
-                        "event": "tool_error",
-                        "data": {
-                            "tool": call.name,
-                            "error": "Argument parse failure",
-                            "call_id": call.call_id,
-                        },
-                    }
-                    continue
-
                 async with asyncio.timeout(self.ctx.limits.tool_timeout):
                     result = await execute_tool(
                         self.tools,
@@ -1007,10 +990,9 @@ class AgentExecutor:
                     }
                     continue
 
-                if admission.changed:
-                    self.ctx.record_sources(
-                        capture_tool_source_candidates(self.ctx, call, result)
-                    )
+                self.ctx.record_sources(
+                    capture_tool_source_candidates(self.ctx, call, result)
+                )
                 summary, _ = summarize_result(call.name, result)
                 model_result = localize_agent_tool_result(self.ctx, call.name, result)
                 self.ctx.record_tool_success()
@@ -1025,76 +1007,10 @@ class AgentExecutor:
                     },
                 }
 
-            except TimeoutError:
-                message = (
-                    "Tool execution timed out after "
-                    f"{self.ctx.limits.tool_timeout:g} seconds"
-                )
-                logger.warning(f"Tool {call.name}: {message}")
-                self.ctx.record_error(message)
-                results_out.append({"tool": call.name, "error": message})
-                yield {
-                    "event": "tool_error",
-                    "data": {
-                        "tool": call.name,
-                        "error": message,
-                        "call_id": call.call_id,
-                        "code": "tool_failed",
-                        "retryable": True,
-                    },
-                }
-            except WorkspaceConflictError:
-                message = "Workspace changed before the operation could be applied"
-                self.ctx.note_nonfatal_error(message)
-                results_out.append({"tool": call.name, "error": message})
-                yield {
-                    "event": "tool_error",
-                    "data": {
-                        "tool": call.name,
-                        "error": message,
-                        "call_id": call.call_id,
-                        "code": "workspace_conflict",
-                        "retryable": False,
-                    },
-                }
-            except ToolExecutionError as e:
-                if _is_local_reference_resolution_error(e.message):
-                    await emit(
-                        self.ctx.session_id,
-                        "agent",
-                        "local_reference_resolution_failed",
-                        {
-                            "pipeline": "agent_tool_loop",
-                            "reference_type": _local_reference_type(call.name),
-                            "reason": "unknown_or_wrong_type",
-                        },
-                    )
-                self.ctx.record_error(e.message)
-                results_out.append({"tool": call.name, "error": e.message})
-                yield {
-                    "event": "tool_error",
-                    "data": {
-                        "tool": call.name,
-                        "error": e.message,
-                        "call_id": call.call_id,
-                        "code": "tool_failed",
-                        "retryable": e.retryable,
-                    },
-                }
-            except Exception as e:
-                logger.exception(f"Tool {call.name} unexpected failure: {e}")
-                self.ctx.record_error("Internal tool failure")
-                results_out.append(
-                    {"tool": call.name, "error": "Internal tool failure"}
-                )
-                yield {
-                    "event": "tool_error",
-                    "data": {
-                        "tool": call.name,
-                        "error": "Internal tool failure",
-                        "call_id": call.call_id,
-                    },
-                }
+            except Exception as exc:
+                failure = await self._normalize_tool_failure(call, exc)
+                results_out.append({"tool": call.name, "error": failure["error"]})
+                yield {"event": "tool_error", "data": failure}
 
     async def _execute_parallel_tools(
         self, tool_calls: List[_ToolCall], results_out: List[Dict]
@@ -1113,7 +1029,6 @@ class AgentExecutor:
             limit = self.ctx.limits.get_tool_limit(
                 call.name, self.ctx.limits.max_calls
             )
-            reservable = reservable and not call.args.get("_parse_error")
             reservable = reservable and not self.ctx.is_duplicate(
                 call.name, call.args
             )
@@ -1163,31 +1078,9 @@ class AgentExecutor:
 
         for call, outcome in zip(tool_calls, outcomes, strict=True):
             if isinstance(outcome, Exception):
-                if isinstance(outcome, TimeoutError):
-                    message = (
-                        "Tool execution timed out after "
-                        f"{self.ctx.limits.tool_timeout:g} seconds"
-                    )
-                    retryable = True
-                elif isinstance(outcome, ToolExecutionError):
-                    message = outcome.message
-                    retryable = outcome.retryable
-                else:
-                    logger.error("Parallel tool {} failed: {}", call.name, outcome)
-                    message = "Internal tool failure"
-                    retryable = False
-                self.ctx.record_error(message)
-                results_out.append({"tool": call.name, "error": message})
-                yield {
-                    "event": "tool_error",
-                    "data": {
-                        "tool": call.name,
-                        "error": message,
-                        "call_id": call.call_id,
-                        "code": "tool_failed",
-                        "retryable": retryable,
-                    },
-                }
+                failure = await self._normalize_tool_failure(call, outcome)
+                results_out.append({"tool": call.name, "error": failure["error"]})
+                yield {"event": "tool_error", "data": failure}
                 continue
 
             admission = self.ctx.accumulate_tool_result(call.name, outcome)
@@ -1204,10 +1097,9 @@ class AgentExecutor:
                     },
                 }
                 continue
-            if admission.changed:
-                self.ctx.record_sources(
-                    capture_tool_source_candidates(self.ctx, call, outcome)
-                )
+            self.ctx.record_sources(
+                capture_tool_source_candidates(self.ctx, call, outcome)
+            )
             summary, _ = summarize_result(call.name, outcome)
             model_result = localize_agent_tool_result(
                 self.ctx, call.name, outcome
@@ -1222,6 +1114,59 @@ class AgentExecutor:
                     "call_id": call.call_id,
                 },
             }
+
+    async def _normalize_tool_failure(
+        self,
+        call: _ToolCall,
+        failure: Exception,
+    ) -> dict[str, object]:
+        """Give one tool failure the same contract in every execution mode."""
+
+        code = "tool_failed"
+        retryable = False
+        if isinstance(failure, TimeoutError):
+            message = (
+                "Tool execution timed out after "
+                f"{self.ctx.limits.tool_timeout:g} seconds"
+            )
+            retryable = True
+            logger.warning("Tool {}: {}", call.name, message)
+            self.ctx.record_error(message)
+        elif isinstance(failure, WorkspaceConflictError):
+            message = "Workspace changed before the operation could be applied"
+            code = "workspace_conflict"
+            self.ctx.note_nonfatal_error(message)
+        elif isinstance(failure, ToolExecutionError):
+            message = failure.message
+            retryable = failure.retryable
+            if failure.details.get("reason") == "local_reference_invalid":
+                await emit(
+                    self.ctx.session_id,
+                    "agent",
+                    "local_reference_resolution_failed",
+                    {
+                        "pipeline": "agent_tool_loop",
+                        "reference_type": _local_reference_type(call.name),
+                        "reason": "unknown_or_wrong_type",
+                    },
+                )
+            self.ctx.record_error(message)
+        else:
+            message = "Internal tool failure"
+            logger.exception(
+                "Tool {} unexpected failure: {}",
+                call.name,
+                failure,
+            )
+            self.ctx.record_error(message)
+
+        return {
+            "tool": call.name,
+            "error": message,
+            "call_id": call.call_id,
+            "code": code,
+            "retryable": retryable,
+        }
 
     def _global_limit_call_id(self) -> str:
         """Return a stable synthetic ID for a run-level, non-tool-specific limit."""
@@ -1373,54 +1318,11 @@ class AgentExecutor:
             aac_budget=self._aac_budget,
         )
 
-    async def _manage_context_size(self):
-        """Monitor accumulated evidence and summarize if it approaches token limits."""
+    def _refresh_evidence_token_count(self) -> None:
+        """Measure the bounded notebook after its admission-owned rollover."""
+
         evidence_str = build_evidence_context(self.ctx)
         self.ctx.set_evidence_token_count(self.llm.count_tokens(evidence_str))
-
-        if self.ctx.evidence_token_count > MAX_TOKEN_CHUNK_SIZE:
-            logger.info(
-                f"Evidence size ({self.ctx.evidence_token_count} tokens) "
-                "exceeds limit. Summarizing..."
-            )
-
-            summary = await self._generate_evidence_summary(evidence_str)
-
-            if not summary:
-                logger.warning(
-                    "Evidence summarization failed. Rolling over the retained "
-                    "notebook neighborhood without a generated summary."
-                )
-            self.ctx.rollover_notebook(summary)
-
-            # Recalculate against the actual bounded state retained by the run.
-            post_compaction = build_evidence_context(self.ctx)
-            self.ctx.set_evidence_token_count(self.llm.count_tokens(post_compaction))
-
-    async def _generate_evidence_summary(self, evidence_text: str) -> Optional[str]:
-        """Call LLM to condense existing evidence into a core summary."""
-        prompt = (
-            "I have gathered the following evidence regarding: "
-            f"'{self.ctx.user_query}'\n\n"
-            f"{evidence_text}\n\n"
-            "Summarize the key details, connections, and relevant information into "
-            "a concise summary. Preserve the relevant evidence and any local "
-            "references already present; never invent or request system IDs."
-        )
-
-        try:
-            return await self.llm.generate_text(
-                system=(
-                    "You are a data librarian. Condense retrieved evidence into "
-                    "a factual summary without losing key details."
-                ),
-                user=prompt,
-                temperature=0.0,  # Strict factual summary
-                aac_budget=self._aac_budget,
-            )
-        except (ConfigurationError, LLMError) as e:
-            logger.error(f"Failed to summarize evidence: {e}")
-            return None
 
     async def _emit_llm_call(self, model: Optional[str], reasoning: str):
         briefing = self.ctx.project_briefing

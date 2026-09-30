@@ -13,11 +13,8 @@ import json
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any
 from urllib.parse import urlsplit
-
-NotebookAudience = Literal["system", "agent"]
-
 
 _KNOWLEDGE_SECTIONS = (
     "entities",
@@ -37,13 +34,13 @@ _ALL_SECTIONS = _KNOWLEDGE_SECTIONS + _EVIDENCE_SECTIONS
 _GROUNDED_KNOWLEDGE_SECTIONS = ("relationships", "episodes", "paths")
 _ACTION_TOOLS = frozenset(
     {
-        "edit_brain",
-        "restore_brain_section",
-        "create_file",
-        "update_file",
-        "append_file",
-        "move_file",
-        "delete_file",
+        "edit_agent_brain",
+        "restore_agent_brain_section",
+        "create_project_file",
+        "update_project_file",
+        "append_project_file",
+        "move_project_file",
+        "delete_project_file",
         "report_relationship_conflict",
         "propose_entity_merge",
     }
@@ -92,9 +89,7 @@ class NotebookCapacity:
             max_messages=_positive_limit(limits, "max_accumulated_messages", 30),
             max_documents=_positive_limit(limits, "max_accumulated_documents", 30),
             max_observation_supports=_positive_limit(
-                limits,
-                "max_accumulated_observation_supports",
-                _positive_limit(limits, "max_accumulated_paths", 8),
+                limits, "max_accumulated_paths", 8
             ),
             max_web_discoveries=_positive_limit(
                 limits, "max_accumulated_web_discoveries", 12
@@ -169,9 +164,10 @@ class RunNotebook:
         self._actions: dict[str, dict[str, Any]] = {}
         self.possible_next_steps: list[dict[str, Any]] = []
         self.summary = NotebookSummary()
+        self._previous_page: RunNotebook | None = None
+        self.show_previous_page = False
         self._last_applied_references: tuple[str, ...] = ()
         self._contribution_history: list[tuple[str, tuple[str, ...]]] = []
-        self._last_apply_result = NotebookApplyResult(False)
 
     def __deepcopy__(self, memo: dict[int, Any]) -> "RunNotebook":
         """Copy state without cloning the live model tokenizer or service."""
@@ -188,9 +184,10 @@ class RunNotebook:
         clone._actions = deepcopy(self._actions, memo)
         clone.possible_next_steps = deepcopy(self.possible_next_steps, memo)
         clone.summary = deepcopy(self.summary, memo)
+        clone._previous_page = deepcopy(self._previous_page, memo)
+        clone.show_previous_page = self.show_previous_page
         clone._last_applied_references = self._last_applied_references
         clone._contribution_history = deepcopy(self._contribution_history, memo)
-        clone._last_apply_result = self._last_apply_result
         return clone
 
     def section_items(self, section: str) -> tuple[dict[str, Any], ...]:
@@ -202,19 +199,25 @@ class RunNotebook:
 
     @property
     def entity_pages(self) -> dict[str, dict[str, Any]]:
-        return self._entity_pages
+        return deepcopy(self._entity_pages)
 
     @property
     def actions(self) -> list[dict[str, Any]]:
-        return list(self._actions.values())
+        return deepcopy(list(self._actions.values()))
 
     @property
-    def last_applied_references(self) -> tuple[str, ...]:
-        return self._last_applied_references
+    def previous_page(self) -> RunNotebook | None:
+        """Return a detached copy of the one retained prior generation."""
 
-    @property
-    def last_apply_result(self) -> NotebookApplyResult:
-        return self._last_apply_result
+        return deepcopy(self._previous_page)
+
+    def set_previous_page_visibility(self, show: bool = False) -> bool:
+        """Choose whether model-facing rendering includes the retained page."""
+
+        if not isinstance(show, bool):
+            raise TypeError("show must be a boolean")
+        self.show_previous_page = bool(show and self._previous_page is not None)
+        return self.show_previous_page
 
     def set_token_counter(self, token_counter: Callable[[str], int] | None) -> None:
         """Install the active model tokenizer without making it notebook state."""
@@ -248,7 +251,7 @@ class RunNotebook:
         }
 
     def _render_token_count(self) -> int:
-        rendered = self.render()
+        rendered = self.render(show_previous=False)
         if self._token_counter is not None:
             return max(0, int(self._token_counter(rendered)))
         return len(rendered.split())
@@ -293,21 +296,8 @@ class RunNotebook:
             "render_tokens": token_count,
         }
 
-    def capacity_state(self) -> str:
-        return str(self.capacity_report()["status"])
-
     def _section_values(self, section: str) -> list[dict[str, Any]]:
         return [self._records[section][key] for key in self._orders[section]]
-
-    def section_reference(self, section: str, item: dict[str, Any]) -> str:
-        """Return the canonical reference used for one section record."""
-
-        return self._reference_for_section(section, item)
-
-    def is_last_applied(self, section: str, item: dict[str, Any]) -> bool:
-        return (
-            self._reference_for_section(section, item) in self._last_applied_references
-        )
 
     def _reference_for_section(self, section: str, item: dict[str, Any]) -> str:
         if section == "entities":
@@ -561,7 +551,7 @@ class RunNotebook:
         episode_id = value.get("episode_id", value.get("id"))
         if isinstance(episode_id, (str, int)) and str(episode_id).strip():
             self._add_system_hint(
-                "read_episode",
+                "read_episode_messages",
                 {"episode_id": episode_id},
                 "when message-level detail is needed",
                 [ref],
@@ -609,6 +599,18 @@ class RunNotebook:
             retained_evidence = []
             for evidence in raw_evidence:
                 observation_id = self._observation_id_from_bundle(evidence)
+                if (
+                    observation_id is None
+                    and isinstance(evidence, dict)
+                    and evidence.get("kind") == "relationship_observation"
+                ):
+                    candidate = evidence.get("observation_id")
+                    if (
+                        isinstance(candidate, int)
+                        and not isinstance(candidate, bool)
+                        and candidate > 0
+                    ):
+                        observation_id = candidate
                 if observation_id is None:
                     retained_evidence.append(evidence)
                 elif observation_id not in observation_ids:
@@ -634,7 +636,7 @@ class RunNotebook:
         ref = self._upsert("paths", value)
         for observation_id, observation_ref in zip(observation_ids, observation_refs):
             self._add_system_hint(
-                "read_observation_evidence",
+                "read_relationship_observation_evidence",
                 {"observation_id": observation_id},
                 "when this path's durable support needs inspection",
                 [ref, observation_ref],
@@ -683,37 +685,6 @@ class RunNotebook:
         if hint not in self.possible_next_steps:
             self.possible_next_steps.append(hint)
 
-    def record_agent_hint(
-        self,
-        tool: str,
-        arguments: dict[str, Any],
-        reason: str,
-    ) -> dict[str, Any]:
-        """Record a short operational hint, never hidden chain-of-thought."""
-
-        if not isinstance(reason, str) or not reason.strip():
-            raise ValueError("agent hint reason must be non-blank")
-        reason = " ".join(reason.split())
-        if len(reason) > 240:
-            raise ValueError("agent hint reason must be at most 240 characters")
-        hint = {
-            "audience": "agent",
-            "tool": str(tool),
-            "arguments": deepcopy(arguments),
-            "reason": reason,
-        }
-        previous_steps = self.possible_next_steps
-        self.possible_next_steps = [
-            item
-            for item in self.possible_next_steps
-            if not (item.get("audience") == "agent" and item.get("tool") == tool)
-        ]
-        self.possible_next_steps.append(hint)
-        if not self._fits_capacity():
-            self.possible_next_steps = previous_steps
-            raise ValueError("notebook next-step guidance exceeds capacity")
-        return hint
-
     def set_summary(
         self, text: str | None, references: list[str] | tuple[str, ...] = ()
     ) -> None:
@@ -727,119 +698,6 @@ class RunNotebook:
         if not self._fits_capacity():
             self.summary = previous_summary
             raise ValueError("notebook summary exceeds capacity")
-
-    @staticmethod
-    def _model_message(item: dict[str, Any]) -> dict[str, Any]:
-        """Expose one canonical message in the formatter's compact shape."""
-
-        value = deepcopy(item)
-        if isinstance(value.get("context"), list):
-            return value
-        content = value.get("message", value.get("content", ""))
-        value.setdefault("message", content)
-        value.setdefault("score", 0.5)
-        value["context"] = [
-            {
-                "role": value.get("role", "assistant"),
-                "timestamp": value.get("timestamp", ""),
-                "content": content,
-                "is_hit": True,
-            }
-        ]
-        return value
-
-    def _messages_for_refs(self, references: object) -> list[dict[str, Any]]:
-        if not isinstance(references, list):
-            return []
-        values = []
-        for reference in references:
-            if isinstance(reference, str) and reference in self._records["messages"]:
-                values.append(self._model_message(self._records["messages"][reference]))
-        return values
-
-    def model_view(self) -> dict[str, Any]:
-        """Build a bounded, formatter-friendly view without changing state."""
-
-        relationships = []
-        for item in self._section_values("relationships"):
-            value = deepcopy(item)
-            value["evidence"] = self._messages_for_refs(value.get("evidence_refs"))
-            relationships.append(value)
-
-        activities = []
-        for item in self._section_values("activities"):
-            value = deepcopy(item)
-            value["evidence"] = self._messages_for_refs(value.get("evidence_refs"))
-            activities.append(value)
-
-        paths = []
-        for item in self._section_values("paths"):
-            value = deepcopy(item)
-            value["evidence"] = self._messages_for_refs(value.get("evidence_refs"))
-            paths.append(value)
-
-        episodes = []
-        for item in self._section_values("episodes"):
-            value = deepcopy(item)
-            value["evidence"] = self._messages_for_refs(value.get("evidence_refs"))
-            episodes.append(
-                {
-                    "resolution": value.pop("resolution", "unknown"),
-                    "results": [value],
-                }
-            )
-
-        documents = self._section_values("documents")
-        document_messages = []
-        for document in documents:
-            content = document.get("content", "")
-            document_messages.append(
-                {
-                    "id": (
-                        f"document:{document.get('document_id', 'document')}:"
-                        f"{document.get('chunk_index', 0)}"
-                    ),
-                    "document_id": document.get("document_id", "document"),
-                    "chunk_index": document.get("chunk_index", 0),
-                    "content": content,
-                    "message": content,
-                    "role": "document",
-                    "score": document.get("score", 0.5),
-                    "source_type": "document",
-                    "source": document.get("document_name", "uploaded document"),
-                    "context": [
-                        {
-                            "role": "document",
-                            "timestamp": document.get(
-                                "document_name", "uploaded document"
-                            ),
-                            "content": content,
-                            "is_hit": True,
-                        }
-                    ],
-                }
-            )
-
-        return {
-            "profiles": [deepcopy(item) for item in self._section_values("entities")],
-            "entity_pages": deepcopy(self._entity_pages),
-            "graph": relationships,
-            "activities": activities,
-            "paths": paths,
-            "episodes": episodes,
-            "messages": [
-                self._model_message(item) for item in self._section_values("messages")
-            ]
-            + document_messages,
-            "sources": [
-                deepcopy(item) for item in self._section_values("web_discoveries")
-            ]
-            + [deepcopy(item) for item in self._section_values("web_reads")],
-            "documents": [deepcopy(item) for item in documents],
-            "actions": self.actions,
-            "possible_next_steps": deepcopy(self.possible_next_steps),
-            "summary": self.summary.as_dict(),
-        }
 
     def _apply_unchecked(
         self, tool_name: str, result: dict[str, Any]
@@ -860,29 +718,29 @@ class RunNotebook:
             return NotebookApplyResult(False)
 
         references: list[str] = []
-        if tool_name == "search_entity":
+        if tool_name == "search_knowledge_entities":
             for item in data if isinstance(data, list) else []:
                 if isinstance(item, dict):
                     references.append(self._add_entity(item))
             for ref in dict.fromkeys(references):
                 entity_id = ref.removeprefix("entity:")
                 self._add_system_hint(
-                    "get_connections",
+                    "get_entity_relationships",
                     {"entity_id": int(entity_id) if entity_id.isdigit() else entity_id},
                     "when more relationship detail is needed",
                     [ref],
                 )
                 self._add_system_hint(
-                    "episode_check",
+                    "search_episodes",
                     {"entity_id": int(entity_id) if entity_id.isdigit() else entity_id},
                     "when history or developments are needed",
                     [ref],
                 )
-        elif tool_name == "search_messages":
+        elif tool_name == "search_knowledge_messages":
             for item in data if isinstance(data, list) else []:
                 if isinstance(item, dict):
                     references.append(self._add_message(item))
-        elif tool_name == "get_connections":
+        elif tool_name == "get_entity_relationships":
             for item in data if isinstance(data, list) else []:
                 if isinstance(item, dict) and (
                     {"source", "target"}.issubset(item)
@@ -892,7 +750,7 @@ class RunNotebook:
                     }.issubset(item)
                 ):
                     references.append(self._add_relationship(item))
-        elif tool_name == "get_recent_activity":
+        elif tool_name == "get_entity_recent_activity":
             for item in data if isinstance(data, list) else []:
                 if (
                     isinstance(item, dict)
@@ -901,13 +759,13 @@ class RunNotebook:
                     and item.get("time") is not None
                 ):
                     references.append(self._add_activity(item))
-        elif tool_name == "find_path":
+        elif tool_name == "find_relationship_path":
             for item in data if isinstance(data, list) else []:
                 if isinstance(item, dict):
                     references.append(self._add_path(item))
-        elif tool_name == "read_observation_evidence" and isinstance(data, dict):
+        elif tool_name == "read_relationship_observation_evidence" and isinstance(data, dict):
             references.append(self._add_observation_support(data))
-        elif tool_name in {"episode_check", "read_recent_episodes"}:
+        elif tool_name in {"search_episodes", "read_recent_episodes"}:
             groups = data.get("results", []) if isinstance(data, dict) else []
             resolution = data.get("resolution") if isinstance(data, dict) else None
             for group in groups if isinstance(groups, list) else []:
@@ -945,20 +803,20 @@ class RunNotebook:
                         references.append(self._add_episode(item))
                     elif item.get("id") is not None or item.get("message") is not None:
                         references.append(self._add_message(item))
-        elif tool_name == "read_episode":
+        elif tool_name == "read_episode_messages":
             for item in data if isinstance(data, list) else []:
                 if isinstance(item, dict):
                     references.append(self._add_message(item))
         elif tool_name in {
-            "list_documents",
-            "get_document_info",
-            "search_documents",
-            "read_document",
+            "list_project_documents",
+            "get_project_document_info",
+            "search_project_documents",
+            "read_project_document",
         }:
             for item in data if isinstance(data, list) else []:
                 if isinstance(item, dict) and item.get("document_id") is not None:
                     references.append(self._add_document(item))
-        elif tool_name in {"web_search", "news_search"}:
+        elif tool_name in {"search_web", "search_news"}:
             section = "web_discoveries"
             for item in data if isinstance(data, list) else []:
                 if isinstance(item, dict):
@@ -966,7 +824,7 @@ class RunNotebook:
                     item.setdefault(
                         "source_kind",
                         "news_search_result"
-                        if tool_name == "news_search"
+                        if tool_name == "search_news"
                         else "web_search_result",
                     )
                     ref = self._add_source(section, item)
@@ -986,7 +844,7 @@ class RunNotebook:
                     ref = self._add_source("web_reads", item)
                     if ref:
                         references.append(ref)
-        elif tool_name == "load_topic_context":
+        elif tool_name == "load_project_topic_context":
             for topic_data in data.values() if isinstance(data, dict) else []:
                 if not isinstance(topic_data, dict):
                     continue
@@ -1030,22 +888,21 @@ class RunNotebook:
         self._actions = candidate._actions
         self.possible_next_steps = candidate.possible_next_steps
         self.summary = candidate.summary
+        self._previous_page = candidate._previous_page
+        self.show_previous_page = candidate.show_previous_page
         self._last_applied_references = candidate._last_applied_references
         self._contribution_history = candidate._contribution_history
-        self._last_apply_result = candidate._last_apply_result
 
     def apply(self, tool_name: str, result: dict[str, Any]) -> NotebookApplyResult:
         """Apply one result atomically, rolling over once when it does not fit."""
 
         if not isinstance(result, dict) or result.get("error"):
             self._last_applied_references = ()
-            self._last_apply_result = NotebookApplyResult(False)
-            return self._last_apply_result
+            return NotebookApplyResult(False)
         data = result.get("data")
         if data is None or data == [] or data == {}:
             self._last_applied_references = ()
-            self._last_apply_result = NotebookApplyResult(False)
-            return self._last_apply_result
+            return NotebookApplyResult(False)
 
         before = self.fingerprint()
         candidate = deepcopy(self)
@@ -1054,7 +911,6 @@ class RunNotebook:
             applied = NotebookApplyResult(
                 before != candidate.fingerprint(), applied.references
             )
-            candidate._last_apply_result = applied
             self._adopt_from(candidate)
             return applied
 
@@ -1063,13 +919,12 @@ class RunNotebook:
             rollover = rolled.rollover()
         except ValueError:
             self._last_applied_references = ()
-            self._last_apply_result = NotebookApplyResult(
+            return NotebookApplyResult(
                 False,
                 (),
                 False,
                 "capacity",
             )
-            return self._last_apply_result
         retried = rolled._apply_unchecked(tool_name, result)
         if retried.references and rolled._fits_capacity():
             applied = NotebookApplyResult(
@@ -1078,18 +933,16 @@ class RunNotebook:
                 True,
                 f"rolled_over:{rollover.generation}",
             )
-            rolled._last_apply_result = applied
             self._adopt_from(rolled)
             return applied
 
         self._last_applied_references = ()
-        self._last_apply_result = NotebookApplyResult(
+        return NotebookApplyResult(
             False,
             (),
             False,
             "capacity",
         )
-        return self._last_apply_result
 
     @staticmethod
     def _ref_section(reference: str) -> str | None:
@@ -1244,6 +1097,9 @@ class RunNotebook:
 
         if recent_contributions < 1:
             raise ValueError("recent_contributions must be positive")
+        previous_page = deepcopy(self)
+        previous_page._previous_page = None
+        previous_page.show_previous_page = False
         retained = self._bounded_retained_references(
             self._retain_references(active_references, recent_contributions)
         )
@@ -1305,8 +1161,7 @@ class RunNotebook:
         self.possible_next_steps = [
             hint
             for hint in self.possible_next_steps
-            if hint.get("audience") == "agent"
-            or any(
+            if any(
                 isinstance(ref, str) and ref in retained
                 for ref in hint.get("references", [])
             )
@@ -1339,52 +1194,22 @@ class RunNotebook:
                 normalized_summary[: self.capacity.max_summary_chars - 1] + "…"
             )
         self.set_summary(normalized_summary, summary_references)
+        self._previous_page = previous_page
+        self.show_previous_page = False
         self._contribution_history = [("rollover", tuple(retained))]
         self._last_applied_references = ()
-        self._last_apply_result = NotebookApplyResult(False)
         return NotebookRolloverResult(
             self.generation,
             tuple(ref for section in _ALL_SECTIONS for ref in self._orders[section]),
             tuple(self.summary.references),
         )
 
-    def references_for_result(
-        self,
-        tool_name: str,
-        result: dict[str, Any],
-        *,
-        local_references: dict[str, str] | None = None,
-    ) -> tuple[str, ...]:
-        """Preview the references admitted by a result without mutating state."""
-
-        preview = deepcopy(self)
-        candidate = deepcopy(result)
-        if local_references:
-            candidate = self._restore_local_references(candidate, local_references)
-        return preview.apply(tool_name, candidate).references
-
-    @staticmethod
-    def _restore_local_references(value: Any, local_references: dict[str, str]):
-        if isinstance(value, str):
-            return local_references.get(value, value)
-        if isinstance(value, list):
-            return [
-                RunNotebook._restore_local_references(item, local_references)
-                for item in value
-            ]
-        if isinstance(value, dict):
-            return {
-                key: RunNotebook._restore_local_references(item, local_references)
-                for key, item in value.items()
-            }
-        return value
-
-    def render(self) -> str:
+    def render(self, *, show_previous: bool | None = None) -> str:
         """Render this notebook for a model-facing prompt view."""
 
         from core.agent.notebook_renderer import render_notebook
 
-        return render_notebook(self)
+        return render_notebook(self, show_previous=show_previous)
 
     def has_any(self) -> bool:
         return bool(
@@ -1494,6 +1319,7 @@ class RunNotebook:
         self._actions.clear()
         self.possible_next_steps.clear()
         self.summary = NotebookSummary()
+        self._previous_page = None
+        self.show_previous_page = False
         self._last_applied_references = ()
         self._contribution_history.clear()
-        self._last_apply_result = NotebookApplyResult(False)

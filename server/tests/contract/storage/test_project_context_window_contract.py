@@ -172,7 +172,7 @@ async def test_project_semantic_window_claim_is_atomic_and_membership_reloads_ex
     assert claimed.claimed is True
     assert duplicate.claimed is False
     assert duplicate.window.window_id == proposed.window_id
-    reloaded = await store.get_project_semantic_window(
+    reloaded = await SemanticWindowReader(real_postgres_client).get_window(
         proposed.window_id,
         user_name="ada",
         project_id="project-1",
@@ -180,7 +180,7 @@ async def test_project_semantic_window_claim_is_atomic_and_membership_reloads_ex
     assert reloaded is not None
     assert reloaded.domain_version == proposed.domain_version
     assert reloaded.policy_snapshot == proposed.policy_snapshot
-    assert await store.get_project_semantic_window_messages(
+    assert await SemanticWindowReader(real_postgres_client).get_window_messages(
         proposed.window_id,
         user_name="ada",
         project_id="project-1",
@@ -827,7 +827,7 @@ async def test_window_local_episodes_reach_notebook_synthesis_with_reversal_hist
     ]
 
     notebook = RunNotebook()
-    admission = notebook.apply("episode_check", {"data": result})
+    admission = notebook.apply("search_episodes", {"data": result})
     assert admission.accepted
     assert set(admission.references) == {
         f"episode:{episode.episode_id}" for episode in generated
@@ -838,7 +838,7 @@ async def test_window_local_episodes_reach_notebook_synthesis_with_reversal_hist
             session_id="session-1",
         )
         assert len(sources) == 1
-        assert notebook.apply("read_episode", {"data": sources}).accepted
+        assert notebook.apply("read_episode_messages", {"data": sources}).accepted
 
     rendered_notebook = render_notebook(notebook)
     synthesis_prompt = get_agent_prompt(

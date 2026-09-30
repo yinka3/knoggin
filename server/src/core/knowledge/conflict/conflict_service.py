@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
+from loguru import logger
+
 from common.schema.evidence import EvidenceBundle, EvidenceSnapshot
 from common.utils.events import emit
 from core.knowledge.conflict.conflicts import (
@@ -87,12 +89,18 @@ class ConflictService:
             evidence_snapshot=evidence_snapshot,
             existing_conflict_id=existing_conflict_id,
         )
-        await self.notify_detection(
-            user_name=user_name,
-            project_id=project_id,
-            origin=origin,
-            result=result,
-        )
+        try:
+            await self.notify_detection(
+                user_name=user_name,
+                project_id=project_id,
+                origin=origin,
+                result=result,
+            )
+        except Exception:
+            logger.exception(
+                "Conflict {} was committed but its notification failed",
+                result.group.conflict_id,
+            )
         return result
 
     @staticmethod

@@ -5,46 +5,51 @@ import pytest
 from common.exceptions import StorageReadError, ToolExecutionError
 from common.schema.agent.tool_contracts import (
     TOOL_SCHEMAS_BY_NAME,
-    get_filtered_schemas,
 )
-from core.agent.tool_runtime import execute_tool
+from core.agent.notebook import RunNotebook
+from core.agent.tool_runtime import _tool_argument_metadata, execute_tool
 from core.agent.tools.memory import MemoryTools
-from core.agent.tools.registry import build_tool_runtime, get_tool_definition
+from core.agent.tools.registry import (
+    Tools,
+    build_tool_runtime,
+    get_tool_definition,
+    get_tool_schemas,
+)
 
 
 class DispatchTools:
     def __init__(self):
         self.calls = []
 
-    async def search_messages(self, query, limit=None):
-        self.calls.append(("search_messages", query, limit))
+    async def search_knowledge_messages(self, query, limit=None):
+        self.calls.append(("search_knowledge_messages", query, limit))
         return [{"id": "msg_1"}]
 
-    async def search_entity(self, query, limit=None):
-        self.calls.append(("search_entity", query, limit))
+    async def search_knowledge_entities(self, query, limit=None):
+        self.calls.append(("search_knowledge_entities", query, limit))
         return [{"id": 1, "query": query}]
 
-    async def load_topic_context(self, topics):
-        self.calls.append(("load_topic_context", topics))
+    async def load_project_topic_context(self, topics):
+        self.calls.append(("load_project_topic_context", topics))
         return {
             topic: {"entities": [{"name": topic}], "messages": []}
             for topic in topics
         }
 
-    async def get_recent_activity(self, entity_id, hours=None):
-        self.calls.append(("get_recent_activity", entity_id, hours))
+    async def get_entity_recent_activity(self, entity_id, hours=None):
+        self.calls.append(("get_entity_recent_activity", entity_id, hours))
         return [{"entity_id": entity_id}]
 
-    async def episode_check(self, query, entity_id=None):
-        self.calls.append(("episode_check", query, entity_id))
+    async def search_episodes(self, query, entity_id=None):
+        self.calls.append(("search_episodes", query, entity_id))
         return {"resolution": "exact"}
 
-    async def read_episode(self, episode_id):
-        self.calls.append(("read_episode", episode_id))
+    async def read_episode_messages(self, episode_id):
+        self.calls.append(("read_episode_messages", episode_id))
         return [{"id": episode_id}]
 
-    async def read_observation_evidence(self, observation_id):
-        self.calls.append(("read_observation_evidence", observation_id))
+    async def read_relationship_observation_evidence(self, observation_id):
+        self.calls.append(("read_relationship_observation_evidence", observation_id))
         return {
             "subject": {
                 "kind": "relationship_observation",
@@ -52,7 +57,7 @@ class DispatchTools:
             }
         }
 
-    async def read_document(
+    async def read_project_document(
         self,
         document_id=None,
         relative_path=None,
@@ -60,7 +65,7 @@ class DispatchTools:
         end_line=None,
     ):
         self.calls.append(
-            ("read_document", document_id, relative_path, start_line, end_line)
+            ("read_project_document", document_id, relative_path, start_line, end_line)
         )
         return [{"document_id": document_id, "content": "lines"}]
 
@@ -79,6 +84,31 @@ class DispatchTools:
     async def broken_storage(self):
         raise StorageReadError("message search")
 
+    async def legacy_error(self):
+        return {"error": "The requested operation is unavailable"}
+
+
+def test_tool_argument_logs_contain_only_bounded_metadata():
+    secret = "do-not-log-this-secret"
+    content = "private brain content"
+
+    metadata = _tool_argument_metadata(
+        {
+            "content": content,
+            "api_key": secret,
+            "limit": 5,
+        }
+    )
+
+    rendered = str(metadata)
+    assert content not in rendered
+    assert secret not in rendered
+    assert metadata == {
+        "api_key": {"type": "str", "redacted": True},
+        "content": {"type": "str", "size": len(content)},
+        "limit": {"type": "int"},
+    }
+
 
 @pytest.mark.no_network
 async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
@@ -86,27 +116,27 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
 
     result = await execute_tool(
         tools,
-        "search_messages",
+        "search_knowledge_messages",
         {"query": 1234, "limit": "5"},
     )
     activity = await execute_tool(
         tools,
-        "get_recent_activity",
+        "get_entity_recent_activity",
         {"entity_id": "7", "hours": "48"},
     )
     entity = await execute_tool(
         tools,
-        "search_entity",
+        "search_knowledge_entities",
         {"query": 99, "limit": "2"},
     )
     topic_context = await execute_tool(
         tools,
-        "load_topic_context",
+        "load_project_topic_context",
         {"topics": ["Work", "Finance"]},
     )
     file_content = await execute_tool(
         tools,
-        "read_document",
+        "read_project_document",
         {"document_id": "file-1", "start_line": "2", "end_line": "4"},
     )
     page_content = await execute_tool(
@@ -126,17 +156,17 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
     )
     episode = await execute_tool(
         tools,
-        "episode_check",
+        "search_episodes",
         {"query": "What changed?", "entity_id": "7"},
     )
     expanded_episode = await execute_tool(
         tools,
-        "read_episode",
+        "read_episode_messages",
         {"episode_id": 42},
     )
     observation = await execute_tool(
         tools,
-        "read_observation_evidence",
+        "read_relationship_observation_evidence",
         {"observation_id": "17"},
     )
 
@@ -172,11 +202,11 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
         }
     }
     assert tools.calls == [
-        ("search_messages", "1234", 5),
-        ("get_recent_activity", 7, 48),
-        ("search_entity", "99", 2),
-        ("load_topic_context", ["Work", "Finance"]),
-        ("read_document", "file-1", None, 2, 4),
+        ("search_knowledge_messages", "1234", 5),
+        ("get_entity_recent_activity", 7, 48),
+        ("search_knowledge_entities", "99", 2),
+        ("load_project_topic_context", ["Work", "Finance"]),
+        ("read_project_document", "file-1", None, 2, 4),
         ("read_web_page", "https://example.test/report", 2, 5, None, None),
         (
             "read_web_page",
@@ -187,10 +217,30 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
             None,
         ),
         ("read_web_page", "https://example.test/report.pdf", None, 150, None, 2),
-        ("episode_check", "What changed?", 7),
-        ("read_episode", "42"),
-        ("read_observation_evidence", 17),
+        ("search_episodes", "What changed?", 7),
+        ("read_episode_messages", "42"),
+        ("read_relationship_observation_evidence", 17),
     ]
+
+
+@pytest.mark.no_network
+async def test_previous_notebook_page_tool_toggles_model_visibility():
+    notebook = RunNotebook()
+    notebook.apply(
+        "search_knowledge_messages",
+        {"data": [{"id": "m1", "message": "older evidence"}]},
+    )
+    notebook.rollover()
+    tools = object.__new__(Tools)
+    tools.run_notebook = notebook
+
+    shown = await execute_tool(tools, "show_previous_notebook_page", {"show": True})
+    hidden = await execute_tool(
+        tools, "show_previous_notebook_page", {"show": False}
+    )
+
+    assert shown == {"data": {"available": True, "show_previous": True}}
+    assert hidden == {"data": {"available": True, "show_previous": False}}
 
 
 @pytest.mark.no_network
@@ -200,21 +250,18 @@ def test_read_web_page_registry_definition_matches_schema_and_default_limit():
     assert definition is not None
     assert definition.default_limit == 6
     assert definition.schema == TOOL_SCHEMAS_BY_NAME["read_web_page"]
-    assert definition.dispatch == (
-        "read_web_page",
-        ("url", "start_line", "max_lines", "query", "page_number"),
-    )
+    assert definition.executor_protocol is False
     assert definition.parallel_safe is False
 
 
 @pytest.mark.no_network
 def test_only_explicit_stateless_retrieval_tools_are_parallel_safe():
-    assert get_tool_definition("search_messages").parallel_safe is True
-    assert get_tool_definition("search_entity").parallel_safe is True
-    assert get_tool_definition("episode_check").parallel_safe is True
-    assert get_tool_definition("search_documents").parallel_safe is True
+    assert get_tool_definition("search_knowledge_messages").parallel_safe is True
+    assert get_tool_definition("search_knowledge_entities").parallel_safe is True
+    assert get_tool_definition("search_episodes").parallel_safe is True
+    assert get_tool_definition("search_project_documents").parallel_safe is True
     assert get_tool_definition("read_web_page").parallel_safe is False
-    assert get_tool_definition("edit_brain").parallel_safe is False
+    assert get_tool_definition("edit_agent_brain").parallel_safe is False
 
 
 @pytest.mark.no_network
@@ -236,24 +283,24 @@ def test_tool_runtime_rejects_invalid_graph_result_limits(invalid_limit):
 
 @pytest.mark.no_network
 def test_entity_search_schema_routes_memory_questions_to_episode_check_first():
-    description = TOOL_SCHEMAS_BY_NAME["search_entity"]["function"]["description"]
+    description = TOOL_SCHEMAS_BY_NAME["search_knowledge_entities"]["function"]["description"]
 
-    assert "episode_check first" in description
+    assert "search_episodes first" in description
     assert "starting point for almost every query" not in description
 
 
 @pytest.mark.no_network
 def test_read_web_page_is_available_by_default_and_allowlists_opt_in_explicitly():
     default_names = {
-        schema["function"]["name"] for schema in get_filtered_schemas()
+        schema["function"]["name"] for schema in get_tool_schemas()
     }
     search_only_names = {
         schema["function"]["name"]
-        for schema in get_filtered_schemas(enabled_tools=["web_search"])
+        for schema in get_tool_schemas(enabled_tools=["search_web"])
     }
     enabled_names = {
         schema["function"]["name"]
-        for schema in get_filtered_schemas(enabled_tools=["read_web_page"])
+        for schema in get_tool_schemas(enabled_tools=["read_web_page"])
     }
 
     assert "read_web_page" in default_names
@@ -291,13 +338,13 @@ async def test_execute_tool_raises_for_unknown_or_missing_methods():
     assert "Unknown tool" in unknown.value.message
 
     with pytest.raises(ToolExecutionError) as missing:
-        await execute_tool(tools, "edit_brain", {
+        await execute_tool(tools, "edit_agent_brain", {
             "section": "Role",
             "content": "updated",
             "expected_revision": 1,
         })
 
-    assert missing.value.details["tool"] == "edit_brain"
+    assert missing.value.details["tool"] == "edit_agent_brain"
     assert "Tool method not found" in missing.value.message
 
 
@@ -317,6 +364,42 @@ async def test_execute_tool_rejects_direct_entity_merge_bypass():
 
 
 @pytest.mark.no_network
+async def test_execute_tool_preserves_typed_local_reference_failure():
+    tools = DispatchTools()
+    tools.short_uuid_references = {}
+
+    with pytest.raises(ToolExecutionError) as captured:
+        await execute_tool(
+            tools,
+            "read_episode_messages",
+            {"episode_id": "wrong_1"},
+        )
+
+    assert captured.value.details["reason"] == "local_reference_invalid"
+    assert captured.value.retryable is False
+
+
+@pytest.mark.no_network
+async def test_execute_tool_keeps_canonical_constraints_with_weaker_override():
+    tools = DispatchTools()
+    canonical = get_tool_definition("read_episode_messages").schema
+    override = {
+        **canonical,
+        "function": {
+            **canonical["function"],
+            "parameters": {
+                **canonical["function"]["parameters"],
+                "required": [],
+            },
+        },
+    }
+    tools.active_tool_schemas = {"read_episode_messages": override}
+
+    with pytest.raises(ToolExecutionError, match="episode_id is required"):
+        await execute_tool(tools, "read_episode_messages", {})
+
+
+@pytest.mark.no_network
 async def test_execute_tool_wraps_tool_method_exceptions(monkeypatch):
     tools = DispatchTools()
 
@@ -324,7 +407,8 @@ async def test_execute_tool_wraps_tool_method_exceptions(monkeypatch):
         "core.agent.tool_runtime.get_tool_definition",
         lambda name: (
             SimpleNamespace(
-                dispatch=("broken", ()),
+                name="broken",
+                executor_protocol=False,
                 schema={
                     "function": {
                         "capability": "read",
@@ -355,7 +439,8 @@ async def test_execute_tool_marks_transient_storage_failures_retryable(monkeypat
         "core.agent.tool_runtime.get_tool_definition",
         lambda name: (
             SimpleNamespace(
-                dispatch=("broken_storage", ()),
+                name="broken_storage",
+                executor_protocol=False,
                 schema={
                     "function": {
                         "capability": "read",
@@ -374,6 +459,32 @@ async def test_execute_tool_marks_transient_storage_failures_retryable(monkeypat
 
     assert exc.value.retryable is True
     assert exc.value.details["retryable"] is True
+
+
+@pytest.mark.no_network
+async def test_execute_tool_rejects_legacy_error_data(monkeypatch):
+    tools = DispatchTools()
+    monkeypatch.setattr(
+        "core.agent.tool_runtime.get_tool_definition",
+        lambda name: (
+            SimpleNamespace(
+                name="legacy_error",
+                executor_protocol=False,
+                schema={
+                    "function": {
+                        "capability": "read",
+                        "parameters": {"type": "object"},
+                    }
+                },
+                capability="read",
+            )
+            if name == "legacy_error_tool"
+            else None
+        ),
+    )
+
+    with pytest.raises(ToolExecutionError, match="operation is unavailable"):
+        await execute_tool(tools, "legacy_error_tool", {})
 
 
 class RecordingPostgres:
@@ -407,12 +518,12 @@ class MemoryToolHarness(MemoryTools):
 
 
 @pytest.mark.no_network
-async def test_memory_tools_read_and_edit_brain_with_configured_postgres():
+async def test_memory_tools_read_and_edit_agent_brain_with_configured_postgres():
     postgres = RecordingPostgres()
     tools = MemoryToolHarness(postgres)
 
-    brain = await tools.read_brain()
-    edited = await tools.edit_brain(
+    brain = await tools.read_agent_brain()
+    edited = await tools.edit_agent_brain(
         "Behavioral Directives",
         "Ada prefers scoped tests",
         expected_revision=1,
@@ -436,30 +547,13 @@ async def test_memory_tools_read_and_edit_brain_with_configured_postgres():
 async def test_memory_tools_return_clean_defaults_without_active_agent():
     tools = MemoryToolHarness(postgres=None, agent_id=None)
 
-    assert await tools.read_brain() == {"error": "No durable agent identity is active"}
-    assert await tools.list_brain_snapshots() == {
-        "error": "No durable agent identity is active"
-    }
-    assert await tools.read_brain_snapshot(1) == {
-        "error": "No durable agent identity is active"
-    }
-    assert await tools.edit_brain("Behavioral Directives", "note", 1) == {
-        "error": "No durable agent identity is active"
-    }
-    assert await tools.restore_brain_section(
-        "Behavioral Directives",
-        1,
-        1,
-    ) == {"error": "No durable agent identity is active"}
-
-
-@pytest.mark.no_network
-async def test_normal_memory_tools_keep_community_only_tools_unavailable():
-    tools = MemoryToolHarness(postgres=RecordingPostgres())
-
-    assert await tools.save_insight("community insight") == {
-        "error": "save_insight is only available in community discussions."
-    }
-    assert await tools.spawn_specialist("Expert", "Persona") == {
-        "error": "spawn_specialist is only available in community discussions."
-    }
+    operations = (
+        tools.read_agent_brain(),
+        tools.list_agent_brain_snapshots(),
+        tools.read_agent_brain_snapshot(1),
+        tools.edit_agent_brain("Behavioral Directives", "note", 1),
+        tools.restore_agent_brain_section("Behavioral Directives", 1, 1),
+    )
+    for operation in operations:
+        with pytest.raises(ToolExecutionError, match="No durable agent identity"):
+            await operation

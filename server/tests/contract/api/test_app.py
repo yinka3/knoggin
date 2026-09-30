@@ -18,7 +18,12 @@ from common.schema.artifacts import (
     artifact_content_hash,
     render_artifact_markdown,
 )
+from common.schema.document import FolderScanSettings
+from common.schema.health import HealthActivity, HealthSnapshot
 from common.schema.public import (
+    ArtifactListResponse,
+    ArtifactResponse,
+    ArtifactRevisionResponse,
     CreateProjectRequest,
     CreateSessionRequest,
     ProjectResponse,
@@ -73,6 +78,22 @@ class FakeApplication:
         self.artifact, self.artifact_revision = _artifact_payloads()
         self.document_focus = None
 
+    async def get_engine_health(self, *, user_name):
+        self.calls.append(("engine_health", user_name))
+        return HealthSnapshot(summary="Engine healthy")
+
+    async def get_resource_health(self, *, user_name, project_id):
+        self.calls.append(("resource_health", user_name, project_id))
+        return HealthSnapshot(activity=HealthActivity.BUSY, summary="Resources busy")
+
+    async def get_ingestion_health(self, *, user_name, project_id):
+        self.calls.append(("ingestion_health", user_name, project_id))
+        return HealthSnapshot(summary="Ingestion healthy")
+
+    async def get_background_health(self, *, user_name, project_id):
+        self.calls.append(("background_health", user_name, project_id))
+        return HealthSnapshot(summary="Background healthy")
+
     async def create_project(self, *, user_name, request: CreateProjectRequest):
         self.calls.append(("project", user_name, request))
         if self.fail_projects:
@@ -121,6 +142,24 @@ class FakeApplication:
         self.calls.append(("document_focus_clear", user_name, session_id))
         self.document_focus = None
 
+    async def list_documents(self, *, user_name, project_id, limit):
+        self.calls.append(("documents", user_name, project_id, limit))
+        return [dict(document_id="document-1", project_id=project_id, original_name="notes.md",
+                     relative_path="notes.md", extension=".md", size_bytes=4,
+                     content_hash="a" * 64, status="indexed")]
+
+    async def list_saved_web_links(self, *, user_name, project_id, limit):
+        self.calls.append(("saved_links", user_name, project_id, limit))
+        return [dict(link_id="link-1", project_id=project_id, url="https://example.com",
+                     created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc))]
+
+    async def get_document_scan_settings(self, *, user_name, project_id):
+        self.calls.append(("scan_settings", user_name, project_id))
+        return FolderScanSettings(blocked_extensions={".log"})
+
+    async def open_run_stream(self, *, user_name, request: StartRunRequest):
+        return self.run_stream(user_name=user_name, request=request)
+
     async def run_stream(self, *, user_name, request: StartRunRequest):
         self.calls.append(("run", user_name, request))
         now = datetime.now(timezone.utc)
@@ -149,13 +188,13 @@ class FakeApplication:
 
     async def list_artifacts(self, *, user_name, project_id, session_id=None, limit=50):
         self.calls.append(("artifacts", user_name, project_id, session_id, limit))
-        return [self.artifact]
+        return ArtifactListResponse(artifacts=(ArtifactResponse.model_validate(self.artifact),))
 
     async def get_artifact(
         self, *, user_name, project_id, artifact_id, session_id=None
     ):
         self.calls.append(("artifact", user_name, project_id, artifact_id, session_id))
-        return self.artifact if artifact_id == self.artifact["artifact_id"] else None
+        return ArtifactResponse.model_validate(self.artifact) if artifact_id == self.artifact["artifact_id"] else None
 
     async def get_artifact_revision(
         self, *, user_name, project_id, artifact_id, revision, session_id=None
@@ -164,7 +203,7 @@ class FakeApplication:
             ("artifact_revision", user_name, project_id, artifact_id, revision, session_id)
         )
         return (
-            self.artifact_revision
+            ArtifactRevisionResponse.model_validate(self.artifact_revision)
             if artifact_id == self.artifact["artifact_id"] and revision == 1
             else None
         )
@@ -338,6 +377,39 @@ async def test_first_vertical_slice_delegates_public_routes_to_injected_port():
 
 @pytest.mark.unit
 @pytest.mark.no_network
+async def test_health_routes_delegate_typed_scoped_snapshots():
+    port = FakeApplication()
+    app = create_app(port)
+
+    async with await _client(app) as client:
+        engine = await client.get("/v1/health", headers={"X-User-Name": "ada"})
+        resources = await client.get(
+            "/v1/projects/project-1/health/resources",
+            headers={"X-User-Name": "ada"},
+        )
+        ingestion = await client.get(
+            "/v1/projects/project-1/health/ingestion",
+            headers={"X-User-Name": "ada"},
+        )
+        background = await client.get(
+            "/v1/projects/project-1/health/background",
+            headers={"X-User-Name": "ada"},
+        )
+
+    assert engine.json()["summary"] == "Engine healthy"
+    assert resources.json()["activity"] == "busy"
+    assert ingestion.json()["summary"] == "Ingestion healthy"
+    assert background.json()["summary"] == "Background healthy"
+    assert [call[0] for call in port.calls] == [
+        "engine_health",
+        "resource_health",
+        "ingestion_health",
+        "background_health",
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 async def test_document_focus_routes_keep_selection_request_only():
     port = FakeApplication()
     app = create_app(port)
@@ -385,6 +457,34 @@ async def test_document_focus_routes_keep_selection_request_only():
         "document_focus_set",
         "document_focus_clear",
     ]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_document_management_routes_delegate_to_the_project_port():
+    port = FakeApplication()
+    app = create_app(port)
+
+    async with await _client(app) as client:
+        documents = await client.get(
+            "/v1/projects/project-1/documents?limit=3",
+            headers={"X-User-Name": "ada"},
+        )
+        links = await client.get(
+            "/v1/projects/project-1/saved-web-links",
+            headers={"X-User-Name": "ada"},
+        )
+        settings = await client.get(
+            "/v1/projects/project-1/document-scan-settings",
+            headers={"X-User-Name": "ada"},
+        )
+
+    assert documents.status_code == 200
+    assert documents.json()[0]["document_id"] == "document-1"
+    assert links.status_code == 200
+    assert links.json()[0]["link_id"] == "link-1"
+    assert settings.status_code == 200
+    assert settings.json()["blocked_extensions"] == [".log"]
 
 
 @pytest.mark.unit
@@ -563,7 +663,7 @@ async def test_invalid_stream_event_becomes_sanitized_terminal_failure():
 
     assert response.status_code == 200
     assert response.text.count("event: run.failed") == 1
-    assert '"code":"invalid_request"' in response.text
+    assert '"code":"internal_error"' in response.text
     assert "private.tool.payload" not in response.text
     assert "do not expose" not in response.text
 
@@ -659,3 +759,18 @@ async def test_api_projects_preserve_public_error_retryability(
     assert response.json()["error"]["code"] == code
     assert response.json()["error"]["retryable"] is retryable
     assert "secret" not in response.text
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_project_route_rejects_legacy_object_aliases():
+    class LegacyApplication(FakeApplication):
+        async def create_project(self, **kwargs):
+            return type("LegacyProject", (), {"project_id": "legacy-secret", "name": "Old"})()
+
+    async with await _client(create_app(LegacyApplication())) as client:
+        response = await client.post("/v1/projects", json={"name": "Research"})
+
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "internal_error"
+    assert "legacy-secret" not in response.text

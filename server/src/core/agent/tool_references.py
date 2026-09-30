@@ -8,6 +8,10 @@ from common.utils.local_references import (
     resolve_local_id,
 )
 
+
+class LocalToolReferenceError(ValueError):
+    """A safe model-facing compact reference could not be resolved."""
+
 if TYPE_CHECKING:
     from core.agent.run import AgentRun
     from core.agent.tools.registry import Tools
@@ -17,12 +21,12 @@ if TYPE_CHECKING:
 # Numeric entity and message IDs stay numeric; they are already concise and
 # should not be forced through this UUID lookup.
 _RESULT_UUID_FIELDS: Dict[str, Dict[str, str]] = {
-    "episode_check": {"episode_id": "ep"},
+    "search_episodes": {"episode_id": "ep"},
     "read_recent_episodes": {"episode_id": "ep"},
-    "list_documents": {"document_id": "doc"},
-    "get_document_info": {"document_id": "doc"},
-    "read_document": {"document_id": "doc"},
-    "search_documents": {"document_id": "doc"},
+    "list_project_documents": {"document_id": "doc"},
+    "get_project_document_info": {"document_id": "doc"},
+    "read_project_document": {"document_id": "doc"},
+    "search_project_documents": {"document_id": "doc"},
     "propose_entity_merge": {
         "episode_id": "ep",
         "evidence_episode_ids": "ep",
@@ -30,9 +34,9 @@ _RESULT_UUID_FIELDS: Dict[str, Dict[str, str]] = {
 }
 
 _TOOL_ARGUMENT_UUID_FIELDS: Dict[str, Dict[str, str]] = {
-    "read_episode": {"episode_id": "ep"},
-    "get_document_info": {"document_id": "doc"},
-    "read_document": {"document_id": "doc"},
+    "read_episode_messages": {"episode_id": "ep"},
+    "get_project_document_info": {"document_id": "doc"},
+    "read_project_document": {"document_id": "doc"},
     "propose_entity_merge": {
         "evidence_episode_ids": "ep",
     },
@@ -209,7 +213,7 @@ def resolve_agent_tool_arguments(tools: Tools, tool_name: str, args: Dict) -> Di
         if isinstance(value, list):
             local_values = [str(item) for item in value]
             if len(local_values) != len(set(local_values)):
-                raise ValueError(
+                raise LocalToolReferenceError(
                     f"Duplicate local {prefix} references are not allowed."
                 )
             resolved[field_name] = [
@@ -234,5 +238,10 @@ def _resolve_short_uuid_reference(
     """Resolve one correctly typed compact UUID handle."""
 
     if not isinstance(value, str) or not value.startswith(f"{prefix}_"):
-        raise ValueError(f"Expected a {prefix}_ UUID handle for this argument.")
-    return str(resolve_local_id(value, local_to_actual))
+        raise LocalToolReferenceError(
+            f"Expected a {prefix}_ UUID handle for this argument."
+        )
+    try:
+        return str(resolve_local_id(value, local_to_actual))
+    except ValueError as exc:
+        raise LocalToolReferenceError("Unknown local ID for this LLM call.") from exc

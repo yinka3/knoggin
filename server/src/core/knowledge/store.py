@@ -20,7 +20,6 @@ from common.schema.semantic_window import (
     SemanticWindowStage,
 )
 from common.schema.source.references import (
-    AssistantMessageWithSources,
     SourceConsulted,
     SourceReference,
     SourceReferenceCandidate,
@@ -37,9 +36,6 @@ from core.knowledge.db.readers.graph_reader import GraphReader
 from core.knowledge.db.readers.knowledge_query_reader import KnowledgeQueryReader
 from core.knowledge.db.readers.message_reader import MessageReader
 from core.knowledge.db.readers.project_context_reader import ProjectContextReader
-from core.knowledge.db.readers.relationship_observation_reader import (
-    RelationshipObservationReader,
-)
 from core.knowledge.db.readers.semantic_window_reader import SemanticWindowReader
 from core.knowledge.db.readers.source_reference_reader import SourceReferenceReader
 from core.knowledge.db.writers.artifact_writer import ArtifactWriter
@@ -116,9 +112,6 @@ class KnowledgeStore:
         self._source_reference_reader = SourceReferenceReader(self._postgres_client)
         self._artifact_reader = ArtifactReader(self._postgres_client)
         self._project_context_reader = ProjectContextReader(self._postgres_client)
-        self._relationship_observation_reader = RelationshipObservationReader(
-            self._postgres_client
-        )
         self._semantic_window_reader = SemanticWindowReader(self._postgres_client)
         self._projection_rebuilder = GraphBuilder(self._postgres_client)
         self._embedding_rebuilder = EmbeddingRebuilder(
@@ -128,76 +121,15 @@ class KnowledgeStore:
         self._embedding_service = embedding_service
         logger.info("KnowledgeStore initialized with internal Postgres/AGE backend")
 
-    async def get_relationship_observation_evidence(
-        self,
-        observation_id: int,
-        *,
-        user_name: str,
-        project_id: str,
-        limits: EvidenceTraversalLimits | None = None,
-    ) -> EvidenceBundle:
-        """Return bounded provenance for one project-owned observation."""
+    # Message and exchange lifecycle
 
-        return await self._evidence_service.for_relationship_observation(
-            observation_id,
-            user_name=user_name,
-            project_id=project_id,
-            limits=limits,
+    async def get_session_history(self, *, user_name: str, session_id: str, limit: int, up_to_msg_id: int | None = None) -> list[dict]:
+        return await self._message_reader.get_session_history(
+            user_name=user_name, session_id=session_id, limit=limit, up_to_msg_id=up_to_msg_id
         )
 
-    async def get_visible_relationship_observation_evidence(
-        self,
-        observation_id: int,
-        *,
-        user_name: str,
-        visible_project_ids: list[str],
-        limits: EvidenceTraversalLimits | None = None,
-    ) -> EvidenceBundle:
-        """Return bounded provenance for one observation in the read scope."""
-
-        return await self._evidence_service.for_visible_relationship_observation(
-            observation_id,
-            user_name=user_name,
-            visible_project_ids=visible_project_ids,
-            limits=limits,
-        )
-
-    async def get_context_block_evidence(
-        self,
-        block_id: str,
-        *,
-        user_name: str,
-        project_id: str,
-        limits: EvidenceTraversalLimits | None = None,
-    ) -> EvidenceBundle:
-        """Return bounded provenance for one project-owned Context block."""
-
-        return await self._evidence_service.for_context_block(
-            block_id,
-            user_name=user_name,
-            project_id=project_id,
-            limits=limits,
-        )
-
-    async def get_relationship_observations_evidence(
-        self,
-        observation_ids: list[int],
-        *,
-        user_name: str,
-        project_id: str,
-        limits: EvidenceTraversalLimits | None = None,
-    ) -> tuple[EvidenceBundle, ...]:
-        """Return bounded provenance for a set of project observations."""
-
-        return await self._evidence_service.for_relationship_observations(
-            observation_ids,
-            user_name=user_name,
-            project_id=project_id,
-            limits=limits,
-        )
-
-    async def save_message_logs(self, messages: List[Dict]) -> bool:
-        return await self._message_writer.save_message_logs(messages)
+    async def allocate_message_id(self) -> int:
+        return await self._id_allocator.allocate_message_id()
 
     async def create_editable_user_message(
         self, message: Dict, *, edit_window_seconds: int
@@ -223,18 +155,243 @@ class KnowledgeStore:
             session_id=session_id,
         )
 
-    async def ensure_project_context(
+    async def finalize_assistant_exchange(
+        self,
+        message: Dict,
+        candidates: List[SourceReferenceCandidate],
+        *,
+        readable_project_ids: List[str],
+        artifact: ArtifactDraft | None = None,
+        outcome: str = "assistant_final",
+    ) -> tuple[int, list[str], bool]:
+        """Commit one assistant terminal response and its exchange closure together.
+
+        The result is ``(assistant_message_id, source_ref_ids, created)``.
+        Retries of the same terminal response return the original assistant
+        instead of creating a second assistant message.
+        """
+
+        if message.get("role") != "assistant":
+            raise ValueError("Only assistant messages can finalize an exchange")
+        user_message_id = message.get("user_msg_id")
+        if not isinstance(user_message_id, int) or isinstance(user_message_id, bool):
+            raise ValueError("Assistant exchange finalization requires user_msg_id")
+        scope = ("user_name", "project_id", "session_id", "id")
+        missing = [name for name in scope if not message.get(name)]
+        if missing:
+            raise ValueError(
+                "Assistant exchange finalization missing scope fields: "
+                + ", ".join(missing)
+            )
+
+        async with self._postgres_client.transaction() as cur:
+            existing = await self._message_lifecycle_writer.prepare_assistant_exchange_finalization(
+                user_name=message["user_name"],
+                project_id=message["project_id"],
+                session_id=message["session_id"],
+                user_message_id=user_message_id,
+                outcome=outcome,
+                cur=cur,
+            )
+            if existing is not None:
+                source_ref_ids = (
+                    await self._source_reference_reader.get_message_source_ref_ids(
+                        existing.assistant_message_id,
+                        user_name=message["user_name"],
+                        project_id=message["project_id"],
+                        session_id=message["session_id"],
+                        cursor=cur,
+                    )
+                )
+                return (
+                    int(existing.assistant_message_id),
+                    source_ref_ids,
+                    False,
+                )
+
+            await self._message_writer.save_message_logs([message], cur=cur)
+            references = (
+                await self._source_reference_writer.write_for_assistant_message(
+                    message["id"],
+                    candidates,
+                    user_name=message["user_name"],
+                    project_id=message["project_id"],
+                    session_id=message["session_id"],
+                    readable_project_ids=readable_project_ids,
+                    cursor=cur,
+                )
+            )
+            if artifact is not None:
+                await self._artifact_writer.write_for_assistant_message(
+                    message["id"],
+                    artifact,
+                    user_name=message["user_name"],
+                    project_id=message["project_id"],
+                    session_id=message["session_id"],
+                    cursor=cur,
+                )
+            await self._message_lifecycle_writer.close_user_exchange(
+                user_name=message["user_name"],
+                project_id=message["project_id"],
+                session_id=message["session_id"],
+                user_message_id=user_message_id,
+                outcome=outcome,
+                closed_at_ms=int(message.get("sealed_at_ms") or 0),
+                cur=cur,
+            )
+            return (
+                int(message["id"]),
+                [
+                    str(reference.source_ref_id)
+                    for reference in references
+                    if getattr(reference, "source_ref_id", None)
+                ],
+                True,
+            )
+
+    async def close_user_exchange(
         self,
         *,
         user_name: str,
         project_id: str,
-    ) -> None:
-        """Initialize the project-owned Context root without creating a revision."""
+        session_id: str,
+        user_message_id: int,
+        outcome: str,
+        closed_at_ms: int | None = None,
+        terminal_error: dict[str, object] | None = None,
+    ) -> ExchangeClosure:
+        """Close a clarification, failure, cancellation, or user-only turn."""
 
-        await self._project_context_writer.ensure_context(
+        return await self._message_lifecycle_writer.close_user_exchange(
             user_name=user_name,
             project_id=project_id,
+            session_id=session_id,
+            user_message_id=user_message_id,
+            outcome=outcome,
+            closed_at_ms=closed_at_ms,
+            terminal_error=terminal_error,
         )
+
+    async def close_orphaned_user_exchange(self, **kwargs):
+        return await self._message_lifecycle_writer.close_orphaned_user_exchange(
+            **kwargs
+        )
+
+    async def get_visible_session_ids(
+        self,
+        *,
+        user_name: str,
+        visible_project_ids: List[str],
+    ) -> List[str]:
+        """Return open sessions visible to scoped message retrieval."""
+
+        return await self._message_reader.get_visible_session_ids(
+            user_name=user_name,
+            visible_project_ids=visible_project_ids,
+        )
+
+    async def get_message_text(
+        self,
+        message_id: int,
+        *,
+        user_name: str,
+        session_id: str,
+        visible_project_ids: List[str],
+    ) -> str:
+        return await self._message_reader.get_message_text(
+            message_id,
+            user_name=user_name,
+            session_id=session_id,
+            visible_project_ids=visible_project_ids,
+        )
+
+    async def get_messages_by_ids(
+        self,
+        ids: List[int],
+        *,
+        user_name: str,
+        session_ids: List[str],
+        visible_project_ids: List[str],
+    ) -> List[Dict]:
+        return await self._message_reader.get_messages_by_ids(
+            ids,
+            user_name=user_name,
+            session_ids=session_ids,
+            visible_project_ids=visible_project_ids,
+        )
+
+    async def get_recent_project_messages(
+        self,
+        user_name: str,
+        project_id: str,
+        limit: int,
+        before_message_id: Optional[int] = None,
+    ) -> List[Dict]:
+        return await self._message_reader.get_recent_project_messages(
+            user_name,
+            project_id,
+            limit,
+            before_message_id=before_message_id,
+        )
+
+    async def get_surrounding_messages(
+        self,
+        message_id: int,
+        *,
+        user_name: str,
+        session_id: str,
+        visible_project_ids: List[str],
+        forward: int = 3,
+        target_total: int = 10,
+        discoverable_only: bool = False,
+    ) -> List[Dict]:
+        return await self._message_reader.get_surrounding_messages(
+            message_id,
+            user_name=user_name,
+            session_id=session_id,
+            visible_project_ids=visible_project_ids,
+            forward=forward,
+            target_total=target_total,
+            discoverable_only=discoverable_only,
+        )
+
+    async def search_messages_fts(
+        self,
+        query: str,
+        *,
+        user_name: str,
+        session_ids: List[str],
+        visible_project_ids: List[str],
+        limit: int = 50,
+    ) -> List[Tuple[int, float, str]]:
+        return await self._message_reader.search_fts(
+            query,
+            user_name=user_name,
+            session_ids=session_ids,
+            visible_project_ids=visible_project_ids,
+            limit=limit,
+        )
+
+    async def search_messages_semantic(
+        self,
+        query_embedding: List[float],
+        *,
+        user_name: str,
+        session_ids: List[str],
+        visible_project_ids: List[str],
+        limit: int = 50,
+        threshold: float = 0.25,
+    ) -> List[Tuple[int, float, str]]:
+        return await self._message_reader.search_semantic_episode_sources(
+            query_embedding,
+            user_name=user_name,
+            session_ids=session_ids,
+            visible_project_ids=visible_project_ids,
+            limit=limit,
+            threshold=threshold,
+        )
+
+    # Context and semantic windows
 
     async def get_current_project_context_revision(
         self,
@@ -293,10 +450,12 @@ class KnowledgeStore:
     ) -> tuple[int, ...]:
         """Return durable Context entity effects for a knowledge-committed window."""
 
-        return await self._project_context_reader.get_committed_window_affected_entity_ids(
-            window_id,
-            user_name=user_name,
-            project_id=project_id,
+        return (
+            await self._project_context_reader.get_committed_window_affected_entity_ids(
+                window_id,
+                user_name=user_name,
+                project_id=project_id,
+            )
         )
 
     async def get_project_context_block_supports(
@@ -350,53 +509,12 @@ class KnowledgeStore:
             materialization=materialization,
         )
 
-    async def record_project_context_projection(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        revision_id: str,
-        projection_hash: str,
-    ) -> bool:
-        return await self._project_context_writer.record_projection(
-            user_name=user_name,
-            project_id=project_id,
-            revision_id=revision_id,
-            projection_hash=projection_hash,
-        )
-
     async def claim_project_semantic_window(
         self,
         window: SemanticWindowRecord,
         messages: list[SemanticWindowMessage],
     ) -> SemanticWindowClaimResult:
         return await self._semantic_window_writer.claim_window(window, messages)
-
-    async def get_project_semantic_window(
-        self,
-        window_id: str,
-        *,
-        user_name: str,
-        project_id: str,
-    ) -> SemanticWindowRecord | None:
-        return await self._semantic_window_reader.get_window(
-            window_id,
-            user_name=user_name,
-            project_id=project_id,
-        )
-
-    async def get_project_semantic_window_messages(
-        self,
-        window_id: str,
-        *,
-        user_name: str,
-        project_id: str,
-    ) -> list[SemanticWindowMessage]:
-        return await self._semantic_window_reader.get_window_messages(
-            window_id,
-            user_name=user_name,
-            project_id=project_id,
-        )
 
     async def get_active_project_semantic_window(
         self,
@@ -407,6 +525,19 @@ class KnowledgeStore:
         return await self._semantic_window_reader.get_active_window(
             user_name=user_name,
             project_id=project_id,
+        )
+
+    async def list_failed_project_semantic_windows(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        limit: int = 100,
+    ) -> list[SemanticWindowRecord]:
+        return await self._semantic_window_reader.list_failed_active_windows(
+            user_name=user_name,
+            project_id=project_id,
+            limit=limit,
         )
 
     async def get_project_semantic_window_evidence_messages(
@@ -572,19 +703,6 @@ class KnowledgeStore:
 
         return await self._semantic_commit_writer.commit(build)
 
-    async def get_active_context_relationship_supports(
-        self,
-        relationship_id: str,
-        *,
-        user_name: str,
-        project_id: str,
-    ) -> list[dict]:
-        return await self._relationship_observation_reader.get_active_context_supports(
-            relationship_id,
-            user_name=user_name,
-            project_id=project_id,
-        )
-
     async def get_semantic_window_health(
         self,
         *,
@@ -593,159 +711,12 @@ class KnowledgeStore:
     ) -> Dict[str, int | None]:
         """Return project semantic-window health without exposing messages."""
 
-        row = await self._postgres_client.fetch_one(
-            """
-            SELECT
-                count(*) FILTER (WHERE stage <> 'completed') AS pending_count,
-                count(*) FILTER (WHERE stage = 'claimed') AS claimed_count,
-                count(*) FILTER (WHERE last_failure_at_ms IS NOT NULL) AS failed_count,
-                count(*) FILTER (
-                    WHERE stage <> 'completed'
-                      AND last_failure_at_ms IS NOT NULL
-                      AND next_retry_at_ms IS NULL
-                ) AS exhausted_count,
-                min((EXTRACT(EPOCH FROM claimed_at) * 1000)::BIGINT)
-                    FILTER (WHERE stage <> 'completed') AS oldest_pending_ms,
-                max((EXTRACT(EPOCH FROM completed_at) * 1000)::BIGINT)
-                    AS last_processed_ms
-            FROM public.project_semantic_windows
-            WHERE user_name = %s AND project_id = %s
-            """,
-            (user_name, project_id),
-        )
-        return {
-            key: row.get(key) if row else None
-            for key in (
-                "pending_count",
-                "claimed_count",
-                "failed_count",
-                "exhausted_count",
-                "oldest_pending_ms",
-                "last_processed_ms",
-            )
-        }
-
-    async def finalize_assistant_exchange(
-        self,
-        message: Dict,
-        candidates: List[SourceReferenceCandidate],
-        *,
-        readable_project_ids: List[str],
-        artifact: ArtifactDraft | None = None,
-        outcome: str = "assistant_final",
-    ) -> tuple[int, list[str], bool]:
-        """Commit one assistant terminal response and its exchange closure together.
-
-        The result is ``(assistant_message_id, source_ref_ids, created)``.
-        Retries of the same terminal response return the original assistant
-        instead of creating a second assistant message.
-        """
-
-        if message.get("role") != "assistant":
-            raise ValueError("Only assistant messages can finalize an exchange")
-        user_message_id = message.get("user_msg_id")
-        if not isinstance(user_message_id, int) or isinstance(user_message_id, bool):
-            raise ValueError("Assistant exchange finalization requires user_msg_id")
-        scope = ("user_name", "project_id", "session_id", "id")
-        missing = [name for name in scope if not message.get(name)]
-        if missing:
-            raise ValueError(
-                "Assistant exchange finalization missing scope fields: "
-                + ", ".join(missing)
-            )
-
-        async with self._postgres_client.transaction() as cur:
-            existing = await self._message_lifecycle_writer.prepare_assistant_exchange_finalization(
-                user_name=message["user_name"],
-                project_id=message["project_id"],
-                session_id=message["session_id"],
-                user_message_id=user_message_id,
-                outcome=outcome,
-                cur=cur,
-            )
-            if existing is not None:
-                await cur.execute(
-                    """
-                    SELECT source_ref_id
-                    FROM public.message_source_refs
-                    WHERE project_id = %s
-                      AND session_id = %s
-                      AND message_id = %s
-                    ORDER BY created_at ASC, result_position ASC, source_ref_id ASC
-                    """,
-                    (
-                        message["project_id"],
-                        message["session_id"],
-                        existing.assistant_message_id,
-                    ),
-                )
-                rows = await cur.fetchall()
-                return (
-                    int(existing.assistant_message_id),
-                    [str(row["source_ref_id"]) for row in rows],
-                    False,
-                )
-
-            await self._message_writer.save_message_logs([message], cur=cur)
-            references = await self._source_reference_writer.write_for_assistant_message(
-                message["id"],
-                candidates,
-                user_name=message["user_name"],
-                project_id=message["project_id"],
-                session_id=message["session_id"],
-                readable_project_ids=readable_project_ids,
-                cursor=cur,
-            )
-            if artifact is not None:
-                await self._artifact_writer.write_for_assistant_message(
-                    message["id"],
-                    artifact,
-                    user_name=message["user_name"],
-                    project_id=message["project_id"],
-                    session_id=message["session_id"],
-                    cursor=cur,
-                )
-            await self._message_lifecycle_writer.close_user_exchange(
-                user_name=message["user_name"],
-                project_id=message["project_id"],
-                session_id=message["session_id"],
-                user_message_id=user_message_id,
-                outcome=outcome,
-                closed_at_ms=int(message.get("sealed_at_ms") or 0),
-                cur=cur,
-            )
-            return (
-                int(message["id"]),
-                [
-                    str(reference.source_ref_id)
-                    for reference in references
-                    if getattr(reference, "source_ref_id", None)
-                ],
-                True,
-            )
-
-    async def close_user_exchange(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-        user_message_id: int,
-        outcome: str,
-        closed_at_ms: int | None = None,
-        terminal_error: dict[str, object] | None = None,
-    ) -> ExchangeClosure:
-        """Close a clarification, failure, cancellation, or user-only turn."""
-
-        return await self._message_lifecycle_writer.close_user_exchange(
+        return await self._semantic_window_reader.get_health_summary(
             user_name=user_name,
             project_id=project_id,
-            session_id=session_id,
-            user_message_id=user_message_id,
-            outcome=outcome,
-            closed_at_ms=closed_at_ms,
-            terminal_error=terminal_error,
         )
+
+    # Artifacts and source references
 
     async def get_project_artifact(
         self,
@@ -842,41 +813,7 @@ class KnowledgeStore:
             session_id=session_id,
         )
 
-    async def get_assistant_message_with_sources(
-        self,
-        message_id: int,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-    ) -> Optional[AssistantMessageWithSources]:
-        return await self._source_reference_reader.get_assistant_message_with_sources(
-            message_id,
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-        )
-
-    async def get_episode_source_refs(
-        self,
-        episode_id: str,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-    ) -> List[SourceConsulted]:
-        return await self._source_reference_reader.get_episode_source_refs(
-            episode_id,
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-        )
-
-    async def allocate_entity_id(self) -> int:
-        return await self._id_allocator.allocate_entity_id()
-
-    async def allocate_message_id(self) -> int:
-        return await self._id_allocator.allocate_message_id()
+    # Episodes
 
     async def get_project_episode_source_refs(
         self, episode_id: str, *, user_name: str, project_id: str
@@ -1070,33 +1007,241 @@ class KnowledgeStore:
             visible_project_ids=visible_project_ids,
         )
 
-    async def get_merge_evidence_for_entities(
-        self,
-        entity_ids: List[int],
-        *,
-        project_id: str,
-        evidence_limit: int = 4,
-        source_message_limit: int = 2,
-    ) -> Dict[int, List[Dict]]:
-        return await self._episode_reader.get_merge_evidence_for_entities(
-            entity_ids,
-            project_id=project_id,
-            evidence_limit=evidence_limit,
-            source_message_limit=source_message_limit,
-        )
+    # Entity, graph, and evidence retrieval
+
+    async def allocate_entity_id(self) -> int:
+        return await self._id_allocator.allocate_entity_id()
 
     async def ensure_identity_entity(
         self, user_name: str, aliases: Optional[List[str]] = None
     ) -> Dict:
         return await self._graph_writer.ensure_identity_entity(user_name, aliases)
 
-
-    async def update_entity_aliases(
-        self, alias_updates: Dict[int, List[str]], *, project_id: str
-    ) -> None:
-        return await self._graph_writer.update_entity_aliases(
-            alias_updates, project_id=project_id
+    async def validate_existing_ids(
+        self, ids: List[int], *, visible_project_ids: List[str]
+    ) -> Set[int]:
+        return await self._entity_reader.validate_existing_ids(
+            ids,
+            visible_project_ids=visible_project_ids,
         )
+
+    async def get_entities_by_names(
+        self, names: List[str], *, visible_project_ids: List[str]
+    ) -> List[Dict]:
+        return await self._entity_reader.get_entities_by_names(
+            names,
+            visible_project_ids=visible_project_ids,
+        )
+
+    async def get_visible_entities_for_resolution(
+        self,
+        *,
+        visible_project_ids: List[str],
+    ) -> List[Dict]:
+        return await self._entity_reader.get_visible_entities_for_resolution(
+            visible_project_ids=visible_project_ids,
+        )
+
+    async def list_entities(
+        self,
+        limit: int = 20,
+        offset: int = 0,
+        *,
+        visible_project_ids: List[str],
+        topic: str = None,
+        entity_type: str = None,
+        search: str = None,
+    ) -> Tuple[List[Dict], int]:
+        return await self._entity_reader.list_entities(
+            limit,
+            offset,
+            visible_project_ids=visible_project_ids,
+            topic=topic,
+            entity_type=entity_type,
+            search=search,
+        )
+
+    async def get_entity_by_id(
+        self, entity_id: int, *, visible_project_ids: List[str]
+    ) -> Optional[Dict]:
+        return await self._entity_reader.get_entity_by_id(
+            entity_id,
+            visible_project_ids=visible_project_ids,
+        )
+
+    async def get_entities_by_ids(
+        self, entity_ids: List[int], *, visible_project_ids: List[str]
+    ) -> List[Dict]:
+        return await self._entity_reader.get_entities_by_ids(
+            entity_ids,
+            visible_project_ids=visible_project_ids,
+        )
+
+    async def get_top_connected_entities(
+        self, *, visible_project_ids: List[str], limit: int = 10
+    ) -> List[Dict]:
+        return await self._entity_reader.get_top_connected_entities(
+            visible_project_ids=visible_project_ids,
+            limit=limit,
+        )
+
+    async def get_recently_active_entities(
+        self, *, visible_project_ids: List[str], days: int = 7, limit: int = 10
+    ) -> List[Dict]:
+        return await self._entity_reader.get_recently_active_entities(
+            visible_project_ids=visible_project_ids,
+            days=days,
+            limit=limit,
+        )
+
+    async def get_neighbor_ids_batch(
+        self, entity_ids: List[int], *, visible_project_ids: List[str]
+    ) -> Dict[int, Set[int]]:
+        return await self._graph_reader.get_neighbor_ids_batch(
+            entity_ids,
+            visible_project_ids=visible_project_ids,
+        )
+
+    async def get_hot_topic_context_with_messages(
+        self,
+        hot_topic_names: List[str],
+        *,
+        project_id: str,
+        msg_limit: int = 5,
+    ) -> Dict:
+        return await self._knowledge_query_reader.get_hot_topic_context_with_messages(
+            hot_topic_names,
+            project_id=project_id,
+            msg_limit=msg_limit,
+        )
+
+    async def search_entity(
+        self,
+        query: str,
+        *,
+        visible_project_ids: List[str],
+        limit: int = 5,
+        connections_limit: int = 5,
+        evidence_limit: int = 5,
+    ) -> List[Dict]:
+        return await self._entity_reader.search_by_name(
+            query,
+            visible_project_ids=visible_project_ids,
+            limit=limit,
+            connections_limit=connections_limit,
+            evidence_limit=evidence_limit,
+        )
+
+    async def get_related_entities(
+        self,
+        entity_ids: List[int],
+        *,
+        visible_project_ids: List[str],
+        limit: int = 50,
+    ) -> List[Dict]:
+        return await self._entity_reader.get_related_entities(
+            entity_ids,
+            visible_project_ids=visible_project_ids,
+            limit=limit,
+        )
+
+    async def get_recent_activity(
+        self,
+        entity_id: int,
+        *,
+        visible_project_ids: List[str],
+        hours: int = 24,
+    ) -> List[Dict]:
+        return await self._knowledge_query_reader.get_recent_activity(
+            entity_id,
+            visible_project_ids=visible_project_ids,
+            hours=hours,
+        )
+
+    async def find_path(
+        self,
+        start_entity_id: int,
+        end_entity_id: int,
+        *,
+        visible_project_ids: List[str],
+        max_depth: int = 4,
+    ) -> List[Dict]:
+        return await self._graph_reader.find_path(
+            start_entity_id,
+            end_entity_id,
+            visible_project_ids=visible_project_ids,
+            max_depth=max_depth,
+        )
+
+    async def get_relationship_observation_evidence(
+        self,
+        observation_id: int,
+        *,
+        user_name: str,
+        project_id: str,
+        limits: EvidenceTraversalLimits | None = None,
+    ) -> EvidenceBundle:
+        """Return bounded provenance for one project-owned observation."""
+
+        return await self._evidence_service.for_relationship_observation(
+            observation_id,
+            user_name=user_name,
+            project_id=project_id,
+            limits=limits,
+        )
+
+    async def get_visible_relationship_observation_evidence(
+        self,
+        observation_id: int,
+        *,
+        user_name: str,
+        visible_project_ids: list[str],
+        limits: EvidenceTraversalLimits | None = None,
+    ) -> EvidenceBundle:
+        """Return bounded provenance for one observation in the read scope."""
+
+        return await self._evidence_service.for_visible_relationship_observation(
+            observation_id,
+            user_name=user_name,
+            visible_project_ids=visible_project_ids,
+            limits=limits,
+        )
+
+    async def get_context_block_evidence(
+        self,
+        block_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+        limits: EvidenceTraversalLimits | None = None,
+    ) -> EvidenceBundle:
+        """Return bounded provenance for one project-owned Context block."""
+
+        return await self._evidence_service.for_context_block(
+            block_id,
+            user_name=user_name,
+            project_id=project_id,
+            limits=limits,
+        )
+
+    async def get_relationship_observations_evidence(
+        self,
+        observation_ids: list[int],
+        *,
+        user_name: str,
+        project_id: str,
+        limits: EvidenceTraversalLimits | None = None,
+    ) -> tuple[EvidenceBundle, ...]:
+        """Return bounded provenance for a set of project observations."""
+
+        return await self._evidence_service.for_relationship_observations(
+            observation_ids,
+            user_name=user_name,
+            project_id=project_id,
+            limits=limits,
+        )
+
+    # Maintenance and rebuilds
 
     async def preview_historical_reclassification(
         self,
@@ -1208,276 +1353,4 @@ class KnowledgeStore:
         return await self._embedding_rebuilder.rebuild_project_embeddings(
             project_id,
             user_name,
-        )
-
-
-    async def get_visible_session_ids(
-        self,
-        *,
-        user_name: str,
-        visible_project_ids: List[str],
-    ) -> List[str]:
-        """Return open sessions visible to scoped message retrieval."""
-
-        return await self._message_reader.get_visible_session_ids(
-            user_name=user_name,
-            visible_project_ids=visible_project_ids,
-        )
-
-    async def get_message_text(
-        self,
-        message_id: int,
-        *,
-        user_name: str,
-        session_id: str,
-        visible_project_ids: List[str],
-    ) -> str:
-        return await self._message_reader.get_message_text(
-            message_id,
-            user_name=user_name,
-            session_id=session_id,
-            visible_project_ids=visible_project_ids,
-        )
-
-    async def get_messages_by_ids(
-        self,
-        ids: List[int],
-        *,
-        user_name: str,
-        session_ids: List[str],
-        visible_project_ids: List[str],
-    ) -> List[Dict]:
-        return await self._message_reader.get_messages_by_ids(
-            ids,
-            user_name=user_name,
-            session_ids=session_ids,
-            visible_project_ids=visible_project_ids,
-        )
-
-    async def get_recent_project_messages(
-        self,
-        user_name: str,
-        project_id: str,
-        limit: int,
-        before_message_id: Optional[int] = None,
-    ) -> List[Dict]:
-        return await self._message_reader.get_recent_project_messages(
-            user_name,
-            project_id,
-            limit,
-            before_message_id=before_message_id,
-        )
-
-    async def get_surrounding_messages(
-        self,
-        message_id: int,
-        *,
-        user_name: str,
-        session_id: str,
-        visible_project_ids: List[str],
-        forward: int = 3,
-        target_total: int = 10,
-        discoverable_only: bool = False,
-    ) -> List[Dict]:
-        return await self._message_reader.get_surrounding_messages(
-            message_id,
-            user_name=user_name,
-            session_id=session_id,
-            visible_project_ids=visible_project_ids,
-            forward=forward,
-            target_total=target_total,
-            discoverable_only=discoverable_only,
-        )
-
-    async def validate_existing_ids(
-        self, ids: List[int], *, visible_project_ids: List[str]
-    ) -> Set[int]:
-        return await self._entity_reader.validate_existing_ids(
-            ids,
-            visible_project_ids=visible_project_ids,
-        )
-
-    async def get_entities_by_names(
-        self, names: List[str], *, visible_project_ids: List[str]
-    ) -> List[Dict]:
-        return await self._entity_reader.get_entities_by_names(
-            names,
-            visible_project_ids=visible_project_ids,
-        )
-
-    async def get_visible_entities_for_resolution(
-        self,
-        *,
-        visible_project_ids: List[str],
-    ) -> List[Dict]:
-        return await self._entity_reader.get_visible_entities_for_resolution(
-            visible_project_ids=visible_project_ids,
-        )
-
-
-    async def list_entities(
-        self,
-        limit: int = 20,
-        offset: int = 0,
-        *,
-        visible_project_ids: List[str],
-        topic: str = None,
-        entity_type: str = None,
-        search: str = None,
-    ) -> Tuple[List[Dict], int]:
-        return await self._entity_reader.list_entities(
-            limit,
-            offset,
-            visible_project_ids=visible_project_ids,
-            topic=topic,
-            entity_type=entity_type,
-            search=search,
-        )
-
-    async def get_entity_by_id(
-        self, entity_id: int, *, visible_project_ids: List[str]
-    ) -> Optional[Dict]:
-        return await self._entity_reader.get_entity_by_id(
-            entity_id,
-            visible_project_ids=visible_project_ids,
-        )
-
-    async def get_entities_by_ids(
-        self, entity_ids: List[int], *, visible_project_ids: List[str]
-    ) -> List[Dict]:
-        return await self._entity_reader.get_entities_by_ids(
-            entity_ids,
-            visible_project_ids=visible_project_ids,
-        )
-
-    async def get_top_connected_entities(
-        self, *, visible_project_ids: List[str], limit: int = 10
-    ) -> List[Dict]:
-        return await self._entity_reader.get_top_connected_entities(
-            visible_project_ids=visible_project_ids,
-            limit=limit,
-        )
-
-    async def get_recently_active_entities(
-        self, *, visible_project_ids: List[str], days: int = 7, limit: int = 10
-    ) -> List[Dict]:
-        return await self._entity_reader.get_recently_active_entities(
-            visible_project_ids=visible_project_ids,
-            days=days,
-            limit=limit,
-        )
-
-    async def get_neighbor_ids_batch(
-        self, entity_ids: List[int], *, visible_project_ids: List[str]
-    ) -> Dict[int, Set[int]]:
-        return await self._graph_reader.get_neighbor_ids_batch(
-            entity_ids,
-            visible_project_ids=visible_project_ids,
-        )
-
-    async def get_hot_topic_context_with_messages(
-        self,
-        hot_topic_names: List[str],
-        *,
-        project_id: str,
-        msg_limit: int = 5,
-    ) -> Dict:
-        return await self._knowledge_query_reader.get_hot_topic_context_with_messages(
-            hot_topic_names,
-            project_id=project_id,
-            msg_limit=msg_limit,
-        )
-
-    async def search_messages_fts(
-        self,
-        query: str,
-        *,
-        user_name: str,
-        session_ids: List[str],
-        visible_project_ids: List[str],
-        limit: int = 50,
-    ) -> List[Tuple[int, float, str]]:
-        return await self._message_reader.search_fts(
-            query,
-            user_name=user_name,
-            session_ids=session_ids,
-            visible_project_ids=visible_project_ids,
-            limit=limit,
-        )
-
-    async def search_messages_semantic(
-        self,
-        query_embedding: List[float],
-        *,
-        user_name: str,
-        session_ids: List[str],
-        visible_project_ids: List[str],
-        limit: int = 50,
-        threshold: float = 0.25,
-    ) -> List[Tuple[int, float, str]]:
-        return await self._message_reader.search_semantic_episode_sources(
-            query_embedding,
-            user_name=user_name,
-            session_ids=session_ids,
-            visible_project_ids=visible_project_ids,
-            limit=limit,
-            threshold=threshold,
-        )
-
-    async def search_entity(
-        self,
-        query: str,
-        *,
-        visible_project_ids: List[str],
-        limit: int = 5,
-        connections_limit: int = 5,
-        evidence_limit: int = 5,
-    ) -> List[Dict]:
-        return await self._entity_reader.search_by_name(
-            query,
-            visible_project_ids=visible_project_ids,
-            limit=limit,
-            connections_limit=connections_limit,
-            evidence_limit=evidence_limit,
-        )
-
-    async def get_related_entities(
-        self,
-        entity_ids: List[int],
-        *,
-        visible_project_ids: List[str],
-        limit: int = 50,
-    ) -> List[Dict]:
-        return await self._entity_reader.get_related_entities(
-            entity_ids,
-            visible_project_ids=visible_project_ids,
-            limit=limit,
-        )
-
-    async def get_recent_activity(
-        self,
-        entity_id: int,
-        *,
-        visible_project_ids: List[str],
-        hours: int = 24,
-    ) -> List[Dict]:
-        return await self._knowledge_query_reader.get_recent_activity(
-            entity_id,
-            visible_project_ids=visible_project_ids,
-            hours=hours,
-        )
-
-    async def find_path(
-        self,
-        start_entity_id: int,
-        end_entity_id: int,
-        *,
-        visible_project_ids: List[str],
-        max_depth: int = 4,
-    ) -> List[Dict]:
-        return await self._graph_reader.find_path(
-            start_entity_id,
-            end_entity_id,
-            visible_project_ids=visible_project_ids,
-            max_depth=max_depth,
         )

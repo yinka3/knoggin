@@ -1,6 +1,6 @@
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Iterator, Optional, Protocol, Union
+from typing import Generator, Optional, Protocol, Union
 
 
 class Clock(Protocol):
@@ -90,7 +90,9 @@ def reset_clock() -> None:
 
 
 @contextmanager
-def frozen_time(frozen_at: Union[Clock, str, float, int, datetime]) -> Iterator[Clock]:
+def frozen_time(
+    frozen_at: Union[Clock, str, float, int, datetime]
+) -> Generator[Clock, None, None]:
     global _active_clock
     previous = _active_clock
     clock = set_test_clock(frozen_at)

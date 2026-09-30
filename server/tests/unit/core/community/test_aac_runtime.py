@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
+from common.schema.settings import SearchSettings
 from core.agent.services.agent_manager import AgentManager
 from core.community.aac_store import AACStore
 from core.community.read_context import AACReadContext
@@ -23,7 +25,7 @@ def _provider(*, enabled: bool = True):
     config = SimpleNamespace(
         search=SimpleNamespace(model_dump=lambda: {}),
         developer_settings=SimpleNamespace(
-            search=SimpleNamespace(model_dump=lambda: {}),
+            search=SearchSettings(),
             community=community,
         ),
     )
@@ -40,7 +42,7 @@ class ConfigBus:
         self.config = SimpleNamespace(
             search=SimpleNamespace(model_dump=lambda: {}),
             developer_settings=SimpleNamespace(
-                search=SimpleNamespace(model_dump=lambda: {}),
+                search=SearchSettings(),
                 community=self.community,
             ),
         )
@@ -72,6 +74,143 @@ class FakeSeeder:
     async def decide(self, *, budget):
         self.budgets.append(budget)
         return self.decision
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_aac_search_policy_changes_only_on_context_refresh():
+    resources = FakeResources()
+    config = ConfigBus(enabled=False)
+    config.config.developer_settings.search = SearchSettings(default_entity_limit=3)
+
+    def forbid_web_settings():
+        raise AssertionError("Internal retrieval must not consume web settings")
+
+    config.config.search.model_dump = forbid_web_settings
+    resources.knowledge_store.search_entity = AsyncMock(return_value=[])
+    runtime = await AACRuntime.create(
+        user_name="ada", resources=resources,
+        agent_manager=AgentManager(resources, user_name="ada"),
+        config_provider=config,
+    )
+    previous = runtime.read_context
+    config.config.developer_settings.search.default_entity_limit = 7
+    await previous.knowledge_retrieval.search_entities("query")
+    assert resources.knowledge_store.search_entity.await_args.kwargs["limit"] == 3
+
+    await runtime._refresh_read_context()
+    assert runtime.read_context is not previous
+    await runtime.read_context.knowledge_retrieval.search_entities("query")
+    assert resources.knowledge_store.search_entity.await_args.kwargs["limit"] == 7
+    await previous.knowledge_retrieval.search_entities("query")
+    assert resources.knowledge_store.search_entity.await_args.kwargs["limit"] == 3
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_repeated_start_does_not_interrupt_owned_discussion():
+    resources = FakeResources()
+    manager = AgentManager(resources, user_name="ada")
+    context = await AACReadContext.create(
+        user_name="ada", postgres=resources.postgres,
+        knowledge_store=resources.knowledge_store,
+        embedding_service=resources.embedding,
+    )
+    runtime = AACRuntime(
+        user_name="ada", resources=resources, agent_manager=manager,
+        read_context=context, store=AACStore(resources.postgres),
+        config_provider=_provider(enabled=False),
+    )
+    calls = 0
+
+    async def interrupt(**_):
+        nonlocal calls
+        calls += 1
+
+    runtime.store.interrupt_active_discussions = interrupt
+    await runtime.start()
+    first = runtime._opportunity_task
+    await runtime.start()
+    assert calls == 1
+    assert runtime._opportunity_task is first
+    await runtime.shutdown()
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_shutdown_waits_for_cancelled_admission_write_to_publish():
+    resources = FakeResources()
+    manager = AgentManager(resources, user_name="ada")
+    agent = await manager.create_agent("Researcher", "Careful")
+    await manager.set_aac_enabled(agent.id, True)
+    context = await AACReadContext.create(
+        user_name="ada", postgres=resources.postgres,
+        knowledge_store=resources.knowledge_store,
+        embedding_service=resources.embedding,
+    )
+    runtime = AACRuntime(
+        user_name="ada", resources=resources, agent_manager=manager,
+        read_context=context, store=AACStore(resources.postgres),
+        config_provider=_provider(), seeder=FakeSeeder(SeedDecision("START", "Topic")),
+    )
+    entered, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def write(**_):
+        entered.set()
+        await release.wait()
+
+    async def discussion(**_):
+        finished.set()
+
+    runtime.store.create_discussion = write
+    runtime._run_discussion = discussion
+    admission = asyncio.create_task(runtime.trigger_discussion())
+    await entered.wait()
+    admission.cancel()
+    shutdown = asyncio.create_task(runtime.shutdown())
+    await asyncio.sleep(0)
+    assert not shutdown.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await admission
+    await shutdown
+    assert finished.is_set()
+    assert runtime._discussion_task is None or runtime._discussion_task.done()
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_shutdown_during_seeding_does_not_persist_discussion():
+    resources = FakeResources()
+    manager = AgentManager(resources, user_name="ada")
+    agent = await manager.create_agent("Researcher", "Careful")
+    await manager.set_aac_enabled(agent.id, True)
+    context = await AACReadContext.create(
+        user_name="ada", postgres=resources.postgres,
+        knowledge_store=resources.knowledge_store,
+        embedding_service=resources.embedding,
+    )
+    runtime = AACRuntime(
+        user_name="ada", resources=resources, agent_manager=manager,
+        read_context=context, store=AACStore(resources.postgres), config_provider=_provider(),
+        seeder=FakeSeeder(SeedDecision("START", "Topic")),
+    )
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def decide(*, budget):
+        entered.set()
+        await release.wait()
+        return SeedDecision("START", "Topic")
+
+    runtime.seeder.decide = decide
+    write = runtime.store.create_discussion = AsyncMock()
+    admission = asyncio.create_task(runtime.trigger_discussion())
+    await entered.wait()
+    shutdown = asyncio.create_task(runtime.shutdown())
+    release.set()
+    assert (await admission).reason == "shutting_down"
+    await shutdown
+    write.assert_not_awaited()
 
 
 @pytest.mark.runtime
@@ -383,25 +522,26 @@ async def test_private_specialists_cannot_publish_or_spawn_without_promotion(mon
     }
     assert result == "Checked dates."
     assert captured["run"].is_community is False
-    assert {"save_insight", "vote_insight", "remove_insight_vote", "spawn_specialist", "consult_specialist"}.isdisjoint(visible_tools)
-    assert {"search_documents", "search_insights", "edit_brain"}.issubset(visible_tools)
+    assert {"save_community_insight", "vote_community_insight", "remove_community_insight_vote", "spawn_community_specialist", "consult_community_specialist"}.isdisjoint(visible_tools)
+    assert {"search_project_documents", "search_community_insights", "edit_agent_brain"}.issubset(visible_tools)
 
 
 @pytest.mark.runtime
 @pytest.mark.no_network
+@pytest.mark.parametrize("empty_tools", [False, True])
 async def test_aac_participants_cannot_reexpose_project_tools_from_agent_settings(
-    monkeypatch,
+    monkeypatch, empty_tools,
 ):
     resources = FakeResources()
     manager = AgentManager(resources, user_name="ada")
     agent = await manager.create_agent(
         "Researcher",
         "Careful",
-        enabled_tools=[
-            "search_documents",
-            "create_file",
-            "update_file",
-            "append_file",
+        enabled_tools=[] if empty_tools else [
+            "search_project_documents",
+            "create_project_file",
+            "update_project_file",
+            "append_project_file",
         ],
     )
     context = await AACReadContext.create(
@@ -442,9 +582,12 @@ async def test_aac_participants_cannot_reexpose_project_tools_from_agent_setting
     visible_tools = {
         schema["function"]["name"] for schema in captured["run"].tool_runtime.schemas
     }
-    assert "search_documents" in visible_tools
+    if empty_tools:
+        assert visible_tools == {"submit_answer", "request_clarification", "set_research_plan"}
+    else:
+        assert "search_project_documents" in visible_tools
     assert {
-        "create_file",
-        "update_file",
-        "append_file",
+        "create_project_file",
+        "update_project_file",
+        "append_project_file",
     }.isdisjoint(visible_tools)

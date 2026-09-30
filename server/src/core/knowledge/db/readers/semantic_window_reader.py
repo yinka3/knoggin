@@ -116,6 +116,83 @@ class SemanticWindowReader:
         )
         return None if row is None else SemanticWindowRecord.model_validate(row)
 
+    async def list_failed_active_windows(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        limit: int,
+    ) -> list[SemanticWindowRecord]:
+        """Return a bounded set of active windows carrying failure metadata."""
+
+        user_name, project_id = self._scope(
+            user_name, project_id, "list_failed_active_windows"
+        )
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or not 1 <= limit <= 100
+        ):
+            raise ValueError("limit must be between 1 and 100")
+        rows = await self.client.fetch_all(
+            f"""
+            SELECT {_WINDOW_COLUMNS}
+            FROM public.project_semantic_windows AS semantic_window
+            WHERE semantic_window.user_name = %s
+              AND semantic_window.project_id = %s
+              AND semantic_window.stage <> 'completed'
+              AND semantic_window.last_failure_at_ms IS NOT NULL
+            ORDER BY semantic_window.last_failure_at_ms ASC,
+                     semantic_window.window_id ASC
+            LIMIT %s
+            """,
+            (user_name, project_id, limit),
+        )
+        return [SemanticWindowRecord.model_validate(row) for row in rows]
+
+    async def get_health_summary(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> dict[str, int | None]:
+        """Return bounded aggregate window status without message identifiers."""
+
+        user_name, project_id = self._scope(
+            user_name, project_id, "get_health_summary"
+        )
+        row = await self.client.fetch_one(
+            """
+            SELECT
+                count(*) FILTER (WHERE stage <> 'completed') AS pending_count,
+                count(*) FILTER (WHERE stage = 'claimed') AS claimed_count,
+                count(*) FILTER (WHERE last_failure_at_ms IS NOT NULL) AS failed_count,
+                count(*) FILTER (
+                    WHERE stage <> 'completed'
+                      AND last_failure_at_ms IS NOT NULL
+                      AND next_retry_at_ms IS NULL
+                ) AS exhausted_count,
+                min((EXTRACT(EPOCH FROM claimed_at) * 1000)::BIGINT)
+                    FILTER (WHERE stage <> 'completed') AS oldest_pending_ms,
+                max((EXTRACT(EPOCH FROM completed_at) * 1000)::BIGINT)
+                    AS last_processed_ms
+            FROM public.project_semantic_windows
+            WHERE user_name = %s AND project_id = %s
+            """,
+            (user_name, project_id),
+        )
+        return {
+            key: row.get(key) if row else None
+            for key in (
+                "pending_count",
+                "claimed_count",
+                "failed_count",
+                "exhausted_count",
+                "oldest_pending_ms",
+                "last_processed_ms",
+            )
+        }
+
     async def get_window_messages(
         self,
         window_id: UUID | str,

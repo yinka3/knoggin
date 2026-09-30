@@ -6,7 +6,10 @@ import asyncio
 from functools import partial
 from typing import cast
 
+from loguru import logger
+
 from common.conf.manager import ConfigManager
+from common.schema.settings import DeveloperSettings, RootConfig
 from common.scoping import (
     IDENTITY_ENTITY_ID,
     require_scope_value,
@@ -51,11 +54,13 @@ class ProjectRuntimeFactory:
         user_name: str,
         maintenance_service: ProjectMaintenanceService | None = None,
         config_manager: ConfigManager | None = None,
+        filesystem_factory: ProjectFilesystemFactory | None = None,
     ) -> None:
         self.resources = resources
         self.user_name = user_name
         self._maintenance_service = maintenance_service
         self._config_manager = config_manager
+        self._filesystem_factory = filesystem_factory
 
     @property
     def dev_settings(self):
@@ -75,23 +80,23 @@ class ProjectRuntimeFactory:
         require_scope_value(project_id, "project_id", "ProjectRuntimeFactory")
         require_visible_project_ids(readable_project_ids, "ProjectRuntimeFactory")
         resources = self.resources.require_ready()
+        config_manager = self._config()
+        runtime_config = config_manager.config
+        developer_settings = runtime_config.developer_settings
 
         domain_store = DomainConfigStore(resources.postgres)
         domain_config = await domain_store.load(self.user_name, project_id)
         compiled_domain = domain_config.compile()
-        entity_settings = self.dev_settings.entity_resolution
+        entity_settings = developer_settings.entity_resolution
         entities = EntityResolver(
             project_id=project_id,
             readable_project_ids=readable_project_ids,
             knowledge_store=resources.knowledge_store,
-            fuzzy_substring_threshold=entity_settings.fuzzy_substring_threshold,
-            fuzzy_non_substring_threshold=entity_settings.fuzzy_non_substring_threshold,
-            generic_token_freq=entity_settings.generic_token_freq,
             candidate_fuzzy_threshold=entity_settings.candidate_fuzzy_threshold,
+            jev_client=getattr(resources, "jev_client", None),
         )
         await self._verify_user_entity(entities)
 
-        runtime_config = self._config().config
         retrieval = KnowledgeRetrieval(
             project_id=project_id,
             readable_project_ids=readable_project_ids,
@@ -99,10 +104,7 @@ class ProjectRuntimeFactory:
             entities=entities,
             embedding_service=resources.embedding,
             knowledge_store=resources.knowledge_store,
-            search_config={
-                **runtime_config.developer_settings.search.model_dump(),
-                **runtime_config.search.model_dump(),
-            },
+            search_settings=developer_settings.search,
         )
 
         text_processor = await asyncio.get_running_loop().run_in_executor(
@@ -114,10 +116,11 @@ class ProjectRuntimeFactory:
                 get_profile=entities.get_profile,
                 vp01=await resources.get_vp01(compiled_domain.vp01_language),
                 spacy=resources.spacy,
-                settings=self.dev_settings.nlp_pipeline,
+                settings=developer_settings.nlp_pipeline,
                 model_work=resources.model_work,
                 get_vp01=resources.get_vp01,
                 llm=resources.llm_service,
+                jev_client=getattr(resources, "jev_client", None),
                 user_name=self.user_name,
             ),
         )
@@ -130,6 +133,8 @@ class ProjectRuntimeFactory:
             project_id,
             readable_project_ids=readable_project_ids,
             resources=resources,
+            runtime_config=runtime_config,
+            config_manager=config_manager,
         )
         runtime = ProjectRuntime(
             project_id=project_id,
@@ -140,17 +145,23 @@ class ProjectRuntimeFactory:
             user_name=self.user_name,
             readable_project_ids=readable_project_ids,
             domain_config=domain_config,
+            compiled_domain=compiled_domain,
             document_service=document_service,
             domain_config_store=domain_store,
+            config_manager=config_manager,
             background_work=resources.background_work,
             get_vp01=resources.get_vp01,
         )
         project_semantic_processor = self._create_project_semantic_processor(
-            runtime, resources=resources
+            runtime,
+            resources=resources,
+            developer_settings=developer_settings,
+            config_manager=config_manager,
         )
         runtime.project_semantic_processor = project_semantic_processor
         conflict_discovery_job = self._create_conflict_discovery_job(
-            resources=resources
+            resources=resources,
+            developer_settings=developer_settings,
         )
         runtime.conflict_discovery_job = conflict_discovery_job
 
@@ -166,11 +177,16 @@ class ProjectRuntimeFactory:
                 processor=text_processor,
                 project_semantic_processor=project_semantic_processor,
                 conflict_discovery_job=conflict_discovery_job,
-                resources=resources,
+                config_manager=config_manager,
             )
             await scheduler.start()
         except Exception:
-            await runtime.shutdown()
+            try:
+                await runtime.shutdown()
+            except Exception:
+                logger.exception(
+                    "ProjectRuntime cleanup also failed after bootstrap failure"
+                )
             raise
         return runtime
 
@@ -180,12 +196,21 @@ class ProjectRuntimeFactory:
         *,
         readable_project_ids: list[str],
         resources: ReadyRuntimeResources | None = None,
+        runtime_config: RootConfig | None = None,
+        config_manager: ConfigManager | None = None,
     ) -> DocumentService:
+        """Build the project document boundary from one captured config snapshot.
+
+        Document parser/indexing policy, reranking, project-library location,
+        and reconciliation cadence intentionally change only when the project
+        runtime is rebuilt. They are not registered as live config subscribers.
+        """
         resources = resources or cast(ReadyRuntimeResources, self.resources)
-        runtime_config = self._config().config
+        config_manager = config_manager or self._config()
+        runtime_config = runtime_config or config_manager.config
         document_settings = runtime_config.developer_settings.documents
-        filesystem_factory = ProjectFilesystemFactory(
-            self._config().resolve_path(document_settings.project_library_root)
+        filesystem_factory = self._filesystem_factory or ProjectFilesystemFactory(
+            config_manager.resolve_path(document_settings.project_library_root)
         )
         reader = DocumentReader(
             resources.postgres,
@@ -235,8 +260,12 @@ class ProjectRuntimeFactory:
         runtime: ProjectRuntime,
         *,
         resources: ReadyRuntimeResources | None = None,
+        developer_settings: DeveloperSettings | None = None,
+        config_manager: ConfigManager | None = None,
     ) -> ProjectSemanticProcessor:
         resources = resources or cast(ReadyRuntimeResources, self.resources)
+        config_manager = config_manager or self._config()
+        developer_settings = developer_settings or config_manager.config.developer_settings
         token_counter = getattr(resources.llm_service, "count_tokens", None)
         if not callable(token_counter):
             raise RuntimeError(
@@ -244,19 +273,20 @@ class ProjectRuntimeFactory:
             )
         admission = SemanticWindowAdmission(
             resources.knowledge_store,
-            self.dev_settings.ingestion,
+            developer_settings.ingestion,
             token_counter=token_counter,
-            episode_settings=self.dev_settings.jobs.episode,
+            episode_settings=developer_settings.jobs.episode,
         )
         episode_generator = EpisodeGenerator(
             llm=resources.llm_service,
             embedding_service=resources.embedding,
         )
-        context_filesystem = ProjectFilesystemFactory(
-            self._config().resolve_path(
-                self.dev_settings.documents.project_library_root
+        filesystem_factory = self._filesystem_factory or ProjectFilesystemFactory(
+            config_manager.resolve_path(
+                developer_settings.documents.project_library_root
             )
-        ).for_project(runtime.project_id)
+        )
+        context_filesystem = filesystem_factory.for_project(runtime.project_id)
         context_projection = ContextProjection(
             reader=ProjectContextReader(resources.postgres),
             writer=ProjectContextWriter(resources.postgres),
@@ -266,7 +296,7 @@ class ProjectRuntimeFactory:
             admission,
             resources.knowledge_store,
             episode_generator,
-            settings=self.dev_settings.ingestion,
+            settings=developer_settings.ingestion,
             capture_semantic_policy=runtime.capture_semantic_policy,
             context_updater=ContextUpdater(llm=resources.llm_service),
             context_projection=context_projection,
@@ -287,13 +317,15 @@ class ProjectRuntimeFactory:
         self,
         *,
         resources: ReadyRuntimeResources | None = None,
+        developer_settings: DeveloperSettings | None = None,
     ) -> ConflictDiscoveryJob | None:
         if self._maintenance_service is None:
             return None
         resources = resources or cast(ReadyRuntimeResources, self.resources)
+        developer_settings = developer_settings or self.dev_settings
         return ConflictDiscoveryJob(
             self._maintenance_service,
-            self.dev_settings.jobs.conflict_discovery,
+            developer_settings.jobs.conflict_discovery,
             llm=resources.llm_service,
         )
 
@@ -303,12 +335,12 @@ class ProjectRuntimeFactory:
         *,
         entities: EntityResolver,
         processor: TextProcessor,
-        project_semantic_processor: ProjectSemanticProcessor | None = None,
+        project_semantic_processor: ProjectSemanticProcessor,
         conflict_discovery_job: ConflictDiscoveryJob | None = None,
-        resources: ReadyRuntimeResources | None = None,
+        config_manager: ConfigManager | None = None,
     ) -> None:
         scheduler = runtime.scheduler
-        config_manager = self._config()
+        config_manager = config_manager or self._config()
 
         def update_entity_resolution(settings):
             entities.update_settings(settings)
@@ -325,20 +357,19 @@ class ProjectRuntimeFactory:
                 "developer_settings.nlp_pipeline",
             )
         )
-        if project_semantic_processor is not None:
-            scheduler.register(project_semantic_processor)
-            runtime.add_config_unsubscriber(
-                config_manager.subscribe(
-                    project_semantic_processor.update_settings,
-                    "developer_settings.ingestion",
-                )
+        scheduler.register(project_semantic_processor)
+        runtime.add_config_unsubscriber(
+            config_manager.subscribe(
+                project_semantic_processor.update_settings,
+                "developer_settings.ingestion",
             )
-            runtime.add_config_unsubscriber(
-                config_manager.subscribe(
-                    project_semantic_processor.update_episode_settings,
-                    "developer_settings.jobs.episode",
-                )
+        )
+        runtime.add_config_unsubscriber(
+            config_manager.subscribe(
+                project_semantic_processor.update_episode_settings,
+                "developer_settings.jobs.episode",
             )
+        )
         if conflict_discovery_job is not None:
             scheduler.register(conflict_discovery_job)
             runtime.add_config_unsubscriber(

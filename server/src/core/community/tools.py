@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import Awaitable, Callable, Dict, List, Mapping, Optional
 
+from common.schema.agent.community_tools import AAC_SPECIFIC_SCHEMAS
 from common.schema.agent.identity import AgentConfig, PersonaProfile
 from common.utils.agent_identity import normalize_agent_brain
 from core.agent.services.agent_manager import AgentManager
-from core.agent.tools.registry import Tools
+from core.agent.tools.registry import Tools, validate_tool_owner
 from core.community.aac_store import AACStore
 
 SpecialistRunner = Callable[[AgentConfig, str], Awaitable[object]]
@@ -34,7 +35,7 @@ class AACTools(Tools):
     ) -> None:
         super().__init__(
             user_name=user_name,
-            entities=base_tools.entities,
+            project_id=base_tools.project_id,
             session_id=base_tools.session_id,
             compiled_domain=None,
             search_config=base_tools.search_cfg,
@@ -46,6 +47,7 @@ class AACTools(Tools):
             agent_id=agent_id,
             health_service=None,
             entity_maintenance_service=base_tools.entity_maintenance_service,
+            project_maintenance_service=base_tools.project_maintenance_service,
         )
         self.aac_store = store
         self.agent_manager = agent_manager
@@ -53,7 +55,7 @@ class AACTools(Tools):
         self.agent_id = agent_id
         self._specialist_runner = specialist_runner
 
-    async def save_insight(
+    async def save_community_insight(
         self,
         content: str,
         visibility: str = "shared",
@@ -67,7 +69,7 @@ class AACTools(Tools):
         )
         return {"saved": True, "insight_id": insight_id, "visibility": visibility}
 
-    async def search_insights(
+    async def search_community_insights(
         self,
         query: str = "",
         limit: int = 20,
@@ -79,7 +81,7 @@ class AACTools(Tools):
             limit=limit,
         )
 
-    async def vote_insight(
+    async def vote_community_insight(
         self,
         insight_id: str,
         vote: str,
@@ -94,7 +96,7 @@ class AACTools(Tools):
         )
         return {"voted": True, "insight_id": insight_id, "vote": vote}
 
-    async def remove_insight_vote(self, insight_id: str) -> Dict[str, object]:
+    async def remove_community_insight_vote(self, insight_id: str) -> Dict[str, object]:
         removed = await self.aac_store.remove_insight_vote(
             insight_id=insight_id,
             user_name=self.user_name,
@@ -102,7 +104,7 @@ class AACTools(Tools):
         )
         return {"removed": removed, "insight_id": insight_id}
 
-    async def spawn_specialist(
+    async def spawn_community_specialist(
         self,
         name: str,
         persona: Mapping[str, str],
@@ -125,7 +127,7 @@ class AACTools(Tools):
             "seeded_directives": len(initial_directives or []),
         }
 
-    async def consult_specialist(
+    async def consult_community_specialist(
         self,
         specialist_id: str,
         question: str,
@@ -155,3 +157,6 @@ class AACTools(Tools):
             for mode in labels
             if grouped[mode]
         )
+
+
+validate_tool_owner(AACTools, AAC_SPECIFIC_SCHEMAS)

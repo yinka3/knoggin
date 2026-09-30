@@ -4,6 +4,7 @@ from pydantic import Field, model_validator
 
 from common.schema.agent.settings import AgentLimitSettings
 from common.schema.config import ConfigModel
+from common.schema.jev import JevSettings
 
 DEFAULT_SPARSE_CONTEXT_VERBS = [
     "accepted",
@@ -67,8 +68,6 @@ class IngestionSettings(ConfigModel):
 
 
 class DocumentIndexingSettings(ConfigModel):
-    recovery_interval_seconds: int = Field(60, ge=10)
-    recovery_batch_size: int = Field(16, ge=1, le=100)
     reconciliation_interval_seconds: int = Field(60, ge=10)
 
 
@@ -127,9 +126,6 @@ class SearchSettings(ConfigModel):
 
 
 class EntityResolutionSettings(ConfigModel):
-    fuzzy_substring_threshold: int = Field(75, ge=50, le=100)
-    fuzzy_non_substring_threshold: int = Field(91, ge=50, le=100)
-    generic_token_freq: int = Field(10, ge=1)
     candidate_fuzzy_threshold: int = Field(85, ge=50, le=100)
     resolution_threshold: float = Field(0.85, ge=0.0, le=1.0)
     resolution_margin: float = Field(0.10, ge=0.0, le=1.0)
@@ -220,5 +216,6 @@ class DeveloperSettings(ConfigModel):
 class RootConfig(ConfigModel):
     user_aliases: List[str] = Field(default_factory=list)
     llm: LLMSettings = Field(default_factory=LLMSettings)
+    jev: JevSettings = Field(default_factory=JevSettings)
     search: SearchAPIKeySettings = Field(default_factory=SearchAPIKeySettings)
     developer_settings: DeveloperSettings = Field(default_factory=DeveloperSettings)

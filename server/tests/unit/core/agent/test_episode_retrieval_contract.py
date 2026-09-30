@@ -43,6 +43,7 @@ def episode(episode_id: str, entity_id: int = 2) -> Episode:
 def source_message(message_id: int = 7) -> dict:
     return {
         "message_id": message_id,
+        "session_id": "session-1",
         "role": "user",
         "content": "Let's use episodic memory.",
         "timestamp_ms": 1760000000000,
@@ -382,5 +383,50 @@ async def test_read_episode_returns_all_scoped_source_messages():
 
     result = await tool.read_episode("episode-1", session_id="session-1")
 
-    assert [message["id"] for message in result] == [7, 8]
+    assert [message["id"] for message in result] == ["msg_7", "msg_8"]
+    assert all(message["session_id"] == "session-1" for message in result)
     assert all(message["context"][0]["is_hit"] for message in result)
+
+
+@pytest.mark.no_network
+async def test_episode_and_message_hydration_share_durable_message_identity():
+    class FakeKnowledgeStore(EpisodeStore):
+        async def get_project_episode(self, episode_id, **_scope):
+            return episode(episode_id)
+
+        async def get_project_episode_source_messages(self, _episode_id, **_scope):
+            return [source_message(7)]
+
+        async def get_messages_by_ids(self, _message_ids, **_scope):
+            return [
+                {
+                    "id": 7,
+                    "user_name": "ada",
+                    "session_id": "session-1",
+                    "role": "user",
+                    "content": "Let's use episodic memory.",
+                    "timestamp": 1760000000000,
+                }
+            ]
+
+    tool = EpisodeTool()
+    tool.knowledge_store = FakeKnowledgeStore()
+
+    episode_messages = await tool.read_episode(
+        "episode-1", session_id="session-1"
+    )
+    hydrated_messages = await tool._hydrate_evidence(
+        [
+            {
+                "user_name": "ada",
+                "session_id": "session-1",
+                "message_id": 7,
+            }
+        ],
+        session_id="session-1",
+    )
+
+    identity_fields = ("id", "user_name", "session_id", "timestamp")
+    assert {
+        key: episode_messages[0][key] for key in identity_fields
+    } == {key: hydrated_messages[0][key] for key in identity_fields}

@@ -3,6 +3,7 @@ from uuid import UUID
 
 import pytest
 
+from common.artifact_retention import ARTIFACT_RETENTION_PERIOD
 from common.schema.artifacts import ArtifactDraft, MarkdownArtifactBlock
 from core.knowledge.db.readers.artifact_reader import ArtifactReader
 from core.knowledge.db.writers.artifact_writer import ArtifactWriter
@@ -97,7 +98,7 @@ async def test_artifact_reader_resolves_message_artifact_with_full_scope():
     query, params = client.calls[0][1], client.calls[0][2]
     assert "artifact.originating_message_id = %s" in query
     assert "artifact.session_id = %s" in query
-    assert params == (43, "ada", "project-1", "session-1", "ada")
+    assert params == (43, "ada", "project-1", "session-1", "ada", ARTIFACT_RETENTION_PERIOD)
 
 
 @pytest.mark.storage

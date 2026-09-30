@@ -23,13 +23,13 @@ from core.knowledge.documents.constants import (
     EXPECTED_EMBEDDING_DIMENSION,
     MAX_ERROR_MESSAGE_LENGTH,
 )
-from core.knowledge.documents.filesystem import ProjectFilesystem
-from core.knowledge.documents.policy import DocumentIndexPolicy
-from core.knowledge.documents.storage import (
+from core.knowledge.documents.extraction import (
     DocumentChunk,
     embedding_text,
     extract_and_split_document,
 )
+from core.knowledge.documents.filesystem import ProjectFilesystem
+from core.knowledge.documents.policy import DocumentIndexPolicy
 from core.knowledge.services.embedding_service import EmbeddingService
 from infrastructure.background_work import (
     BackgroundWorkCoordinator,

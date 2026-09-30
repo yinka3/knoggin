@@ -12,17 +12,30 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import datetime
 from typing import Annotated, Any, Literal, Union
+from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
+from common.document_limits import MAX_DOCUMENT_BASE64_LENGTH, MAX_SOURCE_BATCH_ITEMS
 from common.exceptions import (
     ConfigurationError,
     DependencyError,
+    EpisodeEditConflictError,
     IdempotencyConflictError,
     LLMBudgetExceededError,
     LLMProviderError,
     LLMResponseError,
     NotFoundError,
+    PayloadTooLargeError,
     RequestInProgressError,
     RequestInterruptedError,
     SessionBusyError,
@@ -35,6 +48,8 @@ from common.schema.artifacts import ArtifactBlock, ArtifactKind, ArtifactStatus
 from common.schema.document import DocumentSelection
 from common.schema.evidence import EvidenceBundle, EvidencePointer, EvidenceSnapshot
 from common.schema.maintenance import MaintenanceImpactPreview
+from common.schema.settings import DeveloperSettings, LLMSpendingBudgetSettings
+from common.schema.source.locators import DocumentLocator
 from common.schema.source.references import SourceConsulted
 
 PUBLIC_CONTRACT_VERSION = "1"
@@ -70,8 +85,21 @@ class PublicModel(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
         frozen=True,
-        str_strip_whitespace=True,
+        str_strip_whitespace=False,
     )
+
+    @field_validator(
+        "id", "project_id", "session_id", "agent_id", "run_id", "document_id",
+        "source_ref_id", "artifact_id", "episode_id", "request_id", "model", "idempotency_key",
+        mode="before", check_fields=False,
+    )
+    @classmethod
+    def _normalise_identifiers(cls, value, info):
+        if isinstance(value, str) and (
+            info.field_name.endswith("_id") or info.field_name in {"id", "model", "idempotency_key"}
+        ):
+            return value.strip()
+        return value
 
 
 class CreateProjectRequest(PublicModel):
@@ -98,6 +126,38 @@ class ProjectResponse(PublicModel):
     updated_at: datetime | None = None
 
 
+class UpdateProjectRequest(PublicModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=10_000)
+    allowed_projects: list[str] | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _project_name(cls, value):
+        if value is None:
+            return value
+        value = value.strip()
+        if not value:
+            raise ValueError("name must not be blank")
+        return value
+
+    @field_validator("allowed_projects")
+    @classmethod
+    def _readable_projects(cls, value):
+        if value is None:
+            return value
+        names = [name.strip() for name in value]
+        if any(not name for name in names) or len(set(names)) != len(names):
+            raise ValueError("allowed_projects must contain unique nonblank IDs")
+        return names
+
+
+class ProjectDeletedResponse(PublicModel):
+    project_id: str = Field(min_length=1)
+    deleted: Literal[True] = True
+    file_cleanup_status: Literal["complete", "pending"]
+
+
 class CreateSessionRequest(PublicModel):
     project_id: str = Field(min_length=1)
     model: str | None = Field(default=None, min_length=1)
@@ -116,6 +176,123 @@ class SessionResponse(PublicModel):
     enabled_tools: tuple[str, ...] | None = None
     created_at: datetime | None = None
     last_active_at: datetime | None = None
+
+
+class UpdateSessionRequest(PublicModel):
+    """Omitted fields are unchanged; null resets optional settings."""
+
+    model: str | None = Field(default=None, min_length=1)
+    agent_id: str | None = Field(default=None, min_length=1)
+    enabled_tools: list[str] | None = None
+
+    _normalise_tools = field_validator("enabled_tools")(_normalise_enabled_tools)
+
+
+class SessionHistoryMessage(PublicModel):
+    message_id: int = Field(ge=1)
+    role: Literal["user", "assistant", "system", "tool"]
+    content: str
+    timestamp: datetime
+
+
+class SessionDeletedResponse(PublicModel):
+    session_id: str = Field(min_length=1)
+    deleted: Literal[True] = True
+
+
+class SettingsUpdateRequest(PublicModel):
+    updates: dict[str, Any]
+
+
+class PublicLLMSettings(PublicModel):
+    agent_model: str
+    extraction_model: str
+    merge_model: str
+    spending_budget: LLMSpendingBudgetSettings
+    api_key_configured: bool
+
+
+class PublicSearchSettings(PublicModel):
+    provider: str
+    brave_api_key_configured: bool
+    tavily_api_key_configured: bool
+
+
+class SettingsResponse(PublicModel):
+    user_aliases: tuple[str, ...]
+    llm: PublicLLMSettings
+    search: PublicSearchSettings
+    developer_settings: DeveloperSettings
+
+
+class SettingsApplyStatusResponse(PublicModel):
+    generation: int = Field(ge=0)
+    persisted: bool
+    activated: bool
+    failed_subscriptions: tuple[int, ...]
+    pending_subscriptions: tuple[int, ...]
+    fully_applied: bool
+
+
+class SettingsOperationResponse(PublicModel):
+    accepted: bool
+    status: SettingsApplyStatusResponse
+
+
+class AACAdmissionResponse(PublicModel):
+    outcome: Literal["started", "skipped"]
+    reason: Literal["admitted", "shutting_down", "disabled", "already_active", "no_enabled_agents", "no_seed"]
+    discussion_id: str | None = None
+
+
+class AACStopResponse(PublicModel):
+    stop_requested: bool
+
+
+class AACParticipationRequest(PublicModel):
+    enabled: bool
+
+
+class AACParticipationResponse(PublicModel):
+    agent_id: str = Field(min_length=1)
+    enabled: bool
+
+
+class AACDiscussionResponse(PublicModel):
+    discussion_id: str
+    topic: str
+    status: Literal["active", "completed", "stopped", "interrupted", "failed"]
+    end_reason: Literal["completed", "token_budget", "user_stopped", "no_participants", "shutdown", "failed", "startup_recovery", "interrupted"] | None = None
+    token_budget: int = Field(ge=0)
+    tokens_used: int = Field(ge=0)
+    started_at: datetime
+    ended_at: datetime | None = None
+
+
+class AACTimelineResponse(PublicModel):
+    timeline_id: str
+    kind: Literal["agent_message", "system_event"]
+    agent_id: str | None = None
+    content: str
+    created_at: datetime
+    event_sequence: int = Field(gt=0)
+
+
+class AACInsightResponse(PublicModel):
+    insight_id: str
+    discussion_id: str | None = None
+    author_agent_id: str
+    visibility: Literal["shared", "private"]
+    content: str
+    created_at: datetime
+
+
+class AACInsightVoteResponse(PublicModel):
+    voter_agent_id: str
+    vote: Literal["up", "down"]
+    reason: str
+    created_at: datetime
+    updated_at: datetime
 
 
 class UpdateAgentRequest(PublicModel):
@@ -201,6 +378,152 @@ class PromoteSourceRequest(PublicModel):
     source_ref_id: str = Field(min_length=1)
     title: str | None = Field(default=None, max_length=512)
     summary: str | None = Field(default=None, max_length=4000)
+
+
+class UploadDocumentRequest(PublicModel):
+    """Upload one document using base64-encoded source bytes."""
+
+    original_name: str = Field(min_length=1, max_length=512)
+    content_base64: str = Field(min_length=1)
+    relative_path: str | None = Field(default=None, min_length=1, max_length=2048)
+
+    @field_validator("content_base64", mode="before")
+    @classmethod
+    def _bound_encoded_content(cls, value):
+        if isinstance(value, str) and len(value) > MAX_DOCUMENT_BASE64_LENGTH:
+            raise PayloadTooLargeError()
+        return value
+
+
+class DocumentResponse(PublicModel):
+    document_id: str = Field(min_length=1)
+    project_id: str = Field(min_length=1)
+    original_name: str = Field(min_length=1)
+    relative_path: str = Field(min_length=1)
+    extension: str
+    size_bytes: int = Field(ge=0)
+    content_hash: str = Field(min_length=1)
+    status: Literal["queued", "indexing", "indexed", "failed", "deleted"]
+    current_snapshot_id: str | None = None
+    chunk_count: int = Field(default=0, ge=0)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    indexed_at: datetime | None = None
+    deleted_at: datetime | None = None
+    next_index_retry_at: datetime | None = None
+    index_attempt_count: int = Field(default=0, ge=0)
+    last_index_failure_kind: Literal["transient_dependency", "invalid_content"] | None = None
+
+
+class DocumentContentResponse(DocumentResponse):
+    document_name: str
+    parse_snapshot_id: str = Field(min_length=1)
+    chunk_index: str
+    content: str
+    start_line: int = Field(ge=1)
+    end_line: int = Field(ge=1)
+    total_lines: int = Field(ge=1)
+    truncated: bool
+    locator: DocumentLocator
+    page_number: int | None = Field(default=None, ge=1)
+
+
+class DocumentDeletedResponse(PublicModel):
+    document_id: str = Field(min_length=1)
+    deleted: Literal[True]
+
+
+class SavedWebLinkResponse(PublicModel):
+    link_id: str = Field(min_length=1)
+    project_id: str = Field(min_length=1)
+    url: str = Field(min_length=1)
+    title: str | None = None
+    summary: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class SavedWebLinkDeletedResponse(PublicModel):
+    link_id: str = Field(min_length=1)
+    deleted: Literal[True]
+
+
+def project_public_model(model, value):
+    """Project service dictionaries through a declared public field allowlist."""
+    if isinstance(value, model):
+        return value
+    if isinstance(value, BaseModel):
+        value = value.model_dump()
+    if not isinstance(value, dict):
+        raise PublicStreamContractError("Invalid public management result")
+    projected = {name: value[name] for name in model.model_fields if name in value}
+    for name, item in projected.items():
+        if (name == "id" or name.endswith("_id")) and isinstance(item, UUID):
+            projected[name] = str(item)
+    return model.model_validate(projected)
+
+
+class UpdateSavedWebLinkRequest(PublicModel):
+    title: str | None = Field(default=None, max_length=512)
+    summary: str | None = Field(default=None, max_length=4000)
+
+
+class UpdateEpisodeRequest(PublicModel):
+    """Replace the complete narrative, not the episode's canonical sources."""
+
+    summary: str = Field(min_length=1, max_length=20_000)
+    new_developments: list[Annotated[str, Field(min_length=1, max_length=20_000)]] = Field(max_length=100)
+    updates: list[Annotated[str, Field(min_length=1, max_length=20_000)]] = Field(max_length=100)
+    unresolved: list[Annotated[str, Field(min_length=1, max_length=20_000)]] = Field(max_length=100)
+    expected_updated_at: AwareDatetime
+
+    @field_validator("summary")
+    @classmethod
+    def _summary(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("summary must not be blank")
+        return value
+
+    @field_validator("new_developments", "updates", "unresolved")
+    @classmethod
+    def _items(cls, values: list[str]) -> list[str]:
+        result = [value.strip() for value in values]
+        if any(not value for value in result):
+            raise ValueError("narrative items must not be blank")
+        return result
+
+    @model_validator(mode="after")
+    def _hard_narrative_limit(self):
+        if self.narrative_character_count() > 20_000:
+            raise ValueError("episode narrative exceeds the hard character limit")
+        return self
+
+    def narrative_character_count(self) -> int:
+        return sum(len(value) for value in (
+            self.summary, *self.new_developments, *self.updates, *self.unresolved,
+        ))
+
+
+class EpisodeResponse(PublicModel):
+    """Narrative and revision only; no vectors, raw sources or generator metadata."""
+
+    episode_id: str = Field(min_length=1)
+    project_id: str = Field(min_length=1)
+    summary: str = Field(min_length=1)
+    new_developments: tuple[str, ...]
+    updates: tuple[str, ...]
+    unresolved: tuple[str, ...]
+    user_modified: bool
+    created_at: AwareDatetime
+    updated_at: AwareDatetime
+
+
+class EpisodeEditedResponse(PublicModel):
+    episode_id: str = Field(min_length=1)
+    project_id: str = Field(min_length=1)
+    user_modified: Literal[True] = True
+    updated_at: AwareDatetime
 
 
 class MaintenanceReviewResponse(PublicModel):
@@ -353,6 +676,9 @@ class PublicError(PublicModel):
 
 
 _PUBLIC_ERROR_PROJECTIONS: dict[type[Exception], tuple[str, str, bool]] = {
+    PermissionError: ("forbidden", "This operation is not allowed.", False),
+    PayloadTooLargeError: ("payload_too_large", "The upload exceeds the permitted size.", False),
+    FileNotFoundError: ("not_found", "The requested resource was not found.", False),
     ConfigurationError: (
         "configuration_error",
         "The server configuration is invalid.",
@@ -393,6 +719,11 @@ _PUBLIC_ERROR_PROJECTIONS: dict[type[Exception], tuple[str, str, bool]] = {
         "The workspace changed before the request could be applied.",
         False,
     ),
+    EpisodeEditConflictError: (
+        "episode_conflict",
+        "The episode changed or is unavailable. Read it again before editing.",
+        False,
+    ),
     StorageError: (
         "storage_unavailable",
         "Storage is temporarily unavailable.",
@@ -416,6 +747,35 @@ _PUBLIC_ERROR_PROJECTIONS: dict[type[Exception], tuple[str, str, bool]] = {
 }
 
 
+def sanitize_public_error(error: PublicError, *, request_id=None, run_id=None) -> PublicError:
+    messages = {code: message for code, message, _ in _PUBLIC_ERROR_PROJECTIONS.values()}
+    messages.update({
+        "invalid_request": "The request is invalid.",
+        "internal_error": "The server could not complete the request.",
+        "tool_failed": "A tool could not complete the request.",
+        "run_failed": "The run could not complete.",
+        "run_cancelled": "The run was cancelled.",
+        "clarification_required": "The run requires clarification.",
+        "unsupported_operation": "This operation is not supported.",
+    })
+    code = error.code if error.code in messages else "internal_error"
+    return PublicError(code=code, message=messages[code], retryable=error.retryable,
+                       request_id=request_id, run_id=run_id or error.run_id)
+
+
+def public_error_status(error: PublicError) -> int:
+    statuses = {
+        "invalid_request": 422, "forbidden": 403, "not_found": 404, "payload_too_large": 413,
+        "session_busy": 409, "idempotency_conflict": 409, "request_in_progress": 409,
+        "request_interrupted": 409, "workspace_conflict": 409, "episode_conflict": 409,
+        "run_cancelled": 409, "clarification_required": 409,
+        "llm_budget_exhausted": 429, "internal_error": 500, "configuration_error": 500,
+        "dependency_unavailable": 503, "storage_unavailable": 503, "model_unavailable": 503,
+        "invalid_model_response": 502, "run_failed": 502, "unsupported_operation": 501,
+    }
+    return statuses.get(error.code, 503 if error.retryable else 502)
+
+
 def to_public_error(
     error: Exception,
     *,
@@ -424,6 +784,9 @@ def to_public_error(
 ) -> PublicError:
     """Convert an internal exception without exposing details or stack text."""
 
+    if isinstance(error, (ValidationError, PublicStreamContractError)):
+        return PublicError(code="internal_error", message="The server could not complete the request.",
+                           request_id=request_id, run_id=run_id)
     if isinstance(error, ToolExecutionError):
         projection = (
             "tool_failed",
@@ -537,6 +900,43 @@ def validate_public_stream_event(event: object) -> PublicStreamEvent:
     return _public_stream_event_adapter.validate_python(event)
 
 
+class PublicStreamContractError(ValueError):
+    """Invalid server stream output, never an invalid client request."""
+
+
+class PublicStreamState:
+    """Small incremental validator shared by streaming and complete consumers."""
+
+    def __init__(self):
+        self.run_id: str | None = None
+        self.sequence = -1
+        self.terminal: PublicStreamEvent | None = None
+
+    def accept(self, raw: object) -> PublicStreamEvent:
+        if self.terminal is not None:
+            raise PublicStreamContractError("public stream cannot continue after terminal event")
+        try:
+            event = validate_public_stream_event(raw)
+        except ValueError:
+            raise PublicStreamContractError("Malformed public stream event") from None
+        if self.run_id is not None and event.run_id != self.run_id:
+            raise PublicStreamContractError("public stream events must belong to one run")
+        if event.sequence <= self.sequence:
+            raise PublicStreamContractError("public stream sequence must increase monotonically")
+        if isinstance(event, RunCompletedEvent) and event.result.run_id != event.run_id:
+            raise PublicStreamContractError("public terminal result must belong to the event run")
+        if isinstance(event, RunFailedEvent) and event.error.run_id not in (None, event.run_id):
+            raise PublicStreamContractError("public terminal error must belong to the event run")
+        self.run_id, self.sequence = event.run_id, event.sequence
+        if isinstance(event, (RunCompletedEvent, RunFailedEvent, RunCancelledEvent)):
+            self.terminal = event
+        return event
+
+    def finish(self, *, require_terminal=True):
+        if require_terminal and self.terminal is None:
+            raise PublicStreamContractError("public stream must end with one terminal event")
+
+
 def validate_public_stream(
     events: Sequence[object],
     *,
@@ -544,31 +944,51 @@ def validate_public_stream(
 ) -> tuple[PublicStreamEvent, ...]:
     """Validate ordering and one-run ownership for a complete public stream."""
 
-    parsed = tuple(validate_public_stream_event(event) for event in events)
-    if not parsed:
-        if require_terminal:
-            raise ValueError("public stream must contain a terminal event")
-        return parsed
-
-    run_id = parsed[0].run_id
-    previous_sequence = -1
-    terminal_count = 0
-    for event in parsed:
-        if event.run_id != run_id:
-            raise ValueError("public stream events must belong to one run")
-        if event.sequence <= previous_sequence:
-            raise ValueError("public stream sequence must increase monotonically")
-        previous_sequence = event.sequence
-        if event.type in {"run.completed", "run.failed", "run.cancelled"}:
-            terminal_count += 1
-    if terminal_count > 1:
-        raise ValueError("public stream must contain at most one terminal event")
-    if require_terminal and terminal_count != 1:
-        raise ValueError("public stream must end with one terminal event")
-    if terminal_count == 1 and parsed[-1].type not in {
-        "run.completed",
-        "run.failed",
-        "run.cancelled",
-    }:
-        raise ValueError("public stream events cannot follow a terminal event")
+    state = PublicStreamState()
+    parsed = tuple(state.accept(event) for event in events)
+    state.finish(require_terminal=require_terminal)
     return parsed
+
+
+class BatchDocumentItem(UploadDocumentRequest):
+    source_type: Literal["document"]
+
+
+class BatchWebLinkItem(PublicModel):
+    source_type: Literal["web_link"]
+    url: str = Field(min_length=1, max_length=2048)
+    title: str | None = Field(default=None, max_length=512)
+    summary: str | None = Field(default=None, max_length=4000)
+
+
+class BatchSourceRequest(PublicModel):
+    items: tuple[Annotated[Union[BatchDocumentItem, BatchWebLinkItem], Field(discriminator="source_type")], ...] = Field(min_length=1, max_length=MAX_SOURCE_BATCH_ITEMS)
+
+    @field_validator("items")
+    @classmethod
+    def _aggregate_encoded_limit(cls, items):
+        if sum(len(item.content_base64) for item in items if isinstance(item, BatchDocumentItem)) > MAX_DOCUMENT_BASE64_LENGTH:
+            raise PayloadTooLargeError()
+        return items
+
+
+class BatchDocumentAccepted(PublicModel):
+    index: int = Field(ge=0)
+    status: Literal["accepted_document"] = "accepted_document"
+    document: DocumentResponse
+
+
+class BatchWebLinkAccepted(PublicModel):
+    index: int = Field(ge=0)
+    status: Literal["accepted_web_link"] = "accepted_web_link"
+    link: SavedWebLinkResponse
+
+
+class BatchSourceFailed(PublicModel):
+    index: int = Field(ge=0)
+    status: Literal["failed"] = "failed"
+    error: PublicError
+
+
+class BatchSourceResponse(PublicModel):
+    results: tuple[Annotated[Union[BatchDocumentAccepted, BatchWebLinkAccepted, BatchSourceFailed], Field(discriminator="status")], ...]

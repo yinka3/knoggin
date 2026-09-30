@@ -54,3 +54,20 @@ async def test_aac_document_reader_uses_only_readable_project_ownership():
     params = postgres.calls[-1][2]
     assert params[0] == list(context.readable_project_ids)
     assert params[1] == 10
+
+
+@pytest.mark.no_network
+async def test_refreshed_context_withdraws_deleted_projects_from_all_readers():
+    postgres = FakePostgresClient()
+    postgres.upsert_project("withdrawn", user_name="ada")
+    args = dict(user_name="ada", postgres=postgres, knowledge_store=object(),
+                embedding_service=FakeEmbeddingService())
+    previous = await AACReadContext.create(**args)
+    assert "withdrawn" in previous.readable_project_ids
+    postgres.upsert_project("withdrawn", status="deleted", user_name="ada")
+    postgres.upsert_project("new", user_name="ada")
+    refreshed = await AACReadContext.create(**args)
+    assert refreshed.readable_project_ids == (IDENTITY_SCOPE, "new")
+    assert refreshed.entities.readable_project_ids == [IDENTITY_SCOPE, "new"]
+    await refreshed.documents.list_documents(limit=10)
+    assert postgres.calls[-1][2][0] == [IDENTITY_SCOPE, "new"]

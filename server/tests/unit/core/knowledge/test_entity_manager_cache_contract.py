@@ -44,29 +44,6 @@ def test_entity_index_populate_register_and_alias_views_are_coherent():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-def test_entity_index_alias_collisions_and_idempotent_commits():
-    index = EntityIndex()
-    index.populate(
-        {
-            "id": 101,
-            "canonical_name": "Robert Chen",
-            "aliases": ["Bob"],
-        }
-    )
-    index.populate({"id": 202, "canonical_name": "Bob Smith", "aliases": []})
-
-    changed = index.commit_aliases(202, ["Bob", "B. Smith"])
-    second_changed = index.commit_aliases(202, ["B. Smith"])
-
-    assert changed is True
-    assert second_changed is False
-    assert index.get_entity_id_for_name("bob") == 101
-    assert index.get_entity_id_for_name("b. smith") == 202
-    assert "bob" not in set(index.get_mentions(202))
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
 def test_entity_index_populate_preserves_shared_alias_ambiguity():
     index = EntityIndex()
     index.populate(

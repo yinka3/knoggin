@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 from common.conf.domain_config import DomainConfig
+from common.schema.settings import RootConfig
 from core.knowledge.db.readers.document_reader import DocumentReader
 from core.knowledge.db.writers.document_writer import DocumentWriter
 from core.knowledge.documents import DocumentService
@@ -60,6 +61,7 @@ def make_project_state(
         reader=reader,
         writer=writer,
     )
+    active_domain = domain_config or make_domain_config()
     return ProjectRuntime(
         project_id=project_id,
         entities=entities,
@@ -69,9 +71,11 @@ def make_project_state(
         ),
         scheduler=scheduler,
         user_name="ada",
-        domain_config=domain_config or make_domain_config(),
+        domain_config=active_domain,
+        compiled_domain=active_domain.compile(),
         readable_project_ids=[project_id],
         document_service=document_service,
         domain_config_store=DomainConfigStore(postgres),
+        config_manager=SimpleNamespace(config=RootConfig()),
         background_work=background_work,
     )

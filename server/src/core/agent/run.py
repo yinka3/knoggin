@@ -358,7 +358,6 @@ class AgentRun:
     consecutive_errors: int = 0
     consecutive_empty_results: int = 0
     empty_retrieval_signatures: Set[Tuple[str, str]] = field(default_factory=set)
-    tools_used: List[str] = field(default_factory=list)
     previous_calls: Set[Tuple[str, str]] = field(default_factory=set)
     last_error: Optional[str] = None
     tool_call_counts: Dict[str, int] = field(default_factory=dict)
@@ -675,7 +674,6 @@ class AgentRun:
         call_sig = (tool_name, json.dumps(args, sort_keys=True, default=str))
         self.previous_calls.add(call_sig)
         self.call_count += 1
-        self.tools_used.append(tool_name)
         self.tool_call_counts[tool_name] = self.tool_call_counts.get(tool_name, 0) + 1
 
     def record_error(self, message: str) -> None:
@@ -708,11 +706,13 @@ class AgentRun:
 
     def record_source(self, candidate: SourceReferenceCandidate) -> None:
         self._require_active()
-        self.source_candidates.append(candidate)
+        if candidate not in self.source_candidates:
+            self.source_candidates.append(candidate)
 
     def record_sources(self, candidates: List[SourceReferenceCandidate]) -> None:
         self._require_active()
-        self.source_candidates.extend(candidates)
+        for candidate in candidates:
+            self.record_source(candidate)
 
     def accumulate_tool_result(
         self, tool_name: str, result: Dict

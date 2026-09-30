@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from inspect import isawaitable
 from typing import Any, Callable, Optional, Protocol, cast
@@ -17,11 +18,13 @@ from loguru import logger
 from common.conf.manager import ConfigManager
 from common.exceptions import ConfigurationError, DependencyError
 from common.utils.coordination_log import configure_coordination_log
+from common.utils.lifecycle import settle_owned_task
 from core.ingestion.vp01 import GLiNER25VP01Adapter
 from core.knowledge.db.embedding_rebuilder import EmbeddingRebuilder
 from core.knowledge.services.embedding_service import EmbeddingService
 from core.knowledge.store import KnowledgeStore
 from infrastructure.background_work import BackgroundWorkCoordinator
+from infrastructure.jev_client import JevClient
 from infrastructure.llm_client import LLMService
 from infrastructure.model_work import ModelWorkCoordinator, ModelWorkPriority
 from infrastructure.postgres_client import PostgresClient
@@ -53,6 +56,7 @@ class ReadyRuntimeResources(Protocol):
     postgres: PostgresClient
     embedding: EmbeddingService
     llm_service: LLMService
+    jev_client: JevClient
     executor: ThreadPoolExecutor
     background_work: BackgroundWorkCoordinator
     model_work: ModelWorkCoordinator
@@ -71,6 +75,7 @@ class RuntimeResources:
         self.postgres: Optional[PostgresClient] = None
         self.embedding: Optional[EmbeddingService] = None
         self.llm_service: Optional[LLMService] = None
+        self.jev_client: JevClient | None = None
         self.executor: Optional[ThreadPoolExecutor] = None
         self.background_work: Optional[BackgroundWorkCoordinator] = None
         self.model_work: Optional[ModelWorkCoordinator] = None
@@ -82,30 +87,41 @@ class RuntimeResources:
         self.spacy: Optional[Any] = None
         self.config_unsubscribers: list[Any] = []
         self._started = False
+        self._closing = False
+        self._shutdown_lock = asyncio.Lock()
         self._shutdown_complete = False
         self._shutdown_error: RuntimeResourcesShutdownError | None = None
 
     @classmethod
-    async def create(cls, num_workers: int | None = None) -> "RuntimeResources":
+    async def create(cls, num_workers: int | None = None, *, config_manager=None) -> "RuntimeResources":
         """Create fully initialized resources without registering global state."""
 
         instance = cls()
+        instance._config_manager = config_manager
+        instance._startup_config = deepcopy(config_manager.config) if config_manager is not None else None
         try:
             await instance._start(num_workers=num_workers)
-        except Exception as exc:
+        except BaseException as exc:
             logger.error(f"Runtime resource initialization failed: {exc}")
-            cleanup_failures = await instance._teardown(wait=False)
+            cleanup = asyncio.create_task(instance._teardown(wait=True))
+            cleanup_failures = await settle_owned_task(cleanup)
             for failure in cleanup_failures:
                 logger.error(
                     "Runtime resource startup cleanup failed in {}: {}",
                     failure.phase,
                     failure.error,
                 )
-            if isinstance(exc, (DependencyError, ConfigurationError)):
+            if cleanup_failures:
+                # Keep failed handles reachable through the primary startup error.
+                exc.cleanup_owner = instance
+            if not isinstance(exc, Exception) or isinstance(exc, (DependencyError, ConfigurationError)):
                 raise
-            raise DependencyError(
+            error = DependencyError(
                 f"Unexpected error during runtime resource initialization: {exc}"
-            ) from exc
+            )
+            if cleanup_failures:
+                error.cleanup_owner = instance
+            raise error from exc
 
         instance._started = True
         logger.info("Runtime resources initialized")
@@ -121,7 +137,7 @@ class RuntimeResources:
     def require_ready(self) -> ReadyRuntimeResources:
         """Return the complete resource view guaranteed by successful startup."""
 
-        if not self._started or self._shutdown_complete:
+        if not self._started or self._closing or self._shutdown_complete:
             raise RuntimeError("Runtime resources are not ready")
         return cast(ReadyRuntimeResources, self)
 
@@ -130,12 +146,16 @@ class RuntimeResources:
 
         if language not in {"en", "multilingual"}:
             raise ValueError("VP-01 language must be 'en' or 'multilingual'")
+        if self._closing:
+            raise RuntimeError("Runtime resources are shutting down")
         if self.model_work is None:
             raise RuntimeError("VP-01 model work coordinator is unavailable")
         existing = self._vp01_by_language.get(language)
         if existing is not None:
             return existing
         async with self._vp01_load_lock:
+            if self._closing:
+                raise RuntimeError("Runtime resources are shutting down")
             existing = self._vp01_by_language.get(language)
             if existing is not None:
                 return existing
@@ -147,6 +167,8 @@ class RuntimeResources:
                 priority=ModelWorkPriority.BACKGROUND,
                 name=f"vp01-{language}-model-load",
             )
+            if self._closing:
+                raise RuntimeError("Runtime resources are shutting down")
             self._vp01_by_language[language] = model
             if language == "en":
                 self.vp01 = model
@@ -157,6 +179,8 @@ class RuntimeResources:
         load_dotenv()
         resource_profile = ResourceProfile.from_environment()
         if num_workers is not None:
+            if isinstance(num_workers, bool) or not isinstance(num_workers, int) or num_workers < 1:
+                raise ConfigurationError("num_workers must be a positive integer")
             resource_profile = replace(resource_profile, worker_count=num_workers)
         self.resource_profile = resource_profile
 
@@ -212,8 +236,8 @@ class RuntimeResources:
         if self.postgres is None or self.model_work is None or self.resource_profile is None:
             raise RuntimeError("Runtime datastore and worker dependencies are unavailable")
 
-        config_manager = ConfigManager.get()
-        config = config_manager.config
+        config_manager = self._config_manager or ConfigManager.get()
+        config = self._startup_config or deepcopy(config_manager.config)
 
         def configure_runtime_coordination_log(settings):
             configure_coordination_log(
@@ -222,9 +246,6 @@ class RuntimeResources:
                 )
             )
 
-        configure_runtime_coordination_log(
-            config.developer_settings.coordination_log
-        )
         self.config_unsubscribers.append(
             config_manager.subscribe(
                 configure_runtime_coordination_log,
@@ -250,6 +271,13 @@ class RuntimeResources:
         self.config_unsubscribers.append(
             config_manager.subscribe(self.llm_service.update_settings, "llm")
         )
+        # The lightweight owner makes no HTTP client/request at disabled startup.
+        self.jev_client = JevClient(
+            config.jev, spending_ledger=self.llm_service.spending_ledger
+        )
+        self.config_unsubscribers.append(
+            config_manager.subscribe(self.jev_client.update_settings, "jev")
+        )
         self.embedding = EmbeddingService(
             embedding_model=os.getenv(
                 "KNOGGIN_EMBEDDING_MODEL", "dunzhang/stella_en_1.5B_v5"
@@ -261,9 +289,8 @@ class RuntimeResources:
             ),
             device=device,
             batch_size=self.resource_profile.embedding_batch_size,
+            model_work=self.model_work,
         )
-        if hasattr(self.embedding, "set_model_work_coordinator"):
-            self.embedding.set_model_work_coordinator(self.model_work)
         self.knowledge_store = KnowledgeStore(
             postgres_client=self.postgres,
             embedding_service=self.embedding,
@@ -286,14 +313,22 @@ class RuntimeResources:
         async def load_vp01() -> None:
             await self.get_vp01("en")
 
-        try:
-            await asyncio.gather(
+        loaders = asyncio.gather(
                 self.llm_service.load_tokenizer(),
                 self.embedding.load_models(),
                 load_spacy(),
                 load_vp01(),
+                return_exceptions=True,
             )
+        try:
+            results = await asyncio.shield(loaders)
+            for result in results:
+                if isinstance(result, BaseException):
+                    raise result
             await EmbeddingRebuilder(self.postgres, self.embedding).ensure_configuration()
+        except asyncio.CancelledError:
+            await settle_owned_task(loaders)
+            raise
         except Exception as exc:
             logger.critical(f"Global resource initialization failed: {exc}")
             raise DependencyError(
@@ -310,43 +345,69 @@ class RuntimeResources:
 
         failures: list[RuntimeResourceShutdownFailure] = []
 
-        async def attempt(phase: str, callback: Callable[[], object]) -> None:
+        self._closing = True
+
+        async def attempt(phase: str, callback: Callable[[], object]) -> bool:
             try:
                 result = callback()
                 if isawaitable(result):
                     await result
+                return True
             except Exception as exc:
                 logger.exception(f"Runtime resource cleanup failed: {phase}")
                 failures.append(RuntimeResourceShutdownFailure(phase=phase, error=exc))
+                return False
 
-        unsubscribers, self.config_unsubscribers = self.config_unsubscribers, []
-        for index, unsubscribe in enumerate(unsubscribers, start=1):
-            await attempt(f"configuration unsubscribe {index}", unsubscribe)
+        for index, unsubscribe in enumerate(tuple(self.config_unsubscribers), start=1):
+            if await attempt(f"configuration unsubscribe {index}", unsubscribe):
+                self.config_unsubscribers.remove(unsubscribe)
 
-        background_work, self.background_work = self.background_work, None
+        background_work = self.background_work
         if background_work is not None:
-            await attempt("background work", background_work.shutdown)
+            if await attempt("background work", background_work.shutdown):
+                self.background_work = None
+        if self.background_work is not None:
+            return tuple(failures)
 
-        model_work, self.model_work = self.model_work, None
+        model_work = self.model_work
         if model_work is not None:
-            await attempt("model work", model_work.shutdown)
+            if await attempt("model work", model_work.shutdown):
+                self.model_work = None
+        if self.model_work is not None or self.config_unsubscribers:
+            return tuple(failures)
 
-        executor, self.executor = self.executor, None
+        executor = self.executor
         if executor is not None:
-            await attempt("executor", lambda: executor.shutdown(wait=wait))
+            if await attempt("executor", lambda: executor.shutdown(wait=wait)):
+                self.executor = None
+        if self.executor is not None:
+            return tuple(failures)
 
-        postgres, self.postgres = self.postgres, None
+        # JEV cancellation settles shared accounting while PostgreSQL is alive.
+        jev_client = self.jev_client
+        if jev_client is not None:
+            if await attempt("JEV client", jev_client.close):
+                self.jev_client = None
+            else:
+                return tuple(failures)
+
+        postgres = self.postgres
         if postgres is not None:
-            await attempt("PostgreSQL", postgres.close)
+            if await attempt("PostgreSQL", postgres.close):
+                self.postgres = None
 
-        embedding, self.embedding = self.embedding, None
+        embedding = self.embedding
         if embedding is not None:
-            await attempt("embedding", embedding.cleanup)
+            if await attempt("embedding", embedding.cleanup):
+                self.embedding = None
 
-        llm_service, self.llm_service = self.llm_service, None
+        llm_service = self.llm_service
         if llm_service is not None:
-            await attempt("LLM client", llm_service.close)
+            if await attempt("LLM client", llm_service.close):
+                self.llm_service = None
 
+        if failures:
+            return tuple(failures)
         self.vp01 = None
         self._vp01_by_language.clear()
         self._vp01_device = None
@@ -368,18 +429,31 @@ class RuntimeResources:
         }
 
     async def shutdown(self) -> None:
-        """Release resources once through the authoritative application owner."""
+        """Serialize cleanup, retaining unsuccessful owners for a later retry."""
+
+        async with self._shutdown_lock:
+            cleanup = asyncio.create_task(self._shutdown_locked())
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                try:
+                    await settle_owned_task(cleanup)
+                except Exception:
+                    logger.exception("Resource cleanup failed while caller was cancelled")
+                raise
+
+    async def _shutdown_locked(self) -> None:
 
         if self._shutdown_complete:
-            if self._shutdown_error is not None:
-                raise self._shutdown_error
             return
 
-        failures = await self._teardown(wait=True)
+        self._closing = True
         self._started = False
-        self._shutdown_complete = True
+        failures = await self._teardown(wait=True)
         if failures:
             error = RuntimeResourcesShutdownError(failures)
             self._shutdown_error = error
             raise error
+        self._shutdown_error = None
+        self._shutdown_complete = True
         logger.info("Runtime resources shut down")

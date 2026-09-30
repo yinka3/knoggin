@@ -1,5 +1,6 @@
 import pytest
 
+from core.knowledge.documents.indexer import DocumentIndexer
 from core.knowledge.documents.service import DocumentService
 from infrastructure.background_work import BackgroundWorkCoordinator
 from infrastructure.model_work import ModelWorkCoordinator
@@ -75,7 +76,9 @@ def test_document_indexing_snapshot_for_health_is_public_and_json_safe() -> None
         "document_id": "doc-1",
         "message": "document content",
     }
-    service.indexing_snapshot = lambda: raw
+    indexer = object.__new__(DocumentIndexer)
+    indexer.indexing_snapshot = lambda: raw
+    service._indexer = indexer
 
     safe = service.indexing_snapshot_for_health()
 

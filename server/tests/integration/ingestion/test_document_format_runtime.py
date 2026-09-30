@@ -9,8 +9,8 @@ from common.schema.public import StartRunRequest, validate_public_stream
 from common.schema.settings import DeveloperSettings, IngestionSettings, RootConfig
 from core.agent.orchestrator import AgentOrchestrator
 from core.knowledge.documents import DocumentService, ProjectFilesystemFactory
-from core.knowledge.documents import storage as document_storage
-from core.knowledge.documents.storage import (
+from core.knowledge.documents import extraction as document_extraction
+from core.knowledge.documents.extraction import (
     DocumentParseSnapshot,
     DocumentSnapshotPage,
     LayoutRegion,
@@ -43,7 +43,7 @@ class _DeterministicDocumentAgentLLM:
     def __init__(self):
         self.steps = [
             (
-                "search_documents",
+                "search_project_documents",
                 '{"query": "violet launch phrase", "limit": 1}',
                 "document-search-1",
             ),
@@ -112,6 +112,7 @@ class _StaticSessionManager:
 
 def _session(resources, *, user_name, project_id, session_id):
     project = SimpleNamespace(
+        project_id=project_id,
         scheduler=object(),
         project_semantic_processor=object(),
         record_session_activity=lambda: asyncio.sleep(0),
@@ -265,12 +266,12 @@ async def test_public_runtime_preserves_format_specific_document_provenance(
     scope = real_server_scope
     postgres = scope["postgres"]
     monkeypatch.setattr(
-        document_storage.pytesseract,
+        document_extraction.pytesseract,
         "image_to_string",
         lambda _: "The violet launch phrase is durable.\n",
     )
     monkeypatch.setattr(
-        document_storage,
+        document_extraction,
         "_extract_docling_snapshot",
         _structured_parse_snapshot,
     )
@@ -329,6 +330,7 @@ async def test_public_runtime_preserves_format_specific_document_provenance(
         session_id=scope["session_id"],
     )
     context.project = SimpleNamespace(
+        project_id=scope["project_id"],
         scheduler=object(),
         project_semantic_processor=object(),
         record_session_activity=lambda: asyncio.sleep(0),
@@ -350,7 +352,7 @@ async def test_public_runtime_preserves_format_specific_document_provenance(
             "communication_signature": "clear",
             "productive_flaw": "overexplains",
         },
-        enabled_tools=["search_documents"],
+        enabled_tools=["search_project_documents"],
     )
     context.agent_orchestrator = AgentOrchestrator(
         _StaticAgentManager(agent),
@@ -370,7 +372,7 @@ async def test_public_runtime_preserves_format_specific_document_provenance(
             request=StartRunRequest(
                 session_id=scope["session_id"],
                 query="What is the violet launch phrase?",
-                enabled_tools=["search_documents"],
+                enabled_tools=["search_project_documents"],
             ),
         )
     ]
@@ -380,7 +382,7 @@ async def test_public_runtime_preserves_format_specific_document_provenance(
     assert not [event for event in public_events if event.type == "run.failed"]
     assert any(
         event.type == "tool.completed"
-        and event.tool_name == "search_documents"
+        and event.tool_name == "search_project_documents"
         and event.succeeded
         for event in public_events
     )
@@ -390,14 +392,13 @@ async def test_public_runtime_preserves_format_specific_document_provenance(
     if expected_source is None:
         assert source_events == []
         assert response.result.source_ref_ids == ()
-        answer = await store.get_assistant_message_with_sources(
+        sources = await store.get_message_source_refs(
             response.result.assistant_message_id,
             user_name=scope["user_name"],
             project_id=scope["project_id"],
             session_id=scope["session_id"],
         )
-        assert answer is not None
-        assert answer.sources_consulted == ()
+        assert sources == []
         return
 
     assert len(source_events) == 1
@@ -407,15 +408,14 @@ async def test_public_runtime_preserves_format_specific_document_provenance(
     assert source_events[0].source.locator.model_dump() == expected_source["locator"]
 
     assert len(response.result.source_ref_ids) == 1
-    answer = await store.get_assistant_message_with_sources(
+    sources = await store.get_message_source_refs(
         response.result.assistant_message_id,
         user_name=scope["user_name"],
         project_id=scope["project_id"],
         session_id=scope["session_id"],
     )
-    assert answer is not None
-    assert len(answer.sources_consulted) == 1
-    assert answer.sources_consulted[0].source_status == "available"
+    assert len(sources) == 1
+    assert sources[0].source_status == "available"
     assert (
-        answer.sources_consulted[0].locator.model_dump() == expected_source["locator"]
+        sources[0].locator.model_dump() == expected_source["locator"]
     )

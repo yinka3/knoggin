@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "kind": "deterministic_and_fake_backed_baseline",
+  "human_review_status": "pending",
+  "live_provider_calls": 0,
+  "records": [
+    {
+      "case_id": "ambiguous_bob",
+      "entity_ids": [
+        703
+      ],
+      "new_entity_ids": [
+        703
+      ],
+      "identity_outcome": "abstained"
+    },
+    {
+      "case_id": "explicit_bob",
+      "entity_ids": [
+        701
+      ],
+      "new_entity_ids": [],
+      "identity_outcome": "reused"
+    },
+    {
+      "case_id": "one_mention_covers_block",
+      "mentions": [
+        {
+          "name": "Orion",
+          "type": "Company",
+          "topic": "Work",
+          "origin": "vp01"
+        }
+      ],
+      "generative_calls": 0
+    },
+    {
+      "case_id": "endpoint_gap",
+      "mentions": [
+        {
+          "name": "Orion",
+          "type": "Company",
+          "topic": "Work",
+          "origin": "vp01"
+        },
+        {
+          "name": "Zephyr Dynamics",
+          "type": "Company",
+          "topic": "Work",
+          "origin": "llm_fallback"
+        }
+      ],
+      "generative_calls": 1
+    }
+  ]
+}

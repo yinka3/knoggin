@@ -8,7 +8,7 @@ need to start PostgreSQL or an embedding model.
 
 from __future__ import annotations
 
-import inspect
+import asyncio
 import json
 import re
 from collections.abc import AsyncIterator, Mapping
@@ -19,47 +19,71 @@ from uuid import uuid4
 from fastapi import Depends, FastAPI, Header, Path, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import ValidationError
+from loguru import logger
 
-from common.exceptions import (
-    DependencyError,
-    IdempotencyConflictError,
-    LLMBudgetExceededError,
-    LLMProviderError,
-    NotFoundError,
-    RequestInProgressError,
-    RequestInterruptedError,
-    SessionBusyError,
-    StorageError,
-    ToolExecutionError,
-    WorkspaceConflictError,
-)
+from api.upload_limits import DocumentUploadLimitMiddleware
+from common.schema.document import FolderScanSettings
+from common.schema.health import HealthSnapshot
 from common.schema.public import (
+    AACAdmissionResponse,
+    AACDiscussionResponse,
+    AACInsightResponse,
+    AACInsightVoteResponse,
+    AACParticipationRequest,
+    AACParticipationResponse,
+    AACStopResponse,
+    AACTimelineResponse,
     ArtifactListResponse,
     ArtifactResponse,
     ArtifactRevisionResponse,
+    BatchSourceFailed,
+    BatchSourceRequest,
+    BatchSourceResponse,
     CreateProjectRequest,
     CreateSessionRequest,
+    DocumentContentResponse,
+    DocumentDeletedResponse,
     DocumentFocusResponse,
+    DocumentResponse,
     EntityMergeRollbackRequest,
+    EpisodeEditedResponse,
+    EpisodeResponse,
     MaintenanceOperationResponse,
     MaintenanceReviewDecisionRequest,
     MaintenanceReviewDetailResponse,
     MaintenanceReviewListResponse,
     MaintenanceReviewPreviewResponse,
     MaintenanceReviewResponse,
+    ProjectDeletedResponse,
     ProjectResponse,
     PromoteSourceRequest,
     PublicError,
-    RunCancelledEvent,
+    PublicStreamContractError,
+    PublicStreamState,
     RunCompletedEvent,
     RunFailedEvent,
     RunResult,
+    SavedWebLinkDeletedResponse,
+    SavedWebLinkResponse,
+    SessionDeletedResponse,
+    SessionHistoryMessage,
+    SessionResponse,
     SetDocumentFocusRequest,
+    SettingsApplyStatusResponse,
+    SettingsOperationResponse,
+    SettingsResponse,
+    SettingsUpdateRequest,
     StartRunRequest,
+    UpdateEpisodeRequest,
+    UpdateProjectRequest,
+    UpdateSavedWebLinkRequest,
+    UpdateSessionRequest,
+    UploadDocumentRequest,
+    public_error_status,
+    sanitize_public_error,
     to_public_error,
-    validate_public_stream_event,
 )
+from common.utils.lifecycle import settle_owned_task
 
 
 class ApplicationPort(Protocol):
@@ -67,9 +91,22 @@ class ApplicationPort(Protocol):
 
     Implementations may wrap the existing project/session managers and
     orchestrator, but the adapter does not require those internal classes.  A
-    port method may return the corresponding public model or a mapping/object
-    that can be projected to it.
+    port method returns canonical public fields, never arbitrary object aliases.
     """
+
+    async def get_engine_health(self, *, user_name: str) -> HealthSnapshot: ...
+
+    async def get_resource_health(
+        self, *, user_name: str, project_id: str
+    ) -> HealthSnapshot: ...
+
+    async def get_ingestion_health(
+        self, *, user_name: str, project_id: str
+    ) -> HealthSnapshot: ...
+
+    async def get_background_health(
+        self, *, user_name: str, project_id: str
+    ) -> HealthSnapshot: ...
 
     async def create_project(
         self,
@@ -78,12 +115,57 @@ class ApplicationPort(Protocol):
         request: CreateProjectRequest,
     ) -> ProjectResponse | Mapping[str, Any]: ...
 
+    async def admit_sources_batch(self, *, user_name: str, project_id: str, request: BatchSourceRequest) -> BatchSourceResponse: ...
+
+    async def get_settings(self, *, user_name: str) -> SettingsResponse: ...
+    async def get_settings_status(self, *, user_name: str) -> SettingsApplyStatusResponse: ...
+    async def update_settings(self, *, user_name: str, request: SettingsUpdateRequest) -> SettingsOperationResponse: ...
+    async def reload_settings(self, *, user_name: str) -> SettingsOperationResponse: ...
+    async def retry_settings_applies(self, *, user_name: str) -> SettingsApplyStatusResponse: ...
+
+    async def trigger_aac(self, *, user_name: str) -> AACAdmissionResponse: ...
+    async def stop_aac(self, *, user_name: str) -> AACStopResponse: ...
+    async def set_aac_participation(self, *, user_name: str, agent_id: str, enabled: bool) -> AACParticipationResponse: ...
+    async def list_aac_discussions(self, *, user_name: str, limit: int = 20) -> list[AACDiscussionResponse]: ...
+    async def list_aac_timeline(self, *, user_name: str, discussion_id: str, limit: int = 100, after_sequence: int = 0) -> list[AACTimelineResponse]: ...
+    async def list_aac_insights(self, *, user_name: str, query: str | None = None, limit: int = 20) -> list[AACInsightResponse]: ...
+    async def list_aac_insight_votes(self, *, user_name: str, insight_id: str) -> list[AACInsightVoteResponse]: ...
+
+    async def list_projects(self, *, user_name: str) -> list[ProjectResponse]: ...
+    async def get_project(self, *, user_name: str, project_id: str) -> ProjectResponse: ...
+    async def update_project(self, *, user_name: str, project_id: str, request: UpdateProjectRequest) -> ProjectResponse: ...
+    async def archive_project(self, *, user_name: str, project_id: str) -> ProjectResponse: ...
+    async def delete_project(self, *, user_name: str, project_id: str) -> ProjectDeletedResponse: ...
+
+    async def get_episode(
+        self, *, user_name: str, project_id: str, episode_id: str
+    ) -> EpisodeResponse: ...
+
+    async def update_episode(
+        self, *, user_name: str, project_id: str, episode_id: str,
+        request: UpdateEpisodeRequest,
+    ) -> EpisodeEditedResponse: ...
+
     async def create_session(
         self,
         *,
         user_name: str,
         request: CreateSessionRequest,
-    ) -> Any: ...
+    ) -> SessionResponse | Mapping[str, Any]: ...
+
+    async def list_sessions(self, *, user_name: str) -> list[SessionResponse]: ...
+
+    async def get_session_history(
+        self, *, user_name: str, session_id: str, limit: int = 100
+    ) -> list[SessionHistoryMessage]: ...
+
+    async def update_session(
+        self, *, user_name: str, session_id: str, request: UpdateSessionRequest
+    ) -> SessionResponse: ...
+
+    async def delete_session(
+        self, *, user_name: str, session_id: str
+    ) -> SessionDeletedResponse: ...
 
     async def get_document_focus(
         self,
@@ -113,9 +195,22 @@ class ApplicationPort(Protocol):
         user_name: str,
         project_id: str,
         request: PromoteSourceRequest,
-    ) -> Any: ...
+    ) -> SavedWebLinkResponse: ...
 
-    async def run_stream(
+    async def list_documents(self, *, user_name: str, project_id: str, limit: int = 100) -> list[DocumentResponse]: ...
+    async def get_document(self, *, user_name: str, project_id: str, document_id: str) -> DocumentResponse: ...
+    async def read_document(self, *, user_name: str, project_id: str, document_id: str, start_line: int = 1, end_line: int | None = None) -> DocumentContentResponse: ...
+    async def upload_document(self, *, user_name: str, project_id: str, request: UploadDocumentRequest) -> DocumentResponse: ...
+    async def reindex_document(self, *, user_name: str, project_id: str, document_id: str) -> DocumentResponse: ...
+    async def delete_document(self, *, user_name: str, project_id: str, document_id: str) -> DocumentDeletedResponse: ...
+    async def list_saved_web_links(self, *, user_name: str, project_id: str, limit: int = 50) -> list[SavedWebLinkResponse]: ...
+    async def update_saved_web_link(self, *, user_name: str, project_id: str, link_id: str, request: UpdateSavedWebLinkRequest) -> SavedWebLinkResponse: ...
+    async def delete_saved_web_link(self, *, user_name: str, project_id: str, link_id: str) -> SavedWebLinkDeletedResponse: ...
+    async def get_document_scan_settings(self, *, user_name: str, project_id: str) -> FolderScanSettings: ...
+    async def set_document_scan_settings(self, *, user_name: str, project_id: str, settings: FolderScanSettings) -> FolderScanSettings: ...
+    async def reset_document_scan_settings(self, *, user_name: str, project_id: str) -> FolderScanSettings: ...
+
+    async def open_run_stream(
         self,
         *,
         user_name: str,
@@ -129,7 +224,7 @@ class ApplicationPort(Protocol):
         project_id: str,
         session_id: str | None = None,
         limit: int = 50,
-    ) -> Any: ...
+    ) -> ArtifactListResponse: ...
 
     async def get_artifact(
         self,
@@ -138,7 +233,7 @@ class ApplicationPort(Protocol):
         project_id: str,
         artifact_id: str,
         session_id: str | None = None,
-    ) -> Any: ...
+    ) -> ArtifactResponse | None: ...
 
     async def get_artifact_revision(
         self,
@@ -148,13 +243,13 @@ class ApplicationPort(Protocol):
         artifact_id: str,
         revision: int,
         session_id: str | None = None,
-    ) -> Any: ...
+    ) -> ArtifactRevisionResponse | None: ...
 
     async def list_global_maintenance_reviews(
         self,
         *,
         user_name: str,
-    ) -> Any: ...
+    ) -> list[MaintenanceReviewResponse]: ...
 
     async def decide_global_maintenance_review(
         self,
@@ -162,14 +257,14 @@ class ApplicationPort(Protocol):
         user_name: str,
         review_id: str,
         request: MaintenanceReviewDecisionRequest,
-    ) -> Any: ...
+    ) -> dict[str, Any]: ...
 
     async def list_project_maintenance_reviews(
         self,
         *,
         user_name: str,
         project_id: str,
-    ) -> Any: ...
+    ) -> list[MaintenanceReviewResponse]: ...
 
     async def get_project_maintenance_review(
         self,
@@ -177,7 +272,7 @@ class ApplicationPort(Protocol):
         user_name: str,
         project_id: str,
         review_id: str,
-    ) -> Any: ...
+    ) -> MaintenanceReviewDetailResponse: ...
 
     async def preview_project_maintenance_review(
         self,
@@ -185,7 +280,7 @@ class ApplicationPort(Protocol):
         user_name: str,
         project_id: str,
         review_id: str,
-    ) -> Any: ...
+    ) -> MaintenanceReviewPreviewResponse: ...
 
     async def decide_project_maintenance_review(
         self,
@@ -194,14 +289,14 @@ class ApplicationPort(Protocol):
         project_id: str,
         review_id: str,
         request: MaintenanceReviewDecisionRequest,
-    ) -> Any: ...
+    ) -> dict[str, Any]: ...
 
     async def preview_entity_merge_rollback(
         self,
         *,
         user_name: str,
         merge_id: str,
-    ) -> Any: ...
+    ) -> dict[str, Any]: ...
 
     async def rollback_entity_merge(
         self,
@@ -209,7 +304,7 @@ class ApplicationPort(Protocol):
         user_name: str,
         merge_id: str,
         request: EntityMergeRollbackRequest,
-    ) -> Any: ...
+    ) -> dict[str, Any]: ...
 
 
 class UnsupportedOperation(RuntimeError):
@@ -244,204 +339,36 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _as_data(value: Any) -> dict[str, Any]:
-    if isinstance(value, Mapping):
-        return dict(value)
-    model_dump = getattr(value, "model_dump", None)
-    if callable(model_dump):
-        dumped = model_dump()
-        if isinstance(dumped, Mapping):
-            return dict(dumped)
-    try:
-        return dict(vars(value))
-    except TypeError as exc:
-        raise ValueError("application port returned an unsupported result") from exc
+def _project_response(value: ProjectResponse) -> ProjectResponse:
+    return ProjectResponse.model_validate(value)
 
 
-def _value(data: Mapping[str, Any], *names: str, default: Any = None) -> Any:
-    for name in names:
-        if name in data:
-            return data[name]
-    return default
+def _session_response(value: SessionResponse) -> SessionResponse:
+    return SessionResponse.model_validate(value)
 
 
-def _project_response(value: Any) -> ProjectResponse:
-    if isinstance(value, ProjectResponse):
-        return value
-    data = _as_data(value)
-    status = _value(data, "status", default="active")
-    status = getattr(status, "value", status)
-    return ProjectResponse.model_validate(
-        {
-            "id": _value(data, "id", "project_id"),
-            "name": _value(data, "name"),
-            "description": _value(data, "description"),
-            "status": status,
-            "session_count": _value(data, "session_count", default=0) or 0,
-            "allowed_projects": tuple(
-                _value(data, "allowed_projects", default=[]) or []
-            ),
-            "created_at": _value(data, "created_at"),
-            "updated_at": _value(data, "updated_at"),
-        }
-    )
+def _document_focus_response(value: DocumentFocusResponse) -> DocumentFocusResponse:
+    return DocumentFocusResponse.model_validate(value)
 
 
-def _session_response(value: Any, request: CreateSessionRequest):
-    from common.schema.public import SessionResponse
-
-    if isinstance(value, SessionResponse):
-        return value
-    data = _as_data(value)
-    status = _value(data, "status", default="open")
-    status = getattr(status, "value", status)
-    enabled_tools = _value(data, "enabled_tools", default=request.enabled_tools)
-    return SessionResponse.model_validate(
-        {
-            "session_id": _value(data, "session_id", "id"),
-            "project_id": _value(data, "project_id", default=request.project_id),
-            "status": status,
-            "model": _value(data, "model", default=request.model),
-            "agent_id": _value(data, "agent_id", default=request.agent_id),
-            "enabled_tools": tuple(enabled_tools)
-            if enabled_tools is not None
-            else None,
-            "created_at": _value(data, "created_at"),
-            "last_active_at": _value(data, "last_active_at"),
-        }
-    )
+def _artifact_response(value: ArtifactResponse) -> ArtifactResponse:
+    return ArtifactResponse.model_validate(value)
 
 
-def _document_focus_response(value: Any) -> DocumentFocusResponse:
-    if isinstance(value, DocumentFocusResponse):
-        return value
-    return DocumentFocusResponse.model_validate(_as_data(value))
+def _artifact_revision_response(value: ArtifactRevisionResponse) -> ArtifactRevisionResponse:
+    return ArtifactRevisionResponse.model_validate(value)
 
 
-def _run_result(value: Any) -> RunResult:
-    if isinstance(value, RunResult):
-        return value
-    data = _as_data(value)
-    artifact_value = _value(data, "artifact")
-    return RunResult.model_validate(
-        {
-            "run_id": _value(data, "run_id", "id"),
-            "content": _value(data, "content", "response", default=""),
-            "sources": tuple(_value(data, "sources", default=[]) or []),
-            "usage": _value(data, "usage"),
-            "research_mode": _value(data, "research_mode", default="normal"),
-            "assistant_message_id": _value(data, "assistant_message_id"),
-            "source_ref_ids": tuple(_value(data, "source_ref_ids", default=[]) or []),
-            "artifact": (
-                _artifact_response(artifact_value).model_dump(mode="json")
-                if artifact_value is not None
-                else None
-            ),
-        }
-    )
+def _artifact_list_response(value: ArtifactListResponse) -> ArtifactListResponse:
+    return ArtifactListResponse.model_validate(value)
 
 
-def _artifact_response(value: Any) -> ArtifactResponse:
-    if isinstance(value, ArtifactResponse):
-        return value
-    data = _as_data(value)
-    return ArtifactResponse.model_validate(
-        {
-            "artifact_id": str(_value(data, "artifact_id", "id")),
-            "project_id": _value(data, "project_id"),
-            "session_id": _value(data, "session_id"),
-            "originating_message_id": _value(
-                data, "originating_message_id", "message_id"
-            ),
-            "kind": _value(data, "kind"),
-            "title": _value(data, "title"),
-            "status": _value(data, "status"),
-            "current_revision": _value(data, "current_revision", default=1),
-            "created_at": _value(data, "created_at"),
-            "updated_at": _value(data, "updated_at"),
-        }
-    )
+def _maintenance_review_list_response(value: list[MaintenanceReviewResponse]) -> MaintenanceReviewListResponse:
+    return MaintenanceReviewListResponse(reviews=tuple(value))
 
 
-def _artifact_revision_response(value: Any) -> ArtifactRevisionResponse:
-    if isinstance(value, ArtifactRevisionResponse):
-        return value
-    data = _as_data(value)
-    return ArtifactRevisionResponse.model_validate(
-        {
-            "artifact_id": str(_value(data, "artifact_id", "id")),
-            "revision": _value(data, "revision"),
-            "schema_version": _value(data, "schema_version", default=1),
-            "kind": _value(data, "kind"),
-            "title": _value(data, "title"),
-            "blocks": tuple(_value(data, "blocks", default=[]) or []),
-            "status": _value(data, "status"),
-            "markdown": _value(data, "markdown"),
-            "content_hash": _value(data, "content_hash"),
-            "created_at": _value(data, "created_at"),
-        }
-    )
-
-
-def _artifact_list_response(value: Any) -> ArtifactListResponse:
-    if isinstance(value, ArtifactListResponse):
-        return value
-    if value is None:
-        values = []
-    elif isinstance(value, Mapping) and "artifacts" in value:
-        values = value["artifacts"] or []
-    else:
-        values = value
-    return ArtifactListResponse(
-        artifacts=tuple(_artifact_response(item) for item in values)
-    )
-
-
-def _maintenance_review_response(value: Any) -> MaintenanceReviewResponse:
-    if isinstance(value, MaintenanceReviewResponse):
-        return value
-    data = _as_data(value)
-    plan = _value(data, "proposed_plan", default={})
-    if not isinstance(plan, Mapping):
-        plan = _as_data(plan)
-    return MaintenanceReviewResponse.model_validate(
-        {
-            "review_id": _value(data, "review_id", "id"),
-            "scope": _value(data, "scope"),
-            "project_id": _value(data, "project_id"),
-            "kind": _value(data, "kind"),
-            "reasoning": _value(data, "reasoning"),
-            "proposed_plan": dict(plan),
-            "expected_state": dict(_value(data, "expected_state", default={}) or {}),
-            "status": _value(data, "status"),
-            "created_at": _value(data, "created_at"),
-            "resolved_at": _value(data, "resolved_at"),
-        }
-    )
-
-
-def _maintenance_review_list_response(value: Any) -> MaintenanceReviewListResponse:
-    if isinstance(value, MaintenanceReviewListResponse):
-        return value
-    if isinstance(value, Mapping):
-        values = value.get("reviews") or ()
-    else:
-        values = value or ()
-    return MaintenanceReviewListResponse(
-        reviews=tuple(_maintenance_review_response(item) for item in values)
-    )
-
-
-def _maintenance_operation_response(value: Any) -> MaintenanceOperationResponse:
-    if isinstance(value, MaintenanceOperationResponse):
-        return value
-    if isinstance(value, Mapping) and set(value) == {"result"}:
-        value = value["result"]
-    data = _as_data(value)
-    plan = data.get("plan")
-    if plan is not None and not isinstance(plan, Mapping):
-        data["plan"] = _as_data(plan)
-    return MaintenanceOperationResponse(result=data)
+def _maintenance_operation_response(value: dict[str, Any]) -> MaintenanceOperationResponse:
+    return MaintenanceOperationResponse(result=value)
 
 
 def _error_response(
@@ -452,16 +379,21 @@ def _error_response(
     run_id: str | None = None,
 ) -> JSONResponse:
     if isinstance(error, PublicOperationError):
-        public_error = error.error.model_copy(update={"request_id": request_id})
-    elif isinstance(error, (RequestValidationError, ValidationError)):
+        public_error = sanitize_public_error(error.error, request_id=request_id, run_id=run_id)
+    elif isinstance(error, RequestValidationError):
         public_error = PublicError(
             code="invalid_request",
             message="The request is invalid.",
             request_id=request_id,
             run_id=run_id,
         )
+    elif isinstance(error, UnsupportedOperation):
+        public_error = PublicError(code="unsupported_operation", message="This operation is not supported.",
+                                   request_id=request_id, run_id=run_id)
     else:
         public_error = to_public_error(error, request_id=request_id, run_id=run_id)
+    if public_error.code == "internal_error":
+        logger.error("Public response failure request={} run={}", request_id, run_id)
     if status_code is None:
         status_code = _status_for_error(error)
     return JSONResponse(
@@ -472,90 +404,57 @@ def _error_response(
 
 
 def _status_for_error(error: Exception) -> int:
-    if isinstance(error, PublicOperationError):
-        if error.error.code == "invalid_request":
-            return 422
-        if error.error.code == "not_found":
-            return 404
-        if error.error.code == "workspace_conflict":
-            return 409
-        if error.error.code == "llm_budget_exhausted":
-            return 429
-        return 503 if error.error.retryable else 502
+    if isinstance(error, RequestValidationError):
+        return 422
     if isinstance(error, UnsupportedOperation):
         return 501
-    if isinstance(
-        error,
-        (
-            SessionBusyError,
-            IdempotencyConflictError,
-            RequestInProgressError,
-            RequestInterruptedError,
-        ),
-    ):
-        return 409
-    if isinstance(error, WorkspaceConflictError):
-        return 409
-    if isinstance(error, LLMBudgetExceededError):
-        return 429
-    if isinstance(error, (ValueError, ValidationError, RequestValidationError)):
-        return 422
-    if isinstance(error, NotFoundError):
-        return 404
-    if isinstance(
-        error,
-        (DependencyError, StorageError, LLMProviderError),
-    ):
-        return 503
-    if isinstance(error, ToolExecutionError):
-        return 503 if error.retryable else 502
-    return 500
+    public = error.error if isinstance(error, PublicOperationError) else to_public_error(error)
+    return public_error_status(sanitize_public_error(public))
 
 
 async def _call(method: Any, **kwargs: Any) -> Any:
-    value = method(**kwargs)
-    if inspect.isawaitable(value):
-        return await value
-    return value
-
-
-async def _stream_from_port(port: Any, **kwargs: Any) -> AsyncIterator[object]:
-    method = getattr(port, "run_stream", None)
-    if method is None:
-        method = getattr(port, "stream_run", None)
-    if method is None:
-        raise UnsupportedOperation("run streaming is not configured")
-    result = method(**kwargs)
-    if inspect.isawaitable(result):
-        result = await result
-    if hasattr(result, "__aiter__"):
-        async for event in result:
-            yield event
-        return
-    if isinstance(result, (list, tuple)):
-        for event in result:
-            yield event
-        return
-    raise ValueError("application port returned a non-streaming run result")
+    return await method(**kwargs)
 
 
 async def _open_stream_from_port(port: Any, **kwargs: Any) -> AsyncIterator[object]:
     """Open a stream early when the port supports explicit run admission."""
 
-    method = getattr(port, "open_run_stream", None)
-    if method is None:
-        return _stream_from_port(port, **kwargs)
-    result = await _call(method, **kwargs)
-    if hasattr(result, "__aiter__"):
+    result = await port.open_run_stream(**kwargs)
+    if hasattr(result, "__aiter__") and callable(getattr(result, "aclose", None)):
         return result
-    if isinstance(result, (list, tuple)):
+    raise PublicStreamContractError("application port returned a non-streaming run result")
 
-        async def static_events() -> AsyncIterator[object]:
-            for event in result:
-                yield event
 
-        return static_events()
-    raise ValueError("application port returned a non-streaming run result")
+async def _close_owned_stream(stream, *, request_id=None) -> None:
+    cleanup = asyncio.create_task(stream.aclose())
+    try:
+        await asyncio.shield(cleanup)
+    except asyncio.CancelledError:
+        try:
+            await settle_owned_task(cleanup)
+        except Exception:
+            logger.error("Run stream cleanup failed during cancellation request={}", request_id)
+        raise
+    except Exception:
+        logger.error("Run stream cleanup failed request={}", request_id)
+
+
+class OwnedStreamingResponse(StreamingResponse):
+    """Own admission even when sending fails before body iteration starts."""
+
+    def __init__(self, content, *, owner, request_id=None, **kwargs):
+        super().__init__(content, **kwargs)
+        self.owner = owner
+        self.request_id = request_id
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            try:
+                await _close_owned_stream(self.body_iterator, request_id=self.request_id)
+            finally:
+                await _close_owned_stream(self.owner, request_id=self.request_id)
 
 
 def _sse_frame(event: Any) -> str:
@@ -570,6 +469,7 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
     """Build the public API around an injected application port."""
 
     app = FastAPI(title=title, version="1", docs_url="/docs", redoc_url=None)
+    app.add_middleware(DocumentUploadLimitMiddleware)
 
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next):
@@ -598,32 +498,162 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
             raise ValueError("X-User-Name must not be blank")
         return user_name
 
+    @app.get("/v1/health", response_model=HealthSnapshot)
+    async def get_engine_health(
+        user_name: str = Depends(current_user),
+    ) -> HealthSnapshot:
+        return await _call(port.get_engine_health, user_name=user_name)
+
+    @app.get("/v1/projects/{project_id}/health/resources", response_model=HealthSnapshot)
+    async def get_resource_health(
+        project_id: str,
+        user_name: str = Depends(current_user),
+    ) -> HealthSnapshot:
+        return await _call(
+            port.get_resource_health, user_name=user_name, project_id=project_id
+        )
+
+    @app.get("/v1/projects/{project_id}/health/ingestion", response_model=HealthSnapshot)
+    async def get_ingestion_health(
+        project_id: str,
+        user_name: str = Depends(current_user),
+    ) -> HealthSnapshot:
+        return await _call(
+            port.get_ingestion_health, user_name=user_name, project_id=project_id
+        )
+
+    @app.get("/v1/projects/{project_id}/health/background", response_model=HealthSnapshot)
+    async def get_background_health(
+        project_id: str,
+        user_name: str = Depends(current_user),
+    ) -> HealthSnapshot:
+        return await _call(
+            port.get_background_health, user_name=user_name, project_id=project_id
+        )
+
     @app.post("/v1/projects", response_model=ProjectResponse, status_code=201)
     async def create_project(
         body: CreateProjectRequest,
         request: Request,
         user_name: str = Depends(current_user),
     ) -> ProjectResponse:
-        try:
-            return _project_response(
-                await _call(port.create_project, user_name=user_name, request=body)
-            )
-        except Exception as exc:
-            raise exc
+        return _project_response(
+            await _call(port.create_project, user_name=user_name, request=body)
+        )
 
-    @app.post("/v1/sessions", status_code=201)
+    @app.post("/v1/projects/{project_id}/sources/batch", response_model=BatchSourceResponse)
+    async def admit_sources_batch(body: BatchSourceRequest, request: Request, project_id: str = Path(min_length=1), user_name: str = Depends(current_user)):
+        result = await port.admit_sources_batch(user_name=user_name, project_id=project_id, request=body)
+        return result.model_copy(update={"results": tuple(
+            item.model_copy(update={"error": sanitize_public_error(item.error, request_id=_request_id(request))})
+            if isinstance(item, BatchSourceFailed) else item for item in result.results
+        )})
+
+    @app.get("/v1/settings", response_model=SettingsResponse)
+    async def get_settings(user_name: str = Depends(current_user)):
+        return await port.get_settings(user_name=user_name)
+
+    @app.patch("/v1/settings", response_model=SettingsOperationResponse)
+    async def update_settings(body: SettingsUpdateRequest, user_name: str = Depends(current_user)):
+        return await port.update_settings(user_name=user_name, request=body)
+
+    @app.post("/v1/settings/reload", response_model=SettingsOperationResponse)
+    async def reload_settings(user_name: str = Depends(current_user)):
+        return await port.reload_settings(user_name=user_name)
+
+    @app.get("/v1/settings/status", response_model=SettingsApplyStatusResponse)
+    async def get_settings_status(user_name: str = Depends(current_user)):
+        return await port.get_settings_status(user_name=user_name)
+
+    @app.post("/v1/settings/retry-applies", response_model=SettingsApplyStatusResponse)
+    async def retry_settings_applies(user_name: str = Depends(current_user)):
+        return await port.retry_settings_applies(user_name=user_name)
+
+    @app.post("/v1/aac/trigger", response_model=AACAdmissionResponse)
+    async def trigger_aac(user_name: str = Depends(current_user)):
+        return await port.trigger_aac(user_name=user_name)
+
+    @app.post("/v1/aac/stop", response_model=AACStopResponse)
+    async def stop_aac(user_name: str = Depends(current_user)):
+        return await port.stop_aac(user_name=user_name)
+
+    @app.put("/v1/aac/agents/{agent_id}/participation", response_model=AACParticipationResponse)
+    async def set_aac_participation(body: AACParticipationRequest, agent_id: str = Path(min_length=1), user_name: str = Depends(current_user)):
+        return await port.set_aac_participation(user_name=user_name, agent_id=agent_id, enabled=body.enabled)
+
+    @app.get("/v1/aac/discussions", response_model=list[AACDiscussionResponse])
+    async def list_aac_discussions(limit: int = Query(default=20, ge=1, le=100), user_name: str = Depends(current_user)):
+        return await port.list_aac_discussions(user_name=user_name, limit=limit)
+
+    @app.get("/v1/aac/discussions/{discussion_id}/timeline", response_model=list[AACTimelineResponse])
+    async def list_aac_timeline(discussion_id: str = Path(min_length=1), limit: int = Query(default=100, ge=1, le=100), after_sequence: int = Query(default=0, ge=0), user_name: str = Depends(current_user)):
+        return await port.list_aac_timeline(user_name=user_name, discussion_id=discussion_id, limit=limit, after_sequence=after_sequence)
+
+    @app.get("/v1/aac/insights", response_model=list[AACInsightResponse])
+    async def list_aac_insights(query: str | None = Query(default=None, max_length=4000), limit: int = Query(default=20, ge=1, le=100), user_name: str = Depends(current_user)):
+        return await port.list_aac_insights(user_name=user_name, query=query, limit=limit)
+
+    @app.get("/v1/aac/insights/{insight_id}/votes", response_model=list[AACInsightVoteResponse])
+    async def list_aac_insight_votes(insight_id: str = Path(min_length=1), user_name: str = Depends(current_user)):
+        return await port.list_aac_insight_votes(user_name=user_name, insight_id=insight_id)
+
+    @app.get("/v1/projects", response_model=list[ProjectResponse])
+    async def list_projects(user_name: str = Depends(current_user)):
+        return await port.list_projects(user_name=user_name)
+
+    @app.get("/v1/projects/{project_id}", response_model=ProjectResponse)
+    async def get_project(project_id: str = Path(min_length=1), user_name: str = Depends(current_user)):
+        return await port.get_project(user_name=user_name, project_id=project_id)
+
+    @app.patch("/v1/projects/{project_id}", response_model=ProjectResponse)
+    async def update_project(body: UpdateProjectRequest, project_id: str = Path(min_length=1), user_name: str = Depends(current_user)):
+        return await port.update_project(user_name=user_name, project_id=project_id, request=body)
+
+    @app.post("/v1/projects/{project_id}/archive", response_model=ProjectResponse)
+    async def archive_project(project_id: str = Path(min_length=1), user_name: str = Depends(current_user)):
+        return await port.archive_project(user_name=user_name, project_id=project_id)
+
+    @app.delete("/v1/projects/{project_id}", response_model=ProjectDeletedResponse)
+    async def delete_project(project_id: str = Path(min_length=1), user_name: str = Depends(current_user)):
+        return await port.delete_project(user_name=user_name, project_id=project_id)
+
+    @app.post("/v1/sessions", response_model=SessionResponse, status_code=201)
     async def create_session(
         body: CreateSessionRequest,
         request: Request,
         user_name: str = Depends(current_user),
     ):
-        try:
-            return _session_response(
-                await _call(port.create_session, user_name=user_name, request=body),
-                body,
-            )
-        except Exception as exc:
-            raise exc
+        return _session_response(
+            await _call(port.create_session, user_name=user_name, request=body),
+        )
+
+    @app.get("/v1/sessions", response_model=list[SessionResponse])
+    async def list_sessions(user_name: str = Depends(current_user)):
+        return await port.list_sessions(user_name=user_name)
+
+    @app.get("/v1/sessions/{session_id}/history", response_model=list[SessionHistoryMessage])
+    async def get_session_history(
+        session_id: str = Path(min_length=1),
+        limit: int = Query(default=100, ge=1, le=1000),
+        user_name: str = Depends(current_user),
+    ):
+        return await port.get_session_history(
+            user_name=user_name, session_id=session_id, limit=limit
+        )
+
+    @app.patch("/v1/sessions/{session_id}", response_model=SessionResponse)
+    async def update_session(
+        body: UpdateSessionRequest,
+        session_id: str = Path(min_length=1),
+        user_name: str = Depends(current_user),
+    ):
+        return await port.update_session(user_name=user_name, session_id=session_id, request=body)
+
+    @app.delete("/v1/sessions/{session_id}", response_model=SessionDeletedResponse)
+    async def delete_session(
+        session_id: str = Path(min_length=1), user_name: str = Depends(current_user)
+    ):
+        return await port.delete_session(user_name=user_name, session_id=session_id)
 
     @app.get(
         "/v1/sessions/{session_id}/document-focus",
@@ -674,6 +704,7 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
 
     @app.post(
         "/v1/projects/{project_id}/sources/promote",
+        response_model=SavedWebLinkResponse,
         status_code=201,
     )
     async def promote_source(
@@ -688,6 +719,98 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
             project_id=project_id,
             request=body,
         )
+
+    @app.get("/v1/projects/{project_id}/documents", response_model=list[DocumentResponse])
+    async def list_documents(
+        project_id: str,
+        limit: int = Query(default=100, ge=1, le=100),
+        user_name: str = Depends(current_user),
+    ):
+        return await _call(port.list_documents, user_name=user_name, project_id=project_id, limit=limit)
+
+    @app.post("/v1/projects/{project_id}/documents", response_model=DocumentResponse, status_code=201)
+    async def upload_document(
+        project_id: str, body: UploadDocumentRequest,
+        user_name: str = Depends(current_user),
+    ):
+        return await _call(port.upload_document, user_name=user_name, project_id=project_id, request=body)
+
+    @app.get("/v1/projects/{project_id}/documents/{document_id}", response_model=DocumentResponse)
+    async def get_document(
+        project_id: str, document_id: str,
+        user_name: str = Depends(current_user),
+    ):
+        return await _call(port.get_document, user_name=user_name, project_id=project_id, document_id=document_id)
+
+    @app.get("/v1/projects/{project_id}/documents/{document_id}/content", response_model=DocumentContentResponse)
+    async def read_document(
+        project_id: str, document_id: str,
+        start_line: int = Query(default=1, ge=1),
+        end_line: int | None = Query(default=None, ge=1),
+        user_name: str = Depends(current_user),
+    ):
+        return await _call(
+            port.read_document, user_name=user_name, project_id=project_id,
+            document_id=document_id, start_line=start_line, end_line=end_line,
+        )
+
+    @app.post("/v1/projects/{project_id}/documents/{document_id}/reindex", response_model=DocumentResponse)
+    async def reindex_document(
+        project_id: str, document_id: str,
+        user_name: str = Depends(current_user),
+    ):
+        return await _call(port.reindex_document, user_name=user_name, project_id=project_id, document_id=document_id)
+
+    @app.delete("/v1/projects/{project_id}/documents/{document_id}", response_model=DocumentDeletedResponse)
+    async def delete_document(
+        project_id: str, document_id: str,
+        user_name: str = Depends(current_user),
+    ):
+        return await _call(port.delete_document, user_name=user_name, project_id=project_id, document_id=document_id)
+
+    @app.get("/v1/projects/{project_id}/saved-web-links", response_model=list[SavedWebLinkResponse])
+    async def list_saved_web_links(
+        project_id: str,
+        limit: int = Query(default=50, ge=1, le=100),
+        user_name: str = Depends(current_user),
+    ):
+        return await _call(port.list_saved_web_links, user_name=user_name, project_id=project_id, limit=limit)
+
+    @app.patch("/v1/projects/{project_id}/saved-web-links/{link_id}", response_model=SavedWebLinkResponse)
+    async def update_saved_web_link(
+        project_id: str, link_id: str, body: UpdateSavedWebLinkRequest,
+        user_name: str = Depends(current_user),
+    ):
+        return await _call(
+            port.update_saved_web_link, user_name=user_name, project_id=project_id,
+            link_id=link_id, request=body,
+        )
+
+    @app.delete("/v1/projects/{project_id}/saved-web-links/{link_id}", response_model=SavedWebLinkDeletedResponse)
+    async def delete_saved_web_link(
+        project_id: str, link_id: str,
+        user_name: str = Depends(current_user),
+    ):
+        return await _call(port.delete_saved_web_link, user_name=user_name, project_id=project_id, link_id=link_id)
+
+    @app.get("/v1/projects/{project_id}/document-scan-settings", response_model=FolderScanSettings)
+    async def get_document_scan_settings(
+        project_id: str, user_name: str = Depends(current_user),
+    ) -> FolderScanSettings:
+        return await _call(port.get_document_scan_settings, user_name=user_name, project_id=project_id)
+
+    @app.put("/v1/projects/{project_id}/document-scan-settings", response_model=FolderScanSettings)
+    async def set_document_scan_settings(
+        project_id: str, body: FolderScanSettings,
+        user_name: str = Depends(current_user),
+    ) -> FolderScanSettings:
+        return await _call(port.set_document_scan_settings, user_name=user_name, project_id=project_id, settings=body)
+
+    @app.delete("/v1/projects/{project_id}/document-scan-settings", response_model=FolderScanSettings)
+    async def reset_document_scan_settings(
+        project_id: str, user_name: str = Depends(current_user),
+    ) -> FolderScanSettings:
+        return await _call(port.reset_document_scan_settings, user_name=user_name, project_id=project_id)
 
     @app.get(
         "/v1/maintenance/reviews",
@@ -825,6 +948,34 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
         )
 
     @app.get(
+        "/v1/projects/{project_id}/episodes/{episode_id}",
+        response_model=EpisodeResponse,
+    )
+    async def get_episode(
+        project_id: str = Path(min_length=1, max_length=200),
+        episode_id: str = Path(min_length=1, max_length=200),
+        user_name: str = Depends(current_user),
+    ) -> EpisodeResponse:
+        return await port.get_episode(
+            user_name=user_name, project_id=project_id, episode_id=episode_id,
+        )
+
+    @app.patch(
+        "/v1/projects/{project_id}/episodes/{episode_id}",
+        response_model=EpisodeEditedResponse,
+    )
+    async def update_episode(
+        body: UpdateEpisodeRequest,
+        project_id: str = Path(min_length=1, max_length=200),
+        episode_id: str = Path(min_length=1, max_length=200),
+        user_name: str = Depends(current_user),
+    ) -> EpisodeEditedResponse:
+        return await port.update_episode(
+            user_name=user_name, project_id=project_id, episode_id=episode_id,
+            request=body,
+        )
+
+    @app.get(
         "/v1/projects/{project_id}/artifacts",
         response_model=ArtifactListResponse,
     )
@@ -915,41 +1066,19 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
         request: Request,
         user_name: str = Depends(current_user),
     ) -> RunResult:
+        stream = await _open_stream_from_port(port, user_name=user_name, request=body)
         try:
-            direct = getattr(port, "run", None)
-            if direct is not None:
-                result = await _call(
-                    direct,
-                    user_name=user_name,
-                    request=body,
-                )
-                if isinstance(result, (RunResult, Mapping)) or hasattr(
-                    result, "model_dump"
-                ):
-                    return _run_result(result)
-                if hasattr(result, "__aiter__"):
-                    events = [event async for event in result]
-                elif isinstance(result, (list, tuple)):
-                    events = list(result)
-                else:
-                    raise ValueError("application port returned an invalid run result")
-            else:
-                events = [
-                    event
-                    async for event in await _open_stream_from_port(
-                        port, user_name=user_name, request=body
-                    )
-                ]
-            parsed = [validate_public_stream_event(event) for event in events]
-            completed = [event for event in parsed if isinstance(event, RunCompletedEvent)]
-            if completed:
-                return completed[-1].result
-            failed = [event for event in parsed if isinstance(event, RunFailedEvent)]
-            if failed:
-                raise PublicOperationError(failed[-1].error)
-            raise ValueError("run stream did not contain a terminal result")
-        except Exception as exc:
-            raise exc
+            state = PublicStreamState()
+            async for event in stream:
+                state.accept(event)
+            state.finish()
+            if isinstance(state.terminal, RunCompletedEvent):
+                return state.terminal.result
+            if isinstance(state.terminal, RunFailedEvent):
+                raise PublicOperationError(state.terminal.error)
+            raise PublicOperationError(PublicError(code="run_cancelled", message="The run was cancelled."))
+        finally:
+            await _close_owned_stream(stream, request_id=_request_id(request))
 
     @app.post("/v1/runs/stream")
     async def run_stream(
@@ -965,59 +1094,40 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
         )
 
         async def events() -> AsyncIterator[str]:
-            run_id: str | None = None
-            previous_sequence = -1
-            terminal = False
+            state = PublicStreamState()
             try:
                 async for raw_event in stream:
-                    event = validate_public_stream_event(raw_event)
-                    if run_id is None:
-                        run_id = event.run_id
-                    if event.run_id != run_id:
-                        raise ValueError("public stream events must belong to one run")
-                    if event.sequence <= previous_sequence:
-                        raise ValueError("public stream sequence must increase monotonically")
-                    if terminal:
-                        raise ValueError("public stream cannot continue after terminal event")
-                    previous_sequence = event.sequence
+                    event = state.accept(raw_event)
+                    if isinstance(event, RunFailedEvent):
+                        event = event.model_copy(update={"error": sanitize_public_error(
+                            event.error, request_id=request_id, run_id=event.run_id,
+                        )})
                     yield _sse_frame(event)
-                    if isinstance(
-                        event,
-                        (RunCompletedEvent, RunFailedEvent, RunCancelledEvent),
-                    ):
-                        terminal = True
-                if not terminal:
-                    raise ValueError("public stream must contain a terminal event")
+                state.finish()
             except Exception as exc:
                 # A malformed event after a valid terminal cannot be repaired
                 # without violating the one-terminal stream contract.  Keep
                 # the already-emitted terminal event as the public result.
-                if terminal:
+                if state.terminal is not None:
+                    logger.error("Invalid post-terminal stream request={} run={}", request_id, state.run_id)
                     return
-                run_id = run_id or str(uuid4())
+                run_id = state.run_id or str(uuid4())
+                logger.error("Public stream failure request={} run={}", request_id, run_id)
                 failed = RunFailedEvent(
                     run_id=run_id,
-                    sequence=previous_sequence + 1,
+                    sequence=state.sequence + 1,
                     timestamp=_now(),
-                    error=(
-                        PublicError(
-                            code="invalid_request",
-                            message="The request is invalid.",
-                            request_id=request_id,
-                            run_id=run_id,
-                        )
-                        if isinstance(exc, (RequestValidationError, ValidationError))
-                        else to_public_error(
-                            exc,
-                            request_id=request_id,
-                            run_id=run_id,
-                        )
+                    error=to_public_error(
+                        PublicStreamContractError("Invalid server output") if isinstance(exc, ValueError) else exc,
+                        request_id=request_id, run_id=run_id,
                     ),
                 )
                 yield _sse_frame(failed)
 
-        return StreamingResponse(
+        return OwnedStreamingResponse(
             events(),
+            owner=stream,
+            request_id=request_id,
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",

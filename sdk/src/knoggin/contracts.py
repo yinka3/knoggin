@@ -19,30 +19,16 @@ class DocumentFocusDocument:
 
 @dataclass(frozen=True, slots=True)
 class DocumentFocusSubtree:
-    """Select one subtree of a folder upload for a single agent turn."""
+    """Select one project-library subtree for a single agent turn."""
 
-    folder_root_id: str
     path_prefix: str
 
     def __post_init__(self) -> None:
-        if not self.folder_root_id.strip() or not self.path_prefix.strip():
-            raise ValueError("folder_root_id and path_prefix are required")
+        if not self.path_prefix.strip():
+            raise ValueError("path_prefix is required")
 
 
-@dataclass(frozen=True, slots=True)
-class DocumentFocusFolderUpload:
-    """Select all visible documents from one folder upload for one turn."""
-
-    folder_root_id: str
-
-    def __post_init__(self) -> None:
-        if not self.folder_root_id.strip():
-            raise ValueError("folder_root_id is required")
-
-
-DocumentFocus: TypeAlias = (
-    DocumentFocusDocument | DocumentFocusSubtree | DocumentFocusFolderUpload
-)
+DocumentFocus: TypeAlias = DocumentFocusDocument | DocumentFocusSubtree
 
 
 @dataclass(frozen=True, slots=True)

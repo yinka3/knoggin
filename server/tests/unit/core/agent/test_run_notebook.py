@@ -17,10 +17,36 @@ def test_empty_notebook_renders_a_stable_minimal_view():
     assert render_notebook(RunNotebook()) == "RUN NOTEBOOK"
 
 
+def test_previous_notebook_page_is_hidden_until_requested():
+    notebook = RunNotebook()
+    notebook.apply(
+        "search_knowledge_messages",
+        {"data": [{"id": "m1", "message": "older evidence"}]},
+    )
+    notebook.rollover()
+    notebook.apply(
+        "search_knowledge_messages",
+        {"data": [{"id": "m2", "message": "current evidence"}]},
+    )
+
+    hidden = render_notebook(notebook)
+    notebook.set_previous_page_visibility(True)
+    visible = render_notebook(notebook)
+    notebook.set_previous_page_visibility(False)
+
+    assert "PREVIOUS NOTEBOOK PAGE" not in hidden
+    assert "CURRENT NOTEBOOK PAGE" not in hidden
+    assert "PREVIOUS NOTEBOOK PAGE" in visible
+    assert "CURRENT NOTEBOOK PAGE" in visible
+    assert "older evidence" in visible
+    assert "current evidence" in visible
+    assert "PREVIOUS NOTEBOOK PAGE" not in render_notebook(notebook)
+
+
 def test_notebook_renderer_is_strict_localized_and_read_only():
     notebook = RunNotebook()
     notebook.apply(
-        "search_entity",
+        "search_knowledge_entities",
         {
             "data": [
                 {"id": 24, "canonical_name": "Sarah Johnson", "project_id": "project-a"}
@@ -28,7 +54,7 @@ def test_notebook_renderer_is_strict_localized_and_read_only():
         },
     )
     notebook.apply(
-        "episode_check",
+        "search_episodes",
         {
             "data": {
                 "resolution": "semantic",
@@ -38,16 +64,12 @@ def test_notebook_renderer_is_strict_localized_and_read_only():
             }
         },
     )
-    notebook.record_agent_hint(
-        "get_connections", {"entity_id": 24}, "inspect the relationship neighborhood"
-    )
     before = deepcopy(notebook.as_dict())
 
     rendered = render_notebook(notebook)
 
     assert "E1 Sarah Johnson" in rendered
     assert "ep_epsecr: Changed" in rendered
-    assert '"entity_id": 24' in rendered
     assert '"episode_id": "ep_epsecr"' in rendered
     assert "ep-secret" not in rendered
     assert "project-a" not in rendered
@@ -62,7 +84,7 @@ def test_notebook_renderer_is_strict_localized_and_read_only():
 def test_notebook_renderer_preserves_cross_project_records_without_duplicate_ids():
     notebook = RunNotebook()
     notebook.apply(
-        "search_messages",
+        "search_knowledge_messages",
         {
             "data": [
                 {"id": "msg-1", "project_id": "project-a", "message": "A"},
@@ -119,13 +141,19 @@ def test_path_observation_handles_are_retained_and_expand_only_on_demand():
     }
 
     notebook.apply(
-        "find_path",
+        "find_relationship_path",
         {
             "data": [
                 {
                     "entity_a": "Ada",
                     "entity_b": "Acme",
-                    "evidence": [bundle],
+                    "evidence": [
+                        {
+                            "kind": "relationship_observation",
+                            "observation_id": 17,
+                            "project_id": "project-1",
+                        }
+                    ],
                 }
             ]
         },
@@ -135,11 +163,11 @@ def test_path_observation_handles_are_retained_and_expand_only_on_demand():
 
     assert "Paths:" in initial
     assert "(support: O1)" in initial
-    assert "read_observation_evidence" in initial
+    assert "read_relationship_observation_evidence" in initial
     assert "Observation support (expanded on demand):" not in initial
     assert "Ada joined Acme." not in initial
 
-    notebook.apply("read_observation_evidence", {"data": bundle})
+    notebook.apply("read_relationship_observation_evidence", {"data": bundle})
     expanded = render_notebook(notebook)
 
     assert "Observation support (expanded on demand):" in expanded
@@ -154,7 +182,7 @@ def test_notebook_renderer_keeps_long_text_evidence_and_source_continuations():
     notebook = RunNotebook()
     leading_context = "introductory context " * 24
     notebook.apply(
-        "search_messages",
+        "search_knowledge_messages",
         {
             "data": [
                 {
@@ -165,7 +193,7 @@ def test_notebook_renderer_keeps_long_text_evidence_and_source_continuations():
         },
     )
     notebook.apply(
-        "read_document",
+        "read_project_document",
         {
             "data": [
                 {
@@ -223,7 +251,7 @@ def test_notebook_renderer_keeps_long_text_evidence_and_source_continuations():
 def test_notebook_renderer_marks_a_clipped_read_passage_for_follow_up():
     notebook = RunNotebook()
     notebook.apply(
-        "read_document",
+        "read_project_document",
         {
             "data": [
                 {
@@ -257,7 +285,7 @@ def test_notebook_renderer_marks_a_clipped_read_passage_for_follow_up():
 def test_notebook_renderer_handles_missing_passages_and_available_continuations():
     notebook = RunNotebook()
     notebook.apply(
-        "read_document",
+        "read_project_document",
         {
             "data": [
                 {

@@ -176,6 +176,7 @@ CREATE TABLE public.aac_insights (
 );
 CREATE TABLE public.aac_timeline (
     timeline_id text NOT NULL,
+    event_sequence bigint GENERATED ALWAYS AS IDENTITY NOT NULL,
     discussion_id text NOT NULL,
     kind text NOT NULL,
     agent_id text,
@@ -1190,6 +1191,7 @@ ALTER TABLE ONLY public.sessions
 CREATE INDEX aac_discussions_user_started_idx ON public.aac_discussions USING btree (user_name, started_at DESC);
 CREATE INDEX aac_insights_user_visibility_created_idx ON public.aac_insights USING btree (user_name, visibility, created_at DESC);
 CREATE INDEX aac_timeline_discussion_created_idx ON public.aac_timeline USING btree (discussion_id, created_at, timeline_id);
+CREATE UNIQUE INDEX aac_timeline_discussion_sequence_idx ON public.aac_timeline USING btree (discussion_id, event_sequence);
 CREATE INDEX agent_brain_snapshots_user_idx ON public.agent_brain_snapshots USING btree (user_name, agent_id, revision DESC);
 CREATE INDEX agent_tool_audits_run_idx ON public.agent_tool_audits USING btree (run_id, created_at);
 CREATE INDEX agent_tool_audits_scope_idx ON public.agent_tool_audits USING btree (user_name, project_id, created_at DESC);

@@ -72,6 +72,7 @@ class BackgroundWorkCoordinator:
         self._start_lock = asyncio.Lock()
         self._workers: list[asyncio.Task] = []
         self._closed = False
+        self._shutdown_task: asyncio.Task | None = None
         self._submitted = 0
         self._completed = 0
         self._failed = 0
@@ -306,9 +307,12 @@ class BackgroundWorkCoordinator:
     async def shutdown(self) -> None:
         """Reject new work and cancel/join every queued or active operation."""
 
-        if self._closed:
-            return
-        self._closed = True
+        if self._shutdown_task is None:
+            self._closed = True
+            self._shutdown_task = asyncio.create_task(self._finish_shutdown())
+        await asyncio.shield(self._shutdown_task)
+
+    async def _finish_shutdown(self) -> None:
         async with self._condition:
             while self._queue:
                 work = self._queue.popleft()

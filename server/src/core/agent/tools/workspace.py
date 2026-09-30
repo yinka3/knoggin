@@ -47,17 +47,20 @@ class ProjectFileTools:
 
     document_service = None
 
-    def _files_unavailable(self, *, list_result: bool = False):
-        message = "No project document service with local-file access is available"
-        return [{"error": message}] if list_result else {"error": message}
+    @staticmethod
+    def _files_unavailable(tool_name: str) -> None:
+        raise ToolExecutionError(
+            tool_name,
+            "No project document service with local-file access is available",
+        )
 
-    async def list_files(
+    async def list_project_files(
         self,
         path_prefix: Optional[str] = None,
         limit: int = PROJECT_FILE_TOOL_MAX_LIST_LIMIT,
     ) -> List[Dict]:
         if self.document_service is None:
-            return self._files_unavailable(list_result=True)
+            self._files_unavailable("list_project_files")
         if path_prefix is not None:
             if not isinstance(path_prefix, str) or len(path_prefix) > PROJECT_FILE_TOOL_MAX_PATH_LENGTH:
                 raise ValueError("path_prefix must be a bounded string")
@@ -79,7 +82,7 @@ class ProjectFileTools:
             limit=limit,
         )
 
-    async def read_file(
+    async def read_project_file(
         self,
         path: str,
         start_line: int = 1,
@@ -87,7 +90,7 @@ class ProjectFileTools:
         max_characters: int = PROJECT_FILE_TOOL_MAX_READ_CHARACTERS,
     ) -> Dict:
         if self.document_service is None:
-            return self._files_unavailable()
+            self._files_unavailable("read_project_file")
         normalized_path = _normalize_tool_path(path)
         if is_controlled_context_file(normalized_path):
             raise PermissionError(
@@ -102,9 +105,9 @@ class ProjectFileTools:
                 document = None
             except ValueError as exc:
                 raise ToolExecutionError(
-                    "read_file",
+                    "read_project_file",
                     "This path has ambiguous managed-document identity; use "
-                    "read_document with a document_id instead.",
+                    "read_project_document with a document_id instead.",
                 ) from exc
             active_project_id = getattr(self.document_service, "project_id", None)
             if document is not None and (
@@ -112,9 +115,9 @@ class ProjectFileTools:
                 or document.get("project_id") == active_project_id
             ):
                 raise ToolExecutionError(
-                    "read_file",
+                    "read_project_file",
                     "This path is a registered evidence document. Use "
-                    "read_document so the passage keeps source provenance.",
+                    "read_project_document so the passage keeps source provenance.",
                 )
         if not isinstance(start_line, int) or isinstance(start_line, bool) or start_line < 1:
             raise ValueError("start_line must be a positive integer")
@@ -144,67 +147,67 @@ class ProjectFileTools:
             max_characters=max_characters,
         )
 
-    async def create_file(self, path: str, content: str) -> Dict:
+    async def create_project_file(self, path: str, content: str) -> Dict:
         if self.document_service is None:
-            return self._files_unavailable()
+            self._files_unavailable("create_project_file")
         return await self.document_service.create_project_file(
             _editable_path(path),
             _validate_content(content),
         )
 
-    async def update_file(
+    async def update_project_file(
         self,
         path: str,
         content: str,
         expected_content_hash: str,
     ) -> Dict:
         if self.document_service is None:
-            return self._files_unavailable()
+            self._files_unavailable("update_project_file")
         return await self.document_service.update_project_file(
             _editable_path(path),
             _validate_content(content),
             expected_content_hash=_validate_content_hash(expected_content_hash),
         )
 
-    async def append_file(
+    async def append_project_file(
         self,
         path: str,
         content: str,
         expected_content_hash: str,
     ) -> Dict:
         if self.document_service is None:
-            return self._files_unavailable()
+            self._files_unavailable("append_project_file")
         return await self.document_service.append_project_file(
             _editable_path(path),
             _validate_content(content),
             expected_content_hash=_validate_content_hash(expected_content_hash),
         )
 
-    async def move_file(
+    async def move_project_file(
         self,
         source_path: str,
         destination_path: str,
         expected_content_hash: str,
     ) -> Dict:
         if self.document_service is None:
-            return self._files_unavailable()
+            self._files_unavailable("move_project_file")
         return await self.document_service.move_project_file(
             _editable_path(source_path),
             _editable_path(destination_path),
             expected_content_hash=_validate_content_hash(expected_content_hash),
         )
 
-    async def delete_file(self, path: str, expected_content_hash: str) -> Dict:
+    async def delete_project_file(self, path: str, expected_content_hash: str) -> Dict:
         if self.document_service is None:
-            return self._files_unavailable()
+            self._files_unavailable("delete_project_file")
         return await self.document_service.delete_project_file(
             _editable_path(path),
             expected_content_hash=_validate_content_hash(expected_content_hash),
         )
 
-    async def create_folder(self, path: str) -> Dict:
+    async def create_project_folder(self, path: str) -> Dict:
         if self.document_service is None:
-            return self._files_unavailable()
+            self._files_unavailable("create_project_folder")
         return await self.document_service.create_project_folder(_editable_path(path))
 
 

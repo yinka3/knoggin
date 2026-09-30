@@ -117,6 +117,7 @@ async def test_health_drilldown_is_bounded_scoped_and_read_only():
     background_health = await tools.get_background_health()
 
     assert resources_health["status"] == "degraded"
+    assert resources_health["activity"] == "delayed"
     assert ingestion_health["status"] == "degraded"
     assert background_health["status"] == "healthy"
     serialized = json.dumps(resources_health)

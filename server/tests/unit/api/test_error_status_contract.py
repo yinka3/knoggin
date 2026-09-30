@@ -12,6 +12,7 @@ from common.schema.public import PublicError
         ("invalid_request", 422),
         ("not_found", 404),
         ("workspace_conflict", 409),
+        ("episode_conflict", 409),
         ("llm_budget_exhausted", 429),
         ("run_failed", 502),
         ("dependency_unavailable", 503),

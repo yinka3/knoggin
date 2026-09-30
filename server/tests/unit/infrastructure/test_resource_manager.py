@@ -7,6 +7,7 @@ import torch
 
 from common.exceptions import ConfigurationError, DependencyError
 from common.schema.settings import LLMSettings, RootConfig
+from infrastructure.external_model_budget import ExternalModelSpendingLedger
 from runtime import resources as resources_module
 
 
@@ -80,6 +81,8 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
             subscribe_calls.append((callback, path))
             if path == "llm":
                 callback(self.config.llm)
+            elif path == "jev":
+                callback(self.config.jev)
             elif path == "developer_settings.coordination_log":
                 callback(self.config.developer_settings.coordination_log)
             else:
@@ -103,6 +106,7 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
         def __init__(self, **kwargs):
             captured_llm_kwargs.update(kwargs)
             self.updated_settings = []
+            self.spending_ledger = ExternalModelSpendingLedger()
 
         async def load_tokenizer(self):
             pass
@@ -121,6 +125,7 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
             nli_model=None,
             device=None,
             batch_size=None,
+            model_work=None,
         ):
             self.embedding_model = embedding_model
             self.reranker_model = reranker_model
@@ -187,21 +192,23 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
     assert [path for _callback, path in subscribe_calls] == [
         "developer_settings.coordination_log",
         "llm",
+        "jev",
     ]
+    assert manager.jev_client._ledger is manager.llm_service.spending_ledger
     configured_log_settings = configure_coordination_log.call_args.args[0]
-    assert configured_log_settings.path == (
+    assert Path(configured_log_settings.path) == Path(
         "/tmp/knoggin-config/logs/coordination.log"
     )
-    assert configure_coordination_log.call_count == 2
+    assert configure_coordination_log.call_count == 1
     assert all(
-        call.args[0].path == "/tmp/knoggin-config/logs/coordination.log"
+        Path(call.args[0].path) == Path("/tmp/knoggin-config/logs/coordination.log")
         for call in configure_coordination_log.call_args_list
     )
     assert manager.llm_service.updated_settings == [fake_config.config.llm]
 
     await manager.shutdown()
 
-    assert unsubscribe_calls == ["developer_settings.coordination_log", "llm"]
+    assert unsubscribe_calls == ["developer_settings.coordination_log", "llm", "jev"]
 
 
 @pytest.mark.no_network
@@ -339,7 +346,7 @@ async def test_resource_manager_cleans_up_when_postgres_startup_fails(monkeypatc
     assert FailingPostgresClient.instances[0].closed is True
     assert embedding_instances == []
     assert llm_instances == []
-    assert executor_instances[0].shutdown_calls == [False]
+    assert executor_instances[0].shutdown_calls == [True]
 
 
 @pytest.mark.no_network
@@ -350,7 +357,7 @@ async def test_resource_manager_resolves_gpu_cuda(monkeypatch, tmp_path):
 
     class FakeLLMService:
         def __init__(self, **kwargs):
-            pass
+            self.spending_ledger = ExternalModelSpendingLedger()
 
         async def load_tokenizer(self):
             pass
@@ -369,6 +376,7 @@ async def test_resource_manager_resolves_gpu_cuda(monkeypatch, tmp_path):
             nli_model=None,
             device=None,
             batch_size=None,
+            model_work=None,
         ):
             self.device = device
 
@@ -395,7 +403,9 @@ async def test_resource_manager_resolves_gpu_cuda(monkeypatch, tmp_path):
     monkeypatch.setenv("KNOGGIN_GPU", "true")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
 
-    monkeypatch.setattr(resources_module.ConfigManager, "get", lambda: MagicMock())
+    monkeypatch.setattr(
+        resources_module.ConfigManager, "get", lambda: MagicMock(config=RootConfig())
+    )
     monkeypatch.setattr(resources_module, "KnowledgeStore", FakeKnowledgeStore)
     monkeypatch.setattr(resources_module, "PostgresClient", FakePostgresClient)
     monkeypatch.setattr(resources_module, "LLMService", FakeLLMService)
@@ -419,7 +429,7 @@ async def test_resource_manager_resolves_gpu_mps(monkeypatch, tmp_path):
 
     class FakeLLMService:
         def __init__(self, **kwargs):
-            pass
+            self.spending_ledger = ExternalModelSpendingLedger()
 
         async def load_tokenizer(self):
             pass
@@ -438,6 +448,7 @@ async def test_resource_manager_resolves_gpu_mps(monkeypatch, tmp_path):
             nli_model=None,
             device=None,
             batch_size=None,
+            model_work=None,
         ):
             self.device = device
 
@@ -482,7 +493,9 @@ async def test_resource_manager_resolves_gpu_mps(monkeypatch, tmp_path):
     else:
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
 
-    monkeypatch.setattr(resources_module.ConfigManager, "get", lambda: MagicMock())
+    monkeypatch.setattr(
+        resources_module.ConfigManager, "get", lambda: MagicMock(config=RootConfig())
+    )
     monkeypatch.setattr(resources_module, "KnowledgeStore", FakeKnowledgeStore)
     monkeypatch.setattr(resources_module, "PostgresClient", FakePostgresClient)
     monkeypatch.setattr(resources_module, "LLMService", FakeLLMService)
@@ -505,7 +518,7 @@ async def test_resource_manager_resolves_cpu_when_gpu_false(monkeypatch, tmp_pat
 
     class FakeLLMService:
         def __init__(self, **kwargs):
-            pass
+            self.spending_ledger = ExternalModelSpendingLedger()
 
         async def load_tokenizer(self):
             pass
@@ -524,6 +537,7 @@ async def test_resource_manager_resolves_cpu_when_gpu_false(monkeypatch, tmp_pat
             nli_model=None,
             device=None,
             batch_size=None,
+            model_work=None,
         ):
             self.device = device
 
@@ -550,7 +564,9 @@ async def test_resource_manager_resolves_cpu_when_gpu_false(monkeypatch, tmp_pat
     monkeypatch.setenv("KNOGGIN_GPU", "false")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)  # Should ignore this
 
-    monkeypatch.setattr(resources_module.ConfigManager, "get", lambda: MagicMock())
+    monkeypatch.setattr(
+        resources_module.ConfigManager, "get", lambda: MagicMock(config=RootConfig())
+    )
     monkeypatch.setattr(resources_module, "KnowledgeStore", FakeKnowledgeStore)
     monkeypatch.setattr(resources_module, "PostgresClient", FakePostgresClient)
     monkeypatch.setattr(resources_module, "LLMService", FakeLLMService)
@@ -566,12 +582,13 @@ async def test_resource_manager_resolves_cpu_when_gpu_false(monkeypatch, tmp_pat
 
 
 @pytest.mark.no_network
-async def test_runtime_resources_shutdown_attempts_every_phase_and_aggregates_errors():
+async def test_runtime_resources_shutdown_retains_failed_owners_and_dependencies():
     calls = []
 
     def failing_unsubscribe():
         calls.append("unsubscribe")
-        raise RuntimeError("unsubscribe failed")
+        if calls.count("unsubscribe") == 1:
+            raise RuntimeError("unsubscribe failed")
 
     class AsyncResource:
         def __init__(self, name, *, fail=False):
@@ -626,7 +643,16 @@ async def test_runtime_resources_shutdown_attempts_every_phase_and_aggregates_er
         "configuration unsubscribe 1",
         "background work",
     ]
+    assert calls == ["unsubscribe", "background"]
+    assert resources.background_work is background
+    assert resources.postgres is postgres
+    assert resources.model_work is model_work
+    assert not resources._shutdown_complete
+    background.fail = False
+    await resources.shutdown()
     assert calls == [
+        "unsubscribe",
+        "background",
         "unsubscribe",
         "background",
         "model_work",
@@ -635,20 +661,7 @@ async def test_runtime_resources_shutdown_attempts_every_phase_and_aggregates_er
         "embedding",
         "llm",
     ]
-    assert background.close_calls == model_work.close_calls == 1
-    assert postgres.close_calls == llm.close_calls == 1
-    assert executor.shutdown_calls == embedding.cleanup_calls == 1
-
-    with pytest.raises(resources_module.RuntimeResourcesShutdownError) as repeated_error:
-        await resources.shutdown()
-
-    assert repeated_error.value is error.value
-    assert calls == [
-        "unsubscribe",
-        "background",
-        "model_work",
-        "executor",
-        "postgres",
-        "embedding",
-        "llm",
-    ]
+    assert resources._shutdown_complete
+    assert resources.postgres is None
+    await resources.shutdown()
+    assert model_work.close_calls == postgres.close_calls == llm.close_calls == 1

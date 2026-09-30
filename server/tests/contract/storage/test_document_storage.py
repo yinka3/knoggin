@@ -6,7 +6,7 @@ import pytest
 
 from core.knowledge.db.readers.document_reader import DocumentReader
 from core.knowledge.db.writers.document_writer import DocumentWriter
-from core.knowledge.documents.storage import DocumentParseSnapshot
+from core.knowledge.documents.extraction import DocumentParseSnapshot
 
 
 def _snapshot(text: str, *, parser_version: str = "test") -> DocumentParseSnapshot:

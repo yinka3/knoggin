@@ -8,6 +8,7 @@ from core.agent.services.agent_manager import AgentManager
 from core.community.aac_store import AACStore
 from core.community.read_context import AACReadContext
 from core.community.seeding import AACSeeder, SeedDecision
+from core.community.token_budget import AACTokenBudget
 from tests.fixtures.fakes import FakeResources
 
 
@@ -51,11 +52,17 @@ async def test_seeder_uses_normal_agent_run_and_skips_unusable_output(monkeypatc
         embedding_service=resources.embedding,
     )
 
+    class FalseyBudget(AACTokenBudget):
+        def __bool__(self):
+            return False
+
+    budget = FalseyBudget(0)
+
     class FakeExecutor:
         def __init__(self, run, llm, tools, **kwargs):
             assert run.project_id == "__aac__"
             assert run.tool_runtime.permissions.audit_project_id is None
-            assert kwargs["aac_budget"] is not None
+            assert kwargs["aac_budget"] is budget
             self.tools = tools
 
         async def execute(self):
@@ -71,6 +78,6 @@ async def test_seeder_uses_normal_agent_run_and_skips_unusable_output(monkeypatc
         config_provider=_config_provider(),
     )
 
-    decision = await seeder.decide()
+    decision = await seeder.decide(budget=budget)
 
     assert decision == SeedDecision("SKIP")

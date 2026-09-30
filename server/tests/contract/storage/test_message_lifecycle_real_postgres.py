@@ -24,6 +24,93 @@ async def _seed_session(client, session_id: str) -> None:
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
+async def test_acceptance_updates_activity_but_replay_does_not(real_postgres_client):
+    client = real_postgres_client
+    await _seed_session(client, "session-activity")
+    await client.execute(
+        "UPDATE public.sessions SET last_active_at = '2000-01-01' WHERE session_id = %s",
+        ("session-activity",),
+    )
+    writer = MessageLifecycleWriter(client, MessageWriter(client))
+    message = dict(id=902, user_name="ada", project_id="project-1",
+                   session_id="session-activity", role="user", content="Hello",
+                   timestamp=1000, metadata={}, acceptance_key="content:activity")
+    accepted = await writer.create_editable_user_message(message, edit_window_seconds=600)
+    first = await client.fetch_one(
+        "SELECT last_active_at FROM public.sessions WHERE session_id = %s", ("session-activity",)
+    )
+    replayed = await writer.create_editable_user_message(message, edit_window_seconds=600)
+    second = await client.fetch_one(
+        "SELECT last_active_at FROM public.sessions WHERE session_id = %s", ("session-activity",)
+    )
+    assert accepted.created and not replayed.created
+    assert first["last_active_at"].year > 2000
+    assert second["last_active_at"] == first["last_active_at"]
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_real_postgres_edit_after_revision_selection_preserves_history(
+    real_postgres_client,
+):
+    await _seed_session(real_postgres_client, "session-revisions")
+    writer = MessageLifecycleWriter(
+        real_postgres_client, MessageWriter(real_postgres_client)
+    )
+    scope = dict(
+        user_name="ada", project_id="project-1", session_id="session-revisions"
+    )
+    await writer.create_editable_user_message(
+        {
+            **scope,
+            "id": 901,
+            "role": "user",
+            "content": "First",
+            "timestamp": 1000,
+            "metadata": {},
+            "acceptance_key": "content:revisions",
+        },
+        edit_window_seconds=600,
+    )
+    assert (
+        await writer.edit_user_message(**scope, message_id=901, content="Second") == 2
+    )
+    assert await writer.edit_user_message(**scope, message_id=901, content="Third") == 3
+    assert (
+        await writer.select_user_message_revision(**scope, message_id=901, revision=1)
+        == "First"
+    )
+    assert (
+        await writer.edit_user_message(**scope, message_id=901, content="Fourth") == 4
+    )
+    revisions = await asyncio.gather(
+        *(
+            writer.edit_user_message(**scope, message_id=901, content=f"Concurrent {i}")
+            for i in range(3)
+        )
+    )
+    assert sorted(revisions) == [5, 6, 7]
+    rows = await real_postgres_client.fetch_all(
+        "SELECT revision, content FROM public.message_revisions WHERE message_id = 901 ORDER BY revision"
+    )
+    assert [row["revision"] for row in rows] == list(range(1, 8))
+    assert [row["content"] for row in rows[:4]] == [
+        "First",
+        "Second",
+        "Third",
+        "Fourth",
+    ]
+    await writer.close_user_exchange(**scope, user_message_id=901, outcome="user_only")
+    with pytest.raises(ValueError, match="no longer editable"):
+        await writer.edit_user_message(**scope, message_id=901, content="Sealed")
+    with pytest.raises(ValueError, match="not selectable"):
+        await writer.select_user_message_revision(**scope, message_id=901, revision=1)
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
 async def test_real_postgres_accepts_concurrent_user_message_request_once(
     real_postgres_client,
 ):
@@ -185,12 +272,14 @@ async def test_real_postgres_final_assistant_response_and_exchange_close_are_ato
         [candidate],
         readable_project_ids=["project-1"],
     )
-    duplicate_id, duplicate_source_ref_ids, duplicate_created = (
-        await store.finalize_assistant_exchange(
-            {**message, "id": 503, "content": "Must not be inserted."},
-            [candidate],
-            readable_project_ids=["project-1"],
-        )
+    (
+        duplicate_id,
+        duplicate_source_ref_ids,
+        duplicate_created,
+    ) = await store.finalize_assistant_exchange(
+        {**message, "id": 503, "content": "Must not be inserted."},
+        [candidate],
+        readable_project_ids=["project-1"],
     )
 
     assert (persisted_id, created) == (502, True)
@@ -290,13 +379,15 @@ async def test_real_postgres_persists_and_reloads_a_clarification_exchange(
         readable_project_ids=["project-1"],
         outcome="clarification",
     )
-    duplicate_id, duplicate_source_ref_ids, duplicate_created = (
-        await store.finalize_assistant_exchange(
-            {**message, "id": 533, "content": "Do not insert this duplicate."},
-            [candidate],
-            readable_project_ids=["project-1"],
-            outcome="clarification",
-        )
+    (
+        duplicate_id,
+        duplicate_source_ref_ids,
+        duplicate_created,
+    ) = await store.finalize_assistant_exchange(
+        {**message, "id": 533, "content": "Do not insert this duplicate."},
+        [candidate],
+        readable_project_ids=["project-1"],
+        outcome="clarification",
     )
     exchange = await store.get_user_agent_exchange(
         531,
@@ -429,12 +520,14 @@ async def test_real_postgres_finalizes_historical_document_sources_and_rolls_bac
         [candidate],
         readable_project_ids=["project-1"],
     )
-    duplicate_id, duplicate_ref_ids, duplicate_created = (
-        await store.finalize_assistant_exchange(
-            {**message, "id": 513, "content": "Duplicate answer."},
-            [candidate],
-            readable_project_ids=["project-1"],
-        )
+    (
+        duplicate_id,
+        duplicate_ref_ids,
+        duplicate_created,
+    ) = await store.finalize_assistant_exchange(
+        {**message, "id": 513, "content": "Duplicate answer."},
+        [candidate],
+        readable_project_ids=["project-1"],
     )
     sources = await store.get_message_source_refs(
         512,
@@ -504,7 +597,9 @@ async def test_real_postgres_finalizes_historical_document_sources_and_rolls_bac
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
-async def test_real_postgres_failure_and_cancellation_close_user_evidence(real_postgres_client):
+async def test_real_postgres_failure_and_cancellation_close_user_evidence(
+    real_postgres_client,
+):
     await _seed_session(real_postgres_client, "session-terminal")
     lifecycle = MessageLifecycleWriter(
         real_postgres_client,

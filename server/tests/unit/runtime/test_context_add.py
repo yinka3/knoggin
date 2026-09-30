@@ -13,8 +13,7 @@ from common.schema.artifacts import ArtifactDraft, MarkdownArtifactBlock
 from common.schema.document import create_document_focus
 from common.schema.primitives import Message
 from common.schema.source.references import SourceReferenceCandidate
-from common.utils.core_utils import fetch_conversation_turns
-from core.knowledge.db.readers.message_reader import UserAgentExchange
+from core.knowledge.db.readers.message_reader import MessageReader, UserAgentExchange
 from runtime.session_runtime import SessionRuntime
 from tests.fixtures.factories import make_project_state
 from tests.fixtures.fakes import FakeConfigValue, FakeResources
@@ -75,10 +74,10 @@ class _FakeTurnOrchestrator:
 async def _collect_turn(ctx, message, orchestrator):
     return [
         event
-        async for event in ctx.run_agent_stream(
+        async for event in (await ctx.open_agent_run_stream(
             message,
             orchestrator=orchestrator,
-        )
+        ))
     ]
 
 
@@ -99,6 +98,55 @@ def _runtime(resources, *, session_id="session-1", project_id="project-1"):
     return runtime
 
 
+@pytest.mark.runtime
+@pytest.mark.no_network
+@pytest.mark.parametrize("close_method", ["aclose", "cancel", "shutdown"])
+async def test_unconsumed_admission_has_an_explicit_cleanup_owner(
+    context, close_method
+):
+    ctx, resources = context
+    stream = await ctx.open_agent_run_stream(Message(content="never consumed"))
+    assert ctx._agent_run_reserved
+
+    if close_method == "aclose":
+        await stream.aclose()
+    elif close_method == "cancel":
+        assert await ctx.cancel_active_agent_run()
+    else:
+        await ctx.shutdown()
+
+    assert not ctx._agent_run_reserved
+    assert resources.knowledge_store.closed_exchanges[-1]["outcome"] == "cancelled"
+    assert [event async for event in stream] == []
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_cancel_during_acceptance_finishes_durable_acceptance_and_closure(
+    context, monkeypatch
+):
+    ctx, resources = context
+    entered, finish = asyncio.Event(), asyncio.Event()
+    original = ctx._accept_user_message
+
+    async def delayed(*args, **kwargs):
+        entered.set()
+        await finish.wait()
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(ctx, "_accept_user_message", delayed)
+    admission = asyncio.create_task(
+        ctx.open_agent_run_stream(Message(content="accept then cancel"))
+    )
+    await entered.wait()
+    admission.cancel()
+    finish.set()
+    with pytest.raises(asyncio.CancelledError):
+        await admission
+    assert not ctx._agent_run_reserved
+    assert resources.knowledge_store.closed_exchanges[-1]["outcome"] == "cancelled"
+
+
 @pytest.fixture
 def context(monkeypatch):
     resources = FakeResources()
@@ -109,6 +157,79 @@ def context(monkeypatch):
         property(lambda self: FakeConfigValue(conversation_context_turns=100)),
     )
     return ctx, resources
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_admitted_defaults_do_not_change_before_stream_iteration(context):
+    ctx, _ = context
+    ctx.model, ctx.agent_id, ctx.enabled_tools = (
+        "old-model",
+        "old-agent",
+        ["search_web"],
+    )
+
+    async def handler(kwargs):
+        defaults = kwargs["run_settings"]
+        assert (defaults.model, defaults.agent_id, defaults.enabled_tools) == (
+            "old-model",
+            "old-agent",
+            ("search_web",),
+        )
+        yield _response_event("Answer")
+
+    stream = await ctx.open_agent_run_stream(
+        Message(content="Question"), orchestrator=_FakeTurnOrchestrator(handler)
+    )
+    ctx.model, ctx.agent_id, ctx.enabled_tools = "new-model", "new-agent", []
+    assert [event["event"] async for event in stream] == ["response"]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_terminal_error_is_durable_before_the_first_error_is_consumed(context):
+    ctx, resources = context
+
+    async def handler(_kwargs):
+        yield {"event": "error", "data": {"code": "llm_budget_exhausted"}}
+
+    stream = await ctx.open_agent_run_stream(
+        Message(content="fail"), orchestrator=_FakeTurnOrchestrator(handler)
+    )
+    assert (await anext(stream))["event"] == "error"
+    assert resources.knowledge_store.closed_exchanges[-1]["outcome"] == "failed"
+    assert not ctx._agent_run_reserved
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_cancellation_after_answer_commit_does_not_close_as_cancelled(context):
+    ctx, resources = context
+    entered = asyncio.Event()
+
+    async def handler(_kwargs):
+        yield _response_event("Committed answer")
+
+    orchestrator = _FakeTurnOrchestrator(handler)
+
+    async def bookkeeping(_agent_id):
+        entered.set()
+        await asyncio.Event().wait()
+
+    orchestrator.mark_turn_completed = bookkeeping
+    task = asyncio.create_task(
+        _collect_turn(ctx, Message(content="answer"), orchestrator)
+    )
+    await entered.wait()
+    assert resources.knowledge_store.saved_message_logs[-1][0]["role"] == "assistant"
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not ctx._agent_run_reserved
+    assert not any(
+        row["outcome"] == "cancelled"
+        for row in resources.knowledge_store.closed_exchanges
+    )
 
 
 @pytest.mark.runtime
@@ -127,11 +248,8 @@ async def test_context_add_fails_fast_when_ingestion_wiring_is_incomplete():
 async def test_conversation_history_can_exclude_the_current_first_message():
     resources = FakeResources()
 
-    await fetch_conversation_turns(
-        resources.postgres,
-        "ada",
-        "session-1",
-        num_turns=10,
+    await MessageReader(resources.postgres).get_session_history(
+        user_name="ada", session_id="session-1", limit=10,
         up_to_msg_id=0,
     )
 
@@ -180,7 +298,6 @@ async def test_open_run_uses_durable_message_acceptance(context):
     await ctx.open_agent_run_stream(Message(content="durable only"))
 
 
-
 @pytest.mark.runtime
 @pytest.mark.no_network
 async def test_overlapping_run_is_rejected_before_second_message_persists(context):
@@ -196,18 +313,22 @@ async def test_overlapping_run_is_rejected_before_second_message_persists(contex
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_open_run_retries_after_durable_acceptance_write_failure(context, monkeypatch):
+async def test_open_run_retries_after_durable_acceptance_write_failure(
+    context, monkeypatch
+):
     ctx, resources = context
     timestamp = datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc)
     original_persist = ctx._persist_user_turn
     attempts = 0
 
-    async def fail_once(msg, *, acceptance_key):
+    async def fail_once(msg, *, acceptance_key, edit_window_seconds=None):
         nonlocal attempts
         attempts += 1
         if attempts == 1:
             raise ConnectionError("temporary Postgres failure")
-        return await original_persist(msg, acceptance_key=acceptance_key)
+        return await original_persist(
+            msg, acceptance_key=acceptance_key, edit_window_seconds=edit_window_seconds
+        )
 
     monkeypatch.setattr(ctx, "_persist_user_turn", fail_once)
 
@@ -215,6 +336,7 @@ async def test_open_run_retries_after_durable_acceptance_write_failure(context, 
         await ctx.open_agent_run_stream(Message(content="hello", timestamp=timestamp))
 
     await ctx.open_agent_run_stream(Message(content="hello", timestamp=timestamp))
+
 
 @pytest.mark.runtime
 @pytest.mark.no_network
@@ -224,9 +346,11 @@ async def test_open_run_persists_a_durable_acceptance_key(context):
 
     await ctx.open_agent_run_stream(Message(content="hello", timestamp=timestamp))
 
-    assert resources.knowledge_store.saved_message_logs[0][0]["acceptance_key"].startswith(
-        "content:"
-    )
+    assert resources.knowledge_store.saved_message_logs[0][0][
+        "acceptance_key"
+    ].startswith("content:")
+
+
 @pytest.mark.runtime
 @pytest.mark.no_network
 async def test_context_assistant_turn_uses_canonical_message_sequence(context):
@@ -243,12 +367,12 @@ async def test_context_assistant_turn_uses_canonical_message_sequence(context):
                 "user_name": "ada",
                 "session_id": "session-1",
                 "project_id": "project-1",
-                    "timestamp": timestamp.timestamp() * 1000,
-                    "metadata": {},
-                    "user_msg_id": 1,
-                    "lifecycle_state": "sealed",
-                    "sealed_at_ms": int(timestamp.timestamp() * 1000),
-                }
+                "timestamp": timestamp.timestamp() * 1000,
+                "metadata": {},
+                "user_msg_id": 1,
+                "lifecycle_state": "sealed",
+                "sealed_at_ms": int(timestamp.timestamp() * 1000),
+            }
         ]
     ]
 
@@ -284,7 +408,9 @@ async def test_context_assistant_turn_persists_source_candidates_with_message(co
     candidate = _pasted_source_candidate()
     calls = []
 
-    async def save_atomically(message, candidates, *, readable_project_ids, artifact=None):
+    async def save_atomically(
+        message, candidates, *, readable_project_ids, artifact=None
+    ):
         del artifact
         calls.append((message, candidates, readable_project_ids))
         return message["id"], [], True
@@ -307,11 +433,11 @@ async def test_context_assistant_turn_persists_source_candidates_with_message(co
                 "user_name": "ada",
                 "session_id": "session-1",
                 "project_id": "project-1",
-                    "timestamp": timestamp.timestamp() * 1000,
-                    "metadata": {},
-                    "user_msg_id": 1,
-                    "lifecycle_state": "sealed",
-                    "sealed_at_ms": int(timestamp.timestamp() * 1000),
+                "timestamp": timestamp.timestamp() * 1000,
+                "metadata": {},
+                "user_msg_id": 1,
+                "lifecycle_state": "sealed",
+                "sealed_at_ms": int(timestamp.timestamp() * 1000),
             },
             [candidate],
             ["project-1"],
@@ -331,7 +457,9 @@ async def test_context_retries_atomic_source_handoff_with_the_same_candidates(
     candidate = _pasted_source_candidate()
     calls = []
 
-    async def fail_once_then_save(message, candidates, *, readable_project_ids, artifact=None):
+    async def fail_once_then_save(
+        message, candidates, *, readable_project_ids, artifact=None
+    ):
         del artifact
         calls.append((message, candidates, list(readable_project_ids)))
         if len(calls) == 1:
@@ -342,9 +470,7 @@ async def test_context_retries_atomic_source_handoff_with_the_same_candidates(
     async def skip_retry_delay(_delay):
         return None
 
-    resources.knowledge_store.finalize_assistant_exchange = (
-        fail_once_then_save
-    )
+    resources.knowledge_store.finalize_assistant_exchange = fail_once_then_save
     monkeypatch.setattr("runtime.session_runtime.asyncio.sleep", skip_retry_delay)
 
     await ctx.add_assistant_turn(
@@ -370,7 +496,9 @@ async def test_abandoned_source_handoff_leaves_no_staged_assistant_turn(
     timestamp = datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc)
     attempts = 0
 
-    async def fail_atomically(_message, _candidates, *, readable_project_ids, artifact=None):
+    async def fail_atomically(
+        _message, _candidates, *, readable_project_ids, artifact=None
+    ):
         del readable_project_ids
         del artifact
         nonlocal attempts
@@ -415,7 +543,9 @@ async def test_context_assistant_turn_failure_removes_staged_message_and_raises(
     async def skip_retry_delay(delay):
         return None
 
-    monkeypatch.setattr(resources.knowledge_store, "finalize_assistant_exchange", fail_save)
+    monkeypatch.setattr(
+        resources.knowledge_store, "finalize_assistant_exchange", fail_save
+    )
     monkeypatch.setattr(
         "runtime.session_runtime.asyncio.sleep",
         skip_retry_delay,
@@ -443,7 +573,9 @@ async def test_run_agent_stream_persists_the_final_answer_and_sources_before_res
         history_calls.append((limit, up_to_msg_id))
         return [{"role": "assistant", "content": "A prior durable answer."}]
 
-    async def persist_assistant(message, candidates, *, readable_project_ids, artifact=None):
+    async def persist_assistant(
+        message, candidates, *, readable_project_ids, artifact=None
+    ):
         del artifact
         nonlocal persisted
         source_handoffs.append((message, candidates, readable_project_ids))
@@ -466,16 +598,14 @@ async def test_run_agent_stream_persists_the_final_answer_and_sources_before_res
         }
 
     ctx.get_conversation_context = history
-    resources.knowledge_store.finalize_assistant_exchange = (
-        persist_assistant
-    )
+    resources.knowledge_store.finalize_assistant_exchange = persist_assistant
     orchestrator = _FakeTurnOrchestrator(handler)
     events = []
 
-    async for event in ctx.run_agent_stream(
+    async for event in (await ctx.open_agent_run_stream(
         Message(content="What did we decide?"),
         orchestrator=orchestrator,
-    ):
+    )):
         if event["event"] == "response":
             assert persisted is True
         events.append(event)
@@ -512,7 +642,9 @@ async def test_run_agent_stream_marks_the_turn_only_after_durable_persistence(co
     async def handler(_kwargs):
         yield _response_event("Durable answer", resolved_agent_id="agent-run-1")
 
-    async def persist_assistant(message, candidates, *, readable_project_ids, artifact=None):
+    async def persist_assistant(
+        message, candidates, *, readable_project_ids, artifact=None
+    ):
         nonlocal persisted
         del candidates, readable_project_ids, artifact
         resources.knowledge_store.saved_message_logs.append([message])
@@ -637,10 +769,10 @@ async def test_run_agent_stream_persists_clarification_before_exposing_it(contex
 
     resources.knowledge_store.finalize_assistant_exchange = persist_assistant
     events = []
-    async for event in ctx.run_agent_stream(
+    async for event in (await ctx.open_agent_run_stream(
         Message(content="Help me choose a profile"),
         orchestrator=_FakeTurnOrchestrator(handler),
-    ):
+    )):
         assert persisted is True
         events.append(event)
 
@@ -660,7 +792,9 @@ async def test_run_agent_stream_persists_clarification_before_exposing_it(contex
             },
         }
     ]
-    assert [batch[0]["role"] for batch in resources.knowledge_store.saved_message_logs] == [
+    assert [
+        batch[0]["role"] for batch in resources.knowledge_store.saved_message_logs
+    ] == [
         "user",
         "assistant",
     ]
@@ -712,9 +846,7 @@ async def test_run_agent_stream_persists_artifact_with_assistant_completion(cont
     async def persist_assistant(
         message, candidates, *, readable_project_ids, artifact=None
     ):
-        handoffs.append(
-            (message, candidates, readable_project_ids, artifact)
-        )
+        handoffs.append((message, candidates, readable_project_ids, artifact))
         resources.knowledge_store.saved_message_logs.append([message])
         return message["id"], [], True
 
@@ -724,9 +856,7 @@ async def test_run_agent_stream_persists_artifact_with_assistant_completion(cont
             artifact=artifact.model_dump(mode="json"),
         )
 
-    resources.knowledge_store.finalize_assistant_exchange = (
-        persist_assistant
-    )
+    resources.knowledge_store.finalize_assistant_exchange = persist_assistant
     events = await _collect_turn(
         ctx,
         Message(content="Save this"),
@@ -749,11 +879,11 @@ async def test_run_agent_stream_forwards_selected_research_mode(context):
     orchestrator = _FakeTurnOrchestrator(handler)
     events = [
         event
-        async for event in ctx.run_agent_stream(
+        async for event in (await ctx.open_agent_run_stream(
             Message(content="Investigate this"),
             orchestrator=orchestrator,
             research_mode="deep_research",
-        )
+        ))
     ]
 
     assert [event["event"] for event in events] == ["response"]
@@ -766,6 +896,7 @@ async def test_run_agent_stream_rejects_an_overlapping_turn_before_persistence(c
     ctx, resources = context
     first_started = asyncio.Event()
     release_first = asyncio.Event()
+
     async def handler(kwargs):
         if kwargs["user_query"] == "first":
             first_started.set()
@@ -783,9 +914,9 @@ async def test_run_agent_stream_rejects_an_overlapping_turn_before_persistence(c
         )
 
     assert [call["user_query"] for call in orchestrator.calls] == ["first"]
-    assert [batch[0]["role"] for batch in resources.knowledge_store.saved_message_logs] == [
-        "user"
-    ]
+    assert [
+        batch[0]["role"] for batch in resources.knowledge_store.saved_message_logs
+    ] == ["user"]
 
     release_first.set()
     first_events = await first
@@ -826,19 +957,19 @@ async def test_duplicate_idempotency_key_replays_the_canonical_response(context)
     resources.knowledge_store.get_user_agent_exchange = replay_exchange
     first = [
         event
-        async for event in ctx.run_agent_stream(
+        async for event in (await ctx.open_agent_run_stream(
             Message(content="Please summarize this"),
             orchestrator=_FakeTurnOrchestrator(handler),
             idempotency_key="summary-1",
-        )
+        ))
     ]
     second = [
         event
-        async for event in ctx.run_agent_stream(
+        async for event in (await ctx.open_agent_run_stream(
             Message(content="Please summarize this"),
             orchestrator=_FakeTurnOrchestrator(handler),
             idempotency_key="summary-1",
-        )
+        ))
     ]
 
     assert first[-1]["event"] == "response"
@@ -901,16 +1032,28 @@ async def test_duplicate_acceptance_requires_a_reloadable_exchange(context):
 @pytest.mark.no_network
 def test_focus_resolution_timestamp_is_not_part_of_request_identity():
     first = create_document_focus(
-        mode="request", behavior="restrict", created_at="2026-01-01T00:00:00Z",
-        target_type="document", document_id="doc-1", relative_path="notes.pdf",
+        mode="request",
+        behavior="restrict",
+        created_at="2026-01-01T00:00:00Z",
+        target_type="document",
+        document_id="doc-1",
+        relative_path="notes.pdf",
     )
     second = create_document_focus(
-        mode="request", behavior="restrict", created_at="2026-01-02T00:00:00Z",
-        target_type="document", document_id="doc-1", relative_path="renamed.pdf",
+        mode="request",
+        behavior="restrict",
+        created_at="2026-01-02T00:00:00Z",
+        target_type="document",
+        document_id="doc-1",
+        relative_path="renamed.pdf",
     )
     inputs = dict(
-        message=Message(content="Summarize"), user_timezone=None, model=None,
-        agent_id=None, enabled_tools=None, pasted_text_spans=None,
+        message=Message(content="Summarize"),
+        user_timezone=None,
+        model=None,
+        agent_id=None,
+        enabled_tools=None,
+        pasted_text_spans=None,
         research_mode="normal",
     )
 
@@ -920,12 +1063,14 @@ def test_focus_resolution_timestamp_is_not_part_of_request_identity():
     changed_behavior = first.model_copy(update={"behavior": "prefer"})
     changed_target = first.model_copy(update={"document_id": "doc-2"})
     baseline = SessionRuntime._request_fingerprint(document_focus=first, **inputs)
-    assert SessionRuntime._request_fingerprint(
-        document_focus=changed_behavior, **inputs
-    ) != baseline
-    assert SessionRuntime._request_fingerprint(
-        document_focus=changed_target, **inputs
-    ) != baseline
+    assert (
+        SessionRuntime._request_fingerprint(document_focus=changed_behavior, **inputs)
+        != baseline
+    )
+    assert (
+        SessionRuntime._request_fingerprint(document_focus=changed_target, **inputs)
+        != baseline
+    )
 
 
 @pytest.mark.runtime
@@ -949,9 +1094,9 @@ async def test_failed_request_replay_preserves_safe_terminal_error(context):
     resources.knowledge_store.get_user_agent_exchange = replay_exchange
     events = [
         event
-        async for event in ctx.run_agent_stream(
+        async for event in (await ctx.open_agent_run_stream(
             Message(content="Use the model"), idempotency_key="budget-1"
-        )
+        ))
     ]
 
     assert events[0]["data"]["code"] == "llm_budget_exhausted"
@@ -975,10 +1120,10 @@ async def test_terminal_error_is_closed_with_safe_replay_fields(context):
 
     events = [
         event
-        async for event in ctx.run_agent_stream(
+        async for event in (await ctx.open_agent_run_stream(
             Message(content="Use the model"),
             orchestrator=_FakeTurnOrchestrator(handler),
-        )
+        ))
     ]
 
     assert events[0]["event"] == "error"
@@ -1017,10 +1162,10 @@ async def test_duplicate_idempotency_key_replays_the_canonical_clarification(con
 
     events = [
         event
-        async for event in ctx.run_agent_stream(
+        async for event in (await ctx.open_agent_run_stream(
             Message(content="Help me choose a profile"),
             idempotency_key="clarification-1",
-        )
+        ))
     ]
 
     assert events == [
@@ -1044,7 +1189,9 @@ async def test_duplicate_idempotency_key_replays_the_canonical_clarification(con
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_same_active_idempotency_key_is_in_progress_and_mismatch_conflicts(context):
+async def test_same_active_idempotency_key_is_in_progress_and_mismatch_conflicts(
+    context,
+):
     ctx, _resources = context
     started = asyncio.Event()
     release = asyncio.Event()
@@ -1055,14 +1202,15 @@ async def test_same_active_idempotency_key_is_in_progress_and_mismatch_conflicts
         yield _response_event("done")
 
     orchestrator = _FakeTurnOrchestrator(handler)
+
     async def run_first():
         return [
             event
-            async for event in ctx.run_agent_stream(
+            async for event in (await ctx.open_agent_run_stream(
                 Message(content="original request"),
                 orchestrator=orchestrator,
                 idempotency_key="same-request",
-            )
+            ))
         ]
 
     first = asyncio.create_task(run_first())
@@ -1087,7 +1235,9 @@ async def test_same_active_idempotency_key_is_in_progress_and_mismatch_conflicts
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_interrupted_idempotent_submission_never_starts_another_agent_run(context):
+async def test_interrupted_idempotent_submission_never_starts_another_agent_run(
+    context,
+):
     ctx, resources = context
     resources.knowledge_store.accepted_message_ids["request:interrupted-1"] = 71
 
@@ -1146,7 +1296,9 @@ def test_clarification_metadata_retains_only_usage_and_fallback():
 @pytest.mark.runtime
 @pytest.mark.no_network
 def test_unknown_terminal_error_is_reduced_to_safe_retryable_failure():
-    assert SessionRuntime._terminal_error_record({"code": "private_provider_error"}) == {
+    assert SessionRuntime._terminal_error_record(
+        {"code": "private_provider_error"}
+    ) == {
         "code": "run_failed",
         "retryable": True,
     }
@@ -1231,6 +1383,8 @@ async def test_cancel_active_agent_run_keeps_only_the_durable_user_turn(context)
     assert [
         batch[0]["role"] for batch in resources.knowledge_store.saved_message_logs
     ] == ["user"]
+
+
 @pytest.mark.runtime
 @pytest.mark.no_network
 async def test_session_shutdown_cancels_active_run_and_rejects_new_run(context):
@@ -1259,7 +1413,9 @@ async def test_session_shutdown_cancels_active_run_and_rejects_new_run(context):
     with pytest.raises(asyncio.CancelledError):
         await first
     assert [call["user_query"] for call in orchestrator.calls] == ["first"]
-    assert [batch[0]["role"] for batch in resources.knowledge_store.saved_message_logs] == ["user"]
+    assert [
+        batch[0]["role"] for batch in resources.knowledge_store.saved_message_logs
+    ] == ["user"]
 
 
 @pytest.mark.runtime

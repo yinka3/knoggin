@@ -9,7 +9,10 @@ from loguru import logger
 
 from common.conf.domain_config import DomainConfig
 from common.conf.manager import ConfigManager
+from common.exceptions import WorkspaceConflictError
 from common.scoping import build_readable_project_ids
+from common.utils.lifecycle import settle_owned_task
+from core.knowledge.db.writers.artifact_retention_writer import ArtifactRetentionWriter
 from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
 from core.knowledge.documents.filesystem import ProjectFilesystemFactory
 from core.knowledge.entity.maintenance_service import EntityMaintenanceService
@@ -108,6 +111,7 @@ class ProjectManager:
             user_name=user_name,
             maintenance_service=self.maintenance_service,
             config_manager=config_manager,
+            filesystem_factory=filesystem_factory,
         )
         # Entity identity maintenance is user-global and must not be tied to a
         # loaded ProjectRuntime.  ProjectManager exposes the application-owned
@@ -120,6 +124,7 @@ class ProjectManager:
         self.maintenance_scheduler = ApplicationMaintenanceScheduler(
             maintenance_service=self.entity_maintenance_service,
             user_name=user_name,
+            artifact_retention_writer=ArtifactRetentionWriter(self.pg),
             background_work=getattr(resources, "background_work", None),
         )
         self._closed = False
@@ -650,6 +655,30 @@ class ProjectManager:
         allowed_projects: Optional[List[str]] = None,
     ) -> Optional[dict]:
         """Update project metadata that does not control lifecycle status."""
+        return await self._mutate_project(
+            self._update_project_locked, project_id,
+            name=name, description=description, allowed_projects=allowed_projects,
+        )
+
+    async def _mutate_project(self, operation, *args, **kwargs):
+        """Keep admission excluded until an already-started mutation settles."""
+        async with self.maintenance_service.lock:
+            if self._closed:
+                raise RuntimeError("ProjectManager is shutting down")
+            task = asyncio.create_task(operation(*args, **kwargs))
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                try:
+                    await settle_owned_task(task)
+                except Exception:
+                    logger.error("Cancelled project mutation failed while settling")
+                raise
+
+    async def _update_project_locked(
+        self, project_id: str, name: Optional[str] = None,
+        description: Optional[str] = None, allowed_projects: Optional[List[str]] = None,
+    ) -> Optional[dict]:
         meta = await self.get_project(project_id)
         if not meta:
             return None
@@ -668,7 +697,7 @@ class ProjectManager:
         if allowed_projects is not None:
             active_state = self.active_projects.get(project_id)
             if self._project_leases.get(project_id):
-                raise RuntimeError(
+                raise WorkspaceConflictError(
                     f"Project '{project_id}' has active runtime sessions and "
                     "cannot change its readable project scope"
                 )
@@ -715,6 +744,9 @@ class ProjectManager:
 
     async def archive_project(self, project_id: str) -> Optional[dict]:
         """Retire a project while retaining its sessions and knowledge."""
+        return await self._mutate_project(self._archive_project_locked, project_id)
+
+    async def _archive_project_locked(self, project_id: str) -> Optional[dict]:
         meta = await self.get_project(project_id)
         if not meta:
             return None
@@ -725,7 +757,7 @@ class ProjectManager:
 
         active_state = self.active_projects.get(project_id)
         if self._project_leases.get(project_id):
-            raise RuntimeError(
+            raise WorkspaceConflictError(
                 f"Project '{project_id}' has active runtime sessions and cannot be archived"
             )
         if active_state:
@@ -746,6 +778,9 @@ class ProjectManager:
 
     async def reactivate_project(self, project_id: str) -> Optional[dict]:
         """Make an archived project eligible for sessions again."""
+        return await self._mutate_project(self._reactivate_project_locked, project_id)
+
+    async def _reactivate_project_locked(self, project_id: str) -> Optional[dict]:
         meta = await self.get_project(project_id)
         if not meta:
             return None
@@ -786,7 +821,7 @@ class ProjectManager:
 
             active_state = self.active_projects.get(project_id)
             if self._project_leases.get(project_id):
-                raise RuntimeError(
+                raise WorkspaceConflictError(
                     f"Project '{project_id}' has active runtime sessions and "
                     "cannot be deleted"
                 )
@@ -889,15 +924,17 @@ class ProjectManager:
                 raise RuntimeError(
                     f"Session '{session_id}' does not hold a lease for project '{project_id}'"
                 )
-            leases.remove(session_id)
-            if leases:
+            if len(leases) > 1:
+                leases.remove(session_id)
                 return
 
-            self._project_leases.pop(project_id, None)
-            state = self.active_projects.pop(project_id, None)
+            state = self.active_projects.get(project_id)
             if state is not None:
                 await state.shutdown()
+                self.active_projects.pop(project_id, None)
                 logger.info(f"Released ProjectRuntime for project_id: {project_id}")
+            leases.remove(session_id)
+            self._project_leases.pop(project_id, None)
 
     async def shutdown(self) -> None:
         """Stop every remaining project runtime before shared resources close."""
@@ -908,15 +945,21 @@ class ProjectManager:
             if self._closed and not self.active_projects:
                 return
             self._closed = True
-            states = list(self.active_projects.values())
-            self.active_projects.clear()
-            self._project_leases.clear()
+            states = list(self.active_projects.items())
 
         results = await asyncio.gather(
-            *(state.shutdown() for state in states),
+            *(state.shutdown() for _, state in states),
             return_exceptions=True,
         )
-        failures = [result for result in results if isinstance(result, Exception)]
+        failures = []
+        async with self.maintenance_service.lock:
+            for (project_id, state), result in zip(states, results, strict=True):
+                if isinstance(result, Exception):
+                    failures.append(result)
+                    continue
+                if self.active_projects.get(project_id) is state:
+                    self.active_projects.pop(project_id, None)
+                    self._project_leases.pop(project_id, None)
         if failures:
             raise RuntimeError(
                 f"Failed to shut down {len(failures)} project runtime(s)"

@@ -1,9 +1,11 @@
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 import pytest
 
 from common.schema.artifacts import ArtifactDraft, MarkdownArtifactBlock
 from common.schema.source.references import SourceReferenceCandidate
+from core.knowledge.db.readers.source_reference_reader import SourceReferenceReader
 from core.knowledge.db.writers.message_lifecycle_writer import ExchangeClosure
 from core.knowledge.store import KnowledgeStore
 
@@ -62,6 +64,57 @@ class LifecycleWriter:
             outcome=kwargs["outcome"],
             closed_at_ms=kwargs["closed_at_ms"],
         )
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize("reference_ids", [[], ["ref-2", "ref-1"]])
+async def test_finalization_replay_reads_existing_sources_without_rewriting(
+    reference_ids,
+):
+    class Cursor:
+        async def execute(self, query, params):
+            self.query, self.params = query, params
+
+        async def fetchall(self):
+            return [{"source_ref_id": value} for value in reference_ids]
+
+    class ExistingLifecycle(LifecycleWriter):
+        async def prepare_assistant_exchange_finalization(self, **kwargs):
+            self.prepare_calls.append(kwargs)
+            return SimpleNamespace(assistant_message_id=11)
+
+    client = TransactionClient()
+    client.cursor = Cursor()
+    lifecycle = ExistingLifecycle()
+    store = object.__new__(KnowledgeStore)
+    store._postgres_client = client
+    store._message_lifecycle_writer = lifecycle
+    # No writers are installed: a replay must never write another response.
+    store._source_reference_reader = SourceReferenceReader(client)
+
+    result = await store.finalize_assistant_exchange(
+        {
+            "id": 12,
+            "role": "assistant",
+            "user_name": "ada",
+            "project_id": "project-1",
+            "session_id": "session-1",
+            "user_msg_id": 7,
+        },
+        [_candidate()],
+        readable_project_ids=["project-1"],
+    )
+
+    assert result == (11, reference_ids, False)
+    assert client.transaction_count == 1
+    assert lifecycle.prepare_calls[0]["cur"] is client.cursor
+    assert lifecycle.close_calls == []
+    assert client.cursor.params == ("project-1", "session-1", 11, "ada")
+    assert "message.user_name = %s" in client.cursor.query
+    assert (
+        "ORDER BY ref.created_at ASC, ref.result_position ASC, ref.source_ref_id ASC"
+        in client.cursor.query
+    )
 
 
 def _candidate():

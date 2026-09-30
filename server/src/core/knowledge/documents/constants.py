@@ -1,6 +1,7 @@
 from pathlib import PurePosixPath
 
-MAX_DOCUMENT_SIZE = 50 * 1024 * 1024
+from common.document_limits import MAX_DOCUMENT_SIZE as MAX_DOCUMENT_SIZE
+
 # Keep indexed relative paths comfortably below PostgreSQL's B-tree entry
 # limit, including multibyte UTF-8 path components.
 MAX_RELATIVE_PATH_BYTES = 2048

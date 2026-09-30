@@ -22,7 +22,7 @@ from core.knowledge.documents import (
     ProjectFilesystemFactory,
 )
 from core.knowledge.documents import (
-    storage as storage_module,
+    extraction as extraction_module,
 )
 from core.knowledge.documents.constants import document_extension
 from core.project.project_files import CONTEXT_FILE_PATH
@@ -41,18 +41,18 @@ def docling_snapshot(
 ):
     """Build a deterministic captured parse for document-pipeline tests."""
 
-    return storage_module.DocumentParseSnapshot(
+    return extraction_module.DocumentParseSnapshot(
         text=text,
         structure=structure or {"kind": "docling-test"},
         parser_name="docling",
         parser_version="test",
         parser_fingerprint="a" * 64,
         pages=tuple(
-            storage_module.DocumentSnapshotPage(
+            extraction_module.DocumentSnapshotPage(
                 page_number=page_number,
                 text=page_text,
                 regions=(
-                    storage_module.LayoutRegion(
+                    extraction_module.LayoutRegion(
                         page_number=page_number,
                         element_type="page",
                         extraction_method="native_text",
@@ -114,6 +114,18 @@ class MemoryPostgres:
 
     async def fetch_all(self, query, params=None):
         self.calls.append(("fetch_all", query, params))
+        if "pd.relative_path = ANY(%s)" in query:
+            project_id, relative_paths = params
+            return [
+                deepcopy(row)
+                for row in sorted(
+                    self.rows,
+                    key=lambda row: (row["relative_path"], row["document_id"]),
+                )
+                if row["project_id"] == project_id
+                and row["relative_path"] in relative_paths
+                and row["status"] != "deleted"
+            ]
         if (
             "FROM public.project_documents AS pd" in query
             and "ORDER BY pd.relative_path ASC" in query
@@ -508,6 +520,74 @@ class MemoryCursor:
 
         if (
             normalized.startswith("UPDATE public.project_documents")
+            and "SET original_name = %s" in normalized
+        ):
+            (
+                original_name,
+                extension,
+                size_bytes,
+                content_hash,
+                updated_at,
+                document_id,
+                project_id,
+            ) = params
+            row = next(
+                row
+                for row in self.postgres.rows
+                if row["document_id"] == document_id
+                and row["project_id"] == project_id
+                and row["status"] != "deleted"
+            )
+            row.update(
+                {
+                    "original_name": original_name,
+                    "extension": extension,
+                    "size_bytes": size_bytes,
+                    "content_hash": content_hash,
+                    "current_snapshot_id": None,
+                    "status": "queued",
+                    "deleted_at": None,
+                    "indexed_at": None,
+                    "error_message": None,
+                    "index_attempt_count": 0,
+                    "next_index_retry_at": None,
+                    "last_index_failure_kind": None,
+                    "updated_at": updated_at,
+                }
+            )
+            self.result = None
+            return
+
+        if (
+            normalized.startswith("UPDATE public.project_documents")
+            and "document_id = ANY(%s)" in normalized
+            and "SET status = 'deleted'" in normalized
+        ):
+            deleted_at, updated_at, project_id, document_ids = params
+            for row in self.postgres.rows:
+                if (
+                    row["project_id"] == project_id
+                    and row["document_id"] in document_ids
+                    and row["status"] != "deleted"
+                ):
+                    row.update(
+                        {
+                            "status": "deleted",
+                            "deleted_at": row.get("deleted_at") or deleted_at,
+                            "current_snapshot_id": None,
+                            "indexed_at": None,
+                            "error_message": None,
+                            "index_attempt_count": 0,
+                            "next_index_retry_at": None,
+                            "last_index_failure_kind": None,
+                            "updated_at": updated_at,
+                        }
+                    )
+            self.result = None
+            return
+
+        if (
+            normalized.startswith("UPDATE public.project_documents")
             and "SET status = 'deleted'" in normalized
         ):
             if self.postgres.delete_error is not None:
@@ -879,7 +959,7 @@ def test_tree_sitter_preserves_top_level_code_symbols(
     expected_symbols,
     expected_ranges,
 ):
-    chunks = storage_module.split_document(source, extension=extension)
+    chunks = extraction_module.split_document(source, extension=extension)
 
     assert [chunk.symbol_name for chunk in chunks] == expected_symbols
     assert [(chunk.start_line, chunk.end_line) for chunk in chunks] == expected_ranges
@@ -888,7 +968,7 @@ def test_tree_sitter_preserves_top_level_code_symbols(
 @pytest.mark.unit
 @pytest.mark.no_network
 def test_tree_sitter_falls_back_to_regex_for_incomplete_python():
-    chunks = storage_module.split_document("def unfinished(", extension=".py")
+    chunks = extraction_module.split_document("def unfinished(", extension=".py")
 
     assert len(chunks) == 1
     assert chunks[0].symbol_name == "unfinished"
@@ -898,7 +978,7 @@ def test_tree_sitter_falls_back_to_regex_for_incomplete_python():
 @pytest.mark.no_network
 def test_pdf_extraction_splits_each_page_without_cross_page_chunks(monkeypatch):
     monkeypatch.setattr(
-        storage_module,
+        extraction_module,
         "_extract_docling_snapshot",
         lambda *_: docling_snapshot(
             "Page one only.\n\nPage two only.",
@@ -906,7 +986,7 @@ def test_pdf_extraction_splits_each_page_without_cross_page_chunks(monkeypatch):
         ),
     )
 
-    extraction = storage_module.extract_and_split_document(b"pdf", ".pdf")
+    extraction = extraction_module.extract_and_split_document(b"pdf", ".pdf")
 
     assert extraction.text == "Page one only.\n\nPage two only."
     assert [(chunk.page_number, chunk.content) for chunk in extraction.chunks] == [
@@ -918,15 +998,15 @@ def test_pdf_extraction_splits_each_page_without_cross_page_chunks(monkeypatch):
 @pytest.mark.unit
 @pytest.mark.no_network
 def test_text_markdown_and_csv_chunks_have_reliable_locators():
-    text_chunks = storage_module.split_document(
+    text_chunks = extraction_module.split_document(
         "\nFirst line\nSecond line\n",
         extension=".txt",
     )
-    markdown_chunks = storage_module.split_document(
+    markdown_chunks = extraction_module.split_document(
         "# Overview\nIntroduction\n\n## Risks\nMitigation\n",
         extension=".md",
     )
-    csv_chunks = storage_module.split_document(
+    csv_chunks = extraction_module.split_document(
         "name,value\nalpha,1\nbeta,2\n",
         extension=".csv",
     )
@@ -948,7 +1028,7 @@ def test_text_markdown_and_csv_chunks_have_reliable_locators():
 @pytest.mark.no_network
 def test_docx_chunks_derive_from_the_captured_structured_markdown(monkeypatch):
     monkeypatch.setattr(
-        storage_module,
+        extraction_module,
         "_extract_docling_snapshot",
         lambda *_: docling_snapshot(
             "# Overview\nThe introduction.\n\n## Risks\nMitigate dependency risk.",
@@ -956,7 +1036,7 @@ def test_docx_chunks_derive_from_the_captured_structured_markdown(monkeypatch):
         ),
     )
 
-    extraction = storage_module.extract_and_split_document(b"docx", ".docx")
+    extraction = extraction_module.extract_and_split_document(b"docx", ".docx")
 
     assert [
         (chunk.start_line, chunk.end_line, chunk.section_path)
@@ -986,11 +1066,11 @@ def test_notebook_cells_become_retrievable_chunks():
         ]
     }
 
-    text = storage_module.extract_text(
+    text = extraction_module.extract_text(
         json.dumps(notebook).encode(),
         ".ipynb",
     )
-    chunks = storage_module.split_document(text, extension=".ipynb")
+    chunks = extraction_module.split_document(text, extension=".ipynb")
 
     assert [
         (chunk.chunk_kind, chunk.symbol_name, chunk.content) for chunk in chunks
@@ -1089,13 +1169,75 @@ async def test_reconciliation_catalogs_local_changes_and_tombstones_missing_file
 
     filesystem.write_bytes("external.md", b"second external version", overwrite=True)
     changed = await service.reconcile_project_files()
+    changed_row = next(
+        row
+        for row in postgres.rows
+        if row["relative_path"] == "external.md" and row["status"] != "deleted"
+    )
     filesystem.delete_file("external.md")
     deleted = await service.reconcile_project_files()
 
     assert created["created"] == 1
     assert changed["changed"] == 1
     assert deleted["deleted"] == 1
+    assert changed_row["document_id"] == current["document_id"]
+    assert changed_row["content_hash"] != hashlib.sha256(b"first external version").hexdigest()
     assert current["status"] == "deleted"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_reconciliation_rolls_back_all_catalog_changes_when_commit_fails(
+    document_harness,
+):
+    service, postgres = document_harness
+    filesystem = service._filesystem
+    assert filesystem is not None
+    existing = await service.add_document(
+        content=b"old content",
+        original_name="existing.md",
+    )
+    filesystem.write_bytes("existing.md", b"new content", overwrite=True)
+    filesystem.write_bytes("created.md", b"created content")
+    original_rows = deepcopy(postgres.rows)
+    postgres.transaction_commit_error = RuntimeError("commit failed")
+
+    with pytest.raises(RuntimeError, match="commit failed"):
+        await service.reconcile_project_files()
+
+    assert postgres.rows == original_rows
+    assert next(
+        row for row in postgres.rows if row["document_id"] == existing["document_id"]
+    )["content_hash"] == hashlib.sha256(b"old content").hexdigest()
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_reconciliation_skips_unchanged_bytes_but_keeps_a_full_hash_sweep(
+    document_harness,
+    monkeypatch,
+):
+    service, _postgres = document_harness
+    filesystem = service._filesystem
+    assert filesystem is not None
+    filesystem.write_bytes("external.md", b"unchanged")
+    reads: list[str] = []
+    original_read_bytes = type(filesystem).read_bytes
+
+    def count_read_bytes(instance, relative_path, **kwargs):
+        reads.append(relative_path)
+        return original_read_bytes(instance, relative_path, **kwargs)
+
+    monkeypatch.setattr(type(filesystem), "read_bytes", count_read_bytes)
+    from core.knowledge.documents import service as service_module
+
+    monkeypatch.setattr(service_module, "_RECONCILIATION_FULL_HASH_INTERVAL", 3)
+
+    await service.reconcile_project_files()
+    await service.reconcile_project_files()
+    await service.reconcile_project_files()
+
+    assert reads == ["external.md", "external.md"]
 
 
 @pytest.mark.storage
@@ -1139,6 +1281,77 @@ async def test_native_project_file_operations_reconcile_the_document_catalog(
         row["relative_path"] == "notes/draft.md" and row["status"] == "deleted"
         for row in postgres.rows
     )
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_native_project_file_mutations_do_not_scan_the_project_tree(
+    document_harness,
+    monkeypatch,
+):
+    service, postgres = document_harness
+    filesystem = service._filesystem
+    assert filesystem is not None
+
+    def reject_full_scan(*_args, **_kwargs):
+        raise AssertionError("workspace mutation must not scan the project tree")
+
+    monkeypatch.setattr(type(filesystem), "iter_paths", reject_full_scan)
+
+    created = await service.create_project_file("notes.md", "one")
+    updated = await service.update_project_file(
+        "notes.md",
+        "two",
+        expected_content_hash=created["content_hash"],
+    )
+    appended = await service.append_project_file(
+        "notes.md",
+        " three",
+        expected_content_hash=updated["content_hash"],
+    )
+    await service.move_project_file(
+        "notes.md",
+        "archive.md",
+        expected_content_hash=appended["content_hash"],
+    )
+    archived = next(
+        row
+        for row in postgres.rows
+        if row["relative_path"] == "archive.md" and row["status"] != "deleted"
+    )
+    await service.delete_project_file(
+        "archive.md",
+        expected_content_hash=hashlib.sha256(b"two three").hexdigest(),
+    )
+
+    assert archived["status"] == "deleted"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_list_project_files_only_reads_the_bounded_result_set(
+    document_harness,
+    monkeypatch,
+):
+    service, _postgres = document_harness
+    filesystem = service._filesystem
+    assert filesystem is not None
+    filesystem.write_bytes("a.md", b"alpha")
+    filesystem.write_bytes("b.md", b"beta")
+    filesystem.write_bytes("c.md", b"gamma")
+    reads: list[str] = []
+    original_read_file = type(filesystem).read_file
+
+    def count_read_file(instance, relative_path, **kwargs):
+        reads.append(relative_path)
+        return original_read_file(instance, relative_path, **kwargs)
+
+    monkeypatch.setattr(type(filesystem), "read_file", count_read_file)
+
+    listed = await service.list_project_files(limit=1)
+
+    assert [item["relative_path"] for item in listed] == ["a.md"]
+    assert reads == ["a.md"]
 
 
 @pytest.mark.storage
@@ -1597,7 +1810,7 @@ async def test_delete_document_tombstones_metadata_and_removes_chunks_and_bytes(
         def split_text(self, text):
             return [text]
 
-    monkeypatch.setattr(storage_module, "SentenceSplitter", OneChunkSplitter)
+    monkeypatch.setattr(extraction_module, "SentenceSplitter", OneChunkSplitter)
     first = await service.add_document(
         content=b"same content",
         original_name="notes.txt",
@@ -1824,7 +2037,7 @@ async def test_indexer_start_drains_more_than_one_recovery_batch(document_harnes
         await asyncio.sleep(0.01)
 
     assert {row["status"] for row in postgres.rows} == {"indexed"}
-    await service.shutdown()
+    await service.indexer.shutdown()
 
 
 @pytest.mark.storage
@@ -1869,7 +2082,7 @@ async def test_indexer_retries_document_admission_after_temporary_rejection(
 
     assert background_work.calls >= 2
     assert postgres.rows[0]["status"] == "indexed"
-    await service.shutdown()
+    await service.indexer.shutdown()
 
 
 @pytest.mark.storage
@@ -2238,7 +2451,7 @@ async def test_index_document_extracts_supported_documents(
     service, postgres = document_harness
     if extension == ".pdf":
         monkeypatch.setattr(
-            storage_module,
+            extraction_module,
             "_extract_docling_snapshot",
             lambda *_: docling_snapshot(
                 "First page\n\nSecond page",
@@ -2247,7 +2460,7 @@ async def test_index_document_extracts_supported_documents(
         )
     else:
         monkeypatch.setattr(
-            storage_module,
+            extraction_module,
             "_extract_docling_snapshot",
             lambda *_: docling_snapshot("Document text"),
         )
@@ -2272,7 +2485,7 @@ async def test_read_document_keeps_pdf_line_ranges_page_local(
     monkeypatch, document_harness
 ):
     monkeypatch.setattr(
-        storage_module,
+        extraction_module,
         "_extract_docling_snapshot",
         lambda *_: docling_snapshot(
             "First page line\n\nSecond page first\nSecond page last",
@@ -2319,7 +2532,7 @@ async def test_document_selection_reads_docx_from_its_captured_snapshot(
     document_harness,
 ):
     monkeypatch.setattr(
-        storage_module,
+        extraction_module,
         "_extract_docling_snapshot",
         lambda *_: docling_snapshot("# Overview\n\nCurrent selection"),
     )
@@ -2399,7 +2612,7 @@ async def test_index_document_records_document_parser_errors(
     def fail_pdf_parse(*_):
         raise ValueError("damaged PDF")
 
-    monkeypatch.setattr(storage_module, "_extract_docling_snapshot", fail_pdf_parse)
+    monkeypatch.setattr(extraction_module, "_extract_docling_snapshot", fail_pdf_parse)
     uploaded = await service.add_document(
         content=b"not a valid PDF",
         original_name="notes.pdf",
@@ -2540,13 +2753,13 @@ async def test_index_document_reconciles_before_extraction_when_source_bytes_cha
 
     assert extraction_calls == 0
     assert reconciled["status"] == "queued"
-    assert reconciled["document_id"] != uploaded["document_id"]
+    assert reconciled["document_id"] == uploaded["document_id"]
     assert reconciled["content_hash"] == hashlib.sha256(b"beta").hexdigest()
     assert postgres.chunks == []
     assert postgres.parse_snapshots == {}
     assert next(
         row for row in postgres.rows if row["document_id"] == uploaded["document_id"]
-    )["status"] == "deleted"
+    )["status"] == "queued"
 
     indexed = await service.index_document(document_id=reconciled["document_id"])
 
@@ -2581,13 +2794,13 @@ async def test_index_document_does_not_publish_after_catalog_changes_during_deri
     result = await service.index_document(document_id=uploaded["document_id"])
 
     assert result["status"] == "queued"
-    assert result["document_id"] != uploaded["document_id"]
+    assert result["document_id"] == uploaded["document_id"]
     assert result["content_hash"] == hashlib.sha256(b"beta").hexdigest()
     assert postgres.chunks == []
     assert postgres.parse_snapshots == {}
     assert next(
         row for row in postgres.rows if row["document_id"] == uploaded["document_id"]
-    )["status"] == "deleted"
+    )["status"] == "queued"
 
 
 @pytest.mark.storage
@@ -2625,55 +2838,6 @@ async def test_index_transaction_locks_parent_and_rechecks_indexed_state(
         if method == "cursor.execute" and "FOR UPDATE" in query
     ]
     assert locking_queries
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_accept_folder_indexes_selected_subset_atomically(
-    monkeypatch,
-    document_harness,
-):
-    service, postgres = document_harness
-
-    class OneChunkSplitter:
-        def __init__(self, **kwargs):
-            pass
-
-        def split_text(self, text):
-            return [text]
-
-    monkeypatch.setattr(
-        storage_module,
-        "SentenceSplitter",
-        OneChunkSplitter,
-    )
-    result = await service.accept_folder(
-        folder_name="repo",
-        entries=[
-            FolderUploadEntry(
-                relative_path="src/main.py",
-                content=b"print('main')",
-            ),
-            FolderUploadEntry(
-                relative_path="README.md",
-                content=b"readme",
-            ),
-            FolderUploadEntry(
-                relative_path="ignored.log",
-                content=b"ignored",
-            ),
-        ],
-        selected_paths=["src/main.py", "README.md"],
-    )
-
-    assert result["document_count"] == 2
-    assert set(result["relative_paths"]) == {
-        "README.md",
-        "src/main.py",
-    }
-    assert result["path_prefix"] is None
-    assert len(postgres.rows) == 2
-    assert len(postgres.chunks) == 0
 
 
 @pytest.mark.storage
@@ -2736,217 +2900,3 @@ async def test_preview_uses_saved_settings_and_explicit_settings_do_not_persist(
     }
     assert (await service.get_scan_settings()).blocked_extensions == {".foo"}
 
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_accept_folder_without_selection_accepts_all_eligible_documents(
-    monkeypatch,
-    document_harness,
-):
-    service, postgres = document_harness
-
-    class OneChunkSplitter:
-        def __init__(self, **kwargs):
-            pass
-
-        def split_text(self, text):
-            return [text]
-
-    monkeypatch.setattr(
-        storage_module,
-        "SentenceSplitter",
-        OneChunkSplitter,
-    )
-    await service.save_scan_settings(FolderScanSettings(blocked_extensions={".foo"}))
-
-    result = await service.accept_folder(
-        folder_name="repo",
-        entries=[
-            FolderUploadEntry(relative_path="a.txt", content=b"alpha"),
-            FolderUploadEntry(relative_path="b.md", content=b"beta"),
-            FolderUploadEntry(relative_path="debug.foo", content=b"debug"),
-        ],
-        selected_paths=None,
-    )
-
-    assert set(result["relative_paths"]) == {
-        "a.txt",
-        "b.md",
-    }
-    assert result["scan_settings"]["blocked_extensions"] == [".foo"]
-    assert len(postgres.rows) == 2
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_repeated_folder_acceptance_rejects_an_existing_project_path(
-    monkeypatch,
-    document_harness,
-):
-    service, postgres = document_harness
-
-    class OneChunkSplitter:
-        def __init__(self, **kwargs):
-            pass
-
-        def split_text(self, text):
-            return [text]
-
-    monkeypatch.setattr(
-        storage_module,
-        "SentenceSplitter",
-        OneChunkSplitter,
-    )
-    entries = [FolderUploadEntry(relative_path="notes.txt", content=b"notes")]
-
-    first = await service.accept_folder(
-        folder_name="repo",
-        entries=entries,
-        selected_paths=["notes.txt"],
-    )
-    with pytest.raises(FileExistsError):
-        await service.accept_folder(
-            folder_name="repo",
-            entries=entries,
-            selected_paths=["notes.txt"],
-        )
-    assert first["relative_paths"] == ["notes.txt"]
-    assert len(postgres.rows) == 1
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_accept_folder_rejects_unknown_and_excluded_selections(
-    document_harness,
-):
-    service, postgres = document_harness
-    entries = [
-        FolderUploadEntry(relative_path="notes.txt", content=b"notes"),
-        FolderUploadEntry(relative_path=".env", content=b"secret"),
-    ]
-
-    with pytest.raises(ValueError, match="unknown"):
-        await service.accept_folder(
-            folder_name="repo",
-            entries=entries,
-            selected_paths=["missing.txt"],
-        )
-    with pytest.raises(ValueError, match="excluded"):
-        await service.accept_folder(
-            folder_name="repo",
-            entries=entries,
-            selected_paths=[".env"],
-            force_include_paths=[".env"],
-        )
-    with pytest.raises(ValueError, match="duplicates"):
-        await service.accept_folder(
-            folder_name="repo",
-            entries=entries,
-            selected_paths=["notes.txt", "notes.txt"],
-        )
-    with pytest.raises(ValueError, match="at least one"):
-        await service.accept_folder(
-            folder_name="repo",
-            entries=entries,
-            selected_paths=[],
-        )
-
-    assert postgres.rows == []
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_accept_folder_admits_bytes_without_creating_a_folder_batch(
-    document_harness,
-):
-    service, postgres = document_harness
-
-    result = await service.accept_folder(
-        folder_name="repo",
-        entries=[FolderUploadEntry(relative_path="broken.txt", content=b"\xff")],
-        selected_paths=["broken.txt"],
-    )
-
-    assert result["relative_paths"] == ["broken.txt"]
-    assert len(postgres.rows) == 1
-    assert postgres.rows[0]["status"] == "queued"
-    assert postgres.chunks == []
-    assert service._filesystem.read_bytes("broken.txt") == b"\xff"
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_accept_folder_admits_selected_paths_before_background_indexing(
-    monkeypatch,
-    document_harness,
-):
-    service, postgres = document_harness
-
-    class OneChunkSplitter:
-        def __init__(self, **kwargs):
-            pass
-
-        def split_text(self, text):
-            return [text]
-
-    monkeypatch.setattr(
-        storage_module,
-        "SentenceSplitter",
-        OneChunkSplitter,
-    )
-    result = await service.accept_folder(
-        folder_name="repo",
-        entries=[
-            FolderUploadEntry(relative_path="a.txt", content=b"alpha"),
-            FolderUploadEntry(relative_path="b.txt", content=b"beta"),
-        ],
-        selected_paths=["a.txt", "b.txt"],
-    )
-
-    assert result["relative_paths"] == ["a.txt", "b.txt"]
-    assert len(postgres.rows) == 2
-    assert len(postgres.chunks) == 0
-    assert {row["status"] for row in postgres.rows} == {"queued"}
-    assert {
-        service._filesystem.read_bytes("a.txt"),
-        service._filesystem.read_bytes("b.txt"),
-    } == {b"alpha", b"beta"}
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_accept_folder_commit_failure_removes_rows_and_bytes(
-    monkeypatch,
-    document_harness,
-):
-    service, postgres = document_harness
-
-    class OneChunkSplitter:
-        def __init__(self, **kwargs):
-            pass
-
-        def split_text(self, text):
-            return [text]
-
-    monkeypatch.setattr(
-        storage_module,
-        "SentenceSplitter",
-        OneChunkSplitter,
-    )
-    postgres.transaction_commit_error = RuntimeError("commit failed")
-
-    with pytest.raises(RuntimeError, match="commit failed"):
-        await service.accept_folder(
-            folder_name="repo",
-            entries=[
-                FolderUploadEntry(
-                    relative_path="notes.txt",
-                    content=b"notes",
-                )
-            ],
-            selected_paths=["notes.txt"],
-        )
-
-    assert postgres.rows == []
-    assert postgres.chunks == []
-    assert list(service._filesystem.iter_files()) == []

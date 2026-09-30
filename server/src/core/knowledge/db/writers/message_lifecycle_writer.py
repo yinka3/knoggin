@@ -8,6 +8,7 @@ from time import time
 from typing import Any, Dict
 
 from common.exceptions import IdempotencyConflictError
+from common.scoping import require_scope_value
 from core.knowledge.db.writers.message_writer import MessageWriter
 from infrastructure.postgres_client import PostgresClient
 
@@ -131,6 +132,13 @@ class MessageLifecycleWriter:
                     now_ms,
                 ),
             )
+            await cur.execute(
+                """
+                UPDATE public.sessions SET last_active_at = now()
+                WHERE user_name = %s AND project_id = %s AND session_id = %s
+                """,
+                (row["user_name"], row["project_id"], row["session_id"]),
+            )
         return MessageAcceptance(message_id=inserted_id, created=True)
 
     async def prepare_assistant_exchange_finalization(
@@ -240,7 +248,8 @@ class MessageLifecycleWriter:
                 outcome not in {"failed", "cancelled"}
                 or code not in expected_retryability
                 or (outcome == "cancelled") != (code == "run_cancelled")
-                or terminal_error != {
+                or terminal_error
+                != {
                     "code": code,
                     "retryable": expected_retryability[code],
                 }
@@ -306,7 +315,9 @@ class MessageLifecycleWriter:
                 )
                 assistant = await cur.fetchone()
                 if assistant is None:
-                    raise RuntimeError("Closed assistant exchange is missing its assistant row")
+                    raise RuntimeError(
+                        "Closed assistant exchange is missing its assistant row"
+                    )
                 assistant_message_id = int(assistant["message_id"])
             return ExchangeClosure(
                 user_message_id=user_message_id,
@@ -357,6 +368,51 @@ class MessageLifecycleWriter:
             closed_at_ms=closed_at_ms,
         )
 
+    async def close_orphaned_user_exchange(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+        user_message_id: int,
+        expected_opened_at_ms: int,
+        stale_before_ms: int,
+    ) -> ExchangeClosure:
+        """Close an explicitly selected stale exchange after locking its row."""
+
+        async with self.client.transaction() as cur:
+            await cur.execute(
+                """
+                SELECT timestamp_ms, exchange_state
+                FROM public.messages
+                WHERE user_name = %s
+                  AND project_id = %s
+                  AND session_id = %s
+                  AND message_id = %s
+                  AND role = 'user'
+                FOR UPDATE
+                """,
+                (user_name, project_id, session_id, user_message_id),
+            )
+            row = await cur.fetchone()
+            if row is None:
+                raise ValueError("Orphaned exchange is unavailable")
+            if row["exchange_state"] != "open":
+                raise ValueError("Exchange is no longer open")
+            if int(row["timestamp_ms"]) != expected_opened_at_ms:
+                raise ValueError("Exchange changed since it was inspected")
+            if expected_opened_at_ms > stale_before_ms:
+                raise ValueError("Exchange is not old enough to repair")
+            return await self.close_user_exchange(
+                user_name=user_name,
+                project_id=project_id,
+                session_id=session_id,
+                user_message_id=user_message_id,
+                outcome="failed",
+                terminal_error={"code": "run_failed", "retryable": True},
+                cur=cur,
+            )
+
     async def edit_user_message(
         self,
         *,
@@ -368,19 +424,46 @@ class MessageLifecycleWriter:
     ) -> int:
         """Append and select a revision before the immutable seal deadline."""
 
+        user_name, project_id, session_id = self._edit_scope(
+            user_name, project_id, session_id, message_id
+        )
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError("content must not be blank")
+        content = content.strip()
         now_ms = self._now_ms()
         async with self.client.transaction() as cur:
+            # A separate statement takes the lock before the revision-history
+            # snapshot, so concurrent edits see the preceding committed revision.
+            await cur.execute(
+                """
+                SELECT message_id FROM public.messages
+                WHERE user_name = %s AND project_id = %s AND session_id = %s
+                  AND message_id = %s AND role = 'user'
+                FOR UPDATE
+                """,
+                (user_name, project_id, session_id, message_id),
+            )
+            if await cur.fetchone() is None:
+                raise ValueError("Message is no longer editable")
             await cur.execute(
                 """
                 UPDATE public.messages AS message
                 SET content = %s,
-                    selected_revision = selected_revision + 1
+                    selected_revision = (
+                        SELECT COALESCE(MAX(saved.revision), 0) + 1
+                        FROM public.message_revisions AS saved
+                        WHERE saved.user_name = message.user_name
+                          AND saved.project_id = message.project_id
+                          AND saved.session_id = message.session_id
+                          AND saved.message_id = message.message_id
+                    )
                 WHERE user_name = %s
                   AND project_id = %s
                   AND session_id = %s
                   AND message_id = %s
                   AND role = 'user'
                   AND lifecycle_state = 'editable'
+                  AND exchange_state = 'open'
                   AND editable_until_ms > %s
                   AND EXISTS (
                       SELECT 1
@@ -435,6 +518,11 @@ class MessageLifecycleWriter:
     ) -> str:
         """Choose an already-saved draft version without creating another one."""
 
+        user_name, project_id, session_id = self._edit_scope(
+            user_name, project_id, session_id, message_id
+        )
+        if not isinstance(revision, int) or isinstance(revision, bool) or revision <= 0:
+            raise ValueError("revision must be a positive integer")
         now_ms = self._now_ms()
         async with self.client.transaction() as cur:
             await cur.execute(
@@ -449,6 +537,7 @@ class MessageLifecycleWriter:
                   AND message.message_id = %s
                   AND message.role = 'user'
                   AND message.lifecycle_state = 'editable'
+                  AND message.exchange_state = 'open'
                   AND message.editable_until_ms > %s
                   AND revision_row.user_name = message.user_name
                   AND revision_row.session_id = message.session_id
@@ -477,3 +566,21 @@ class MessageLifecycleWriter:
             updated = await cur.fetchone()
             if updated is None:
                 raise ValueError("Message revision is not selectable")
+            return str(updated["content"])
+
+    @staticmethod
+    def _edit_scope(user_name, project_id, session_id, message_id):
+        if (
+            not isinstance(message_id, int)
+            or isinstance(message_id, bool)
+            or message_id <= 0
+        ):
+            raise ValueError("message_id must be a positive integer")
+        return tuple(
+            require_scope_value(value, name, "edit_user_message")
+            for name, value in (
+                ("user_name", user_name),
+                ("project_id", project_id),
+                ("session_id", session_id),
+            )
+        )

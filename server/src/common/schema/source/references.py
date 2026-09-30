@@ -286,11 +286,3 @@ class SourceConsulted(BaseModel):
     contributing_message_id: int = Field(gt=0)
 
 
-class AssistantMessageWithSources(BaseModel):
-    """One owned assistant response with its ordered source context."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    message_id: int = Field(gt=0)
-    content: str
-    sources_consulted: tuple[SourceConsulted, ...] = Field(default_factory=tuple)

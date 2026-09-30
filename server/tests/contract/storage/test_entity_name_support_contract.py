@@ -27,7 +27,6 @@ async def _seed_mergeable_entities(client) -> None:
     )
 
 
-@pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
 async def test_explicit_user_names_have_global_support(real_postgres_client):
@@ -96,10 +95,19 @@ async def test_project_sources_are_distinct_from_copied_episode_and_merge_histor
         );
         """
     )
-    writer = GraphWriter(real_postgres_client)
-    await writer.update_entity_aliases({2: ["Ada"]}, project_id="project-1")
-    await writer.update_entity_aliases(
-        {2: ["Ada in project two"]}, project_id="project-2"
+    # A surviving project's support must name a current canonical name or
+    # alias. Seed both parts that a semantic commit would have produced; this
+    # test owns deletion behavior, not the ingestion alias-writing workflow.
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.entity_aliases (entity_id, alias)
+        VALUES (2, 'Ada in project two');
+        INSERT INTO public.entity_name_supports (
+            entity_id, name, project_id, source_kind, source_key
+        ) VALUES
+            (2, 'Ada', 'project-1', 'project', 'project-1'),
+            (2, 'Ada in project two', 'project-2', 'project', 'project-2')
+        """
     )
 
     assert await real_postgres_client.fetch_all(
@@ -145,32 +153,6 @@ async def test_project_sources_are_distinct_from_copied_episode_and_merge_histor
     ]
 
 
-@pytest.mark.storage
-@pytest.mark.requires_postgres
-@pytest.mark.no_network
-async def test_project_alias_writer_records_its_source(real_postgres_client):
-    await _seed_mergeable_entities(real_postgres_client)
-
-    await GraphWriter(real_postgres_client).update_entity_aliases(
-        {2: ["Lady Ada"]},
-        project_id="project-1",
-    )
-
-    assert await real_postgres_client.fetch_all(
-        """
-        SELECT entity_id, name, project_id, source_kind, source_key
-        FROM public.entity_name_supports
-        WHERE entity_id = 2
-        """
-    ) == [
-        {
-            "entity_id": 2,
-            "name": "Lady Ada",
-            "project_id": "project-1",
-            "source_kind": "project",
-            "source_key": "project-1",
-        }
-    ]
 
 
 @pytest.mark.storage

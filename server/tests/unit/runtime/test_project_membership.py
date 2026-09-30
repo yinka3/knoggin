@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from common.exceptions import WorkspaceConflictError
 from common.scoping import IDENTITY_SCOPE
 from core.knowledge.documents.filesystem import ProjectFilesystemFactory
 from core.project.project_manager import ProjectManager, ProjectStatus
@@ -126,6 +127,77 @@ async def test_project_runtime_releases_its_exact_final_lease():
     assert manager._project_leases == {}
     assert manager.active_projects == {}
     assert shutdowns == ["project-1"]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_final_lease_release_retains_runtime_when_shutdown_fails():
+    manager = make_manager(RecordingPostgres())
+    attempts = 0
+
+    async def shutdown():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("cleanup failed")
+
+    state = SimpleNamespace(shutdown=shutdown)
+    manager.active_projects["project-1"] = state
+    manager._project_leases["project-1"] = {"session-1"}
+
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        await manager.release_project_for_session("project-1", "session-1")
+
+    assert manager.active_projects == {"project-1": state}
+    assert manager._project_leases == {"project-1": {"session-1"}}
+
+    await manager.release_project_for_session("project-1", "session-1")
+
+    assert manager.active_projects == {}
+    assert manager._project_leases == {}
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_manager_shutdown_retains_only_failed_runtimes_for_retry():
+    manager = make_manager(RecordingPostgres())
+    failed_attempts = 0
+
+    async def successful_shutdown():
+        return None
+
+    async def retry_shutdown():
+        nonlocal failed_attempts
+        failed_attempts += 1
+        if failed_attempts == 1:
+            raise RuntimeError("cleanup failed")
+
+    failed_state = SimpleNamespace(shutdown=retry_shutdown)
+    manager.active_projects.update(
+        {
+            "project-ok": SimpleNamespace(shutdown=successful_shutdown),
+            "project-retry": failed_state,
+        }
+    )
+    manager._project_leases.update(
+        {
+            "project-ok": {"session-ok"},
+            "project-retry": {"session-retry"},
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="Failed to shut down 1 project runtime"):
+        await manager.shutdown()
+
+    assert manager.active_projects == {"project-retry": failed_state}
+    assert manager._project_leases == {
+        "project-retry": {"session-retry"},
+    }
+
+    await manager.shutdown()
+
+    assert manager.active_projects == {}
+    assert manager._project_leases == {}
 
 
 @pytest.mark.runtime
@@ -283,13 +355,14 @@ async def test_update_project_rejects_scope_change_while_runtime_is_active():
     manager = make_manager(postgres)
     manager._project_leases["project-1"] = {"session-1"}
 
-    with pytest.raises(RuntimeError, match="active runtime sessions"):
+    with pytest.raises(WorkspaceConflictError, match="active runtime sessions"):
         await manager.update_project(
             "project-1",
             allowed_projects=["project-2"],
         )
 
     assert not any(call[0] == "execute" for call in postgres.calls)
+    assert manager._project_leases == {"project-1": {"session-1"}}
 
 
 @pytest.mark.runtime
@@ -326,8 +399,10 @@ async def test_archive_project_refuses_active_runtime_sessions():
     manager = make_manager(postgres)
     manager._project_leases["project-1"] = {"session-1"}
 
-    with pytest.raises(RuntimeError, match="cannot be archived"):
+    with pytest.raises(WorkspaceConflictError, match="cannot be archived"):
         await manager.archive_project("project-1")
+    assert manager._project_leases == {"project-1": {"session-1"}}
+    assert not any(call[0] == "execute" for call in postgres.calls)
 
 
 @pytest.mark.runtime
@@ -433,10 +508,11 @@ async def test_delete_project_refuses_active_runtime_sessions(tmp_path):
     writer = RecordingProjectDeletionWriter()
     manager._project_deletion_writer = writer
 
-    with pytest.raises(RuntimeError, match="cannot be deleted"):
+    with pytest.raises(WorkspaceConflictError, match="cannot be deleted"):
         await manager.delete_project("project-1")
 
     assert writer.calls == []
+    assert manager._project_leases == {"project-1": {"session-1"}}
 
 
 @pytest.mark.runtime

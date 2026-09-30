@@ -5,7 +5,6 @@ import json
 from typing import Any
 
 from common.schema.source.references import (
-    AssistantMessageWithSources,
     SourceConsulted,
     SourceReference,
 )
@@ -17,6 +16,40 @@ class SourceReferenceReader:
 
     def __init__(self, client) -> None:
         self.client = client
+
+    async def get_message_source_ref_ids(
+        self,
+        message_id: int,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+        cursor,
+    ) -> list[str]:
+        """Read replay IDs using the finalization transaction's existing cursor."""
+        if message_id <= 0:
+            raise ValueError("message_id must be positive")
+        user_name, project_id, session_id = self._scope(
+            user_name, project_id, session_id, "get_message_source_ref_ids"
+        )
+        await cursor.execute(
+            """
+            SELECT ref.source_ref_id
+            FROM public.message_source_refs AS ref
+            JOIN public.messages AS message
+              ON message.message_id = ref.message_id
+             AND message.project_id = ref.project_id
+             AND message.session_id = ref.session_id
+            WHERE ref.project_id = %s
+              AND ref.session_id = %s
+              AND ref.message_id = %s
+              AND message.user_name = %s
+              AND message.role = 'assistant'
+            ORDER BY ref.created_at ASC, ref.result_position ASC, ref.source_ref_id ASC
+            """,
+            (project_id, session_id, message_id, user_name),
+        )
+        return [str(row["source_ref_id"]) for row in await cursor.fetchall()]
 
     async def get_message_source_refs(
         self,
@@ -137,149 +170,18 @@ class SourceReferenceReader:
         )
         return None if row is None else self._reference_from_row(row)
 
-    async def get_assistant_message_with_sources(
-        self,
-        message_id: int,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-    ) -> AssistantMessageWithSources | None:
-        """Read one owned assistant response with its source provenance."""
-
-        if message_id <= 0:
-            raise ValueError("message_id must be positive")
-        scope = self._scope(
-            user_name,
-            project_id,
-            session_id,
-            "get_assistant_message_with_sources",
-        )
-        user_name, project_id, session_id = scope
-        row = await self.client.fetch_one(
-            """
-            SELECT message.message_id, message.content
-            FROM public.messages AS message
-            JOIN public.sessions AS session
-              ON session.session_id = message.session_id
-             AND session.project_id = message.project_id
-            WHERE message.message_id = %s
-              AND message.project_id = %s
-              AND message.session_id = %s
-              AND message.role = 'assistant'
-              AND session.user_name = %s
-            """,
-            (message_id, project_id, session_id, user_name),
-        )
-        if row is None:
-            return None
-        return AssistantMessageWithSources(
-            message_id=int(row["message_id"]),
-            content=str(row["content"]),
-            sources_consulted=await self.get_message_source_refs(
-                message_id,
-                user_name=user_name,
-                project_id=project_id,
-                session_id=session_id,
-            ),
-        )
-
-    async def get_episode_source_refs(
-        self,
-        episode_id: str,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-    ) -> list[SourceConsulted]:
-        episode_id = require_scope_value(
-            episode_id, "episode_id", "get_episode_source_refs"
-        )
-        scope = self._scope(
-            user_name,
-            project_id,
-            session_id,
-            "get_episode_source_refs",
-        )
-        user_name, project_id, session_id = scope
-        rows = await self.client.fetch_all(
-            """
-            SELECT
-                ref.source_ref_id,
-                ref.project_id,
-                ref.session_id,
-                ref.message_id,
-                ref.source_kind,
-                ref.document_id,
-                ref.parse_snapshot_id,
-                ref.source_project_id,
-                ref.canonical_url,
-                ref.source_message_id,
-                ref.content_hash,
-                ref.locator,
-                ref.excerpt,
-                ref.metadata,
-                ref.encounter_kind,
-                ref.agent_run_id,
-                ref.tool_call_id,
-                ref.result_position,
-                ref.idempotency_key,
-                ref.created_at,
-                document.status AS document_status,
-                document.content_hash AS document_content_hash,
-                document.current_snapshot_id AS document_current_snapshot_id,
-                snapshot.snapshot_id AS snapshot_id,
-                snapshot.source_content_hash AS snapshot_content_hash
-            FROM public.episode_messages AS attachment
-            JOIN public.episodes AS episode
-              ON episode.episode_id = attachment.episode_id
-             AND episode.project_id = attachment.project_id
-            JOIN public.sessions AS session
-              ON session.session_id = attachment.session_id
-             AND session.project_id = attachment.project_id
-            JOIN public.message_source_refs AS ref
-              ON ref.message_id = attachment.message_id
-             AND ref.project_id = attachment.project_id
-             AND ref.session_id = attachment.session_id
-            LEFT JOIN public.project_documents AS document
-              ON document.document_id = ref.document_id
-             AND document.project_id = ref.source_project_id
-            LEFT JOIN public.document_parse_snapshots AS snapshot
-              ON snapshot.snapshot_id = ref.parse_snapshot_id
-             AND snapshot.document_id = ref.document_id
-            WHERE attachment.episode_id = %s
-              AND episode.project_id = %s
-              AND attachment.session_id = %s
-              AND session.user_name = %s
-            ORDER BY attachment.message_position ASC, ref.created_at ASC,
-                ref.result_position ASC, ref.source_ref_id ASC
-            """,
-            (episode_id, project_id, session_id, user_name),
-        )
-        presented = []
-        seen = set()
-        for row in rows:
-            reference = self._reference_from_row(row)
-            key = self._episode_deduplication_key(reference)
-            if key in seen:
-                continue
-            seen.add(key)
-            presented.append(
-                self._present_reference(
-                    reference,
-                    document_status=row.get("document_status"),
-                    document_content_hash=row.get("document_content_hash"),
-                    document_current_snapshot_id=row.get("document_current_snapshot_id"),
-                    snapshot_id=row.get("snapshot_id"),
-                    snapshot_content_hash=row.get("snapshot_content_hash"),
-                    document_status_resolved="document_status" in row,
-                )
-            )
-        return presented
-
     async def get_project_episode_source_refs(
         self, episode_id: str, *, user_name: str, project_id: str
     ) -> list[SourceConsulted]:
+        episode_id = require_scope_value(
+            episode_id, "episode_id", "get_project_episode_source_refs"
+        )
+        user_name = require_scope_value(
+            user_name, "user_name", "get_project_episode_source_refs"
+        )
+        project_id = require_scope_value(
+            project_id, "project_id", "get_project_episode_source_refs"
+        )
         rows = await self.client.fetch_all(
             """
             SELECT
@@ -320,12 +222,14 @@ class SourceReferenceReader:
                 presented.append(
                     self._present_reference(
                         reference,
-                    document_status=row.get("document_status"),
-                    document_content_hash=row.get("document_content_hash"),
-                    document_current_snapshot_id=row.get("document_current_snapshot_id"),
-                    snapshot_id=row.get("snapshot_id"),
-                    snapshot_content_hash=row.get("snapshot_content_hash"),
-                    document_status_resolved="document_status" in row,
+                        document_status=row.get("document_status"),
+                        document_content_hash=row.get("document_content_hash"),
+                        document_current_snapshot_id=row.get(
+                            "document_current_snapshot_id"
+                        ),
+                        snapshot_id=row.get("snapshot_id"),
+                        snapshot_content_hash=row.get("snapshot_content_hash"),
+                        document_status_resolved="document_status" in row,
                     )
                 )
         return presented

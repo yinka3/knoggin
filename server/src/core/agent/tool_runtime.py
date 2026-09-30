@@ -14,18 +14,15 @@ from common.exceptions import (
 )
 from common.schema.agent.tool_contracts import (
     READ_CAPABILITY,
-    TOOL_SCHEMAS,
     validate_tool_arguments,
 )
-from core.agent.tool_references import resolve_agent_tool_arguments
+from core.agent.tool_references import (
+    LocalToolReferenceError,
+    resolve_agent_tool_arguments,
+)
 from core.agent.tools.registry import Tools, get_tool_definition
 
-_TOOL_PARAM_TYPES: Dict[str, Dict[str, str]] = {}
-for _schema in TOOL_SCHEMAS:
-    _fn = _schema.get("function", {})
-    _name = _fn.get("name", "")
-    _props = _fn.get("parameters", {}).get("properties", {})
-    _TOOL_PARAM_TYPES[_name] = {k: v.get("type", "string") for k, v in _props.items()}
+
 def _coerce_arg(value, expected_type: str):
     """Best-effort coercion of LLM-provided arg values to declared schema types."""
     if value is None:
@@ -61,15 +58,15 @@ def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
         return "No results", 0
 
     if tool_name in (
-        "get_connections",
-        "get_recent_activity",
-        "search_messages",
-        "search_entity",
+        "get_entity_relationships",
+        "get_entity_recent_activity",
+        "search_knowledge_messages",
+        "search_knowledge_entities",
     ):
         count = len(data) if isinstance(data, list) else 0
         return f"Found {count} results", count
 
-    if tool_name == "load_topic_context":
+    if tool_name == "load_project_topic_context":
         if not isinstance(data, dict) or not data:
             return "No topic context found", 0
         message_count = sum(
@@ -83,17 +80,17 @@ def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
             len(data),
         )
 
-    if tool_name == "find_path":
+    if tool_name == "find_relationship_path":
         if data:
             return f"Path found: {len(data)} hops", len(data)
         return "No path", 0
 
-    if tool_name == "read_observation_evidence":
+    if tool_name == "read_relationship_observation_evidence":
         if isinstance(data, dict) and data.get("subject"):
             return "Loaded observation support", 1
         return "No observation support found", 0
 
-    if tool_name in ("episode_check", "read_recent_episodes"):
+    if tool_name in ("search_episodes", "read_recent_episodes"):
         if isinstance(data, dict):
             res_type = data.get("resolution", "unknown")
             results = data.get("results", [])
@@ -101,25 +98,25 @@ def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
             return f"Resolved via {res_type} ({count} matches)", count
         return "No results", 0
 
-    if tool_name in ("edit_brain", "restore_brain_section"):
+    if tool_name in ("edit_agent_brain", "restore_agent_brain_section"):
         if "error" in result:
             return f"Error: {result['error']}", 0
         return "Brain updated", 1
 
-    if tool_name in ("read_brain", "list_brain_snapshots", "read_brain_snapshot"):
+    if tool_name in ("read_agent_brain", "list_agent_brain_snapshots", "read_agent_brain_snapshot"):
         return "Brain loaded", 1
 
-    if tool_name in ("search_documents", "read_document", "read_web_page"):
+    if tool_name in ("search_project_documents", "read_project_document", "read_web_page"):
         count = len(data) if isinstance(data, list) else 0
         if count > 0 and "error" not in (data[0] if data else {}):
-            if tool_name == "read_document":
+            if tool_name == "read_project_document":
                 return "Read document content", 1
             if tool_name == "read_web_page":
                 return "Read web content", 1
             return f"Found {count} relevant chunks", count
         return "No results", 0
 
-    if tool_name == "list_documents":
+    if tool_name == "list_project_documents":
         count = len(data) if isinstance(data, list) else 0
         return f"Found {count} items", count
 
@@ -128,20 +125,20 @@ def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
 
 async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
     definition = get_tool_definition(name)
-    if definition is None or definition.dispatch is None:
+    if definition is None or definition.executor_protocol:
         raise ToolExecutionError(name, f"Unknown tool: {name}")
 
-    method_name, param_keys = definition.dispatch
-    method = getattr(tools, method_name, None)
+    method = getattr(tools, definition.name, None)
     if method is None:
-        raise ToolExecutionError(name, f"Tool method not found: {method_name}")
+        raise ToolExecutionError(name, f"Tool method not found: {definition.name}")
 
     active_schemas = getattr(tools, "active_tool_schemas", {})
-    schema = active_schemas.get(name) or definition.schema
+    canonical_schema = definition.schema
+    schema = active_schemas.get(name) or canonical_schema
     authorization = getattr(tools, "tool_authorization", None)
     capability = definition.capability if schema else READ_CAPABILITY
 
-    logger.info(f"[TOOL CALL] {name}: {json.dumps(args, default=str)}")
+    logger.info("[TOOL CALL] {}: {}", name, _tool_argument_metadata(args))
     audit_id = None
     try:
         if authorization is not None:
@@ -173,31 +170,35 @@ async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
 
         kwargs = dict(args)
 
-        param_types = (
-            {
-                key: value.get("type", "string")
-                for key, value in schema["function"]
-                .get("parameters", {})
-                .get("properties", {})
-                .items()
-            }
-            if schema
-            else _TOOL_PARAM_TYPES.get(name, {})
-        )
+        param_types = {
+            key: value.get("type", "string")
+            for key, value in canonical_schema["function"]
+            .get("parameters", {})
+            .get("properties", {})
+            .items()
+        }
         for k, v in kwargs.items():
             if k in param_types:
                 kwargs[k] = _coerce_arg(v, param_types[k])
 
-        if schema:
-            validation_errors = validate_tool_arguments(schema, kwargs)
+        if canonical_schema:
+            validation_errors = validate_tool_arguments(canonical_schema, kwargs)
             if validation_errors:
                 raise ToolExecutionError(
                     name,
                     "Invalid arguments: " + "; ".join(validation_errors),
                 )
 
+            if schema is not canonical_schema:
+                presentation_errors = validate_tool_arguments(schema, kwargs)
+                if presentation_errors:
+                    raise ToolExecutionError(
+                        name,
+                        "Invalid arguments: " + "; ".join(presentation_errors),
+                    )
+
             parameter_names = set(
-                schema["function"]
+                canonical_schema["function"]
                 .get("parameters", {})
                 .get("properties", {})
             )
@@ -206,23 +207,23 @@ async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
                 for key, value in kwargs.items()
                 if key in parameter_names
             }
-        else:
-            kwargs = {k: args.get(k) for k in param_keys if k in args}
-
         # Tool schemas validate the model-facing local values first. Only then
         # resolve them for the scoped backend reader/writer call.
-        kwargs = resolve_agent_tool_arguments(tools, name, kwargs)
+        try:
+            kwargs = resolve_agent_tool_arguments(tools, name, kwargs)
+        except LocalToolReferenceError as exc:
+            raise ToolExecutionError(
+                name,
+                str(exc),
+                details={"reason": "local_reference_invalid"},
+            ) from exc
         result = await method(**kwargs)
+        result = _normalize_tool_result(name, result)
         if audit_id:
-            audit_status = (
-                "rejected"
-                if isinstance(result, dict) and result.get("error")
-                else "succeeded"
-            )
             await _safe_finish_tool_audit(
                 tools,
                 audit_id,
-                status=audit_status,
+                status="succeeded",
                 result=result,
             )
         return {"data": result}
@@ -249,6 +250,64 @@ async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
             "Tool execution failed",
             retryable=_is_retryable_tool_failure(exc),
         ) from exc
+
+
+def _normalize_tool_result(tool_name: str, result):
+    """Reject legacy error-shaped returns before they look like success data."""
+
+    error = None
+    if isinstance(result, dict):
+        error = result.get("error")
+    elif isinstance(result, list):
+        error_rows = [
+            row.get("error")
+            for row in result
+            if isinstance(row, dict) and row.get("error")
+        ]
+        if error_rows:
+            error = error_rows[0]
+        elif result and all(
+            isinstance(row, dict) and row.get("title") == "No Results"
+            for row in result
+        ):
+            return []
+        elif any(
+            isinstance(row, dict)
+            and row.get("title") == "Not Available"
+            and not row.get("url")
+            for row in result
+        ):
+            raise ToolExecutionError(
+                tool_name,
+                "The requested provider is not configured",
+            )
+    if error:
+        message = str(error)
+        if message.casefold().startswith("failed to "):
+            message = "The tool operation failed"
+        raise ToolExecutionError(tool_name, message)
+    return result
+
+
+def _tool_argument_metadata(arguments: Dict) -> dict:
+    """Describe arguments for logs without copying their values."""
+
+    metadata = {}
+    for key in sorted(arguments)[:20]:
+        safe_key = str(key)[:64]
+        value = arguments[key]
+        entry = {"type": type(value).__name__}
+        if any(
+            marker in safe_key.casefold()
+            for marker in ("token", "secret", "password", "api_key")
+        ):
+            entry["redacted"] = True
+        elif isinstance(value, (str, bytes, list, tuple, dict, set)):
+            entry["size"] = len(value)
+        metadata[safe_key] = entry
+    if len(arguments) > len(metadata):
+        metadata["_truncated"] = {"count": len(arguments) - len(metadata)}
+    return metadata
 
 
 def _is_retryable_tool_failure(exc: Exception) -> bool:

@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from common.exceptions import StorageWriteError
+from common.exceptions import EpisodeEditConflictError, StorageWriteError
 from core.knowledge.db.writers.episode_writer import EpisodeWriter
 from core.knowledge.store import KnowledgeStore
 from tests.fixtures.fakes import RecordingPostgresClient
@@ -134,13 +134,14 @@ async def test_store_edit_embedding_failure_does_not_open_a_transaction(
 async def test_episode_writer_rejects_a_stale_edit_without_a_second_write():
     client = RecordingPostgresClient(fetch_one_results=[None])
 
-    with pytest.raises(ValueError, match="has changed"):
+    with pytest.raises(EpisodeEditConflictError, match="has changed"):
         await EpisodeWriter(client).edit_episode(**_edit_arguments())
 
     assert client.transaction_enters == 1
     assert client.transaction_exits == 1
     assert len(client.calls) == 1
     assert "episode.updated_at = %s" in client.calls[0][1]
+    assert "project.status = 'active'" in client.calls[0][1]
 
 
 @pytest.mark.storage
@@ -195,7 +196,7 @@ async def test_episode_writer_commits_narrative_and_vector_together_with_a_stale
         "vector_matches": True,
     }
 
-    with pytest.raises(ValueError, match="has changed"):
+    with pytest.raises(EpisodeEditConflictError, match="has changed"):
         await writer.edit_episode(
             **_edit_arguments(
                 summary="Stale edit must not apply.",

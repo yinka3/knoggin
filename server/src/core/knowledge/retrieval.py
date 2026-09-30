@@ -8,6 +8,7 @@ those remain separate product surfaces.
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any, Dict, List, Optional, Tuple
@@ -15,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from loguru import logger
 
 from common.schema.evidence import EvidenceTraversalLimits
+from common.schema.settings import SearchSettings
 from common.scoping import require_scope_value, require_visible_project_ids
 from common.utils.events import emit
 
@@ -28,6 +30,10 @@ class KnowledgeRetrieval:
     directional ``readable_project_ids`` set governs all cross-project reads.
     Methods accept a session ID only where message context or telemetry needs
     it; the service itself is intentionally not session-owned.
+
+    Internal search policy is validated and captured at construction. Config
+    publication does not change this instance; project reload or AAC context
+    refresh constructs a new owner. External web settings never belong here.
     """
 
     def __init__(
@@ -39,7 +45,7 @@ class KnowledgeRetrieval:
         entities,
         embedding_service,
         knowledge_store,
-        search_config: Optional[Dict] = None,
+        search_settings: SearchSettings | None = None,
     ) -> None:
         self.project_id = require_scope_value(
             project_id, "project_id", "KnowledgeRetrieval"
@@ -53,7 +59,11 @@ class KnowledgeRetrieval:
         self.entities = entities
         self.embedding_service = embedding_service
         self.knowledge_store = knowledge_store
-        self.search_cfg = search_config or {}
+        if search_settings is not None and not isinstance(search_settings, SearchSettings):
+            raise TypeError("search_settings must be SearchSettings")
+        self._search_settings = SearchSettings.model_validate(
+            (search_settings or SearchSettings()).model_dump()
+        )
 
     async def search_messages(
         self,
@@ -66,7 +76,12 @@ class KnowledgeRetrieval:
         session_id = require_scope_value(
             session_id, "session_id", "KnowledgeRetrieval.search_messages"
         )
-        limit = limit or self.search_cfg.get("default_message_limit", 8)
+        query = self._require_query(query, "search_messages")
+        limit = self._positive_int(
+            limit,
+            "search_messages limit",
+            default=self._search_settings.default_message_limit,
+        )
         results = await self._search_messages(query, session_id=session_id, k=limit)
         if not results:
             return []
@@ -121,7 +136,12 @@ class KnowledgeRetrieval:
         limit: Optional[int] = None,
     ) -> List[Dict]:
         """Discover visible entities before requesting a stable-ID follow-up."""
-        limit = limit or self.search_cfg.get("default_entity_limit", 5)
+        query = self._require_query(query, "search_entities")
+        limit = self._positive_int(
+            limit,
+            "search_entities limit",
+            default=self._search_settings.default_entity_limit,
+        )
         results = await self.knowledge_store.search_entity(
             query,
             visible_project_ids=self.readable_project_ids,
@@ -136,8 +156,10 @@ class KnowledgeRetrieval:
         session_id: str,
         limit: int = 40,
     ) -> List[Dict]:
-        if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
-            raise ValueError("get_connections limit must be a positive integer")
+        session_id = require_scope_value(
+            session_id, "session_id", "KnowledgeRetrieval.get_connections"
+        )
+        limit = self._positive_int(limit, "get_connections limit")
         if await self.entities.get_profile(entity_id) is None:
             return [{"error": f"Entity not found: '{entity_id}'"}]
 
@@ -149,11 +171,18 @@ class KnowledgeRetrieval:
         return await self._hydrate_result_evidence(results, session_id=session_id)
 
     async def get_recent_activity(
-        self, entity_id: int, *, session_id: str, hours: int = 24
+        self, entity_id: int, *, session_id: str, hours: Optional[int] = None
     ) -> List[Dict]:
+        session_id = require_scope_value(
+            session_id, "session_id", "KnowledgeRetrieval.get_recent_activity"
+        )
+        hours = self._positive_int(
+            hours,
+            "get_recent_activity hours",
+            default=self._search_settings.default_activity_hours,
+        )
         if await self.entities.get_profile(entity_id) is None:
             return [{"error": f"Entity not found: '{entity_id}'"}]
-        hours = hours or self.search_cfg.get("default_activity_hours", 24)
         results = await self.knowledge_store.get_recent_activity(
             entity_id,
             hours=hours,
@@ -169,7 +198,10 @@ class KnowledgeRetrieval:
         entity_id: Optional[int] = None,
     ) -> Dict:
         """Retrieve episodes, then fall back to raw durable messages."""
-        query = query.strip()
+        session_id = require_scope_value(
+            session_id, "session_id", "KnowledgeRetrieval.episode_check"
+        )
+        query = self._require_query(query, "episode_check")
         started_at = perf_counter()
 
         if entity_id is not None:
@@ -295,6 +327,9 @@ class KnowledgeRetrieval:
         return {"resolution": "fallback", "results": fallback}
 
     async def read_episode(self, episode_id: str, *, session_id: str) -> List[Dict]:
+        session_id = require_scope_value(
+            session_id, "session_id", "KnowledgeRetrieval.read_episode"
+        )
         episode = await self.knowledge_store.get_project_episode(
             episode_id,
             user_name=self.user_name,
@@ -324,11 +359,16 @@ class KnowledgeRetrieval:
                 ),
             },
         )
-        return [self._as_message_evidence(source) for source in sources]
+        return [
+            self._as_message_evidence(source, fallback_session_id=session_id)
+            for source in sources
+        ]
 
     async def read_recent_episodes(self, *, session_id: str, limit: int = 2) -> Dict:
-        if limit <= 0:
-            raise ValueError("read_recent_episodes limit must be positive")
+        session_id = require_scope_value(
+            session_id, "session_id", "KnowledgeRetrieval.read_recent_episodes"
+        )
+        limit = self._positive_int(limit, "read_recent_episodes limit")
         effective_limit = min(limit, DEFAULT_EPISODE_RETRIEVAL_LIMIT)
         started_at = perf_counter()
         episodes = await self.knowledge_store.get_recent_project_episodes(
@@ -357,9 +397,12 @@ class KnowledgeRetrieval:
             ],
         }
 
-    async def find_path(
+    async def find_relationship_path(
         self, entity_a_id: int, entity_b_id: int, *, session_id: str
     ) -> List[Dict]:
+        session_id = require_scope_value(
+            session_id, "session_id", "KnowledgeRetrieval.find_relationship_path"
+        )
         entity_a = await self.entities.get_profile(entity_a_id)
         entity_b = await self.entities.get_profile(entity_b_id)
         if entity_a is None and entity_b is None:
@@ -377,7 +420,11 @@ class KnowledgeRetrieval:
             max_depth=4,
             visible_project_ids=self.readable_project_ids,
         )
-        return await self._hydrate_result_evidence(path, session_id=session_id)
+        return await self._hydrate_result_evidence(
+            path,
+            session_id=session_id,
+            expand_observations=False,
+        )
 
     async def read_observation_evidence(self, observation_id: int) -> Dict:
         """Expand one path observation through the scoped evidence traversal."""
@@ -408,6 +455,9 @@ class KnowledgeRetrieval:
     async def get_hot_topic_context(
         self, hot_topics: List[str], *, session_id: str
     ) -> Dict[str, Dict]:
+        session_id = require_scope_value(
+            session_id, "session_id", "KnowledgeRetrieval.get_hot_topic_context"
+        )
         if not hot_topics:
             return {}
         raw = await self.knowledge_store.get_hot_topic_context_with_messages(
@@ -425,10 +475,10 @@ class KnowledgeRetrieval:
     async def _search_messages(
         self, query: str, *, session_id: str, k: int
     ) -> List[Tuple[str, float, Optional[str]]]:
-        fts_limit = self.search_cfg.get("fts_limit", 50)
-        semantic_limit = self.search_cfg.get("semantic_message_limit", fts_limit)
-        semantic_threshold = self.search_cfg.get("semantic_message_threshold", 0.25)
-        rerank_candidates = self.search_cfg.get("rerank_candidates", 25)
+        fts_limit = self._search_settings.fts_limit
+        semantic_limit = self._search_settings.semantic_message_limit
+        semantic_threshold = self._search_settings.semantic_message_threshold
+        rerank_candidates = self._search_settings.rerank_candidates
         visible_sessions = await self.knowledge_store.get_visible_session_ids(
             user_name=self.user_name,
             visible_project_ids=self.readable_project_ids,
@@ -559,32 +609,22 @@ class KnowledgeRetrieval:
         results_by_idx: Dict[int, Dict] = {}
         for (user_name, reference_session_id), items in grouped.items():
             durable = await self.knowledge_store.get_messages_by_ids(
-                [item["message_id"] for item in items],
+                list(dict.fromkeys(item["message_id"] for item in items)),
                 user_name=user_name,
                 session_ids=[reference_session_id],
                 visible_project_ids=self.readable_project_ids,
             )
             for message in durable:
-                timestamp = message.get("timestamp")
-                rendered_timestamp = (
-                    datetime.fromtimestamp(timestamp / 1000.0, timezone.utc).isoformat()
-                    if isinstance(timestamp, (int, float))
-                    else ""
-                )
                 key = (
                     str(message.get("user_name") or user_name),
                     str(message.get("session_id") or reference_session_id),
                     int(message["id"]),
                 )
-                hydrated = {
-                    "id": f"msg_{message['id']}",
-                    "user_name": message.get("user_name"),
-                    "session_id": message.get("session_id"),
-                    "message": message["content"],
-                    "timestamp": rendered_timestamp,
-                }
-                if message.get("role") is not None:
-                    hydrated["role"] = message["role"]
+                hydrated = self._format_durable_message(
+                    message,
+                    fallback_user_name=user_name,
+                    fallback_session_id=reference_session_id,
+                )
                 for index in requested_indexes.get(key, ()):
                     results_by_idx[index] = dict(hydrated)
         return [results_by_idx[index] for index in sorted(results_by_idx)]
@@ -594,12 +634,15 @@ class KnowledgeRetrieval:
         results: List[Dict],
         *,
         session_id: str,
+        expand_observations: bool = True,
     ) -> List[Dict]:
         """Hydrate message and observation support without changing its meaning."""
 
+        detached_results = [deepcopy(result) for result in results]
         message_refs_by_result: list[list] = []
         observation_refs_by_result: list[list[dict]] = []
-        for result in results:
+        all_message_refs: list = []
+        for result in detached_results:
             refs = result.pop("evidence_refs", None)
             if refs is None:
                 refs = result.pop("evidence_ids", [])
@@ -607,22 +650,44 @@ class KnowledgeRetrieval:
                 result.pop("evidence_ids", None)
             message_refs, observation_refs = self._split_evidence_refs(refs)
             message_refs_by_result.append(message_refs)
+            all_message_refs.extend(message_refs)
             observation_refs_by_result.append(observation_refs)
 
-        observation_bundles = await self._hydrate_observation_evidence(
-            observation_refs_by_result
-        )
+        if expand_observations:
+            hydrated_messages, observation_bundles = await asyncio.gather(
+                self._hydrate_evidence(all_message_refs, session_id=session_id),
+                self._hydrate_observation_evidence(observation_refs_by_result),
+            )
+        else:
+            hydrated_messages = await self._hydrate_evidence(
+                all_message_refs, session_id=session_id
+            )
+            observation_bundles = observation_refs_by_result
+        messages_by_key = {
+            self._message_evidence_key(message): message
+            for message in hydrated_messages
+        }
         for result, message_refs, bundles in zip(
-            results,
+            detached_results,
             message_refs_by_result,
             observation_bundles,
         ):
-            messages = await self._hydrate_evidence(
-                message_refs,
-                session_id=session_id,
-            )
+            messages = []
+            for ref in message_refs:
+                normalized = self._normalize_evidence_ref(ref, session_id=session_id)
+                if normalized is None:
+                    continue
+                message = messages_by_key.get(
+                    (
+                        normalized["user_name"],
+                        normalized["session_id"],
+                        normalized["message_id"],
+                    )
+                )
+                if message is not None:
+                    messages.append(deepcopy(message))
             result["evidence"] = [*messages, *bundles]
-        return results
+        return detached_results
 
     def _split_evidence_refs(self, refs: Any) -> tuple[list, list[dict]]:
         if not isinstance(refs, list):
@@ -649,7 +714,11 @@ class KnowledgeRetrieval:
             or user_name != self.user_name
         ):
             raise ValueError("relationship observation evidence is outside read scope")
-        return {"observation_id": observation_id, "project_id": project_id}
+        return {
+            "kind": "relationship_observation",
+            "observation_id": observation_id,
+            "project_id": project_id,
+        }
 
     async def _hydrate_observation_evidence(
         self,
@@ -721,22 +790,24 @@ class KnowledgeRetrieval:
             target_total=target_total,
             discoverable_only=True,
         )
-        return [
-            {
-                "role": message["role"],
-                "timestamp": (
-                    datetime.fromtimestamp(
-                        message["timestamp"] / 1000.0, timezone.utc
-                    ).isoformat()
-                    if isinstance(message.get("timestamp"), (int, float))
-                    else ""
-                ),
-                "content": message["content"],
-                "id": f"msg_{message['id']}",
-                "is_hit": message["id"] == message_id,
-            }
-            for message in messages
-        ]
+        context = []
+        for message in messages:
+            normalized = self._format_durable_message(
+                message,
+                fallback_user_name=self.user_name,
+                fallback_session_id=session_id,
+            )
+            context.append(
+                {
+                    "role": normalized["role"],
+                    "timestamp": normalized["timestamp"],
+                    "content": normalized["message"],
+                    "id": normalized["id"],
+                    "is_hit": self._parse_message_ref_id(normalized["id"])
+                    == message_id,
+                }
+            )
+        return context
 
     def _normalize_evidence_ref(self, ref: Any, *, session_id: str) -> Optional[Dict]:
         if isinstance(ref, dict):
@@ -749,6 +820,8 @@ class KnowledgeRetrieval:
             reference_session_id = session_id
         if raw_id is None or not user_name or not reference_session_id:
             return None
+        if user_name != self.user_name:
+            raise ValueError("message evidence is outside retrieval user scope")
         try:
             message_id = self._parse_message_ref_id(raw_id)
         except (TypeError, ValueError, IndexError):
@@ -759,6 +832,14 @@ class KnowledgeRetrieval:
             "message_id": message_id,
             "key": self._format_message_id(message_id),
         }
+
+    @staticmethod
+    def _message_evidence_key(message: Dict) -> tuple[str, str, int]:
+        return (
+            str(message.get("user_name") or ""),
+            str(message.get("session_id") or ""),
+            KnowledgeRetrieval._parse_message_ref_id(message.get("id")),
+        )
 
     async def _serialize_episodes(
         self,
@@ -863,6 +944,19 @@ class KnowledgeRetrieval:
         return message_id if isinstance(message_id, str) else f"msg_{message_id}"
 
     @staticmethod
+    def _positive_int(value: Any, name: str, *, default: Any = None) -> int:
+        value = default if value is None else value
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+        return value
+
+    @staticmethod
+    def _require_query(value: Any, operation: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{operation} query must be a non-blank string")
+        return value.strip()
+
+    @staticmethod
     def _parse_message_ref_id(raw_id: Any) -> int:
         if isinstance(raw_id, str):
             if raw_id.startswith("msg_"):
@@ -878,28 +972,52 @@ class KnowledgeRetrieval:
             for episode in episodes
         )
 
-    @staticmethod
-    def _as_message_evidence(source: Dict) -> Dict:
+    def _as_message_evidence(
+        self, source: Dict, *, fallback_session_id: str
+    ) -> Dict:
+        message = self._format_durable_message(
+            source,
+            fallback_user_name=self.user_name,
+            fallback_session_id=fallback_session_id,
+        )
+        message["score"] = 1.0
+        message["context"] = [
+            {
+                "role": message["role"],
+                "timestamp": message["timestamp"],
+                "content": message["message"],
+                "id": message["id"],
+                "is_hit": True,
+            }
+        ]
+        return message
+
+    @classmethod
+    def _format_durable_message(
+        cls,
+        source: Dict,
+        *,
+        fallback_user_name: str,
+        fallback_session_id: str,
+    ) -> Dict:
+        raw_id = source.get("message_id", source.get("id"))
+        message_id = cls._parse_message_ref_id(raw_id)
+        timestamp = source.get("timestamp_ms", source.get("timestamp"))
+        if isinstance(timestamp, (int, float)) and not isinstance(timestamp, bool):
+            rendered_timestamp = datetime.fromtimestamp(
+                timestamp / 1000.0, timezone.utc
+            ).isoformat()
+        elif isinstance(timestamp, datetime):
+            rendered_timestamp = timestamp.isoformat()
+        elif isinstance(timestamp, str):
+            rendered_timestamp = timestamp
+        else:
+            rendered_timestamp = ""
         return {
-            "id": source.get("message_id"),
-            "message_id": source.get("message_id"),
-            "message": source.get("content", ""),
-            "content": source.get("content", ""),
-            "role": source.get("role", "assistant"),
-            "timestamp_ms": source.get("timestamp_ms"),
-            "attached_at": (
-                source["attached_at"].isoformat()
-                if source.get("attached_at")
-                and hasattr(source["attached_at"], "isoformat")
-                else source.get("attached_at")
-            ),
-            "score": 1.0,
-            "context": [
-                {
-                    "role": source.get("role", "assistant"),
-                    "timestamp": source.get("timestamp_ms", ""),
-                    "content": source.get("content", ""),
-                    "is_hit": True,
-                }
-            ],
+            "id": cls._format_message_id(message_id),
+            "user_name": source.get("user_name") or fallback_user_name,
+            "session_id": source.get("session_id") or fallback_session_id,
+            "role": source.get("role") or "assistant",
+            "message": source.get("content", source.get("message", "")),
+            "timestamp": rendered_timestamp,
         }

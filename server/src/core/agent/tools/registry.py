@@ -2,25 +2,20 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Dict, Iterable, Optional
 
-import httpx
-
 from common.conf.domain_config import CompiledDomain
 from common.exceptions import ToolExecutionError
 from common.schema.agent.community_tools import AAC_SPECIFIC_SCHEMAS
 from common.schema.agent.tool_contracts import (
-    CAPABILITY_CLASSES,
-    SAFE_DEFAULT_CAPABILITIES,
     TOOL_SCHEMAS,
     get_schema_capability,
 )
 from core.agent.tools.health import HealthTools
 from core.agent.tools.maintenance import MaintenanceTools
 from core.agent.tools.memory import MemoryTools
-from core.agent.tools.search import SearchTools, create_web_page_http_client
+from core.agent.tools.search import SearchTools
 from core.agent.tools.workspace import ProjectFileTools
 from core.knowledge.documents import DocumentService
 from core.knowledge.entity.maintenance_service import EntityMaintenanceService
-from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.retrieval import KnowledgeRetrieval
 
 
@@ -30,7 +25,6 @@ class ToolDefinition:
 
     name: str
     schema: dict
-    dispatch: tuple[str, tuple[str, ...]] | None
     capability: str
     default_limit: Optional[int] = None
     runtime_instruction: Optional[str] = None
@@ -48,19 +42,25 @@ _HEALTH_RUNTIME_INSTRUCTION = (
 )
 
 _TOPIC_CONTEXT_RUNTIME_INSTRUCTION = (
-    "[SYSTEM NOTICE: load_topic_context retrieves compact supporting context for "
+    "[SYSTEM NOTICE: load_project_topic_context retrieves compact supporting context for "
     "listed active topics. Use it when a topic is materially relevant and deeper "
     "context is needed; do not use it as a substitute for targeted entity, "
     "episode, document, or web retrieval.]"
 )
 
+_PREVIOUS_NOTEBOOK_PAGE_RUNTIME_INSTRUCTION = (
+    "[SYSTEM NOTICE: The notebook may retain one previous page after rollover. "
+    "Use show_previous_notebook_page only when the current handoff lacks needed "
+    "detail, and hide it again when that older context is no longer useful.]"
+)
+
 _EPISODE_CHECK_RUNTIME_INSTRUCTION = (
-    "[SYSTEM NOTICE: Use episode_check for remembered history, decisions, or "
+    "[SYSTEM NOTICE: Use search_episodes for remembered history, decisions, or "
     "developments. It returns compact, evidence-backed summaries; inspect the "
     "returned provenance when exact or sensitive detail matters.]"
 )
 _READ_EPISODE_RUNTIME_INSTRUCTION = (
-    "[SYSTEM NOTICE: Use read_episode with an episode handle returned in this "
+    "[SYSTEM NOTICE: Use read_episode_messages with an episode handle returned in this "
     "run when exact wording or complete supporting detail matters.]"
 )
 _RECENT_EPISODES_RUNTIME_INSTRUCTION = (
@@ -68,36 +68,36 @@ _RECENT_EPISODES_RUNTIME_INSTRUCTION = (
     "when the user gives no topic or episode handle.]"
 )
 _ENTITY_RUNTIME_INSTRUCTION = (
-    "[SYSTEM NOTICE: Use search_entity to discover stable entity IDs and scoped "
+    "[SYSTEM NOTICE: Use search_knowledge_entities to discover stable entity IDs and scoped "
     "profiles before an ID-based follow-up.]"
 )
 _CONNECTIONS_RUNTIME_INSTRUCTION = (
-    "[SYSTEM NOTICE: get_connections returns observed relationship evidence, not "
+    "[SYSTEM NOTICE: get_entity_relationships returns observed relationship evidence, not "
     "an unqualified current-state claim. Preserve its qualifications and support.]"
 )
 _ACTIVITY_RUNTIME_INSTRUCTION = (
-    "[SYSTEM NOTICE: get_recent_activity is for bounded temporal questions such "
+    "[SYSTEM NOTICE: get_entity_recent_activity is for bounded temporal questions such "
     "as recent changes or activity in a stated time window.]"
 )
 _MESSAGE_SEARCH_RUNTIME_INSTRUCTION = (
-    "[SYSTEM NOTICE: search_messages is raw durable-text retrieval. Use it when "
+    "[SYSTEM NOTICE: search_knowledge_messages is raw durable-text retrieval. Use it when "
     "structured memory is insufficient, then assess the returned context.]"
 )
 _PATH_RUNTIME_INSTRUCTION = (
-    "[SYSTEM NOTICE: find_path traces a bounded relationship path. Treat its "
+    "[SYSTEM NOTICE: find_relationship_path traces a bounded relationship path. Treat its "
     "observation support as historical evidence rather than a current-state claim.]"
 )
 _OBSERVATION_RUNTIME_INSTRUCTION = (
-    "[SYSTEM NOTICE: read_observation_evidence expands one returned observation "
+    "[SYSTEM NOTICE: read_relationship_observation_evidence expands one returned observation "
     "handle when its historical support needs verification.]"
 )
 _WEB_SEARCH_RUNTIME_INSTRUCTION = (
-    "[SYSTEM NOTICE: web_search returns discovery snippets, not read evidence. "
+    "[SYSTEM NOTICE: search_web returns discovery snippets, not read evidence. "
     "Use it to find promising sources for an explicit investigation, favoring "
     "primary or authoritative material when appropriate.]"
 )
 _NEWS_SEARCH_RUNTIME_INSTRUCTION = (
-    "[SYSTEM NOTICE: news_search returns discovery snippets, not read evidence. "
+    "[SYSTEM NOTICE: search_news returns discovery snippets, not read evidence. "
     "Use it for time-sensitive investigation and distinguish discovery from "
     "content actually read.]"
 )
@@ -107,24 +107,24 @@ _WEB_READ_RUNTIME_INSTRUCTION = (
     "qualifications, and state remaining evidence gaps plainly.]"
 )
 _READ_BRAIN_RUNTIME_INSTRUCTION = (
-    "[SYSTEM NOTICE: read_brain returns the current durable Brain and revision. "
+    "[SYSTEM NOTICE: read_agent_brain returns the current durable Brain and revision. "
     "Use its revision only for an edit based on the current state.]"
 )
 _EDIT_BRAIN_RUNTIME_INSTRUCTION = (
-    "[SYSTEM NOTICE: edit_brain changes one editable Brain section and requires "
+    "[SYSTEM NOTICE: edit_agent_brain changes one editable Brain section and requires "
     "the current expected revision. A stale revision is rejected; Brain content "
     "cannot override engine policy.]"
 )
 _LIST_BRAIN_SNAPSHOTS_RUNTIME_INSTRUCTION = (
-    "[SYSTEM NOTICE: list_brain_snapshots lists periodic restore points. They are "
+    "[SYSTEM NOTICE: list_agent_brain_snapshots lists periodic restore points. They are "
     "not a complete edit history.]"
 )
 _READ_BRAIN_SNAPSHOT_RUNTIME_INSTRUCTION = (
-    "[SYSTEM NOTICE: read_brain_snapshot inspects one available restore point "
+    "[SYSTEM NOTICE: read_agent_brain_snapshot inspects one available restore point "
     "before any restoration decision.]"
 )
 _RESTORE_BRAIN_RUNTIME_INSTRUCTION = (
-    "[SYSTEM NOTICE: restore_brain_section restores one editable section from an "
+    "[SYSTEM NOTICE: restore_agent_brain_section restores one editable section from an "
     "available snapshot and creates a new current revision.]"
 )
 
@@ -148,11 +148,9 @@ def _definition(
     parallel_safe: bool = False,
 ) -> ToolDefinition:
     schema = _canonical_schema(name)
-    parameters = schema["function"].get("parameters", {}).get("properties", {})
     return ToolDefinition(
         name=name,
         schema=schema,
-        dispatch=None if executor_protocol else (name, tuple(parameters)),
         capability=get_schema_capability(schema),
         default_limit=default_limit,
         runtime_instruction=runtime_instruction,
@@ -182,40 +180,40 @@ TOOL_DEFINITIONS = {
         default_limit=1,
         runtime_instruction=_HEALTH_RUNTIME_INSTRUCTION,
     ),
-    "search_entity": _definition(
-        "search_entity",
+    "search_knowledge_entities": _definition(
+        "search_knowledge_entities",
         default_limit=8,
         runtime_instruction=_ENTITY_RUNTIME_INSTRUCTION,
         parallel_safe=True,
     ),
-    "load_topic_context": _definition(
-        "load_topic_context",
+    "load_project_topic_context": _definition(
+        "load_project_topic_context",
         default_limit=2,
         runtime_instruction=_TOPIC_CONTEXT_RUNTIME_INSTRUCTION,
     ),
-    "get_connections": _definition(
-        "get_connections",
+    "get_entity_relationships": _definition(
+        "get_entity_relationships",
         default_limit=8,
         runtime_instruction=_CONNECTIONS_RUNTIME_INSTRUCTION,
     ),
-    "find_path": _definition(
-        "find_path",
+    "find_relationship_path": _definition(
+        "find_relationship_path",
         default_limit=8,
         runtime_instruction=_PATH_RUNTIME_INSTRUCTION,
     ),
-    "read_observation_evidence": _definition(
-        "read_observation_evidence",
+    "read_relationship_observation_evidence": _definition(
+        "read_relationship_observation_evidence",
         default_limit=4,
         runtime_instruction=_OBSERVATION_RUNTIME_INSTRUCTION,
     ),
-    "search_messages": _definition(
-        "search_messages",
+    "search_knowledge_messages": _definition(
+        "search_knowledge_messages",
         default_limit=6,
         runtime_instruction=_MESSAGE_SEARCH_RUNTIME_INSTRUCTION,
         parallel_safe=True,
     ),
-    "get_recent_activity": _definition(
-        "get_recent_activity",
+    "get_entity_recent_activity": _definition(
+        "get_entity_recent_activity",
         default_limit=8,
         runtime_instruction=_ACTIVITY_RUNTIME_INSTRUCTION,
     ),
@@ -223,14 +221,19 @@ TOOL_DEFINITIONS = {
         "request_clarification",
         executor_protocol=True,
     ),
-    "episode_check": _definition(
-        "episode_check",
+    "show_previous_notebook_page": _definition(
+        "show_previous_notebook_page",
+        default_limit=4,
+        runtime_instruction=_PREVIOUS_NOTEBOOK_PAGE_RUNTIME_INSTRUCTION,
+    ),
+    "search_episodes": _definition(
+        "search_episodes",
         default_limit=6,
         runtime_instruction=_EPISODE_CHECK_RUNTIME_INSTRUCTION,
         parallel_safe=True,
     ),
-    "read_episode": _definition(
-        "read_episode",
+    "read_episode_messages": _definition(
+        "read_episode_messages",
         default_limit=4,
         runtime_instruction=_READ_EPISODE_RUNTIME_INSTRUCTION,
     ),
@@ -239,44 +242,44 @@ TOOL_DEFINITIONS = {
         default_limit=4,
         runtime_instruction=_RECENT_EPISODES_RUNTIME_INSTRUCTION,
     ),
-    "read_brain": _definition(
-        "read_brain",
+    "read_agent_brain": _definition(
+        "read_agent_brain",
         default_limit=4,
         runtime_instruction=_READ_BRAIN_RUNTIME_INSTRUCTION,
     ),
-    "list_brain_snapshots": _definition(
-        "list_brain_snapshots",
+    "list_agent_brain_snapshots": _definition(
+        "list_agent_brain_snapshots",
         default_limit=4,
         runtime_instruction=_LIST_BRAIN_SNAPSHOTS_RUNTIME_INSTRUCTION,
     ),
-    "read_brain_snapshot": _definition(
-        "read_brain_snapshot",
+    "read_agent_brain_snapshot": _definition(
+        "read_agent_brain_snapshot",
         default_limit=4,
         runtime_instruction=_READ_BRAIN_SNAPSHOT_RUNTIME_INSTRUCTION,
     ),
-    "edit_brain": _definition(
-        "edit_brain",
+    "edit_agent_brain": _definition(
+        "edit_agent_brain",
         default_limit=2,
         runtime_instruction=_EDIT_BRAIN_RUNTIME_INSTRUCTION,
     ),
-    "restore_brain_section": _definition(
-        "restore_brain_section",
+    "restore_agent_brain_section": _definition(
+        "restore_agent_brain_section",
         default_limit=2,
         runtime_instruction=_RESTORE_BRAIN_RUNTIME_INSTRUCTION,
     ),
-    "list_documents": _definition("list_documents", default_limit=4),
-    "get_document_info": _definition("get_document_info", default_limit=6),
-    "read_document": _definition("read_document", default_limit=6),
-    "search_documents": _definition(
-        "search_documents", default_limit=8, parallel_safe=True
+    "list_project_documents": _definition("list_project_documents", default_limit=4),
+    "get_project_document_info": _definition("get_project_document_info", default_limit=6),
+    "read_project_document": _definition("read_project_document", default_limit=6),
+    "search_project_documents": _definition(
+        "search_project_documents", default_limit=8, parallel_safe=True
     ),
-    "web_search": _definition(
-        "web_search",
+    "search_web": _definition(
+        "search_web",
         default_limit=8,
         runtime_instruction=_WEB_SEARCH_RUNTIME_INSTRUCTION,
     ),
-    "news_search": _definition(
-        "news_search",
+    "search_news": _definition(
+        "search_news",
         default_limit=8,
         runtime_instruction=_NEWS_SEARCH_RUNTIME_INSTRUCTION,
     ),
@@ -289,32 +292,32 @@ TOOL_DEFINITIONS = {
         "set_research_plan", executor_protocol=True
     ),
     "submit_answer": _definition("submit_answer", executor_protocol=True),
-    "check_graph_health": _definition("check_graph_health"),
+    "inspect_duplicate_entities": _definition("inspect_duplicate_entities"),
     "propose_entity_merge": _definition("propose_entity_merge"),
     "report_relationship_conflict": _definition("report_relationship_conflict"),
-    "list_files": _definition("list_files", default_limit=4),
-    "read_file": _definition("read_file", default_limit=4),
-    "create_file": _definition(
-        "create_file",
+    "list_project_files": _definition("list_project_files", default_limit=4),
+    "read_project_file": _definition("read_project_file", default_limit=4),
+    "create_project_file": _definition(
+        "create_project_file",
         default_limit=2,
     ),
-    "update_file": _definition(
-        "update_file",
+    "update_project_file": _definition(
+        "update_project_file",
         default_limit=2,
     ),
-    "append_file": _definition(
-        "append_file",
+    "append_project_file": _definition(
+        "append_project_file",
         default_limit=2,
     ),
-    "move_file": _definition("move_file", default_limit=2),
-    "delete_file": _definition("delete_file", default_limit=2),
-    "create_folder": _definition("create_folder", default_limit=2),
-    "save_insight": _definition("save_insight", default_limit=4),
-    "spawn_specialist": _definition("spawn_specialist", default_limit=2),
-    "search_insights": _definition("search_insights", default_limit=4),
-    "vote_insight": _definition("vote_insight", default_limit=4),
-    "remove_insight_vote": _definition("remove_insight_vote", default_limit=4),
-    "consult_specialist": _definition("consult_specialist", default_limit=2),
+    "move_project_file": _definition("move_project_file", default_limit=2),
+    "delete_project_file": _definition("delete_project_file", default_limit=2),
+    "create_project_folder": _definition("create_project_folder", default_limit=2),
+    "save_community_insight": _definition("save_community_insight", default_limit=4),
+    "spawn_community_specialist": _definition("spawn_community_specialist", default_limit=2),
+    "search_community_insights": _definition("search_community_insights", default_limit=4),
+    "vote_community_insight": _definition("vote_community_insight", default_limit=4),
+    "remove_community_insight_vote": _definition("remove_community_insight_vote", default_limit=4),
+    "consult_community_specialist": _definition("consult_community_specialist", default_limit=2),
 }
 
 
@@ -338,32 +341,11 @@ def get_registered_tool_names() -> frozenset[str]:
 
 def get_tool_schemas(
     enabled_tools: list[str] | tuple[str, ...] | None = None,
-    tags: list[str] | None = None,
-    capabilities: list[str] | set[str] | frozenset[str] | None = None,
     additional_schemas: Iterable[dict] = (),
 ) -> list[dict]:
     """Resolve model-visible schemas from canonical definitions for one run."""
 
     enabled_set = set(enabled_tools) if enabled_tools is not None else None
-    tags_set = set(tags) if tags else None
-    capability_set = (
-        set(capabilities)
-        if capabilities is not None
-        else set(SAFE_DEFAULT_CAPABILITIES)
-    )
-    if capabilities is None and enabled_set is not None:
-        capability_set.update(
-            TOOL_DEFINITIONS[name].capability
-            for name in enabled_set
-            if name in TOOL_DEFINITIONS
-        )
-    invalid_capabilities = capability_set - CAPABILITY_CLASSES
-    if invalid_capabilities:
-        raise ValueError(
-            "Unknown tool capabilities: "
-            + ", ".join(sorted(invalid_capabilities))
-        )
-
     additional = tuple(additional_schemas)
     _validate_additional_schemas(additional)
     overrides = {
@@ -388,11 +370,7 @@ def get_tool_schemas(
             continue
 
         is_enabled = enabled_set is None or name in enabled_set
-        has_capability = definition.capability in capability_set
-        has_tag = True
-        if tags_set is not None:
-            has_tag = bool(set(schema["function"].get("tags", [])) & tags_set)
-        if is_enabled and has_capability and has_tag:
+        if is_enabled:
             filtered.append(schema)
             selected_names.add(name)
 
@@ -431,7 +409,7 @@ def _validate_additional_schemas(schemas: Iterable[dict]) -> None:
                 f"Tool schema override for '{name}' changes its capability"
             )
 
-        if definition.dispatch is None:
+        if definition.executor_protocol:
             continue
         parameters = function.get("parameters")
         properties = (
@@ -443,7 +421,11 @@ def _validate_additional_schemas(schemas: Iterable[dict]) -> None:
             raise ValueError(
                 f"Additional tool schema '{name}' has invalid parameters"
             )
-        expected = set(definition.dispatch[1])
+        expected = set(
+            definition.schema["function"]
+            .get("parameters", {})
+            .get("properties", {})
+        )
         if set(properties) != expected:
             raise ValueError(
                 f"Additional tool schema '{name}' does not match its registered "
@@ -471,13 +453,10 @@ class ToolPermissions:
     session_id: str
     run_id: str
     allowed_tools: frozenset[str]
-    allowed_capabilities: frozenset[str]
 
     def authorize(self, tool_name: str, capability: str) -> Optional[str]:
         if tool_name not in self.allowed_tools:
             return f"Tool '{tool_name}' is not enabled for this run"
-        if capability not in self.allowed_capabilities:
-            return f"Capability '{capability}' is not enabled for this run"
         return None
 
 
@@ -524,9 +503,6 @@ def build_tool_runtime(
         session_id=session_id,
         run_id=run_id,
         allowed_tools=frozenset(schema_map),
-        allowed_capabilities=frozenset(
-            get_schema_capability(schema) for schema in schema_map.values()
-        ),
     )
     return ToolRuntime(
         schemas=schemas,
@@ -560,7 +536,7 @@ def validate_registry_contract() -> None:
         if sum(schema["function"]["name"] == name for schema in schemas) > 1
     }
     # Community discussion supplies a narrower presentation of the same tool.
-    duplicate_names.discard("edit_brain")
+    duplicate_names.discard("edit_agent_brain")
     if duplicate_names:
         raise RuntimeError(f"Duplicate tool schemas: {sorted(duplicate_names)}")
 
@@ -579,24 +555,30 @@ def validate_registry_contract() -> None:
             raise RuntimeError(f"Tool definition '{name}' schema mismatch")
         if definition.capability != get_schema_capability(definition.schema):
             raise RuntimeError(f"Tool definition '{name}' capability mismatch")
-        if definition.executor_protocol != (definition.dispatch is None):
-            raise RuntimeError(f"Tool definition '{name}' dispatch mismatch")
-        if definition.dispatch is None:
+        if definition.executor_protocol:
             continue
-        method_name, parameter_names = definition.dispatch
-        if not callable(getattr(Tools, method_name, None)):
+        if name in {
+            schema["function"]["name"] for schema in AAC_SPECIFIC_SCHEMAS
+        }:
+            continue
+        if not callable(getattr(Tools, name, None)):
             raise RuntimeError(
-                f"Tool '{name}' has no concrete method '{method_name}'"
+                f"Tool '{name}' has no concrete method '{name}'"
             )
-        schema_parameters = set(
-            definition.schema["function"].get("parameters", {}).get("properties", {})
+
+
+def validate_tool_owner(owner: type, schemas: Iterable[dict]) -> None:
+    """Validate additional tool methods against their concrete composition."""
+
+    missing = sorted(
+        schema["function"]["name"]
+        for schema in schemas
+        if not callable(getattr(owner, schema["function"]["name"], None))
+    )
+    if missing:
+        raise RuntimeError(
+            f"{owner.__name__} is missing registered tool methods: {missing}"
         )
-        if set(parameter_names) != schema_parameters:
-            raise RuntimeError(
-                f"Tool '{name}' dispatch/schema parameters differ: "
-                f"dispatch={sorted(parameter_names)}, "
-                f"schema={sorted(schema_parameters)}"
-            )
 
 
 class Tools(
@@ -609,7 +591,7 @@ class Tools(
     def __init__(
         self,
         user_name: str,
-        entities: EntityResolver,
+        project_id: str,
         session_id: str,
         compiled_domain: Optional[CompiledDomain] = None,
         search_config: Optional[dict] = None,
@@ -621,6 +603,7 @@ class Tools(
         agent_id: Optional[str] = None,
         health_service=None,
         entity_maintenance_service: Optional[EntityMaintenanceService] = None,
+        project_maintenance_service=None,
     ):
         if knowledge_store is None or postgres is None:
             raise ValueError("Tools requires explicit knowledge_store and postgres")
@@ -631,11 +614,8 @@ class Tools(
         self.knowledge_store = knowledge_store
         self.knowledge_retrieval = knowledge_retrieval
         self.postgres = postgres
-        self.entities = entities
         self.user_name = user_name
-        self.embedding_service = getattr(knowledge_retrieval, "embedding_service", None)
-        self.project_id = entities.project_id
-        self.readable_project_ids = entities.readable_project_ids
+        self.project_id = project_id
         self.compiled_domain = compiled_domain
         self.document_service = document_service
         self.document_focus = document_focus
@@ -645,46 +625,48 @@ class Tools(
         self.active_tool_schemas: Dict[str, dict] = {}
         self.max_graph_results = 40
         self.short_uuid_references: Dict[str, str] = {}
+        self.run_notebook = None
         self.health_service = health_service
         # Global entity maintenance is application-owned. Read-only/community
         # tool compositions intentionally leave it unavailable rather than
         # constructing an uncoordinated service instance here.
         self.entity_maintenance_service = entity_maintenance_service
+        self.project_maintenance_service = project_maintenance_service
 
-        self._http_client = httpx.AsyncClient(timeout=10.0)
-        self._web_page_client = create_web_page_http_client()
+        self._http_client = None
+        self._web_page_client = None
         self._web_page_snapshots = OrderedDict()
         self._web_page_snapshot_aliases: Dict[str, str] = {}
 
     # Internal-memory tools are formatting/argument adapters only. Retrieval
     # policy, ranking, and evidence expansion live in the
     # project-scoped KnowledgeRetrieval service.
-    async def search_messages(self, query: str, limit: int = None):
+    async def search_knowledge_messages(self, query: str, limit: int = None):
         return await self.knowledge_retrieval.search_messages(
             query, session_id=self.session_id, limit=limit
         )
 
-    async def search_entity(self, query: str, limit: int = None):
+    async def search_knowledge_entities(self, query: str, limit: int = None):
         return await self.knowledge_retrieval.search_entities(query, limit=limit)
 
-    async def get_connections(self, entity_id: int):
+    async def get_entity_relationships(self, entity_id: int):
         return await self.knowledge_retrieval.get_connections(
             entity_id,
             session_id=self.session_id,
             limit=self.max_graph_results,
         )
 
-    async def get_recent_activity(self, entity_id: int, hours: int = 24):
+    async def get_entity_recent_activity(self, entity_id: int, hours: int = None):
         return await self.knowledge_retrieval.get_recent_activity(
             entity_id, session_id=self.session_id, hours=hours
         )
 
-    async def episode_check(self, query: str, entity_id: Optional[int] = None):
+    async def search_episodes(self, query: str, entity_id: Optional[int] = None):
         return await self.knowledge_retrieval.episode_check(
             query, session_id=self.session_id, entity_id=entity_id
         )
 
-    async def read_episode(self, episode_id: str):
+    async def read_episode_messages(self, episode_id: str):
         return await self.knowledge_retrieval.read_episode(
             episode_id, session_id=self.session_id
         )
@@ -695,22 +677,22 @@ class Tools(
             limit=limit,
         )
 
-    async def find_path(self, entity_a_id: int, entity_b_id: int):
-        return await self.knowledge_retrieval.find_path(
+    async def find_relationship_path(self, entity_a_id: int, entity_b_id: int):
+        return await self.knowledge_retrieval.find_relationship_path(
             entity_a_id, entity_b_id, session_id=self.session_id
         )
 
-    async def read_observation_evidence(self, observation_id: int):
+    async def read_relationship_observation_evidence(self, observation_id: int):
         return await self.knowledge_retrieval.read_observation_evidence(
             observation_id
         )
 
-    async def load_topic_context(self, topics: list[str]) -> dict:
+    async def load_project_topic_context(self, topics: list[str]) -> dict:
         """Load full bounded context for validated active project topics."""
 
         if self.compiled_domain is None:
             raise ToolExecutionError(
-                "load_topic_context",
+                "load_project_topic_context",
                 "Topic context is unavailable because this run has no project domain.",
             )
 
@@ -725,7 +707,7 @@ class Tools(
 
         if invalid_topics:
             raise ToolExecutionError(
-                "load_topic_context",
+                "load_project_topic_context",
                 "Unknown or inactive topic(s): " + ", ".join(invalid_topics),
             )
 
@@ -734,11 +716,25 @@ class Tools(
             session_id=self.session_id,
         )
 
+    async def show_previous_notebook_page(self, show: bool = False) -> dict:
+        """Toggle the one retained notebook page for subsequent model turns."""
+
+        if self.run_notebook is None:
+            raise ToolExecutionError(
+                "show_previous_notebook_page",
+                "The run notebook is unavailable.",
+            )
+        visible = self.run_notebook.set_previous_page_visibility(show)
+        return {
+            "available": self.run_notebook.previous_page is not None,
+            "show_previous": visible,
+        }
+
     async def get_document_manifest(self):
         """Get indexed documents for prompt context."""
         if not self.document_service:
             return []
-        documents = await self.document_service.list_documents()
+        documents = await self.document_service.list_project_documents()
         return [
             document
             for document in documents
@@ -746,12 +742,14 @@ class Tools(
         ]
 
     async def close(self):
-        try:
+        if self._http_client is not None:
             await self._http_client.aclose()
-        finally:
+            self._http_client = None
+        if self._web_page_client is not None:
             await self._web_page_client.aclose()
-            self._web_page_snapshots.clear()
-            self._web_page_snapshot_aliases.clear()
+            self._web_page_client = None
+        self._web_page_snapshots.clear()
+        self._web_page_snapshot_aliases.clear()
 
 
 validate_registry_contract()

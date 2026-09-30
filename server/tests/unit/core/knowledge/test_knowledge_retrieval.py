@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from common.exceptions import ToolExecutionError
+from common.schema.settings import SearchSettings
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 from core.agent.tools.registry import Tools, install_tool_runtime
 from core.knowledge.retrieval import KnowledgeRetrieval
@@ -42,7 +43,7 @@ async def test_message_context_uses_durable_storage():
         entities=SimpleNamespace(),
         embedding_service=SimpleNamespace(),
         knowledge_store=Store(),
-        search_config={"fts_limit": 10},
+        search_settings=SearchSettings(fts_limit=10, semantic_message_limit=10),
     )
 
     results = await retrieval.search_messages(
@@ -268,6 +269,68 @@ async def test_connection_retrieval_rejects_invalid_limits_before_entity_lookup(
 
 
 @pytest.mark.no_network
+@pytest.mark.parametrize("hours", [0, -1, True, 1.5])
+async def test_activity_retrieval_rejects_invalid_hours_before_entity_lookup(hours):
+    class Entities:
+        async def get_profile(self, _entity_id):
+            raise AssertionError("invalid hours must fail before entity lookup")
+
+    retrieval = KnowledgeRetrieval(
+        project_id="project-1",
+        readable_project_ids=["project-1"],
+        user_name="ada",
+        entities=Entities(),
+        embedding_service=SimpleNamespace(),
+        knowledge_store=SimpleNamespace(),
+    )
+
+    with pytest.raises(ValueError, match="positive integer"):
+        await retrieval.get_recent_activity(
+            9, session_id="session-1", hours=hours
+        )
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize("limit", [0, -1, True, 1.5])
+async def test_message_and_entity_search_reject_invalid_limits(limit):
+    retrieval = KnowledgeRetrieval(
+        project_id="project-1",
+        readable_project_ids=["project-1"],
+        user_name="ada",
+        entities=SimpleNamespace(),
+        embedding_service=SimpleNamespace(),
+        knowledge_store=SimpleNamespace(),
+    )
+
+    with pytest.raises(ValueError, match="positive integer"):
+        await retrieval.search_messages(
+            "query", session_id="session-1", limit=limit
+        )
+    with pytest.raises(ValueError, match="positive integer"):
+        await retrieval.search_entities("query", limit=limit)
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize("query", ["", "   ", None])
+async def test_message_entity_and_episode_search_reject_blank_queries(query):
+    retrieval = KnowledgeRetrieval(
+        project_id="project-1",
+        readable_project_ids=["project-1"],
+        user_name="ada",
+        entities=SimpleNamespace(),
+        embedding_service=SimpleNamespace(),
+        knowledge_store=SimpleNamespace(),
+    )
+
+    with pytest.raises(ValueError, match="non-blank string"):
+        await retrieval.search_messages(query, session_id="session-1")
+    with pytest.raises(ValueError, match="non-blank string"):
+        await retrieval.search_entities(query)
+    with pytest.raises(ValueError, match="non-blank string"):
+        await retrieval.episode_check(query, session_id="session-1")
+
+
+@pytest.mark.no_network
 async def test_hot_topic_context_hydrates_current_project_entity_mentions():
     class Store:
         def __init__(self):
@@ -327,9 +390,10 @@ async def test_hot_topic_context_hydrates_current_project_entity_mentions():
             "messages": [
                 {
                     "id": "msg_7",
-                    "user_name": "ada",
-                    "session_id": "session-1",
-                    "message": "Identity evidence",
+                        "user_name": "ada",
+                        "session_id": "session-1",
+                        "role": "assistant",
+                        "message": "Identity evidence",
                     "timestamp": "2023-11-14T22:13:20+00:00",
                 }
             ],
@@ -348,21 +412,18 @@ async def test_agent_memory_tools_delegate_to_project_scoped_retrieval():
             return [{"id": "msg_7"}]
 
     retrieval = Retrieval()
-    entities = SimpleNamespace(
-        embedding_service=SimpleNamespace(),
-        project_id="project-1",
-        readable_project_ids=["project-1"],
-    )
     tools = Tools(
         user_name="ada",
-        entities=entities,
+        project_id="project-1",
         session_id="session-1",
         knowledge_retrieval=retrieval,
         knowledge_store=SimpleNamespace(),
         postgres=SimpleNamespace(),
     )
+    assert tools._http_client is None
+    assert tools._web_page_client is None
     try:
-        assert await tools.search_messages("project memory", limit=3) == [
+        assert await tools.search_knowledge_messages("project memory", limit=3) == [
             {"id": "msg_7"}
         ]
     finally:
@@ -381,15 +442,10 @@ async def test_run_graph_limit_controls_the_relationship_retrieval_query():
             self.calls.append((entity_id, session_id, limit))
             return [{"relationship_id": "r-1"}]
 
-    entities = SimpleNamespace(
-        embedding_service=SimpleNamespace(),
-        project_id="project-1",
-        readable_project_ids=["project-1"],
-    )
     retrieval = Retrieval()
     tools = Tools(
         user_name="ada",
-        entities=entities,
+        project_id="project-1",
         session_id="session-1",
         knowledge_retrieval=retrieval,
         knowledge_store=SimpleNamespace(),
@@ -410,7 +466,7 @@ async def test_run_graph_limit_controls_the_relationship_retrieval_query():
     )
     try:
         install_tool_runtime(tools, run.tool_runtime, {})
-        assert await tools.get_connections(7) == [{"relationship_id": "r-1"}]
+        assert await tools.get_entity_relationships(7) == [{"relationship_id": "r-1"}]
     finally:
         await tools.close()
 
@@ -428,14 +484,9 @@ async def test_recent_episode_tool_passes_its_session_to_retrieval():
             return {"resolution": "recent", "results": []}
 
     retrieval = Retrieval()
-    entities = SimpleNamespace(
-        embedding_service=SimpleNamespace(),
-        project_id="project-1",
-        readable_project_ids=["project-1"],
-    )
     tools = Tools(
         user_name="ada",
-        entities=entities,
+        project_id="project-1",
         session_id="session-1",
         knowledge_retrieval=retrieval,
         knowledge_store=SimpleNamespace(),
@@ -563,14 +614,9 @@ async def test_topic_context_tool_normalizes_topics_and_rejects_inactive_ones():
             }
 
     retrieval = Retrieval()
-    entities = SimpleNamespace(
-        embedding_service=SimpleNamespace(),
-        project_id="project-1",
-        readable_project_ids=["project-1"],
-    )
     tools = Tools(
         user_name="ada",
-        entities=entities,
+        project_id="project-1",
         session_id="session-1",
         compiled_domain=Domain(),
         knowledge_retrieval=retrieval,
@@ -578,12 +624,12 @@ async def test_topic_context_tool_normalizes_topics_and_rejects_inactive_ones():
         postgres=SimpleNamespace(),
     )
     try:
-        assert await tools.load_topic_context(["career", "Finance", "Work"]) == {
+        assert await tools.load_project_topic_context(["career", "Finance", "Work"]) == {
             "Work": {"entities": [{"name": "Work"}], "messages": []},
             "Finance": {"entities": [{"name": "Finance"}], "messages": []},
         }
         with pytest.raises(ToolExecutionError, match="Unknown or inactive"):
-            await tools.load_topic_context(["Work", "Unknown"])
+            await tools.load_project_topic_context(["Work", "Unknown"])
     finally:
         await tools.close()
 

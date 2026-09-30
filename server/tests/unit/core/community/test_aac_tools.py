@@ -21,13 +21,16 @@ def _persona():
     }
 
 
+def test_aac_schemas_are_owned_by_aac_tools():
+    assert all(
+        callable(getattr(AACTools, schema["function"]["name"], None))
+        for schema in AAC_SPECIFIC_SCHEMAS
+    )
+
+
 def _base_tools(resources):
     return SimpleNamespace(
-        entities=SimpleNamespace(
-            project_id="__identity__",
-            readable_project_ids=["__identity__", "project-1"],
-            embedding_service=resources.embedding,
-        ),
+        project_id="__identity__",
         session_id="aac:discussion-1",
         compiled_domain=None,
         search_cfg={},
@@ -37,6 +40,7 @@ def _base_tools(resources):
         knowledge_store=resources.knowledge_store,
         postgres=resources.postgres,
         entity_maintenance_service=None,
+        project_maintenance_service=None,
     )
 
 
@@ -89,8 +93,8 @@ async def test_aac_tools_persist_local_insights_and_only_consult_owned_specialis
         specialist_runner=runner,
     )
 
-    insight = await tools.save_insight("The dates conflict.", visibility="private")
-    consultation = await tools.consult_specialist(specialist.id, "Check dates")
+    insight = await tools.save_community_insight("The dates conflict.", visibility="private")
+    consultation = await tools.consult_community_specialist(specialist.id, "Check dates")
 
     assert tools.entity_maintenance_service is None
     assert insight["saved"] is True
@@ -100,13 +104,13 @@ async def test_aac_tools_persist_local_insights_and_only_consult_owned_specialis
 
     outsider = await manager.create_agent("Outsider", "Careful")
     with pytest.raises(ValueError, match="own specialists"):
-        await tools.consult_specialist(outsider.id, "No")
+        await tools.consult_community_specialist(outsider.id, "No")
     await tools.close()
 
 
-def test_save_insight_contract_exposes_shared_and_private_visibility():
+def test_save_community_insight_contract_exposes_shared_and_private_visibility():
     schema = next(
-        item for item in AAC_SPECIFIC_SCHEMAS if item["function"]["name"] == "save_insight"
+        item for item in AAC_SPECIFIC_SCHEMAS if item["function"]["name"] == "save_community_insight"
     )
     visibility = schema["function"]["parameters"]["properties"]["visibility"]
 

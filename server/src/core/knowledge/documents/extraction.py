@@ -1,3 +1,5 @@
+"""Format-aware document extraction, snapshots, and chunk construction."""
+
 import csv
 import hashlib
 import io

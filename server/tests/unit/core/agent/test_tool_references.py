@@ -33,7 +33,7 @@ def test_document_result_localization_keeps_absent_folder_reference_null():
         ]
     }
 
-    localized = localize_agent_tool_result(_run(), "search_documents", result)
+    localized = localize_agent_tool_result(_run(), "search_project_documents", result)
 
     item = localized["data"][0]
     assert item["document_id"].startswith("doc_")

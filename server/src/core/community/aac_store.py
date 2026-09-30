@@ -124,6 +124,7 @@ class AACStore:
         kind: str,
         content: str,
         agent_id: str | None = None,
+        timeline_id: str | None = None,
     ) -> str:
         """Append a scoped transcript message or lightweight system event."""
 
@@ -134,7 +135,7 @@ class AACStore:
         content = self._text(content, "content")
         if agent_id is not None:
             agent_id = self._text(agent_id, "agent_id")
-        timeline_id = str(uuid4())
+        timeline_id = self._text(timeline_id, "timeline_id") if timeline_id is not None else str(uuid4())
         inserted = await self._write(
             "append_aac_timeline",
             """
@@ -145,6 +146,7 @@ class AACStore:
                 %(timeline_id)s, discussion_id, %(kind)s, %(agent_id)s, %(content)s
             FROM public.aac_discussions
             WHERE discussion_id = %(discussion_id)s AND user_name = %(user_name)s
+            ON CONFLICT (timeline_id) DO NOTHING
             """,
             {
                 "timeline_id": timeline_id,
@@ -156,7 +158,16 @@ class AACStore:
             },
         )
         if inserted == 0:
-            raise ValueError("AAC discussion is not available to this user")
+            rows = await self._read(
+                "read_aac_timeline_replay",
+                """SELECT t.kind, t.agent_id, t.content FROM public.aac_timeline t
+                   JOIN public.aac_discussions d ON d.discussion_id = t.discussion_id
+                   WHERE t.timeline_id = %(timeline_id)s AND t.discussion_id = %(discussion_id)s
+                     AND d.user_name = %(user_name)s""",
+                {"timeline_id": timeline_id, "discussion_id": discussion_id, "user_name": user_name},
+            )
+            if not rows or (rows[0]["kind"], rows[0]["agent_id"], rows[0]["content"]) != (kind, agent_id, content):
+                raise ValueError("AAC timeline event conflicts or discussion is unavailable")
         return timeline_id
 
     async def finish_discussion(
@@ -194,7 +205,14 @@ class AACStore:
             },
         )
         if updated == 0:
-            raise ValueError("AAC discussion is not active for this user")
+            rows = await self._read(
+                "read_aac_terminal_outcome",
+                """SELECT status, end_reason, tokens_used FROM public.aac_discussions
+                   WHERE discussion_id = %(discussion_id)s AND user_name = %(user_name)s""",
+                {"discussion_id": discussion_id, "user_name": user_name},
+            )
+            if not rows or rows[0]["status"] != status or rows[0]["end_reason"] != end_reason or rows[0]["tokens_used"] < tokens_used:
+                raise ValueError("AAC discussion terminal outcome conflicts or is unavailable")
 
     async def interrupt_active_discussions(self, *, user_name: str) -> int:
         """Mark stale active work interrupted during application startup."""
@@ -241,26 +259,36 @@ class AACStore:
         discussion_id: str,
         user_name: str,
         limit: int = 100,
+        after_sequence: int = 0,
     ) -> list[dict[str, Any]]:
-        """Return one user's AAC transcript and lightweight system events."""
+        """Read oldest-first; pass the last event_sequence to fetch the next page.
+
+        Sequence gaps are valid, including those consumed by idempotent retries.
+        This is insertion allocation order, not concurrent transaction commit order.
+        """
+
+        if isinstance(after_sequence, bool) or not isinstance(after_sequence, int) or after_sequence < 0:
+            raise ValueError("AAC timeline cursor must be a non-negative integer")
 
         return await self._read(
             "list_aac_timeline",
             """
             SELECT timeline.timeline_id, timeline.kind, timeline.agent_id,
-                   timeline.content, timeline.created_at
+                   timeline.content, timeline.created_at, timeline.event_sequence
             FROM public.aac_timeline AS timeline
             JOIN public.aac_discussions AS discussion
               ON discussion.discussion_id = timeline.discussion_id
             WHERE timeline.discussion_id = %(discussion_id)s
               AND discussion.user_name = %(user_name)s
-            ORDER BY timeline.created_at, timeline.timeline_id
+              AND timeline.event_sequence > %(after_sequence)s
+            ORDER BY timeline.event_sequence
             LIMIT %(limit)s
             """,
             {
                 "discussion_id": self._text(discussion_id, "discussion_id"),
                 "user_name": self._text(user_name, "user_name"),
                 "limit": self._limit(limit),
+                "after_sequence": after_sequence,
             },
         )
 
@@ -290,7 +318,7 @@ class AACStore:
             SELECT
                 %(insight_id)s, %(user_name)s, %(discussion_id)s,
                 %(author_agent_id)s, %(visibility)s, %(content)s
-            WHERE %(discussion_id)s IS NULL OR EXISTS (
+            WHERE %(discussion_id)s::text IS NULL OR EXISTS (
                 SELECT 1
                 FROM public.aac_discussions
                 WHERE discussion_id = %(discussion_id)s

@@ -73,21 +73,23 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "search_entity",
+            "name": "search_knowledge_entities",
             "description": (
                 "Discover entity identities, stable entity IDs, aliases, and project contexts. "
                 "Use the returned entity ID for connections, activity, paths, or an exact Episode follow-up. "
-                "For remembered history, decisions, or developments, use episode_check first."
+                "For remembered history, decisions, or developments, use search_episodes first."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
+                        "minLength": 1,
                         "description": "Name of the person, project, place, or concept.",
                     },
                     "limit": {
                         "type": "integer",
+                        "minimum": 1,
                         "description": "Max results (default 5)",
                     },
                 },
@@ -99,9 +101,9 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "get_connections",
+            "name": "get_entity_relationships",
             "description": (
-                "Retrieve the observed relationship network for an entity ID returned by search_entity, "
+                "Retrieve the observed relationship network for an entity ID returned by search_knowledge_entities, "
                 "including durable endpoint IDs, project attribution, observation metadata, and supporting messages. "
                 "Use it after discovery when relationship details are needed."
             ),
@@ -110,7 +112,7 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "entity_id": {
                         "type": "integer",
-                        "description": "Stable entity ID returned by search_entity.",
+                        "description": "Stable entity ID returned by search_knowledge_entities.",
                     },
                 },
                 "required": ["entity_id"],
@@ -121,7 +123,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "load_topic_context",
+            "name": "load_project_topic_context",
             "description": (
                 "Load compact entity and supporting-message context for one or "
                 "more active project topics. Use this when the user's question "
@@ -154,7 +156,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "find_path",
+            "name": "find_relationship_path",
             "description": (
                 "Investigates the narrative link between two specific entities. "
                 "It doesn't just check if they know each other; it traces the 'chain of custody' (e.g., A knows B, who knows C). "
@@ -174,7 +176,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "read_observation_evidence",
+            "name": "read_relationship_observation_evidence",
             "description": (
                 "Expand the bounded durable support for one relationship observation "
                 "shown by a path result. Use this when an observation handle needs "
@@ -199,23 +201,24 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "search_messages",
+            "name": "search_knowledge_messages",
             "description": (
-                "A fallback tool for raw keyword recall. "
-                "It searches exact words in the chat logs. "
-                "Use this ONLY when: 1) The user asks for a direct quote ('What exactly did I say?'), "
-                "2) You need to find a specific date/time, or "
-                "3) Both search_entity and episode_check failed to find the concept."
+                "Search durable messages using bounded lexical and semantic recall "
+                "with reranking and surrounding context. Use it for exact wording, "
+                "dates, or relevant raw discussion when structured entities and "
+                "episodes are insufficient."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
+                        "minLength": 1,
                         "description": "Keywords or phrase to search for",
                     },
                     "limit": {
                         "type": "integer",
+                        "minimum": 1,
                         "description": "Max results (default 8)",
                     },
                 },
@@ -227,7 +230,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "get_recent_activity",
+            "name": "get_entity_recent_activity",
             "description": (
                 "Checks for updates or interactions involving an entity within a specific timeframe. "
                 "Use for queries like 'What's the status of X?', 'Have I talked about Y lately?', or 'Catch me up on Z'."
@@ -237,16 +240,43 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "entity_id": {
                         "type": "integer",
-                        "description": "Stable entity ID returned by search_entity",
+                        "description": "Stable entity ID returned by search_knowledge_entities",
                     },
                     "hours": {
                         "type": "integer",
+                        "minimum": 1,
                         "description": "Hours to look back (e.g., 24 for daily, 168 for weekly).",
                     },
                 },
                 "required": ["entity_id"],
             },
             "tags": ["graph:read", "core"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "show_previous_notebook_page",
+            "description": (
+                "Show or hide the immediately previous notebook page in model "
+                "context. Use this when the current handoff indicates that older "
+                "evidence may be useful. Only one previous page is available."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "show": {
+                        "type": "boolean",
+                        "description": (
+                            "Whether to show the previous page. Defaults to false."
+                        ),
+                        "default": False,
+                    }
+                },
+                "required": [],
+                "additionalProperties": False,
+            },
+            "tags": ["core"],
         },
     },
     {
@@ -274,10 +304,10 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "episode_check",
+            "name": "search_episodes",
             "description": (
                 "Retrieve contextual episodic memory about a specific entity, including "
-                "compact summaries and provenance references. Use read_episode when the "
+                "compact summaries and provenance references. Use read_episode_messages when the "
                 "original source messages are needed. Results are contextual memory, not "
                 "atomic claims."
             ),
@@ -290,6 +320,7 @@ TOOL_SCHEMAS = [
                     },
                     "query": {
                         "type": "string",
+                        "minLength": 1,
                         "description": "A natural language hint describing what you're looking for.",
                     },
                 },
@@ -301,7 +332,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "read_episode",
+            "name": "read_episode_messages",
             "description": (
                 "Expand a retrieved episode into all of its original source messages. "
                 "Use this to verify, quote, or reconcile an episode's details."
@@ -313,7 +344,7 @@ TOOL_SCHEMAS = [
                         "type": "string",
                         "description": (
                             "The episode ID (for example ep_a3f91c) returned "
-                            "by episode_check or read_recent_episodes."
+                            "by search_episodes or read_recent_episodes."
                         ),
                     }
                 },
@@ -327,8 +358,8 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "read_recent_episodes",
             "description": (
-                "Return the most recent episode summaries by source chronology in the current "
-                "conversation without searching or requiring an episode ID. Use for "
+                "Return the most recent episode summaries by source chronology from "
+                "readable project memory without searching or requiring an episode ID. Use for "
                 "requests such as 'what was the last episode?' or 'show the last few memories'."
             ),
             "parameters": {
@@ -352,7 +383,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "read_brain",
+            "name": "read_agent_brain",
             "description": (
                 "Read your current persistent Markdown identity, its revision, "
                 "and the sections you may edit."
@@ -368,7 +399,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "list_brain_snapshots",
+            "name": "list_agent_brain_snapshots",
             "description": (
                 "List available persistent Brain restore points. Use this "
                 "before choosing a snapshot to inspect or restore from."
@@ -384,7 +415,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "read_brain_snapshot",
+            "name": "read_agent_brain_snapshot",
             "description": (
                 "Read one stored full-Brain snapshot by revision. Only listed "
                 "snapshot revisions are available."
@@ -396,7 +427,7 @@ TOOL_SCHEMAS = [
                         "type": "integer",
                         "minimum": 1,
                         "description": (
-                            "Snapshot revision returned by list_brain_snapshots."
+                            "Snapshot revision returned by list_agent_brain_snapshots."
                         ),
                     },
                 },
@@ -408,10 +439,10 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "edit_brain",
+            "name": "edit_agent_brain",
             "description": (
                 "Update one editable section of your persistent Markdown identity. "
-                "Call read_brain first and pass its revision. Stale edits are rejected."
+                "Call read_agent_brain first and pass its revision. Stale edits are rejected."
             ),
             "parameters": {
                 "type": "object",
@@ -432,7 +463,7 @@ TOOL_SCHEMAS = [
                     },
                     "expected_revision": {
                         "type": "integer",
-                        "description": "Revision returned by read_brain.",
+                        "description": "Revision returned by read_agent_brain.",
                     },
                     "change_note": {
                         "type": "string",
@@ -448,10 +479,10 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "restore_brain_section",
+            "name": "restore_agent_brain_section",
             "description": (
                 "Restore one editable Brain section from a stored snapshot. "
-                "Call read_brain and list_brain_snapshots first. This creates "
+                "Call read_agent_brain and list_agent_brain_snapshots first. This creates "
                 "a new current revision and snapshot."
             ),
             "parameters": {
@@ -475,7 +506,7 @@ TOOL_SCHEMAS = [
                     "expected_current_revision": {
                         "type": "integer",
                         "minimum": 1,
-                        "description": "Current revision returned by read_brain.",
+                        "description": "Current revision returned by read_agent_brain.",
                     },
                     "change_note": {
                         "type": "string",
@@ -495,7 +526,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "list_documents",
+            "name": "list_project_documents",
             "description": (
                 "List documents visible in the current project context. Use this "
                 "to discover document IDs, paths, indexing "
@@ -530,7 +561,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "get_document_info",
+            "name": "get_project_document_info",
             "description": (
                 "Get metadata for one visible document. Provide exactly one of "
                 "document_id or relative_path; use document_id when paths are "
@@ -549,7 +580,7 @@ TOOL_SCHEMAS = [
                     },
                     "relative_path": {
                         "type": "string",
-                        "description": "The exact path shown by list_documents.",
+                        "description": "The exact path shown by list_project_documents.",
                     },
                     "use_focus": {
                         "type": "boolean",
@@ -564,7 +595,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "read_document",
+            "name": "read_project_document",
             "description": (
                 "Read a bounded line range from one visible document. Provide "
                 "exactly one of document_id or relative_path. PDF and DOCX "
@@ -583,7 +614,7 @@ TOOL_SCHEMAS = [
                     },
                     "relative_path": {
                         "type": "string",
-                        "description": "The exact path shown by list_documents.",
+                        "description": "The exact path shown by list_project_documents.",
                     },
                     "page_number": {
                         "type": "integer",
@@ -613,7 +644,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "search_documents",
+            "name": "search_project_documents",
             "description": (
                 "Search indexed documents visible in the current project context."
             ),
@@ -658,7 +689,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "web_search",
+            "name": "search_web",
             "description": ("Search the live internet for information."),
             "parameters": {
                 "type": "object",
@@ -685,7 +716,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "news_search",
+            "name": "search_news",
             "description": ("Search for recent news articles."),
             "parameters": {
                 "type": "object",
@@ -868,7 +899,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "check_graph_health",
+            "name": "inspect_duplicate_entities",
             "description": (
                 "Check for duplicate-entity candidates using the system merge "
                 "detector. Use this during routine maintenance before proposing "
@@ -989,7 +1020,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "list_files",
+            "name": "list_project_files",
             "description": (
                 "List bounded metadata for files in the current project's "
                 "local project folder. This is project-scoped and does not expose "
@@ -1019,13 +1050,13 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "read_file",
+            "name": "read_project_file",
             "description": (
                 "Read a bounded line and character slice from one file in the "
                 "current project's local folder. PROJECT.md is readable "
                 "but remains user-owned; controlled CONTEXT.md is unavailable "
                 "through ordinary workspace tools. Registered evidence documents "
-                "must be read with read_document so source provenance is retained."
+                "must be read with read_project_document so source provenance is retained."
             ),
             "parameters": {
                 "type": "object",
@@ -1062,7 +1093,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "create_file",
+            "name": "create_project_file",
             "description": (
                 "Create a non-empty bounded artifact in the current project's "
                 "local project folder. Ordinary agent tools cannot create or edit "
@@ -1093,7 +1124,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "update_file",
+            "name": "update_project_file",
             "description": (
                 "Replace a project file using optimistic "
                 "concurrency. The supplied SHA-256 content hash must still be "
@@ -1131,7 +1162,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "append_file",
+            "name": "append_project_file",
             "description": (
                 "Append bounded UTF-8 content to a project file "
                 "using an expected SHA-256 content hash. PROJECT.md and controlled "
@@ -1168,7 +1199,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "move_file",
+            "name": "move_project_file",
             "description": "Move one non-reserved current-project file to an unused relative path using its current SHA-256 hash.",
             "parameters": {
                 "type": "object",
@@ -1186,7 +1217,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "delete_file",
+            "name": "delete_project_file",
             "description": "Delete one non-reserved current-project file only when its SHA-256 hash is current.",
             "parameters": {
                 "type": "object",
@@ -1203,7 +1234,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "create_folder",
+            "name": "create_project_folder",
             "description": "Create an empty directory inside the current project's local folder.",
             "parameters": {
                 "type": "object",
@@ -1232,28 +1263,17 @@ CAPABILITY_CLASSES = frozenset(
     }
 )
 
-# Missing agent configuration gets useful autonomy for the currently exposed
-# read and reversible write tools.
-SAFE_DEFAULT_CAPABILITIES = frozenset(
-    {
-        READ_CAPABILITY,
-        REVERSIBLE_WRITE_CAPABILITY,
-        CONFIGURATION_WRITE_CAPABILITY,
-        IDENTITY_WRITE_CAPABILITY,
-    }
-)
-
 _TOOL_CAPABILITIES = {
-    "edit_brain": IDENTITY_WRITE_CAPABILITY,
-    "restore_brain_section": IDENTITY_WRITE_CAPABILITY,
+    "edit_agent_brain": IDENTITY_WRITE_CAPABILITY,
+    "restore_agent_brain_section": IDENTITY_WRITE_CAPABILITY,
     "propose_entity_merge": REVERSIBLE_WRITE_CAPABILITY,
     "report_relationship_conflict": REVERSIBLE_WRITE_CAPABILITY,
-    "create_file": REVERSIBLE_WRITE_CAPABILITY,
-    "update_file": REVERSIBLE_WRITE_CAPABILITY,
-    "append_file": REVERSIBLE_WRITE_CAPABILITY,
-    "move_file": REVERSIBLE_WRITE_CAPABILITY,
-    "delete_file": REVERSIBLE_WRITE_CAPABILITY,
-    "create_folder": REVERSIBLE_WRITE_CAPABILITY,
+    "create_project_file": REVERSIBLE_WRITE_CAPABILITY,
+    "update_project_file": REVERSIBLE_WRITE_CAPABILITY,
+    "append_project_file": REVERSIBLE_WRITE_CAPABILITY,
+    "move_project_file": REVERSIBLE_WRITE_CAPABILITY,
+    "delete_project_file": REVERSIBLE_WRITE_CAPABILITY,
+    "create_project_folder": REVERSIBLE_WRITE_CAPABILITY,
 }
 
 for _schema in TOOL_SCHEMAS:
@@ -1263,7 +1283,6 @@ for _schema in TOOL_SCHEMAS:
         READ_CAPABILITY,
     )
 
-ALL_TOOL_NAMES = [s["function"]["name"] for s in TOOL_SCHEMAS]
 TOOL_SCHEMAS_BY_NAME = {
     schema["function"]["name"]: schema for schema in TOOL_SCHEMAS
 }
@@ -1288,6 +1307,14 @@ def validate_tool_arguments(schema: dict, arguments: dict) -> list[str]:
 def _validate_schema_value(value, schema: dict, path: str) -> list[str]:
     errors = []
     expected_type = schema.get("type")
+
+    any_of = schema.get("anyOf")
+    if any_of and not any(
+        not _validate_schema_value(value, option, path)
+        for option in any_of
+        if isinstance(option, dict)
+    ):
+        errors.append(f"{path} must satisfy at least one allowed shape")
 
     type_matches = {
         "object": lambda item: isinstance(item, dict),
@@ -1329,14 +1356,16 @@ def _validate_schema_value(value, schema: dict, path: str) -> list[str]:
                     _validate_schema_value(item, item_schema, f"{path}[{index}]")
                 )
 
-    if expected_type == "object":
+    if expected_type == "object" or any(
+        key in schema for key in ("properties", "required", "additionalProperties")
+    ):
         properties = schema.get("properties", {})
         required = schema.get("required", [])
         for key in required:
             if key not in value:
                 errors.append(f"{path}.{key} is required")
         unknown = sorted(set(value) - set(properties))
-        if unknown and schema.get("additionalProperties", False) is False:
+        if unknown and schema.get("additionalProperties") is False:
             errors.append(f"{path} contains unknown fields: {', '.join(unknown)}")
         for key, item in value.items():
             if key in properties:
@@ -1349,55 +1378,3 @@ def _validate_schema_value(value, schema: dict, path: str) -> list[str]:
                 )
 
     return errors
-
-
-def get_filtered_schemas(
-    enabled_tools: list[str] | None = None,
-    tags: list[str] | None = None,
-    capabilities: list[str] | set[str] | frozenset[str] | None = None,
-) -> list[dict]:
-    """
-    Return tool schemas filtered by enabled tools AND specific tags.
-    Always includes request_clarification (not user-toggleable).
-    """
-    filtered = []
-    enabled_set = set(enabled_tools) if enabled_tools is not None else None
-    tags_set = set(tags) if tags else None
-    capability_set = (
-        set(capabilities)
-        if capabilities is not None
-        else set(SAFE_DEFAULT_CAPABILITIES)
-    )
-    if capabilities is None and enabled_set is not None:
-        # An explicit per-agent tool allow-list may opt into a stronger
-        # capability. Runtime authorization still applies confirmation rules.
-        capability_set.update(
-            get_schema_capability(TOOL_SCHEMAS_BY_NAME[name])
-            for name in enabled_set
-            if name in TOOL_SCHEMAS_BY_NAME
-        )
-    invalid_capabilities = capability_set - CAPABILITY_CLASSES
-    if invalid_capabilities:
-        raise ValueError(
-            "Unknown tool capabilities: "
-            + ", ".join(sorted(invalid_capabilities))
-        )
-
-    for schema in TOOL_SCHEMAS:
-        name = schema["function"]["name"]
-        if name in ("request_clarification", "set_research_plan", "submit_answer"):
-            filtered.append(schema)
-            continue
-
-        is_enabled = enabled_set is None or name in enabled_set
-        has_capability = get_schema_capability(schema) in capability_set
-
-        has_tag = True
-        if tags_set is not None:
-            tool_tags = set(schema["function"].get("tags", []))
-            has_tag = bool(tool_tags & tags_set)
-
-        if is_enabled and has_tag and has_capability:
-            filtered.append(schema)
-
-    return filtered

@@ -1,16 +1,19 @@
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
 
 from common.exceptions import NotFoundError
 from common.schema.artifacts import ArtifactReference
+from common.schema.health import HealthActivity, HealthSnapshot
 from common.schema.public import (
     CreateProjectRequest,
     CreateSessionRequest,
     EntityMergeRollbackRequest,
     MaintenanceReviewDecisionRequest,
+    PromoteSourceRequest,
     SetDocumentFocusDocument,
     StartRunRequest,
     validate_public_stream,
@@ -48,6 +51,12 @@ class FakeDocumentService:
             },
         }
 
+    async def list_documents(self, *, limit):
+        self.calls.append(("list", {"limit": limit}))
+        return [dict(document_id="document-1", project_id="project-1", original_name="notes.md",
+                     relative_path="notes.md", extension=".md", size_bytes=4,
+                     content_hash="a" * 64, status="indexed", error_message="private-token")]
+
 
 class FakeSession:
     user_name = "ada"
@@ -55,7 +64,7 @@ class FakeSession:
     project_id = "project-1"
     model = "test-model"
     agent_id = "agent-1"
-    enabled_tools = ["web_search"]
+    enabled_tools = ["search_web"]
 
     def __init__(self):
         self.run_calls: list[dict] = []
@@ -66,7 +75,7 @@ class FakeSession:
         return self._events()
 
     async def _events(self):
-        yield {"event": "tool_start", "data": {"tool": "web_search"}}
+        yield {"event": "tool_start", "data": {"tool": "search_web"}}
         yield {"event": "token", "data": {"content": "Answer"}}
         yield {
             "event": "response",
@@ -83,6 +92,39 @@ class FakeSession:
                 "source_ref_ids": [],
             },
         }
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+@pytest.mark.parametrize("start_adapter", [False, True])
+async def test_public_stream_close_reaches_unconsumed_run_owner(port, monkeypatch, start_adapter):
+    application, _, session = port
+
+    class OwnedStream:
+        closed = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise AssertionError("The inner run must not start")
+
+        async def aclose(self):
+            self.closed = True
+
+    owner = OwnedStream()
+
+    async def admit(*args, **kwargs):
+        return owner
+
+    monkeypatch.setattr(session, "open_agent_run_stream", admit)
+    stream = await application.open_run_stream(
+        user_name="ada", request=StartRunRequest(session_id="session-1", query="Question")
+    )
+    if start_adapter:
+        assert (await anext(stream)).type == "run.started"
+    await stream.aclose()
+    assert owner.closed
 
 
 class FakeKnowledgeStore:
@@ -115,6 +157,14 @@ class FakeProjects:
     def __init__(self):
         self.calls = []
         self.maintenance_service = self
+        self.document_service = FakeDocumentService()
+
+    async def acquire_project_for_session(self, project_id, session_id):
+        self.calls.append(("acquire", project_id, session_id))
+        return SimpleNamespace(document_service=self.document_service)
+
+    async def release_project_for_session(self, project_id, session_id):
+        self.calls.append(("release", project_id, session_id))
 
     @staticmethod
     def _review(*, scope="user-global", project_id=None, status="open"):
@@ -143,6 +193,9 @@ class FakeProjects:
             "status": "active",
             "allowed_projects": [],
         }
+
+    async def get_project(self, project_id):
+        return {"id": project_id, "status": "active"} if project_id == "project-1" else None
 
     async def list_global_maintenance_reviews(self):
         self.calls.append({"operation": "list_global_reviews"})
@@ -275,12 +328,211 @@ def port():
         updated_at=created_at,
     )
     session = FakeSession()
+
+    class HealthService:
+        async def get_engine_health(self):
+            return HealthSnapshot(summary="Engine healthy")
+
+        async def get_resource_health(self, *, project_id):
+            assert project_id == "project-1"
+            return HealthSnapshot(activity=HealthActivity.BUSY, summary="Resources busy")
+
+        async def get_ingestion_health(self, *, user_name, project_id):
+            assert (user_name, project_id) == ("ada", "project-1")
+            return HealthSnapshot(summary="Ingestion healthy")
+
+        async def get_background_health(self, *, project_id):
+            assert project_id == "project-1"
+            return HealthSnapshot(summary="Background healthy")
+
     runtime = SimpleNamespace(
         sessions=FakeSessions(session),
         projects=FakeProjects(),
+        health_service=HealthService(),
         resources=SimpleNamespace(knowledge_store=FakeKnowledgeStore(artifact)),
     )
     return ApplicationRuntimePort(runtime), runtime, session
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_runtime_port_exposes_typed_scoped_health(port):
+    application, _runtime, _session = port
+
+    engine = await application.get_engine_health(user_name="ada")
+    resources = await application.get_resource_health(user_name="ada", project_id="project-1")
+    ingestion = await application.get_ingestion_health(user_name="ada", project_id="project-1")
+    background = await application.get_background_health(user_name="ada", project_id="project-1")
+
+    assert engine.summary == "Engine healthy"
+    assert resources.activity is HealthActivity.BUSY
+    assert ingestion.summary == "Ingestion healthy"
+    assert background.summary == "Background healthy"
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_runtime_port_scopes_document_calls_to_a_short_project_lease(port):
+    application, runtime, _session = port
+
+    documents = await application.list_documents(
+        user_name="ada", project_id="project-1", limit=3
+    )
+    assert documents[0].document_id == "document-1"
+    assert "error_message" not in documents[0].model_dump()
+
+    acquire, release = runtime.projects.calls[-2:]
+    assert acquire[0] == "acquire"
+    assert release[0] == "release"
+    assert acquire[1:] == release[1:]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_source_promotion_uses_retained_reference_without_resuming_session(port, monkeypatch):
+    application, runtime, _session = port
+    request = PromoteSourceRequest(session_id="deleted-session", source_ref_id="source-1")
+    source = {"source_kind": "web_page", "canonical_url": "https://example.test"}
+    read = AsyncMock(return_value=source)
+    promote = AsyncMock(return_value={
+        "link_id": "link-1", "project_id": "project-1", "url": "https://example.test",
+        "created_at": datetime(2026, 1, 2, tzinfo=timezone.utc),
+        "updated_at": datetime(2026, 1, 2, tzinfo=timezone.utc),
+    })
+    resume = AsyncMock(side_effect=AssertionError("deleted session must not resume"))
+    monkeypatch.setattr(runtime.resources.knowledge_store, "get_source_reference", read, raising=False)
+    monkeypatch.setattr(runtime.projects.document_service, "promote_source", promote, raising=False)
+    monkeypatch.setattr(runtime.sessions, "get_or_resume_session", resume)
+
+    link = await application.promote_source(
+        user_name="ada", project_id="project-1", request=request,
+    )
+
+    assert link.url == "https://example.test"
+    read.assert_awaited_once_with(
+        "source-1", user_name="ada", project_id="project-1", session_id="deleted-session",
+    )
+    promote.assert_awaited_once_with(source, title=None, summary=None)
+    resume.assert_not_awaited()
+    acquire, release = runtime.projects.calls[-2:]
+    assert acquire[0] == "acquire" and release[0] == "release"
+    assert acquire[1:] == release[1:]
+    assert acquire[2].startswith("api-source-promote:")
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+@pytest.mark.parametrize("project_status, expected_error", [
+    ("archived", PermissionError), ("deleted", NotFoundError), (None, NotFoundError),
+])
+async def test_source_promotion_rejects_nonactive_project_before_source_read(
+    port, monkeypatch, project_status, expected_error,
+):
+    application, runtime, _session = port
+    project = AsyncMock(return_value=(
+        None if project_status is None else {"id": "project-1", "status": project_status}
+    ))
+    read = AsyncMock()
+    monkeypatch.setattr(runtime.projects, "get_project", project)
+    monkeypatch.setattr(runtime.resources.knowledge_store, "get_source_reference", read, raising=False)
+
+    with pytest.raises(expected_error):
+        await application.promote_source(
+            user_name="ada", project_id="project-1",
+            request=PromoteSourceRequest(session_id="deleted-session", source_ref_id="source-1"),
+        )
+
+    read.assert_not_awaited()
+    assert not runtime.projects.calls
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_source_promotion_rejects_unscoped_reference_and_releases_lease(port, monkeypatch):
+    application, runtime, _session = port
+    read = AsyncMock(return_value=None)
+    promote = AsyncMock()
+    monkeypatch.setattr(runtime.resources.knowledge_store, "get_source_reference", read, raising=False)
+    monkeypatch.setattr(runtime.projects.document_service, "promote_source", promote, raising=False)
+
+    with pytest.raises(NotFoundError, match="source"):
+        await application.promote_source(
+            user_name="ada", project_id="project-1",
+            request=PromoteSourceRequest(session_id="foreign-session", source_ref_id="source-1"),
+        )
+
+    read.assert_awaited_once_with(
+        "source-1", user_name="ada", project_id="project-1", session_id="foreign-session",
+    )
+    promote.assert_not_awaited()
+    assert runtime.projects.calls[-2][1:] == runtime.projects.calls[-1][1:]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_source_promotion_releases_lease_when_bookmark_write_fails(port, monkeypatch):
+    application, runtime, _session = port
+    read = AsyncMock(return_value={"source_kind": "web_page", "canonical_url": "https://example.test"})
+    promote = AsyncMock(side_effect=RuntimeError("bookmark write failed"))
+    monkeypatch.setattr(runtime.resources.knowledge_store, "get_source_reference", read, raising=False)
+    monkeypatch.setattr(runtime.projects.document_service, "promote_source", promote, raising=False)
+
+    with pytest.raises(RuntimeError, match="bookmark write failed"):
+        await application.promote_source(
+            user_name="ada", project_id="project-1",
+            request=PromoteSourceRequest(session_id="deleted-session", source_ref_id="source-1"),
+        )
+
+    promote.assert_awaited_once()
+    assert runtime.projects.calls[-2][1:] == runtime.projects.calls[-1][1:]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_source_promotion_rejects_wrong_user_before_project_read(port, monkeypatch):
+    application, runtime, _session = port
+    get_project = AsyncMock()
+    monkeypatch.setattr(runtime.projects, "get_project", get_project)
+
+    with pytest.raises(PermissionError):
+        await application.promote_source(
+            user_name="other", project_id="project-1",
+            request=PromoteSourceRequest(session_id="session-1", source_ref_id="source-1"),
+        )
+
+    get_project.assert_not_awaited()
+
+
+async def test_invalid_management_projection_still_releases_exact_project_lease(port):
+    from unittest.mock import AsyncMock
+
+    from pydantic import ValidationError
+
+    application, runtime, _session = port
+    runtime.projects.document_service.get_document_info = AsyncMock(return_value={})
+    with pytest.raises(ValidationError):
+        await application.get_document(user_name="ada", project_id="project-1", document_id="d")
+    acquire, release = runtime.projects.calls[-2:]
+    assert acquire[0] == "acquire" and release[0] == "release"
+    assert acquire[1:] == release[1:]
+
+
+async def test_decoded_upload_over_limit_is_rejected_before_project_lease(port, monkeypatch):
+    import base64
+
+    from common.exceptions import PayloadTooLargeError
+    from common.schema.public import UploadDocumentRequest
+    from runtime import api_port as module
+
+    application, runtime, _session = port
+    monkeypatch.setattr(module, "MAX_DOCUMENT_SIZE", 1)
+    before = list(runtime.projects.calls)
+    with pytest.raises(PayloadTooLargeError):
+        await application.upload_document(user_name="ada", project_id="project-1",
+            request=UploadDocumentRequest(original_name="n.md", content_base64=base64.b64encode(b"ab").decode()))
+    assert runtime.projects.calls == before
+    with pytest.raises(NotFoundError):
+        await application.get_resource_health(user_name="ada", project_id="missing")
 
 
 @pytest.mark.runtime

@@ -12,6 +12,7 @@ from common.schema.evidence import (
     EvidencePointer,
     EvidenceSubject,
 )
+from common.schema.semantic_window import SemanticWindowRecord
 from core.knowledge.db.writers.entity_reclassification_writer import (
     HistoricalReclassificationResult,
 )
@@ -334,6 +335,133 @@ async def test_retrying_a_semantic_window_keeps_the_durable_window_and_wakes_its
             "project_id": "project-1",
         }
     ]
+    assert runtime.wakes == 1
+
+
+@pytest.mark.no_network
+async def test_semantic_blockage_inspection_classifies_scheduled_and_exhausted_retry():
+    service, _reviews = _project_service(_relationship_review())
+
+    def failed_window(*, next_retry_at_ms):
+        return SemanticWindowRecord(
+            window_id=uuid4(),
+            user_name="ada",
+            project_id="project-1",
+            origin="conversation",
+            stage="claimed",
+            domain_version=1,
+            source_token_count=10,
+            token_estimator="test",
+            token_estimator_version="1",
+            attempt_count=3,
+            last_failure_stage="context",
+            last_failure_code="temporary_failure",
+            last_failure_at_ms=100,
+            last_error_summary="safe summary",
+            next_retry_at_ms=next_retry_at_ms,
+        )
+
+    class Store:
+        async def list_failed_project_semantic_windows(self, **kwargs):
+            assert kwargs["limit"] == 2
+            return [
+                failed_window(next_retry_at_ms=200),
+                failed_window(next_retry_at_ms=None),
+            ]
+
+    service.resources.knowledge_store = Store()
+
+    result = await service.inspect_semantic_window_blockages("project-1", limit=2)
+
+    assert [item.kind for item in result] == ["retry_scheduled", "retry_exhausted"]
+    assert all(item.failure_code == "temporary_failure" for item in result)
+
+
+@pytest.mark.no_network
+async def test_session_blockage_inspection_excludes_live_session_leases():
+    service, _reviews = _project_service(_relationship_review())
+    service._project_leases["project-1"] = {"live-session"}
+    service.pg = RecordingPostgresClient(
+        fetch_all_results=[
+            [
+                {
+                    "session_id": "orphan-session",
+                    "message_id": 12,
+                    "timestamp_ms": 50,
+                    "total_count": 1,
+                }
+            ]
+        ]
+    )
+
+    result = await service.inspect_session_blockages(
+        "project-1", stale_before_ms=100, limit=10
+    )
+
+    assert result.total_count == 1
+    assert result.exchanges[0].session_id == "orphan-session"
+    assert service.pg.calls[-1][2] == (
+        "ada",
+        "project-1",
+        100,
+        ["live-session"],
+        10,
+    )
+
+
+@pytest.mark.no_network
+async def test_orphan_repair_refuses_a_session_that_gained_a_live_owner():
+    service, _reviews = _project_service(_relationship_review())
+    service._project_leases["project-1"] = {"session-1"}
+
+    class Store:
+        async def close_orphaned_user_exchange(self, **kwargs):
+            raise AssertionError("live exchange must not be closed")
+
+    service.resources.knowledge_store = Store()
+
+    with pytest.raises(ValueError, match="live session"):
+        await service.repair_orphaned_exchange(
+            "project-1",
+            session_id="session-1",
+            user_message_id=12,
+            expected_opened_at_ms=50,
+            stale_before_ms=100,
+        )
+
+
+@pytest.mark.no_network
+async def test_orphan_repair_closes_failed_and_wakes_semantic_owner():
+    service, _reviews = _project_service(_relationship_review())
+    closure = SimpleNamespace(user_message_id=12, outcome="failed")
+    calls = []
+
+    class Store:
+        async def close_orphaned_user_exchange(self, **kwargs):
+            calls.append(kwargs)
+            return closure
+
+    class Runtime:
+        def __init__(self):
+            self.wakes = 0
+
+        def signal_semantic_work(self):
+            self.wakes += 1
+
+    runtime = Runtime()
+    service.resources.knowledge_store = Store()
+    service._active_projects["project-1"] = runtime
+
+    result = await service.repair_orphaned_exchange(
+        "project-1",
+        session_id="session-1",
+        user_message_id=12,
+        expected_opened_at_ms=50,
+        stale_before_ms=100,
+    )
+
+    assert result is closure
+    assert calls[0]["expected_opened_at_ms"] == 50
     assert runtime.wakes == 1
 
 
@@ -799,7 +927,9 @@ async def test_merge_and_review_transition_share_one_transaction(monkeypatch):
 
 
 @pytest.mark.no_network
-async def test_failed_merge_projection_repair_does_not_repeat_canonical_merge(monkeypatch):
+async def test_failed_merge_projection_repair_does_not_repeat_canonical_merge(
+    monkeypatch,
+):
     class Writer(_AtomicMergeWriter):
         def __init__(self):
             super().__init__()

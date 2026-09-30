@@ -19,7 +19,6 @@ from common.schema.document import (
     UserAttachedSource,
     UserAttachedUrl,
 )
-from common.schema.health import sanitize_health_details
 from common.schema.source.locators import (
     CodeLineLocator,
     CsvRowLocator,
@@ -52,17 +51,18 @@ from .constants import (
     MAX_READ_LINES,
     document_extension,
 )
+from .extraction import (
+    csv_data_rows,
+    is_code_extension,
+)
 from .filesystem import ProjectFilesystem, ProjectFilesystemFactory
 from .indexer import DocumentIndexer
 from .policy import DocumentIndexPolicy
 from .scanning import build_folder_preview, normalize_relative_path
-from .storage import (
-    csv_data_rows,
-    is_code_extension,
-)
 
 BlockingRunner = Callable[..., Awaitable[Any]]
 _RECONCILIATION_MAX_FILES = 10_000
+_RECONCILIATION_FULL_HASH_INTERVAL = 10
 
 
 class _UnsetSavedWebLinkField:
@@ -110,6 +110,10 @@ class DocumentService:
         self._writer = writer or DocumentWriter(postgres_client, project_id)
         self._run_blocking = blocking_runner
         self._filesystem_factory = filesystem_factory
+        self._reconciliation_fingerprints: dict[
+            str, tuple[int, int, str | None]
+        ] = {}
+        self._reconciliation_run_count = 0
         if indexer is None:
             indexing_policy = DocumentIndexPolicy.capture(
                 inline_index_max_bytes=inline_index_max_bytes,
@@ -180,9 +184,48 @@ class DocumentService:
         reserved_paths = [path for path in paths if is_controlled_context_file(path.relative_path)]
         paths = [path for path in paths if not is_controlled_context_file(path.relative_path)]
         settings = await self.get_scan_settings()
+        current_rows = await self._reader.list_documents_for_reconciliation(
+            limit=_RECONCILIATION_MAX_FILES + 1,
+        )
+        current = {row["relative_path"]: row for row in current_rows}
+        if len(current) > _RECONCILIATION_MAX_FILES:
+            raise RuntimeError(
+                "document catalog reconciliation exceeds the "
+                f"{_RECONCILIATION_MAX_FILES}-file safety limit"
+            )
+
+        self._reconciliation_run_count += 1
+        full_hash_sweep = (
+            not self._reconciliation_fingerprints
+            or self._reconciliation_run_count % _RECONCILIATION_FULL_HASH_INTERVAL == 0
+        )
         entries: list[FolderUploadEntry] = []
+        next_fingerprints: dict[str, tuple[int, int, str | None]] = {
+            path.relative_path: (path.size_bytes, path.modified_ns, None)
+            for path in reserved_paths
+        }
         for path in paths:
             if path.size_bytes > settings.max_document_size_bytes:
+                next_fingerprints[path.relative_path] = (
+                    path.size_bytes,
+                    path.modified_ns,
+                    None,
+                )
+                continue
+            fingerprint = self._reconciliation_fingerprints.get(path.relative_path)
+            existing = current.get(path.relative_path)
+            if (
+                not full_hash_sweep
+                and fingerprint is not None
+                and fingerprint[:2] == (path.size_bytes, path.modified_ns)
+            ):
+                next_fingerprints[path.relative_path] = fingerprint
+                if (
+                    fingerprint[2] is not None
+                    and existing is not None
+                    and existing["content_hash"] == fingerprint[2]
+                ):
+                    current.pop(path.relative_path)
                 continue
             content = await self._run_blocking(
                 filesystem.read_bytes,
@@ -197,49 +240,63 @@ class DocumentService:
             entries=entries,
             settings=settings,
         )
-        content_by_path = {entry.relative_path: entry.content for entry in entries}
         desired = {entry.relative_path: entry for entry in preview.included}
-        current_rows = await self._reader.list_documents_for_reconciliation(
-            limit=_RECONCILIATION_MAX_FILES + 1,
-        )
-        current = {
-            row["relative_path"]: row
-            for row in current_rows
-        }
-        if len(current) > _RECONCILIATION_MAX_FILES:
-            raise RuntimeError(
-                "document catalog reconciliation exceeds the "
-                f"{_RECONCILIATION_MAX_FILES}-file safety limit"
-            )
+        for path in paths:
+            preview_entry = desired.get(path.relative_path)
+            if preview_entry is not None:
+                next_fingerprints[path.relative_path] = (
+                    path.size_bytes,
+                    path.modified_ns,
+                    preview_entry.content_hash,
+                )
+            elif path.relative_path not in next_fingerprints:
+                next_fingerprints[path.relative_path] = (
+                    path.size_bytes,
+                    path.modified_ns,
+                    None,
+                )
 
-        created = changed = deleted = 0
+        created_rows: list[Dict[str, Any]] = []
+        changed_rows: list[Dict[str, Any]] = []
         now = get_now_iso()
         for relative_path, preview_entry in desired.items():
-            content = content_by_path[relative_path]
             existing = current.pop(relative_path, None)
             if existing is not None and existing["content_hash"] == preview_entry.content_hash:
                 continue
             if existing is not None:
-                await self._writer.delete_document(
-                    document_id=str(existing["document_id"]),
+                changed_rows.append(
+                    {
+                        "document_id": str(existing["document_id"]),
+                        "original_name": preview_entry.original_name,
+                        "extension": preview_entry.extension,
+                        "size_bytes": preview_entry.size_bytes,
+                        "content_hash": preview_entry.content_hash,
+                    }
                 )
-                changed += 1
             else:
-                created += 1
-            await self._writer.insert_document(
-                document_id=str(uuid.uuid4()),
-                original_name=preview_entry.original_name,
-                relative_path=relative_path,
-                extension=preview_entry.extension,
-                size_bytes=preview_entry.size_bytes,
-                content_hash=preview_entry.content_hash,
-                created_at=now,
-            )
-        for document in current.values():
-            await self._writer.delete_document(
-                document_id=str(document["document_id"]),
-            )
-            deleted += 1
+                created_rows.append(
+                    {
+                        "document_id": str(uuid.uuid4()),
+                        "original_name": preview_entry.original_name,
+                        "relative_path": relative_path,
+                        "extension": preview_entry.extension,
+                        "size_bytes": preview_entry.size_bytes,
+                        "content_hash": preview_entry.content_hash,
+                    }
+                )
+        deleted_document_ids = [
+            str(document["document_id"]) for document in current.values()
+        ]
+        await self._writer.apply_filesystem_reconciliation(
+            created=created_rows,
+            changed=changed_rows,
+            deleted_document_ids=deleted_document_ids,
+            updated_at=now,
+        )
+        self._reconciliation_fingerprints = next_fingerprints
+        created = len(created_rows)
+        changed = len(changed_rows)
+        deleted = len(deleted_document_ids)
         if created or changed or deleted:
             self._indexer.wake_pending_indexes()
         return {
@@ -248,6 +305,81 @@ class DocumentService:
             "deleted": deleted,
             "excluded": preview.summary.excluded_count + len(reserved_paths),
         }
+
+    async def _reconcile_owned_file_changes(
+        self,
+        *,
+        upserts: Dict[str, bytes],
+        removed_paths: Iterable[str] = (),
+    ) -> None:
+        """Update catalog rows for filesystem mutations already made by Knoggin."""
+        normalized_removed = {
+            normalize_relative_path(path, path) for path in removed_paths
+        }
+        settings = await self.get_scan_settings()
+        entries = [
+            FolderUploadEntry(relative_path=path, content=content)
+            for path, content in upserts.items()
+        ]
+        preview = await self.preview_folder(
+            folder_name=self.project_id,
+            entries=entries,
+            settings=settings,
+        )
+        included = {entry.relative_path: entry for entry in preview.included}
+        affected_paths = [*upserts, *normalized_removed]
+        current_rows = await self._reader.fetch_project_documents_for_paths(
+            relative_paths=affected_paths,
+        )
+        current = {row["relative_path"]: row for row in current_rows}
+        created_rows: list[Dict[str, Any]] = []
+        changed_rows: list[Dict[str, Any]] = []
+        deleted_document_ids: list[str] = []
+
+        for relative_path in upserts:
+            existing = current.get(relative_path)
+            preview_entry = included.get(relative_path)
+            if preview_entry is None:
+                if existing is not None:
+                    deleted_document_ids.append(str(existing["document_id"]))
+                continue
+            if existing is None:
+                created_rows.append(
+                    {
+                        "document_id": str(uuid.uuid4()),
+                        "original_name": preview_entry.original_name,
+                        "relative_path": relative_path,
+                        "extension": preview_entry.extension,
+                        "size_bytes": preview_entry.size_bytes,
+                        "content_hash": preview_entry.content_hash,
+                    }
+                )
+            elif existing["content_hash"] != preview_entry.content_hash:
+                changed_rows.append(
+                    {
+                        "document_id": str(existing["document_id"]),
+                        "original_name": preview_entry.original_name,
+                        "extension": preview_entry.extension,
+                        "size_bytes": preview_entry.size_bytes,
+                        "content_hash": preview_entry.content_hash,
+                    }
+                )
+
+        for relative_path in normalized_removed:
+            existing = current.get(relative_path)
+            if existing is not None:
+                deleted_document_ids.append(str(existing["document_id"]))
+
+        await self._writer.apply_filesystem_reconciliation(
+            created=created_rows,
+            changed=changed_rows,
+            deleted_document_ids=list(dict.fromkeys(deleted_document_ids)),
+            updated_at=get_now_iso(),
+        )
+        for relative_path in {*upserts, *normalized_removed}:
+            self._reconciliation_fingerprints.pop(relative_path, None)
+        if created_rows or changed_rows or deleted_document_ids:
+            self._indexer.wake_pending_indexes()
 
     async def list_project_files(
         self,
@@ -264,17 +396,24 @@ class DocumentService:
         normalized_prefix = None
         if path_prefix is not None and path_prefix.strip() not in {"", "."}:
             normalized_prefix = normalize_relative_path(path_prefix, path_prefix).rstrip("/")
-        files = await self._run_blocking(lambda: list(filesystem.iter_files()))
-        files = [
-            file for file in files if not is_controlled_context_file(file.relative_path)
+        paths = await self._run_blocking(lambda: list(filesystem.iter_paths()))
+        paths = [
+            path for path in paths if not is_controlled_context_file(path.relative_path)
         ]
         if normalized_prefix is not None:
-            files = [
-                file
-                for file in files
-                if file.relative_path == normalized_prefix
-                or file.relative_path.startswith(normalized_prefix + "/")
+            paths = [
+                path
+                for path in paths
+                if path.relative_path == normalized_prefix
+                or path.relative_path.startswith(normalized_prefix + "/")
             ]
+        selected_paths = paths[:limit]
+        files = await self._run_blocking(
+            lambda: [
+                filesystem.read_file(path.relative_path)
+                for path in selected_paths
+            ]
+        )
         return [
             {
                 "relative_path": file.relative_path,
@@ -283,7 +422,7 @@ class DocumentService:
                 "size_bytes": file.size_bytes,
                 "content_hash": file.content_hash,
             }
-            for file in files[:limit]
+            for file in files
         ]
 
     async def read_project_file(
@@ -356,13 +495,13 @@ class DocumentService:
             return None
 
     async def create_project_file(self, path: str, content: str) -> Dict:
-        """Create a text project file and reconcile it into the document catalog."""
+        """Create a text project file and update its document catalog row."""
         payload = self._validate_project_file_content(path, content)
         filesystem = self._require_filesystem()
         normalized_path = normalize_relative_path(path, path)
         self._require_unreserved_context_path(normalized_path)
         await self._run_blocking(filesystem.write_bytes, normalized_path, payload)
-        await self.reconcile_project_files()
+        await self._reconcile_owned_file_changes(upserts={normalized_path: payload})
         return await self.read_project_file(normalized_path)
 
     async def update_project_file(
@@ -384,7 +523,7 @@ class DocumentService:
             overwrite=True,
             expected_content_hash=expected_content_hash,
         )
-        await self.reconcile_project_files()
+        await self._reconcile_owned_file_changes(upserts={normalized_path: payload})
         return await self.read_project_file(normalized_path)
 
     async def append_project_file(
@@ -410,7 +549,7 @@ class DocumentService:
             overwrite=True,
             expected_content_hash=expected_content_hash,
         )
-        await self.reconcile_project_files()
+        await self._reconcile_owned_file_changes(upserts={normalized_path: payload})
         return await self.read_project_file(normalized_path)
 
     async def move_project_file(
@@ -433,7 +572,14 @@ class DocumentService:
             destination,
             expected_content_hash=expected_content_hash,
         )
-        await self.reconcile_project_files()
+        moved_content = await self._run_blocking(
+            filesystem.read_bytes,
+            destination,
+        )
+        await self._reconcile_owned_file_changes(
+            upserts={destination: moved_content},
+            removed_paths=(source,),
+        )
         return await self.read_project_file(destination)
 
     async def delete_project_file(
@@ -451,7 +597,7 @@ class DocumentService:
             normalized_path,
             expected_content_hash=expected_content_hash,
         )
-        await self.reconcile_project_files()
+        await self._reconcile_owned_file_changes(removed_paths=(normalized_path,), upserts={})
         return {
             "relative_path": deleted.relative_path,
             "content_hash": deleted.content_hash,
@@ -542,11 +688,13 @@ class DocumentService:
             settings_json=json.dumps(validated.model_dump(mode="json")),
             saved_at=saved_at,
         )
+        self._reconciliation_fingerprints.clear()
         return validated
 
     async def reset_scan_settings(self) -> FolderScanSettings:
         """Remove saved project settings and return defaults."""
         await self._writer.delete_scan_settings()
+        self._reconciliation_fingerprints.clear()
         return FolderScanSettings()
 
     @staticmethod
@@ -907,142 +1055,6 @@ class DocumentService:
         deleted_metadata["deleted"] = True
         return deleted_metadata
 
-    async def accept_folder(
-        self,
-        *,
-        folder_name: str,
-        entries: List[FolderUploadEntry],
-        selected_paths: Optional[List[str]] = None,
-        settings: Optional[FolderScanSettings] = None,
-        force_include_paths: Optional[List[str]] = None,
-    ) -> Dict:
-        """Copy selected folder entries into the canonical project tree.
-
-        A folder upload is an admission event, not a durable object. Relative
-        paths become the only lasting selectors once the files are written.
-        """
-        validated_entries = [
-            entry
-            if isinstance(entry, FolderUploadEntry)
-            else FolderUploadEntry.model_validate(entry)
-            for entry in entries
-        ]
-        preview = await self.preview_folder(
-            folder_name=folder_name,
-            entries=validated_entries,
-            settings=settings,
-            force_include_paths=force_include_paths,
-        )
-        if selected_paths is None:
-            normalized_selected = [
-                item.relative_path for item in preview.included
-            ]
-        else:
-            if not selected_paths:
-                raise ValueError(
-                    "selected_paths must contain at least one path"
-                )
-            normalized_selected = [
-                normalize_relative_path(path, path)
-                for path in selected_paths
-            ]
-            if len(set(normalized_selected)) != len(normalized_selected):
-                raise ValueError("selected_paths must not contain duplicates")
-            normalized_selected.sort()
-        if not normalized_selected:
-            raise ValueError("folder preview contains no eligible documents")
-        if any(is_controlled_context_file(path) for path in normalized_selected):
-            raise PermissionError(
-                f"{CONTEXT_FILE_PATH} is managed through the controlled Context importer"
-            )
-
-        entry_content = {
-            normalize_relative_path(
-                entry.relative_path,
-                entry.relative_path,
-            ): entry.content
-            for entry in validated_entries
-        }
-        included_by_path = {
-            item.relative_path: item for item in preview.included
-        }
-        unknown = set(normalized_selected) - entry_content.keys()
-        if unknown:
-            raise ValueError(
-                "selected_paths contain unknown entries: "
-                + ", ".join(sorted(unknown))
-            )
-        unavailable = set(normalized_selected) - included_by_path.keys()
-        if unavailable:
-            raise ValueError(
-                "selected_paths contain excluded entries: "
-                + ", ".join(sorted(unavailable))
-            )
-
-        candidate_bytes = sum(len(entry.content) for entry in validated_entries)
-        filesystem = self._require_filesystem()
-        written: list[tuple[str, str]] = []
-        try:
-            for relative_path in normalized_selected:
-                content = entry_content[relative_path]
-                file = await self._run_blocking(
-                    filesystem.write_bytes,
-                    relative_path,
-                    content,
-                )
-                written.append((relative_path, file.content_hash))
-        except Exception:
-            for relative_path, content_hash in reversed(written):
-                try:
-                    await self._run_blocking(
-                        filesystem.delete_file,
-                        relative_path,
-                        expected_content_hash=content_hash,
-                    )
-                except Exception:
-                    logger.exception("Could not roll back folder import file {}", relative_path)
-            raise
-        try:
-            await self.reconcile_project_files()
-        except Exception:
-            for relative_path, content_hash in reversed(written):
-                try:
-                    await self._run_blocking(
-                        filesystem.delete_file,
-                        relative_path,
-                        expected_content_hash=content_hash,
-                    )
-                except Exception:
-                    logger.exception(
-                        "Could not roll back folder import file {}", relative_path
-                    )
-            raise
-        return {
-            "project_id": self.project_id,
-            "path_prefix": self._common_path_prefix(normalized_selected),
-            "candidate_count": len(validated_entries),
-            "candidate_bytes": candidate_bytes,
-            "document_count": len(written),
-            "total_size_bytes": sum(len(entry_content[path]) for path in normalized_selected),
-            "excluded_count": preview.summary.excluded_count,
-            "excluded_bytes": preview.summary.excluded_bytes,
-            "excluded_directory_count": preview.summary.excluded_directory_count,
-            "excluded_reason_counts": preview.summary.reason_counts,
-            "scan_settings": preview.settings.model_dump(mode="json"),
-            "relative_paths": normalized_selected,
-        }
-
-    @staticmethod
-    def _common_path_prefix(paths: List[str]) -> Optional[str]:
-        """Return a stable shared directory when an imported tree has one."""
-        parents = [PurePosixPath(path).parent.parts for path in paths]
-        shared: list[str] = []
-        for parts in zip(*parents):
-            if len(set(parts)) != 1 or parts[0] == ".":
-                break
-            shared.append(parts[0])
-        return PurePosixPath(*shared).as_posix() if shared else None
-
     async def add_document(
         self,
         *,
@@ -1227,21 +1239,6 @@ class DocumentService:
             summary=validated.summary,
         )
 
-    async def admit_user_sources(
-        self,
-        sources: Iterable[UserAttachedSource | Dict[str, Any]],
-        *,
-        durable: bool = True,
-    ) -> list[Dict[str, Any]]:
-        """Admit a bounded batch of user sources with one explicit policy."""
-        values = list(sources)
-        if len(values) > 100:
-            raise ValueError("at most 100 user sources may be admitted at once")
-        return [
-            await self.admit_user_source(source, durable=durable)
-            for source in values
-        ]
-
     async def schedule_document_index(
         self,
         *,
@@ -1254,24 +1251,12 @@ class DocumentService:
             )
         )
 
-    async def shutdown(self) -> None:
-        """Delegate indexer task shutdown while retaining this public façade."""
-        await self._indexer.shutdown()
-
-    async def recover_pending_indexes(self, limit: int = 16) -> int:
-        """Delegate recovery to the project-owned indexer."""
-        return await self._indexer.recover_pending_indexes(limit)
-
     async def pending_index_count(self) -> int:
         return await self._indexer.pending_index_count()
 
-    def indexing_snapshot(self) -> Dict:
-        """Expose the indexer's bounded health projection."""
-        return self._indexer.indexing_snapshot()
-
     def indexing_snapshot_for_health(self) -> dict[str, object]:
         """Return a bounded public projection of indexing metrics."""
-        return sanitize_health_details(self.indexing_snapshot())
+        return self._indexer.indexing_snapshot_for_health()
 
     async def resolve_focus_target(
         self,

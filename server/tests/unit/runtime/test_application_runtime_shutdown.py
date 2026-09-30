@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -45,6 +46,43 @@ class RecordingSessions(RecordingOwner):
         return 0
 
 
+async def test_startup_cleanup_retains_dependencies_after_failure():
+    calls = []
+    cleanup = application_module._StartupCleanup(RecordingOwner("resources", calls))
+    sessions = RecordingSessions("sessions", calls, RuntimeError("busy"))
+    cleanup.owners.update(sessions=sessions, projects=RecordingOwner("projects", calls))
+    with pytest.raises(ApplicationShutdownError):
+        await cleanup.shutdown()
+    assert calls == ["sessions"]
+    sessions.error = None
+    await cleanup.shutdown()
+    assert calls == ["sessions", "sessions", "projects", "resources"]
+    assert not cleanup.owners
+
+
+async def test_cancelled_identity_bootstrap_cleans_resources(monkeypatch, tmp_path):
+    entered = asyncio.Event()
+    resources = RecordingOwner("resources", [])
+
+    async def identity(*_):
+        entered.set()
+        await asyncio.Event().wait()
+
+    resources.knowledge_store = SimpleNamespace(ensure_identity_entity=identity)
+
+    async def create(**_):
+        return resources
+
+    monkeypatch.setattr(application_module.RuntimeResources, "create", create)
+    monkeypatch.setattr(application_module.ConfigManager, "initialize", lambda _: SimpleNamespace(config=SimpleNamespace(user_aliases=[])))
+    startup = asyncio.create_task(ApplicationRuntime.start(user_name="ada", config_dir=tmp_path))
+    await entered.wait()
+    startup.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await startup
+    assert resources.shutdown_count == 1
+
+
 @pytest.mark.runtime
 @pytest.mark.no_network
 async def test_application_shutdown_is_ordered_and_idempotent():
@@ -67,7 +105,7 @@ async def test_application_shutdown_is_ordered_and_idempotent():
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_application_shutdown_continues_after_a_phase_failure_and_replays_error():
+async def test_application_shutdown_retries_failure_without_repeating_success():
     calls = []
     runtime = ApplicationRuntime(
         config_manager=SimpleNamespace(),
@@ -82,14 +120,95 @@ async def test_application_shutdown_continues_after_a_phase_failure_and_replays_
     with pytest.raises(ApplicationShutdownError) as error:
         await runtime.shutdown()
 
-    assert calls == ["aac", "sessions", "projects", "resources"]
+    assert calls == ["aac", "sessions", "projects"]
     assert [failure.phase for failure in error.value.failures] == ["aac"]
 
-    with pytest.raises(ApplicationShutdownError) as repeated_error:
-        await runtime.shutdown()
+    runtime.aac_runtime.error = None
+    await runtime.shutdown()
+    assert calls == ["aac", "sessions", "projects", "aac", "resources"]
+    assert runtime._shutdown_complete
 
-    assert repeated_error.value is error.value
+
+@pytest.mark.parametrize("failed_phase", ["sessions", "projects", "resources"])
+async def test_failed_consumer_keeps_dependencies_until_retry(failed_phase):
+    calls = []
+    runtime = ApplicationRuntime(
+        config_manager=SimpleNamespace(),
+        resources=RecordingOwner("resources", calls),
+        projects=RecordingOwner("projects", calls),
+        sessions=RecordingSessions("sessions", calls),
+        agent_manager=SimpleNamespace(),
+        agent_orchestrator=SimpleNamespace(),
+        aac_runtime=RecordingOwner("aac", calls),
+    )
+    owner = getattr(runtime, failed_phase)
+    owner.error = RuntimeError("failed cleanup")
+    with pytest.raises(ApplicationShutdownError):
+        await runtime.shutdown()
+    order = ["aac", "sessions", "projects", "resources"]
+    assert calls == order[:order.index(failed_phase) + 1]
+    assert not runtime._shutdown_complete
+    owner.error = None
+    await runtime.shutdown()
+    assert calls == order[:order.index(failed_phase)] + [failed_phase] + order[order.index(failed_phase):]
+
+
+async def test_concurrent_shutdown_calls_join_serialized_cleanup():
+    calls = []
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class WaitingOwner(RecordingOwner):
+        async def shutdown(self):
+            await super().shutdown()
+            entered.set()
+            await release.wait()
+
+    runtime = ApplicationRuntime(
+        config_manager=SimpleNamespace(),
+        resources=RecordingOwner("resources", calls),
+        projects=RecordingOwner("projects", calls),
+        sessions=RecordingSessions("sessions", calls),
+        agent_manager=SimpleNamespace(), agent_orchestrator=SimpleNamespace(),
+        aac_runtime=WaitingOwner("aac", calls),
+    )
+    first = asyncio.create_task(runtime.shutdown())
+    await entered.wait()
+    second = asyncio.create_task(runtime.shutdown())
+    await asyncio.sleep(0)
+    assert calls == ["aac"]
+    release.set()
+    await asyncio.gather(first, second)
     assert calls == ["aac", "sessions", "projects", "resources"]
+
+
+async def test_cancelled_application_shutdown_finishes_dependency_cleanup():
+    calls = []
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    class WaitingOwner(RecordingOwner):
+        async def shutdown(self):
+            entered.set()
+            await release.wait()
+            await super().shutdown()
+
+    runtime = ApplicationRuntime(
+        config_manager=SimpleNamespace(), resources=RecordingOwner("resources", calls),
+        projects=RecordingOwner("projects", calls),
+        sessions=RecordingSessions("sessions", calls),
+        agent_manager=SimpleNamespace(), agent_orchestrator=SimpleNamespace(),
+        aac_runtime=WaitingOwner("aac", calls),
+    )
+    caller = asyncio.create_task(runtime.shutdown())
+    await entered.wait()
+    caller.cancel()
+    await asyncio.sleep(0)
+    assert not caller.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    assert calls == ["aac", "sessions", "projects", "resources"]
+    assert runtime._shutdown_complete
 
 
 
@@ -126,7 +245,7 @@ async def test_application_start_cleans_resources_when_composition_fails(
 
     resources.knowledge_store = KnowledgeStore()
 
-    async def create_resources(cls, *, num_workers=None):
+    async def create_resources(cls, *, num_workers=None, config_manager=None):
         return resources
 
     def fail_project_manager(**_kwargs):
@@ -156,6 +275,7 @@ async def test_application_start_cleans_aac_and_resources_when_aac_start_fails(
     resources = RecordingOwner("resources", calls)
     projects = RecordingOwner("projects", calls)
     projects.entity_maintenance_service = SimpleNamespace()
+    projects.maintenance_service = SimpleNamespace()
 
     class KnowledgeStore:
         async def ensure_identity_entity(self, _user_name, _aliases):
@@ -171,7 +291,7 @@ async def test_application_start_cleans_aac_and_resources_when_aac_start_fails(
 
     resources.knowledge_store = KnowledgeStore()
 
-    async def create_resources(cls, *, num_workers=None):
+    async def create_resources(cls, *, num_workers=None, config_manager=None):
         return resources
 
     class RecordingAgentManager:
@@ -200,7 +320,7 @@ async def test_application_start_cleans_aac_and_resources_when_aac_start_fails(
     monkeypatch.setattr(
         application_module,
         "SessionManager",
-        lambda **_kwargs: object(),
+        lambda **_kwargs: RecordingSessions("sessions", calls),
     )
     monkeypatch.setattr(application_module, "AACRuntime", RecordingAACRuntime)
     monkeypatch.setattr(
@@ -214,7 +334,7 @@ async def test_application_start_cleans_aac_and_resources_when_aac_start_fails(
             user_name="ada", config_dir=tmp_path
         )
 
-    assert calls == ["projects_start", "aac", "projects", "resources"]
+    assert calls == ["projects_start", "aac", "sessions", "projects", "resources"]
 
 
 @pytest.mark.runtime
@@ -232,6 +352,7 @@ async def test_application_start_establishes_identity_before_managers(
     resources.knowledge_store = KnowledgeStore()
     projects = RecordingOwner("projects", calls)
     projects.entity_maintenance_service = SimpleNamespace()
+    projects.maintenance_service = SimpleNamespace()
     sessions = RecordingSessions("sessions", calls)
 
     class RecordingAgentManager:
@@ -249,6 +370,10 @@ async def test_application_start_establishes_identity_before_managers(
             assert (
                 kwargs["entity_maintenance_service"]
                 is projects.entity_maintenance_service
+            )
+            assert (
+                kwargs["project_maintenance_service"]
+                is projects.maintenance_service
             )
             calls.append("agent_orchestrator")
 
@@ -271,7 +396,7 @@ async def test_application_start_establishes_identity_before_managers(
         calls.append("sessions")
         return sessions
 
-    async def create_resources(cls, *, num_workers=None):
+    async def create_resources(cls, *, num_workers=None, config_manager=None):
         return resources
 
     monkeypatch.setattr(

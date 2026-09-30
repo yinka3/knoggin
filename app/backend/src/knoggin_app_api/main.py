@@ -10,14 +10,14 @@ from typing import Any, AsyncIterator
 from fastapi import APIRouter, FastAPI, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from knoggin import Knoggin, Turn
 from loguru import logger
 
 from common.exceptions import SessionBusyError
-from knoggin import Knoggin, Turn
 
 from .contracts import (
-    RunCreateRequest,
     ProjectCreateRequest,
+    RunCreateRequest,
     SessionCreateRequest,
     document_focus_to_sdk,
 )
@@ -37,12 +37,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         config_dir=os.environ.get("KNOGGIN_CONFIG_DIR"),
     )
     app.state.knoggin = knoggin
-    app.state.runs = RunManager(knoggin)
+    runs = None
     try:
+        runs = RunManager(knoggin)
+        app.state.runs = runs
         yield
     finally:
-        await app.state.runs.close()
-        await knoggin.close()
+        failures = []
+        if runs is not None:
+            try:
+                await runs.close()
+            except BaseException as exc:
+                failures.append(exc)
+        try:
+            await knoggin.close()
+        except BaseException as exc:
+            failures.append(exc)
+        if len(failures) == 1:
+            raise failures[0]
+        if failures:
+            raise BaseExceptionGroup("Backend shutdown failed", failures)
 
 
 def create_app() -> FastAPI:
@@ -74,7 +88,7 @@ def _router() -> APIRouter:
     @router.get("/health")
     async def health(request: Request) -> dict[str, Any]:
         engine = await request.app.state.knoggin.get_engine_health()
-        return {"status": "ok", "engine": engine}
+        return {"status": engine.get("status", "failed"), "engine": engine}
 
     @router.post("/projects", status_code=201)
     async def create_project(

@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from common.conf.domain_config import DomainConfig
@@ -144,6 +146,86 @@ async def test_project_runtime_shutdown_finishes_cleanup_after_a_phase_failure()
         "background:project:project-1:episode",
         "unsubscribe",
     ]
+    assert state._closed is False
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_project_runtime_shutdown_retries_only_failed_cleanup():
+    calls = []
+    scheduler_attempts = 0
+    unsubscribe_attempts = 0
+
+    class RetryScheduler:
+        registered_job_names = ()
+
+        async def stop(self):
+            nonlocal scheduler_attempts
+            scheduler_attempts += 1
+            calls.append("scheduler")
+            if scheduler_attempts == 1:
+                raise RuntimeError("retry scheduler")
+
+    class RecordingIndexer:
+        async def shutdown(self):
+            calls.append("document-indexer")
+
+    def retry_unsubscribe():
+        nonlocal unsubscribe_attempts
+        unsubscribe_attempts += 1
+        calls.append("unsubscribe")
+        if unsubscribe_attempts == 1:
+            raise RuntimeError("retry unsubscribe")
+
+    state = make_project_state(scheduler=RetryScheduler())
+    state.document_service._indexer = RecordingIndexer()
+    state.add_config_unsubscriber(retry_unsubscribe)
+
+    with pytest.raises(RuntimeError, match="ProjectRuntime shutdown failed"):
+        await state.shutdown()
+    await state.shutdown()
+
+    assert calls == [
+        "scheduler",
+        "document-indexer",
+        "unsubscribe",
+        "scheduler",
+        "unsubscribe",
+    ]
+    assert state._closed is True
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_project_runtime_serializes_concurrent_shutdown_calls():
+    scheduler_started = asyncio.Event()
+    finish_scheduler = asyncio.Event()
+    calls = []
+
+    class BlockingScheduler:
+        registered_job_names = ()
+
+        async def stop(self):
+            calls.append("scheduler")
+            scheduler_started.set()
+            await finish_scheduler.wait()
+
+    class RecordingIndexer:
+        async def shutdown(self):
+            calls.append("document-indexer")
+
+    state = make_project_state(scheduler=BlockingScheduler())
+    state.document_service._indexer = RecordingIndexer()
+    state.add_config_unsubscriber(lambda: calls.append("unsubscribe"))
+
+    first = asyncio.create_task(state.shutdown())
+    await scheduler_started.wait()
+    second = asyncio.create_task(state.shutdown())
+    await asyncio.sleep(0)
+    finish_scheduler.set()
+    await asyncio.gather(first, second)
+
+    assert calls == ["scheduler", "document-indexer", "unsubscribe"]
 
 
 @pytest.mark.unit

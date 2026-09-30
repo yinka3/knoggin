@@ -106,15 +106,11 @@ async def test_domain_config_store_rejects_empty_active_domain():
 
 @pytest.mark.unit
 @pytest.mark.no_network
-async def test_project_state_load_and_activation_replace_runtime_snapshot():
+async def test_project_state_activation_replaces_runtime_snapshot():
     initial = make_domain(version=2)
     activated = make_domain(version=3)
 
     class Store:
-        async def load(self, user_name, project_id):
-            assert (user_name, project_id) == ("ada", "project-1")
-            return initial
-
         async def activate(
             self,
             *,
@@ -132,12 +128,10 @@ async def test_project_state_load_and_activation_replace_runtime_snapshot():
                 previous_version=2,
             )
 
-    state = make_project_state()
+    state = make_project_state(domain_config=initial)
     state.domain_config_store = Store()
 
-    await state.load_domain_config()
-    captured_before = await state.capture_domain()
-    assert captured_before.version == 2
+    assert state.compiled_domain.version == 2
 
     result = await state.activate_domain_config(
         make_domain(),
@@ -146,4 +140,4 @@ async def test_project_state_load_and_activation_replace_runtime_snapshot():
 
     assert result.config.version == 3
     assert state.domain_config.version == 3
-    assert (await state.capture_domain()).version == 3
+    assert state.compiled_domain.version == 3
