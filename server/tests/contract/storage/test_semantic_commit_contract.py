@@ -20,6 +20,7 @@ from common.schema.ingestion.contracts import (
     EntityWrite,
     ProjectEntityClassification,
 )
+from common.schema.jev import JevDecisionRecord, JevPolicy, JevResponse, JevResult
 from common.schema.semantic_window import (
     SemanticWindowMessage,
     SemanticWindowOrigin,
@@ -34,6 +35,7 @@ from core.knowledge.context.models import ContextBlockSupport, ContextMaterializ
 from core.knowledge.context.render import context_block_hash, context_document_hash
 from core.knowledge.db.readers.conflict_discovery_reader import ConflictDiscoveryReader
 from core.knowledge.db.readers.project_context_reader import ProjectContextReader
+from core.knowledge.db.readers.semantic_window_reader import SemanticWindowReader
 from core.knowledge.db.writers.global_entity_merge_writer import GlobalEntityMergeWriter
 from core.knowledge.db.writers.project_context_writer import ProjectContextWriter
 from core.knowledge.db.writers.semantic_commit_writer import SemanticCommitWriter
@@ -60,11 +62,12 @@ def _domain():
     ).compile()
 
 
-def _policy():
+def _policy(jev=None):
     return IngestionPolicy.capture(
         text_processor=TextProcessorSettings(),
         entity_resolution=EntityResolutionSettings(),
         compiled_domain=_domain(),
+        jev=jev,
     )
 
 
@@ -125,6 +128,166 @@ async def _seed_message(client):
         );
         """
     )
+
+
+def _classification_policy():
+    domain = DomainConfig.from_mapping(
+        {
+            "version": 1,
+            "topics": {
+                "Work": {"active": True},
+                "Finance": {"active": True},
+            },
+            "entity_types": {
+                "Company": {
+                    "topic": "Work",
+                    "allowed_topics": ["Work", "Finance"],
+                    "labels": ["company"],
+                }
+            },
+        }
+    ).compile()
+    return IngestionPolicy.capture(
+        text_processor=TextProcessorSettings(),
+        entity_resolution=EntityResolutionSettings(),
+        compiled_domain=domain,
+        jev=JevPolicy(classification_mode="observe"),
+    )
+
+
+def _add_jev_observation(build, block_id, *, evidence_block_id=None):
+    record = JevDecisionRecord(
+        capability="identity",
+        mode="observe",
+        project_id=build.project_id,
+        window_id=build.window_id,
+        pass_number=1,
+        occurrence_key=f"0:{block_id}",
+        evidence_block_ids=(evidence_block_id or block_id,),
+        domain_version=build.policy.domain.version,
+        question_version="identity-v1",
+        acceptance_policy_version="observe-v1",
+        pinned_model="jev-1.13.0",
+        option_mapping={"candidate_1": "42"},
+        result=JevResult(outcome="unavailable", reason="missing_api_key"),
+        baseline_outcome="deterministic_abstention",
+        acceptance_status="unavailable",
+    )
+    build.trace.identity_decisions.append(
+        {
+            "outcome": "abstained",
+            "jev": {
+                "record": record.model_dump(mode="json"),
+                "baseline_entity_id": None,
+                "suggested_entity_id": None,
+                "eligible_candidate_count": 1,
+                "eligible_candidate_ids": [42],
+                "candidate_catalog_truncated": False,
+                "offered_candidate_count": 1,
+                "candidate_set_truncated": False,
+            },
+        }
+    )
+
+
+def _add_jev_extraction_observation(build, block_id, *, evidence_block_id=None):
+    record = JevDecisionRecord(
+        capability="extraction",
+        mode="active",
+        project_id=build.project_id,
+        window_id=build.window_id,
+        pass_number=1,
+        occurrence_key=f"1:{block_id}:delta",
+        evidence_block_ids=(evidence_block_id or block_id,),
+        domain_version=build.policy.domain.version,
+        question_version="extraction-v1",
+        acceptance_policy_version="positive-v1",
+        pinned_model="jev-1.13.0",
+        option_mapping={},
+        result=JevResult(outcome="available"),
+        baseline_outcome="unknown_relationship_endpoint",
+        acceptance_status="accepted",
+    )
+    build.trace.extraction_decisions.append(
+        {
+            "record": record.model_dump(mode="json"),
+            "candidate_name": "Delta",
+            "evidence_origin": "unknown_relationship_endpoint",
+            "proposed_entity_type": "Company",
+            "suggested_entity_type": "Company",
+            "accepted_entity_type": "Company",
+            "candidate_set_truncated": False,
+            "has_context_offsets": True,
+        }
+    )
+
+
+def _add_jev_classification_observation(
+    build, block_id, *, evidence_block_id=None
+):
+    result = JevResult(
+        outcome="available",
+        response=JevResponse.model_validate(
+            {
+                "model": "jev-1.13.0",
+                "answers": {
+                    "topic_choice": {
+                        "type": "choice",
+                        "choice": "topic_2",
+                        "probabilities": {
+                            "topic_1": 0.05,
+                            "topic_2": 0.9,
+                            "insufficient_evidence": 0.05,
+                        },
+                        "confidence": 0.9,
+                    },
+                    "topic_evidence": {"type": "noul", "noul": 0.9},
+                },
+                "usage": {"input_tokens": 20, "output_tokens": 0},
+            }
+        ),
+    )
+    occurrence_key = f"0:{block_id}:topic"
+    aggregate = {
+        "entity_id": 10,
+        "entity_type": "Company",
+        "membership": "missing",
+        "status": "consistent_proposal",
+        "proposed_topics": ["Finance"],
+        "operational_topic": "Work",
+        "observation_count": 1,
+    }
+    record = JevDecisionRecord(
+        capability="classification",
+        mode="observe",
+        project_id=build.project_id,
+        window_id=build.window_id,
+        pass_number=1,
+        occurrence_key=occurrence_key,
+        evidence_block_ids=(evidence_block_id or block_id,),
+        domain_version=build.policy.domain.version,
+        question_version=build.policy.jev.classification_question_version,
+        acceptance_policy_version="observe-v1",
+        pinned_model=build.policy.jev.model,
+        option_mapping={"topic_1": "Work", "topic_2": "Finance"},
+        result=result,
+        baseline_outcome="default_topic",
+        acceptance_status="proposed",
+    )
+    build.trace.classification_decisions.append(
+        {
+            "record": record.model_dump(mode="json"),
+            "entity_id": 10,
+            "entity_type": "Company",
+            "baseline_topic": "Work",
+            "suggested_topic": "Finance",
+            "accepted_topic": None,
+            "allowed_topics": ["Work", "Finance"],
+            "option_set_truncated": False,
+            "aggregation": aggregate,
+        }
+    )
+    build.trace.classification_aggregates.append(aggregate)
 
 
 async def _commit_context(
@@ -193,6 +356,7 @@ def _build(
     relationship_writes=None,
     alias_updates=None,
     support_message_id=101,
+    ingestion_policy=None,
 ):
     existing_classifications = existing_classifications or {}
     missing_classifications = missing_classifications or {}
@@ -236,14 +400,17 @@ def _build(
         block_entity_associations=tuple(associations),
         message_entity_refs=(),
     )
+    ingestion_policy = ingestion_policy or _policy()
     build = SemanticWindowBuild(
         window_id=snapshot.window_id,
         user_name="ada",
         project_id="project-1",
         context=snapshot.context,
         impact_block_ids=frozenset(impact),
-        policy=_policy(),
-        policy_snapshot={"ingestion_policy": _policy().semantic_window_snapshot()},
+        policy=ingestion_policy,
+        policy_snapshot={
+            "ingestion_policy": ingestion_policy.semantic_window_snapshot()
+        },
         block_supports={
             block.block_id: (
                 ContextBlockSupportRecord(
@@ -437,6 +604,274 @@ async def _assert_no_retired_identity_references(client):
 async def _assert_waiting(task):
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(asyncio.shield(task), timeout=0.1)
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_jev_identity_decision_commits_once_and_is_owner_scoped(
+    real_postgres_client,
+):
+    await _seed_message(real_postgres_client)
+    window = _window()
+    window_writer = SemanticWindowWriter(real_postgres_client)
+    assert (await window_writer.claim_window(window, _membership())).claimed
+    block = _block("Bob joined the meeting.")
+    context = await _commit_context(real_postgres_client, window, (block,))
+    assert await window_writer.advance_stage(
+        window_id=window.window_id,
+        user_name="ada",
+        project_id="project-1",
+        expected_stage=SemanticWindowStage.CLAIMED,
+        next_stage=SemanticWindowStage.CONTEXT_COMMITTED,
+        context_revision_id=context.revision_id,
+    )
+    build = _build(
+        _WindowContext(window.window_id, context),
+        impact=(block.block_id,),
+        entity_ids=(),
+        entities={},
+        associations=(),
+        ingestion_policy=_policy(JevPolicy(identity_mode="observe")),
+    )
+    _add_jev_observation(build, block.block_id)
+    writer = SemanticCommitWriter(real_postgres_client)
+    assert (await writer.commit(build)).resumed is False
+    assert (await writer.commit(build)).resumed is True
+
+    reader = SemanticWindowReader(real_postgres_client)
+    records = await reader.list_jev_identity_decisions(
+        window.window_id, user_name="ada", project_id="project-1"
+    )
+    assert len(records) == 1
+    assert records[0]["record"]["occurrence_key"] == f"0:{block.block_id}"
+    assert (
+        await reader.list_jev_identity_decisions(
+            window.window_id, user_name="other", project_id="project-1"
+        )
+        == []
+    )
+    await real_postgres_client.execute(
+        "DELETE FROM public.project_semantic_windows WHERE window_id = %s",
+        (window.window_id,),
+    )
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM public.project_jev_identity_decisions WHERE window_id = %s",
+        (window.window_id,),
+    ) == {"count": 0}
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_jev_extraction_decision_commits_once_and_is_owner_scoped(
+    real_postgres_client,
+):
+    await _seed_message(real_postgres_client)
+    window = _window()
+    window_writer = SemanticWindowWriter(real_postgres_client)
+    assert (await window_writer.claim_window(window, _membership())).claimed
+    block = _block("Delta joined the project.")
+    context = await _commit_context(real_postgres_client, window, (block,))
+    assert await window_writer.advance_stage(
+        window_id=window.window_id,
+        user_name="ada",
+        project_id="project-1",
+        expected_stage=SemanticWindowStage.CLAIMED,
+        next_stage=SemanticWindowStage.CONTEXT_COMMITTED,
+        context_revision_id=context.revision_id,
+    )
+    build = _build(
+        _WindowContext(window.window_id, context),
+        impact=(block.block_id,),
+        entity_ids=(),
+        entities={},
+        associations=(),
+        ingestion_policy=_policy(JevPolicy(extraction_mode="active")),
+    )
+    _add_jev_extraction_observation(build, block.block_id)
+    writer = SemanticCommitWriter(real_postgres_client)
+    assert (await writer.commit(build)).resumed is False
+    assert (await writer.commit(build)).resumed is True
+
+    reader = SemanticWindowReader(real_postgres_client)
+    records = await reader.list_jev_extraction_decisions(
+        window.window_id, user_name="ada", project_id="project-1"
+    )
+    assert len(records) == 1
+    assert records[0]["accepted_entity_type"] == "Company"
+    assert (
+        await reader.list_jev_extraction_decisions(
+            window.window_id, user_name="other", project_id="project-1"
+        )
+        == []
+    )
+    await real_postgres_client.execute(
+        "DELETE FROM public.project_semantic_windows WHERE window_id = %s",
+        (window.window_id,),
+    )
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM public.project_jev_extraction_decisions WHERE window_id = %s",
+        (window.window_id,),
+    ) == {"count": 0}
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_jev_classification_decision_commits_once_and_is_owner_scoped(
+    real_postgres_client,
+):
+    await _seed_message(real_postgres_client)
+    window = _window()
+    window_writer = SemanticWindowWriter(real_postgres_client)
+    assert (await window_writer.claim_window(window, _membership())).claimed
+    block = _block("Delta joined the finance project.")
+    context = await _commit_context(real_postgres_client, window, (block,))
+    assert await window_writer.advance_stage(
+        window_id=window.window_id,
+        user_name="ada",
+        project_id="project-1",
+        expected_stage=SemanticWindowStage.CLAIMED,
+        next_stage=SemanticWindowStage.CONTEXT_COMMITTED,
+        context_revision_id=context.revision_id,
+    )
+    build = _build(
+        _WindowContext(window.window_id, context),
+        impact=(block.block_id,),
+        entity_ids=(10,),
+        entities={10: _entity(10, "Delta", "Company")},
+        associations=(
+            ContextBlockEntityAssociation(
+                block_id=block.block_id,
+                entity_id=10,
+                mention_text="Delta",
+            ),
+        ),
+        ingestion_policy=_classification_policy(),
+    )
+    _add_jev_classification_observation(build, block.block_id)
+    writer = SemanticCommitWriter(real_postgres_client)
+    assert (await writer.commit(build)).resumed is False
+    assert (await writer.commit(build)).resumed is True
+
+    reader = SemanticWindowReader(real_postgres_client)
+    records = await reader.list_jev_classification_decisions(
+        window.window_id, user_name="ada", project_id="project-1"
+    )
+    assert len(records) == 1
+    assert records[0]["suggested_topic"] == "Finance"
+    assert records[0]["accepted_topic"] is None
+    assert records[0]["aggregation"]["operational_topic"] == "Work"
+    assert (
+        await reader.list_jev_classification_decisions(
+            window.window_id, user_name="other", project_id="project-1"
+        )
+        == []
+    )
+    await real_postgres_client.execute(
+        "DELETE FROM public.project_semantic_windows WHERE window_id = %s",
+        (window.window_id,),
+    )
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count "
+        "FROM public.project_jev_classification_decisions WHERE window_id = %s",
+        (window.window_id,),
+    ) == {"count": 0}
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_jev_classification_decision_rejects_unowned_evidence_atomically(
+    real_postgres_client,
+):
+    await _seed_message(real_postgres_client)
+    window = _window()
+    window_writer = SemanticWindowWriter(real_postgres_client)
+    assert (await window_writer.claim_window(window, _membership())).claimed
+    block = _block("Delta joined the finance project.")
+    context = await _commit_context(real_postgres_client, window, (block,))
+    assert await window_writer.advance_stage(
+        window_id=window.window_id,
+        user_name="ada",
+        project_id="project-1",
+        expected_stage=SemanticWindowStage.CLAIMED,
+        next_stage=SemanticWindowStage.CONTEXT_COMMITTED,
+        context_revision_id=context.revision_id,
+    )
+    build = _build(
+        _WindowContext(window.window_id, context),
+        impact=(block.block_id,),
+        entity_ids=(10,),
+        entities={10: _entity(10, "Delta", "Company")},
+        associations=(
+            ContextBlockEntityAssociation(
+                block_id=block.block_id,
+                entity_id=10,
+                mention_text="Delta",
+            ),
+        ),
+        ingestion_policy=_classification_policy(),
+    )
+    _add_jev_classification_observation(
+        build, block.block_id, evidence_block_id=uuid4()
+    )
+    with pytest.raises(ValueError, match="outside the committed window scope"):
+        await SemanticCommitWriter(real_postgres_client).commit(build)
+    assert await real_postgres_client.fetch_one(
+        "SELECT stage FROM public.project_semantic_windows WHERE window_id = %s",
+        (window.window_id,),
+    ) == {"stage": "context_committed"}
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count "
+        "FROM public.project_jev_classification_decisions WHERE window_id = %s",
+        (window.window_id,),
+    ) == {"count": 0}
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM public.entities WHERE entity_id = 10"
+    ) == {"count": 0}
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_jev_identity_decision_rejects_unowned_evidence_atomically(
+    real_postgres_client,
+):
+    await _seed_message(real_postgres_client)
+    window = _window()
+    window_writer = SemanticWindowWriter(real_postgres_client)
+    assert (await window_writer.claim_window(window, _membership())).claimed
+    block = _block("Bob joined the meeting.")
+    context = await _commit_context(real_postgres_client, window, (block,))
+    assert await window_writer.advance_stage(
+        window_id=window.window_id,
+        user_name="ada",
+        project_id="project-1",
+        expected_stage=SemanticWindowStage.CLAIMED,
+        next_stage=SemanticWindowStage.CONTEXT_COMMITTED,
+        context_revision_id=context.revision_id,
+    )
+    build = _build(
+        _WindowContext(window.window_id, context),
+        impact=(block.block_id,),
+        entity_ids=(),
+        entities={},
+        associations=(),
+        ingestion_policy=_policy(JevPolicy(identity_mode="observe")),
+    )
+    _add_jev_observation(build, block.block_id, evidence_block_id=uuid4())
+    with pytest.raises(ValueError, match="outside the committed window scope"):
+        await SemanticCommitWriter(real_postgres_client).commit(build)
+    assert await real_postgres_client.fetch_one(
+        "SELECT stage FROM public.project_semantic_windows WHERE window_id = %s",
+        (window.window_id,),
+    ) == {"stage": "context_committed"}
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM public.project_jev_identity_decisions WHERE window_id = %s",
+        (window.window_id,),
+    ) == {"count": 0}
 
 
 @pytest.mark.storage

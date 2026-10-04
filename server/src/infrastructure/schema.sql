@@ -831,6 +831,57 @@ CREATE TABLE public.project_semantic_window_episodes (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT project_semantic_window_episodes_ordinal_check CHECK ((ordinal >= 0))
 );
+CREATE TABLE public.project_jev_identity_decisions (
+    window_id uuid NOT NULL,
+    project_id text NOT NULL,
+    pass_number integer NOT NULL,
+    occurrence_key text NOT NULL,
+    decision jsonb NOT NULL,
+    baseline_entity_id bigint,
+    suggested_entity_id bigint,
+    accepted_entity_id bigint,
+    eligible_candidate_count integer NOT NULL,
+    offered_candidate_count integer NOT NULL,
+    candidate_set_truncated boolean NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT project_jev_identity_decisions_pass_check CHECK ((pass_number BETWEEN 1 AND 2)),
+    CONSTRAINT project_jev_identity_decisions_counts_check CHECK ((eligible_candidate_count >= offered_candidate_count) AND (offered_candidate_count >= 1)),
+    CONSTRAINT project_jev_identity_decisions_json_check CHECK ((jsonb_typeof(decision) = 'object'::text))
+);
+CREATE TABLE public.project_jev_extraction_decisions (
+    window_id uuid NOT NULL,
+    project_id text NOT NULL,
+    pass_number integer NOT NULL,
+    occurrence_key text NOT NULL,
+    decision jsonb NOT NULL,
+    evidence_origin text NOT NULL,
+    proposed_entity_type text,
+    suggested_entity_type text,
+    accepted_entity_type text,
+    has_context_offsets boolean NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT project_jev_extraction_decisions_pass_check CHECK ((pass_number BETWEEN 1 AND 2)),
+    CONSTRAINT project_jev_extraction_decisions_json_check CHECK ((jsonb_typeof(decision) = 'object'::text))
+);
+CREATE TABLE public.project_jev_classification_decisions (
+    window_id uuid NOT NULL,
+    project_id text NOT NULL,
+    pass_number integer NOT NULL,
+    occurrence_key text NOT NULL,
+    decision jsonb NOT NULL,
+    entity_id bigint NOT NULL,
+    entity_type text NOT NULL,
+    baseline_topic text NOT NULL,
+    suggested_topic text,
+    accepted_topic text,
+    aggregation_status text NOT NULL,
+    operational_topic text NOT NULL,
+    option_set_truncated boolean NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT project_jev_classification_decisions_pass_check CHECK ((pass_number BETWEEN 1 AND 2)),
+    CONSTRAINT project_jev_classification_decisions_status_check CHECK ((aggregation_status = ANY (ARRAY['consistent_proposal'::text, 'conflicting_proposals'::text, 'no_proposal'::text]))),
+    CONSTRAINT project_jev_classification_decisions_json_check CHECK ((jsonb_typeof(decision) = 'object'::text))
+);
 CREATE TABLE public.project_context_revisions (
     revision_id uuid NOT NULL,
     project_id text NOT NULL,
@@ -1158,6 +1209,12 @@ ALTER TABLE ONLY public.project_semantic_window_episodes
     ADD CONSTRAINT project_semantic_window_episodes_pkey PRIMARY KEY (window_id, episode_id);
 ALTER TABLE ONLY public.project_semantic_window_episodes
     ADD CONSTRAINT project_semantic_window_episodes_ordinal_key UNIQUE (window_id, ordinal);
+ALTER TABLE ONLY public.project_jev_identity_decisions
+    ADD CONSTRAINT project_jev_identity_decisions_pkey PRIMARY KEY (window_id, pass_number, occurrence_key);
+ALTER TABLE ONLY public.project_jev_extraction_decisions
+    ADD CONSTRAINT project_jev_extraction_decisions_pkey PRIMARY KEY (window_id, pass_number, occurrence_key);
+ALTER TABLE ONLY public.project_jev_classification_decisions
+    ADD CONSTRAINT project_jev_classification_decisions_pkey PRIMARY KEY (window_id, pass_number, occurrence_key);
 ALTER TABLE ONLY public.context_block_entities
     ADD CONSTRAINT context_block_entities_pkey PRIMARY KEY (block_id, entity_id);
 ALTER TABLE ONLY public.relationship_observation_blocks
@@ -1382,6 +1439,12 @@ ALTER TABLE ONLY public.project_semantic_window_episodes
     ADD CONSTRAINT project_semantic_window_episodes_window_scope_fk FOREIGN KEY (window_id, project_id) REFERENCES public.project_semantic_windows(window_id, project_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.project_semantic_window_episodes
     ADD CONSTRAINT project_semantic_window_episodes_episode_scope_fk FOREIGN KEY (episode_id, project_id) REFERENCES public.episodes(episode_id, project_id) ON DELETE RESTRICT;
+ALTER TABLE ONLY public.project_jev_identity_decisions
+    ADD CONSTRAINT project_jev_identity_decisions_window_scope_fk FOREIGN KEY (window_id, project_id) REFERENCES public.project_semantic_windows(window_id, project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_jev_extraction_decisions
+    ADD CONSTRAINT project_jev_extraction_decisions_window_scope_fk FOREIGN KEY (window_id, project_id) REFERENCES public.project_semantic_windows(window_id, project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_jev_classification_decisions
+    ADD CONSTRAINT project_jev_classification_decisions_window_scope_fk FOREIGN KEY (window_id, project_id) REFERENCES public.project_semantic_windows(window_id, project_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.project_artifact_revisions
     ADD CONSTRAINT project_artifact_revisions_artifact_id_fkey FOREIGN KEY (artifact_id) REFERENCES public.project_artifacts(artifact_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.project_artifacts

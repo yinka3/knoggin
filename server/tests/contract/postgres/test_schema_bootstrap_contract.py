@@ -13,7 +13,7 @@ from infrastructure.postgres_client import PostgresClient
 
 DB_URL = os.environ.get(
     "KNOGGIN_TEST_DATABASE_URL",
-    "postgresql://knoggin:knoggin@localhost:5432/knoggin_db",
+    "postgresql://knoggin:knoggin@127.0.0.1:5432/knoggin_db",
 )
 SCHEMA_SQL = (
     Path(__file__).resolve().parents[3] / "src" / "infrastructure" / "schema.sql"
@@ -120,6 +120,9 @@ async def test_schema_bootstraps_a_fresh_database_with_age_and_vector():
             "entity_global_merge_mutations",
             "maintenance_review_resolutions",
             "project_entity_contexts",
+            "project_jev_identity_decisions",
+            "project_jev_extraction_decisions",
+            "project_jev_classification_decisions",
         } <= table_names
         assert {
             "entity_merge_audits",

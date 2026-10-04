@@ -68,6 +68,7 @@ class EntityTypeDefinition:
     topic: str
     description: str = ""
     labels: tuple[str, ...] = ()
+    allowed_topics: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,7 +189,12 @@ class DomainConfig:
             entity_keys.add(key)
             if not isinstance(raw_value, Mapping):
                 raise DomainConfigError(f"Entity type {name!r} must be an object")
-            unknown_fields = set(raw_value) - {"topic", "description", "labels"}
+            unknown_fields = set(raw_value) - {
+                "topic",
+                "allowed_topics",
+                "description",
+                "labels",
+            }
             if unknown_fields:
                 raise DomainConfigError(
                     f"Unknown fields for entity type {name!r}: "
@@ -203,6 +209,37 @@ class DomainConfig:
                 raise DomainConfigError(
                     f"Entity type {name!r} references unknown topic: {raw_topic}"
                 )
+            if "allowed_topics" not in raw_value:
+                allowed_topics = (topic,)
+            else:
+                raw_allowed_topics = _unique_texts(
+                    raw_value["allowed_topics"],
+                    f"Entity type {name!r}.allowed_topics",
+                )
+                if not raw_allowed_topics:
+                    raise DomainConfigError(
+                        f"Entity type {name!r}.allowed_topics must not be empty"
+                    )
+                unknown_topics = [
+                    item
+                    for item in raw_allowed_topics
+                    if item.casefold() not in topic_names
+                ]
+                if unknown_topics:
+                    raise DomainConfigError(
+                        f"Entity type {name!r}.allowed_topics references unknown "
+                        f"topics: {unknown_topics}"
+                    )
+                allowed_topics = tuple(
+                    topic_names[item.casefold()] for item in raw_allowed_topics
+                )
+                if topic.casefold() not in {
+                    item.casefold() for item in allowed_topics
+                }:
+                    raise DomainConfigError(
+                        f"Entity type {name!r}.allowed_topics must include its "
+                        f"default topic {topic!r}"
+                    )
             labels = _unique_texts(
                 raw_value.get("labels", []),
                 f"Entity type {name!r}.labels",
@@ -226,6 +263,7 @@ class DomainConfig:
                         required=False,
                     ),
                     labels=labels,
+                    allowed_topics=allowed_topics,
                 )
             )
 
@@ -423,6 +461,7 @@ class DomainConfig:
             "entity_types": {
                 entity.name: {
                     "topic": entity.topic,
+                    "allowed_topics": list(entity.allowed_topics),
                     "description": entity.description,
                     "labels": list(entity.labels),
                 }
@@ -449,11 +488,17 @@ class DomainConfig:
         topics = {topic.name.casefold(): topic for topic in self.topics}
         label_to_type: dict[str, str] = {}
         entity_to_topic: dict[str, str] = {}
+        entity_to_allowed_topics: dict[str, tuple[str, ...]] = {}
         active_entity_types: list[str] = []
         entity_descriptions: dict[str, str] = {}
         for entity in self.entity_types:
             topic = topics[entity.topic.casefold()]
             entity_to_topic[entity.name.casefold()] = topic.name
+            entity_to_allowed_topics[entity.name.casefold()] = tuple(
+                allowed_topic
+                for allowed_topic in entity.allowed_topics
+                if topics[allowed_topic.casefold()].active
+            )
             if entity.description:
                 entity_descriptions[entity.name] = entity.description
             if not topic.active:
@@ -471,6 +516,9 @@ class DomainConfig:
             active_entity_types=tuple(active_entity_types),
             label_to_entity_type=_frozen_mapping(label_to_type),
             entity_type_to_topic=_frozen_mapping(entity_to_topic),
+            entity_type_to_allowed_topics=_frozen_mapping(
+                entity_to_allowed_topics
+            ),
             relationships=_frozen_mapping(relationship_map),
             relationship_labels=_frozen_mapping(
                 {
@@ -511,6 +559,7 @@ class CompiledDomain:
     active_entity_types: tuple[str, ...]
     label_to_entity_type: Mapping[str, str]
     entity_type_to_topic: Mapping[str, str]
+    entity_type_to_allowed_topics: Mapping[str, tuple[str, ...]]
     relationships: Mapping[str, RelationshipDefinition]
     topic_aliases: Mapping[str, str]
     descriptions: Mapping[str, str]
@@ -541,6 +590,7 @@ class CompiledDomain:
             active_entity_types=(),
             label_to_entity_type=_frozen_mapping({}),
             entity_type_to_topic=_frozen_mapping({}),
+            entity_type_to_allowed_topics=_frozen_mapping({}),
             relationships=_frozen_mapping({}),
             relationship_labels=_frozen_mapping({}),
             topic_aliases=_frozen_mapping({}),
@@ -561,6 +611,10 @@ class CompiledDomain:
             "active_entity_types": list(self.active_entity_types),
             "label_to_entity_type": dict(self.label_to_entity_type),
             "entity_type_to_topic": dict(self.entity_type_to_topic),
+            "entity_type_to_allowed_topics": {
+                key: list(value)
+                for key, value in self.entity_type_to_allowed_topics.items()
+            },
             "relationships": {
                 key: {
                     "name": value.name,
@@ -594,6 +648,16 @@ class CompiledDomain:
             active_entity_types = tuple(payload["active_entity_types"])
             label_to_entity_type = dict(payload["label_to_entity_type"])
             entity_type_to_topic = dict(payload["entity_type_to_topic"])
+            entity_type_to_allowed_topics = {
+                key: tuple(value)
+                for key, value in payload.get(
+                    "entity_type_to_allowed_topics",
+                    {
+                        key: [topic]
+                        for key, topic in entity_type_to_topic.items()
+                    },
+                ).items()
+            }
             topic_aliases = dict(payload["topic_aliases"])
             descriptions = dict(payload["descriptions"])
             topic_descriptions = dict(payload.get("topic_descriptions", {}))
@@ -653,6 +717,9 @@ class CompiledDomain:
             active_entity_types=active_entity_types,
             label_to_entity_type=_frozen_mapping(label_to_entity_type),
             entity_type_to_topic=_frozen_mapping(entity_type_to_topic),
+            entity_type_to_allowed_topics=_frozen_mapping(
+                entity_type_to_allowed_topics
+            ),
             relationships=_frozen_mapping(relationships),
             relationship_labels=_frozen_mapping(
                 {
@@ -703,12 +770,24 @@ class CompiledDomain:
         return None
 
     def topic_for_entity_type(self, entity_type: str) -> str | None:
+        """Return the configured default topic for an active entity type."""
+
         if not isinstance(entity_type, str):
             return None
         key = entity_type.strip().casefold()
         if key not in {item.casefold() for item in self.active_entity_types}:
             return None
         return self.entity_type_to_topic.get(key)
+
+    def allowed_topics_for_entity_type(self, entity_type: str) -> tuple[str, ...]:
+        """Return active topic choices for an active entity type."""
+
+        if not isinstance(entity_type, str):
+            return ()
+        key = entity_type.strip().casefold()
+        if key not in {item.casefold() for item in self.active_entity_types}:
+            return ()
+        return self.entity_type_to_allowed_topics.get(key, ())
 
     def is_active_entity_type(self, entity_type: str) -> bool:
         if not isinstance(entity_type, str):
@@ -794,6 +873,9 @@ class CompiledDomain:
                     f"  Labels: {', '.join(labels)}",
                 )
             )
+            allowed_topics = self.allowed_topics_for_entity_type(entity_type)
+            if len(allowed_topics) > 1:
+                lines.append(f"  Allowed Topics: {', '.join(allowed_topics)}")
             description = self.entity_descriptions.get(entity_type)
             if description:
                 lines.append(f"  Description: {description}")

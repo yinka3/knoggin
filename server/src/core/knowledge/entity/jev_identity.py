@@ -10,6 +10,7 @@ from common.schema.jev import (
     ChoiceQuestion,
     JevPolicy,
     JevResult,
+    NoulAnswer,
     NoulQuestion,
 )
 from core.knowledge.entity.candidates import EntityCandidateSnapshot
@@ -108,3 +109,47 @@ def proposed_identity(result: JevResult, mapping: dict[str, str]) -> int | None:
     if not isinstance(answer, ChoiceAnswer) or answer.choice not in mapping:
         return None
     return int(mapping[answer.choice])
+
+
+def accepted_identity(
+    result: JevResult,
+    mapping: dict[str, str],
+    policy: JevPolicy,
+    *,
+    candidate_set_truncated: bool,
+) -> int | None:
+    """Apply the versioned active gate without using resolver heuristic scores."""
+
+    if (
+        policy.acceptance_policy_version != "identity-positive-v1"
+        or candidate_set_truncated
+        or result.outcome != "available"
+        or result.response is None
+    ):
+        return None
+    choice = result.response.answers.get("identity_choice")
+    evidence = result.response.answers.get("identity_evidence")
+    if (
+        not isinstance(choice, ChoiceAnswer)
+        or not isinstance(evidence, NoulAnswer)
+        or choice.choice not in mapping
+        or choice.confidence < policy.identity_min_choice_confidence
+        or evidence.noul < policy.identity_min_evidence_noul
+    ):
+        return None
+    selected_probability = choice.probabilities.get(choice.choice, 0)
+    runner_up_probability = max(
+        (
+            probability
+            for handle, probability in choice.probabilities.items()
+            if handle != choice.choice
+        ),
+        default=0,
+    )
+    if (
+        selected_probability < policy.identity_min_choice_probability
+        or selected_probability - runner_up_probability
+        < policy.identity_min_probability_margin
+    ):
+        return None
+    return int(mapping[choice.choice])

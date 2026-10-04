@@ -1,0 +1,912 @@
+{
+  "version": 1,
+  "review_status": "reviewed",
+  "purpose": "Proposed topic labels for a held-out JEV classification evaluation. These are not quality results.",
+  "review_instructions": "A human reviewer must approve or correct every proposed choice and aggregate expectation before changing review_status to reviewed.",
+  "cases": [
+    {
+      "id": "explicit_finance_budget",
+      "entity_name": "Acme",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Acme owns the investment portfolio and prepares the quarterly budget.",
+          "proposed_choice": "Finance"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Finance"
+      ],
+      "reason": "The evidence is specifically about financial activity."
+    },
+    {
+      "id": "explicit_work_delivery",
+      "entity_name": "Acme",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Acme is delivering the migration project and tracking engineering milestones.",
+          "proposed_choice": "Work"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Work"
+      ],
+      "reason": "The evidence is specifically about project work."
+    },
+    {
+      "id": "explicit_legal_contract",
+      "entity_name": "Acme",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Acme is the counterparty named in the signed licensing agreement.",
+          "proposed_choice": "Legal"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Legal"
+      ],
+      "reason": "The evidence is specifically about a legal agreement."
+    },
+    {
+      "id": "insufficient_generic_mention",
+      "entity_name": "Acme",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Acme was mentioned during the meeting.",
+          "proposed_choice": "insufficient_evidence"
+        }
+      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
+      "reason": "The sentence does not identify one allowed topic."
+    },
+    {
+      "id": "consistent_repeated_finance",
+      "entity_name": "Acme",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Acme manages the project budget and investment account.",
+          "proposed_choice": "Finance"
+        },
+        {
+          "context": "Acme manages the project budget and investment account.",
+          "proposed_choice": "Finance"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Finance"
+      ],
+      "reason": "Identical finance evidence should produce one stable topic without conflict."
+    },
+    {
+      "id": "consistent_repeated_ambiguous",
+      "entity_name": "Acme",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Acme was discussed.",
+          "proposed_choice": "insufficient_evidence"
+        },
+        {
+          "context": "Acme was discussed.",
+          "proposed_choice": "insufficient_evidence"
+        }
+      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
+      "reason": "Repeated ambiguous evidence should remain unclassified without conflict."
+    },
+    {
+      "id": "consistent_repeated_work_delivery",
+      "entity_name": "Northstar",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Northstar ships the search migration and reports sprint milestones.",
+          "proposed_choice": "Work"
+        },
+        {
+          "context": "Northstar ships the search migration and reports sprint milestones.",
+          "proposed_choice": "Work"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Work"
+      ],
+      "reason": "Identical delivery evidence should remain Work."
+    },
+    {
+      "id": "consistent_repeated_legal_contract",
+      "entity_name": "Beacon",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Beacon is bound by the software licensing agreement.",
+          "proposed_choice": "Legal"
+        },
+        {
+          "context": "Beacon is bound by the software licensing agreement.",
+          "proposed_choice": "Legal"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Legal"
+      ],
+      "reason": "Identical contract evidence should remain Legal."
+    },
+    {
+      "id": "consistent_repeated_finance_invoice",
+      "entity_name": "Cedar",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Cedar issued the quarterly invoice and reconciled payment.",
+          "proposed_choice": "Finance"
+        },
+        {
+          "context": "Cedar issued the quarterly invoice and reconciled payment.",
+          "proposed_choice": "Finance"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Finance"
+      ],
+      "reason": "Identical invoicing evidence should remain Finance."
+    },
+    {
+      "id": "consistent_repeated_work_hiring",
+      "entity_name": "Delta",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Delta is hiring engineers for the platform team.",
+          "proposed_choice": "Work"
+        },
+        {
+          "context": "Delta is hiring engineers for the platform team.",
+          "proposed_choice": "Work"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Work"
+      ],
+      "reason": "Identical staffing evidence should remain Work."
+    },
+    {
+      "id": "consistent_repeated_legal_compliance",
+      "entity_name": "Evergreen",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Evergreen filed its regulatory compliance response.",
+          "proposed_choice": "Legal"
+        },
+        {
+          "context": "Evergreen filed its regulatory compliance response.",
+          "proposed_choice": "Legal"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Legal"
+      ],
+      "reason": "Identical compliance evidence should remain Legal."
+    },
+    {
+      "id": "consistent_repeated_ambiguous_update",
+      "entity_name": "Fjord",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Fjord provided an update.",
+          "proposed_choice": "insufficient_evidence"
+        },
+        {
+          "context": "Fjord provided an update.",
+          "proposed_choice": "insufficient_evidence"
+        }
+      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
+      "reason": "A generic repeated update supports no specific topic."
+    },
+    {
+      "id": "consistent_repeated_finance_funding",
+      "entity_name": "Granite",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Granite closed a financing round led by two investors.",
+          "proposed_choice": "Finance"
+        },
+        {
+          "context": "Granite closed a financing round led by two investors.",
+          "proposed_choice": "Finance"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Finance"
+      ],
+      "reason": "Identical funding evidence should remain Finance."
+    },
+    {
+      "id": "consistent_repeated_work_roadmap",
+      "entity_name": "Harbor",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Harbor owns the product roadmap and release schedule.",
+          "proposed_choice": "Work"
+        },
+        {
+          "context": "Harbor owns the product roadmap and release schedule.",
+          "proposed_choice": "Work"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Work"
+      ],
+      "reason": "Identical roadmap evidence should remain Work."
+    },
+    {
+      "id": "finance_quarterly_revenue",
+      "entity_name": "Ion",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Ion reported quarterly revenue and operating margin.",
+          "proposed_choice": "Finance"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Finance"
+      ],
+      "reason": "Revenue and margin are financial evidence."
+    },
+    {
+      "id": "finance_funding_round",
+      "entity_name": "Juniper",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Juniper raised a Series A financing round.",
+          "proposed_choice": "Finance"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Finance"
+      ],
+      "reason": "Fundraising is financial evidence."
+    },
+    {
+      "id": "finance_tax_filing",
+      "entity_name": "Keystone",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Keystone submitted its corporate tax filing.",
+          "proposed_choice": "Finance"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Finance"
+      ],
+      "reason": "Tax filing is financial evidence."
+    },
+    {
+      "id": "finance_cash_flow",
+      "entity_name": "Lumen",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Lumen forecast cash flow for the next two quarters.",
+          "proposed_choice": "Finance"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Finance"
+      ],
+      "reason": "Cash-flow forecasting is financial evidence."
+    },
+    {
+      "id": "legal_lawsuit",
+      "entity_name": "Mosaic",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Mosaic is the defendant in a patent lawsuit.",
+          "proposed_choice": "Legal"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Legal"
+      ],
+      "reason": "A lawsuit is legal evidence."
+    },
+    {
+      "id": "legal_trademark",
+      "entity_name": "Nimbus",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Nimbus registered a trademark for its product name.",
+          "proposed_choice": "Legal"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Legal"
+      ],
+      "reason": "Trademark registration is legal evidence."
+    },
+    {
+      "id": "legal_regulatory_filing",
+      "entity_name": "Orchid",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Orchid filed its response with the regulator.",
+          "proposed_choice": "Legal"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Legal"
+      ],
+      "reason": "A regulatory response is legal evidence."
+    },
+    {
+      "id": "legal_nda",
+      "entity_name": "Pioneer",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Pioneer signed a mutual nondisclosure agreement.",
+          "proposed_choice": "Legal"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Legal"
+      ],
+      "reason": "An NDA is legal evidence."
+    },
+    {
+      "id": "work_sprint",
+      "entity_name": "Quartz",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Quartz completed the authentication sprint.",
+          "proposed_choice": "Work"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Work"
+      ],
+      "reason": "Sprint completion is project-work evidence."
+    },
+    {
+      "id": "work_hiring",
+      "entity_name": "Raven",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Raven is recruiting a staff engineer for the API team.",
+          "proposed_choice": "Work"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Work"
+      ],
+      "reason": "Team staffing is work evidence."
+    },
+    {
+      "id": "work_deployment",
+      "entity_name": "Summit",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Summit deployed the new billing service to production.",
+          "proposed_choice": "Work"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Work"
+      ],
+      "reason": "A deployment is work evidence."
+    },
+    {
+      "id": "work_customer_support",
+      "entity_name": "Timber",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Timber owns customer support escalation this week.",
+          "proposed_choice": "Work"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Work"
+      ],
+      "reason": "Operational ownership is work evidence."
+    },
+    {
+      "id": "work_roadmap",
+      "entity_name": "Umbra",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Umbra published the product roadmap for the next release.",
+          "proposed_choice": "Work"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Work"
+      ],
+      "reason": "Roadmap planning is work evidence."
+    },
+    {
+      "id": "work_vendor_onboarding",
+      "entity_name": "Vale",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Vale is onboarding the analytics vendor.",
+          "proposed_choice": "Work"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Work"
+      ],
+      "reason": "Vendor onboarding is work evidence."
+    },
+    {
+      "id": "ambiguous_name_only",
+      "entity_name": "Willow",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Willow was listed in the notes.",
+          "proposed_choice": "insufficient_evidence"
+        }
+      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
+      "reason": "A name alone supports no specific topic."
+    },
+    {
+      "id": "ambiguous_future_update",
+      "entity_name": "Xeno",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Xeno will share more information later.",
+          "proposed_choice": "insufficient_evidence"
+        }
+      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
+      "reason": "A promised update contains no topical evidence."
+    },
+    {
+      "id": "ambiguous_partnership",
+      "entity_name": "Yellowbird",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Yellowbird announced a partnership.",
+          "proposed_choice": "insufficient_evidence"
+        }
+      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
+      "reason": "The partnership purpose is not stated."
+    },
+    {
+      "id": "ambiguous_attended_event",
+      "entity_name": "Zenith",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Zenith attended the annual conference.",
+          "proposed_choice": "insufficient_evidence"
+        }
+      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
+      "reason": "Event attendance supports no specific allowed topic."
+    },
+    {
+      "id": "ambiguous_general_reference",
+      "entity_name": "Atlas",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Atlas remains important to the team.",
+          "proposed_choice": "insufficient_evidence"
+        }
+      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
+      "reason": "The statement gives no topical reason."
+    },
+    {
+      "id": "boundary_project_budget",
+      "entity_name": "Birch",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Birch approved the migration project's annual budget.",
+          "proposed_choice": "Finance"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Finance"
+      ],
+      "reason": "The judgment targets budget approval rather than delivery work."
+    },
+    {
+      "id": "boundary_contract_delivery",
+      "entity_name": "Cloudline",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Cloudline began the implementation required by its customer contract.",
+          "proposed_choice": "Work"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Work"
+      ],
+      "reason": "The evidence describes implementation work, not a contract dispute or term."
+    },
+    {
+      "id": "boundary_legal_budget",
+      "entity_name": "Driftwood",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Driftwood set aside funds for pending litigation.",
+          "proposed_choice": "Legal"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Legal"
+      ],
+      "reason": "Litigation is the defining subject despite the reference to funds."
+    },
+    {
+      "id": "boundary_finance_team_hiring",
+      "entity_name": "Elm",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Elm hired analysts to prepare its financial forecast.",
+          "proposed_choice": "Work"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Work"
+      ],
+      "reason": "The entity action is team hiring even though the team's subject is finance."
+    },
+    {
+      "id": "explicit_audit_finance",
+      "entity_name": "Foxglove",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Foxglove completed the annual financial audit.",
+          "proposed_choice": "Finance"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Finance"
+      ],
+      "reason": "A financial audit directly concerns company finances."
+    },
+    {
+      "id": "explicit_compliance_legal",
+      "entity_name": "Grove",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Grove answered a data-protection compliance inquiry.",
+          "proposed_choice": "Legal"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Legal"
+      ],
+      "reason": "Regulatory compliance is legal evidence."
+    },
+    {
+      "id": "explicit_operations_work",
+      "entity_name": "Hearth",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Hearth is operating the incident response rotation.",
+          "proposed_choice": "Work"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Work"
+      ],
+      "reason": "Operational responsibility is work evidence."
+    }
+  ]
+}

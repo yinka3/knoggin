@@ -6,7 +6,7 @@ import asyncio
 import json
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import httpx
 from pydantic import ValidationError
@@ -44,15 +44,41 @@ class JevWorkBudget:
     """One shared window budget; retry attempts and both passes consume it."""
 
     max_calls: int
+    max_elapsed_seconds: float = 30
+    max_observations: int = 128
     calls: int = 0
+    observations: int = 0
+    _started_at: float | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
-        if self.max_calls < 1 or self.calls < 0:
-            raise ValueError("Work budget must have a positive limit")
+        if (
+            self.max_calls < 1
+            or self.calls < 0
+            or self.max_observations < 1
+            or self.observations < 0
+            or not math.isfinite(self.max_elapsed_seconds)
+            or self.max_elapsed_seconds <= 0
+        ):
+            raise ValueError("Work budget must have positive call and elapsed limits")
+
+    def remaining_seconds(self) -> float:
+        if self._started_at is None:
+            return self.max_elapsed_seconds
+        return max(0, self.max_elapsed_seconds - (time.monotonic() - self._started_at))
+
+    def take_observation(self) -> bool:
+        """Bound diagnostics even when a request exits before spending a call."""
+
+        if self.observations >= self.max_observations:
+            return False
+        self.observations += 1
+        return True
 
     def take(self) -> bool:
-        if self.calls >= self.max_calls:
+        if self.calls >= self.max_calls or self.remaining_seconds() <= 0:
             return False
+        if self._started_at is None:
+            self._started_at = time.monotonic()
         self.calls += 1
         return True
 
@@ -142,7 +168,10 @@ class JevClient:
         if len(body) > policy.max_request_bytes:
             return JevResult(outcome="unavailable", reason="request_limit")
         # Work limits are admitted policy; never trust a looser caller budget.
-        if work_budget.max_calls > policy.max_calls_per_window:
+        if (
+            work_budget.max_calls > policy.max_calls_per_window
+            or work_budget.max_elapsed_seconds > policy.max_elapsed_seconds_per_window
+        ):
             return JevResult(outcome="unavailable", reason="invalid_work_budget")
         progress = {
             "attempts": 0,
@@ -163,8 +192,14 @@ class JevClient:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         try:
-            remaining = max(
+            request_remaining = max(
                 0, policy.total_timeout_seconds - (time.monotonic() - started)
+            )
+            budget_remaining = work_budget.remaining_seconds()
+            budget_limits_wait = budget_remaining <= request_remaining
+            remaining = max(
+                0,
+                min(request_remaining, budget_remaining),
             )
             async with asyncio.timeout(remaining):
                 return await asyncio.shield(task)
@@ -175,7 +210,11 @@ class JevClient:
             reservation = progress["reservation"]
             return JevResult(
                 outcome="unavailable",
-                reason="deadline_exceeded",
+                reason=(
+                    "work_budget_exhausted"
+                    if budget_limits_wait
+                    else "deadline_exceeded"
+                ),
                 attempts=progress["attempts"],
                 elapsed_seconds=time.monotonic() - started,
                 **progress["totals"],
@@ -217,8 +256,13 @@ class JevClient:
         reason = "provider_error"
         work = None
         totals = progress["totals"]
+        budget_limits_work = work_budget.remaining_seconds() <= max(
+            0, policy.total_timeout_seconds - (time.monotonic() - started)
+        )
         try:
-            async with asyncio.timeout(policy.total_timeout_seconds):
+            async with asyncio.timeout(
+                min(policy.total_timeout_seconds, work_budget.remaining_seconds())
+            ):
                 for retry in range(policy.max_retries + 1):
                     if not work_budget.take():
                         reason = "work_budget_exhausted"
@@ -247,11 +291,20 @@ class JevClient:
                             self._closing
                             or time.monotonic() - started
                             >= policy.total_timeout_seconds
+                            or work_budget.remaining_seconds() <= 0
                         ):
                             # Admission may have completed after cancellation.
                             # No provider work was dispatched; release at zero usage.
                             usage = JevUsage(input_tokens=0, output_tokens=0)
-                            reason = "closing" if self._closing else "deadline_exceeded"
+                            reason = (
+                                "closing"
+                                if self._closing
+                                else (
+                                    "work_budget_exhausted"
+                                    if work_budget.remaining_seconds() <= 0
+                                    else "deadline_exceeded"
+                                )
+                            )
                             break
                         attempts += 1
                         progress["attempts"] = attempts
@@ -316,7 +369,10 @@ class JevClient:
                         totals["input_tokens"] += input_tokens
                         totals["output_tokens"] += output_tokens
                         totals["approximate_usage"] |= usage is None
-                        if reservation.price is None:
+                        if usage is not None and usage.cost is not None:
+                            if totals["cost_usd"] is not None:
+                                totals["cost_usd"] += usage.cost
+                        elif reservation.price is None:
                             totals["cost_usd"] = None
                         elif totals["cost_usd"] is not None:
                             totals["cost_usd"] += (
@@ -354,7 +410,11 @@ class JevClient:
                     if retry < policy.max_retries:
                         await asyncio.sleep(retry_delay)
         except TimeoutError:
-            reason = "deadline_exceeded"
+            reason = (
+                "work_budget_exhausted"
+                if budget_limits_work
+                else "deadline_exceeded"
+            )
         return JevResult(
             outcome="unavailable",
             reason=reason,
@@ -367,7 +427,14 @@ class JevClient:
 
     @staticmethod
     def _validate_response(response, questions, policy):
-        if response.model != policy.model:
+        dated_suffix = response.model.removeprefix(f"{policy.model}-")
+        reported_model_is_allowed = response.model == policy.model or (
+            policy.model.startswith("typesafe/jev-")
+            and response.model.startswith(f"{policy.model}-")
+            and len(dated_suffix) == 8
+            and dated_suffix.isdigit()
+        )
+        if not reported_model_is_allowed:
             raise ValueError("Unexpected provider model version")
         if set(response.answers) != set(questions):
             raise ValueError("Missing or extra answer IDs")

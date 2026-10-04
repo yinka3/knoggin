@@ -14,7 +14,7 @@ from common.schema.settings import EntityResolutionSettings, TextProcessorSettin
 from core.ingestion.policy import IngestionPolicy
 from core.knowledge.entity.resolver import EntityResolver
 from infrastructure.external_model_budget import ExternalModelSpendingLedger
-from infrastructure.jev_client import JevClient
+from infrastructure.jev_client import JevClient, JevWorkBudget
 
 
 class Store:
@@ -34,10 +34,23 @@ class Store:
 
 
 class FakeJev:
-    def __init__(self, *, choice="candidate_1", unavailable=False):
+    def __init__(
+        self,
+        *,
+        choice="candidate_1",
+        unavailable=False,
+        confidence=0.7,
+        evidence_noul=0.6,
+        selected_probability=1.0,
+        runner_up_probability=0.0,
+    ):
         self.calls = []
         self.choice = choice
         self.unavailable = unavailable
+        self.confidence = confidence
+        self.evidence_noul = evidence_noul
+        self.selected_probability = selected_probability
+        self.runner_up_probability = runner_up_probability
 
     async def evaluate(self, **kwargs):
         self.calls.append(kwargs)
@@ -53,18 +66,29 @@ class FakeJev:
                         "identity_choice": {
                             "type": "choice",
                             "choice": self.choice,
-                            "probabilities": {
-                                handle: float(handle == self.choice)
-                                for handle in handles
-                            },
-                            "confidence": 0.7,
+                            "probabilities": self._probabilities(handles),
+                            "confidence": self.confidence,
                         },
-                        "identity_evidence": {"type": "noul", "noul": 0.6},
+                        "identity_evidence": {
+                            "type": "noul",
+                            "noul": self.evidence_noul,
+                        },
                     },
                     "usage": {"input_tokens": 100, "output_tokens": 0},
                 }
             ),
         )
+
+    def _probabilities(self, handles):
+        probabilities = {handle: 0.0 for handle in handles}
+        if self.choice in probabilities:
+            probabilities[self.choice] = self.selected_probability
+        runner_up = next(
+            (handle for handle in handles if handle != self.choice), None
+        )
+        if runner_up is not None:
+            probabilities[runner_up] = self.runner_up_probability
+        return probabilities
 
 
 def entity(entity_id, canonical_name, entity_type, *, project_id="project-1"):
@@ -82,7 +106,14 @@ def entity(entity_id, canonical_name, entity_type, *, project_id="project-1"):
     }
 
 
-def identity_policy(mode="observe", *, max_candidates=8, max_calls_per_window=12):
+def identity_policy(
+    mode="observe",
+    *,
+    max_candidates=8,
+    max_calls_per_window=12,
+    identity_match_sample_rate=0,
+    acceptance_policy_version="observe-v1",
+):
     domain = DomainConfig.from_mapping(
         {
             "version": 1,
@@ -101,6 +132,8 @@ def identity_policy(mode="observe", *, max_candidates=8, max_calls_per_window=12
             identity_mode=mode,
             max_candidates=max_candidates,
             max_calls_per_window=max_calls_per_window,
+            identity_match_sample_rate=identity_match_sample_rate,
+            acceptance_policy_version=acceptance_policy_version,
         ),
     )
 
@@ -149,6 +182,123 @@ async def test_non_observe_modes_keep_baseline_without_judging(mode):
 
 
 @pytest.mark.no_network
+async def test_active_identity_positive_gate_reuses_supplied_eligible_candidate():
+    jev = FakeJev(confidence=0.95, evidence_noul=0.95)
+    store = Store(
+        [entity(701, "Robert Chen", "Person"), entity(702, "Bob Smith", "Person")]
+    )
+    resolver = EntityResolver(store, "project-1", ["project-1"], jev_client=jev)
+
+    result = await resolve(
+        resolver,
+        identity_policy(
+            "active", acceptance_policy_version="identity-positive-v1"
+        ),
+        ["Bob joined the meeting."],
+    )
+
+    assert result.entity_ids == (701,)
+    assert result.new_entity_ids == frozenset()
+    decision = result.identity_decisions[0]
+    assert decision["selection_source"] == "jev_active"
+    assert decision["jev"]["accepted_entity_id"] == 701
+    assert decision["jev"]["baseline_entity_id"] is None
+    assert decision["jev"]["record"]["acceptance_status"] == "accepted"
+
+
+@pytest.mark.no_network
+async def test_active_identity_below_gate_uses_pending_new_id_baseline():
+    jev = FakeJev(confidence=0.95, evidence_noul=0.2)
+    store = Store(
+        [entity(701, "Robert Chen", "Person"), entity(702, "Bob Smith", "Person")]
+    )
+    resolver = EntityResolver(store, "project-1", ["project-1"], jev_client=jev)
+
+    result = await resolve(
+        resolver,
+        identity_policy(
+            "active", acceptance_policy_version="identity-positive-v1"
+        ),
+        ["Bob joined the meeting."],
+    )
+
+    assert result.entity_ids == (900,)
+    assert result.new_entity_ids == frozenset({900})
+    observation = result.identity_decisions[0]["jev"]
+    assert observation["accepted_entity_id"] is None
+    assert observation["baseline_entity_id"] == 900
+    assert observation["record"]["acceptance_status"] == "rejected"
+
+
+@pytest.mark.no_network
+async def test_active_identity_never_accepts_a_truncated_candidate_set():
+    jev = FakeJev(confidence=0.95, evidence_noul=0.95)
+    store = Store(
+        [entity(701, "Robert Chen", "Person"), entity(702, "Bob Smith", "Person")]
+    )
+    resolver = EntityResolver(store, "project-1", ["project-1"], jev_client=jev)
+
+    result = await resolve(
+        resolver,
+        identity_policy(
+            "active",
+            max_candidates=1,
+            acceptance_policy_version="identity-positive-v1",
+        ),
+        ["Bob joined the meeting."],
+    )
+
+    assert result.entity_ids == (900,)
+    observation = result.identity_decisions[0]["jev"]
+    assert observation["candidate_set_truncated"] is True
+    assert observation["accepted_entity_id"] is None
+    assert observation["record"]["acceptance_status"] == "indeterminate"
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    "jev",
+    [
+        FakeJev(confidence=0.5, evidence_noul=0.95),
+        FakeJev(
+            confidence=0.95,
+            evidence_noul=0.95,
+            selected_probability=0.7,
+        ),
+        FakeJev(
+            confidence=0.95,
+            evidence_noul=0.95,
+            selected_probability=0.85,
+            runner_up_probability=0.75,
+        ),
+    ],
+)
+async def test_active_identity_requires_every_probability_gate(jev):
+    resolver = EntityResolver(
+        Store(
+            [
+                entity(701, "Robert Chen", "Person"),
+                entity(702, "Bob Smith", "Person"),
+            ]
+        ),
+        "project-1",
+        ["project-1"],
+        jev_client=jev,
+    )
+
+    result = await resolve(
+        resolver,
+        identity_policy(
+            "active", acceptance_policy_version="identity-positive-v1"
+        ),
+        ["Bob joined the meeting."],
+    )
+
+    assert result.entity_ids == (900,)
+    assert result.identity_decisions[0]["jev"]["accepted_entity_id"] is None
+
+
+@pytest.mark.no_network
 async def test_clear_deterministic_match_does_not_call_jev():
     jev = FakeJev()
     resolver = EntityResolver(
@@ -167,6 +317,31 @@ async def test_clear_deterministic_match_does_not_call_jev():
 
     assert result.entity_ids == (701,)
     assert jev.calls == []
+
+
+@pytest.mark.no_network
+async def test_sampled_deterministic_reuse_is_observed_without_changing_identity():
+    jev = FakeJev()
+    resolver = EntityResolver(
+        Store([entity(701, "Robert Chen", "Person")]),
+        "project-1",
+        ["project-1"],
+        jev_client=jev,
+    )
+
+    result = await resolve(
+        resolver,
+        identity_policy(identity_match_sample_rate=1),
+        ["Robert Chen joined the meeting."],
+        name="Robert Chen",
+    )
+
+    assert result.entity_ids == (701,)
+    assert len(jev.calls) == 1
+    assert result.identity_decisions[0]["jev"]["baseline_entity_id"] == 701
+    assert result.identity_decisions[0]["jev"]["record"]["baseline_outcome"] == (
+        "deterministic_reuse"
+    )
 
 
 @pytest.mark.no_network
@@ -200,12 +375,15 @@ async def test_observe_keeps_baseline_and_limits_handles_to_eligible_candidates(
     for decision in result.identity_decisions:
         shadow = decision["jev"]
         assert shadow["eligible_candidate_count"] == 3
+        assert set(shadow["eligible_candidate_ids"]) == {701, 702, 704}
+        assert shadow["candidate_catalog_truncated"] is False
         assert shadow["offered_candidate_count"] == 2
         assert shadow["candidate_set_truncated"] is True
+        assert shadow["suggested_entity_id"] is None
         assert shadow["baseline_entity_id"] in {900, 901}
         record = shadow["record"]
         assert record["mode"] == "observe"
-        assert record["acceptance_status"] == "proposed"
+        assert record["acceptance_status"] == "indeterminate"
         assert record["baseline_outcome"] == "deterministic_abstention"
         assert set(record["option_mapping"].values()).issubset({"701", "702", "704"})
         assert "703" not in record["option_mapping"].values()
@@ -361,6 +539,31 @@ async def test_shared_work_budget_limits_occurrences_in_one_build():
     assert result.identity_decisions[1]["jev"]["record"]["result"]["reason"] == (
         "work_budget_exhausted"
     )
+
+
+@pytest.mark.no_network
+async def test_observation_count_is_bounded_when_provider_is_unavailable():
+    jev = FakeJev(unavailable=True)
+    resolver = EntityResolver(
+        Store(
+            [entity(701, "Robert Chen", "Person"), entity(702, "Bob Smith", "Person")]
+        ),
+        "project-1",
+        ["project-1"],
+        jev_client=jev,
+    )
+
+    result = await resolve(
+        resolver,
+        identity_policy(),
+        ["Bob joined one meeting.", "Bob joined another meeting."],
+        work_budget=JevWorkBudget(12, max_observations=1),
+    )
+
+    assert result.entity_ids == (900, 901)
+    assert len(jev.calls) == 1
+    assert "jev" in result.identity_decisions[0]
+    assert "jev" not in result.identity_decisions[1]
 
 
 @pytest.mark.no_network

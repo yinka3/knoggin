@@ -1,19 +1,16 @@
 # JEV entity identity and extraction implementation plan
 
 Date: 2026-09-28
-Status: Phase A foundation implemented; consumer pilots have not started.
+Status: identity, bounded extraction, and retrieval are in scope as of 2026-10-03. Bounded extraction begins with an observe pilot; active acceptance still requires evaluation.
 
-This plan captures the subsequent discussion and extends the original
-[identity journal](KNOGGIN_JEV_ENTITY_IDENTITY_JOURNAL.md) and
-[extraction journal](KNOGGIN_JEV_EXTRACTION_JOURNAL.md).
-Use the [shared implementation journal](KNOGGIN_JEV_IMPLEMENTATION_JOURNAL.md)
-for provider ownership, spending, and lifecycle requirements. Where the older
-journals differ on the initial question shape or topic selection, use this plan.
+This plan consolidates the JEV identity, extraction, classification, provider,
+spending, and lifecycle decisions that were previously spread across working
+journals. It is the canonical implementation record for this work.
 
 ## 1. Agreed behavior
 
-- Start identity and extraction in observe mode: call JEV and record judgments,
-  but retain baseline decisions and fallback calls. Observe costs time and money.
+- Start identity and bounded extraction in observe mode: call JEV and record
+  judgments while retaining baseline decisions. Observe costs time and money.
 - Start with Choice and Noul. Questions use stable, versioned templates with
   occurrence-specific evidence and choices supplied by code.
 - Questions in one request are independent. A Noul cannot inspect the Choice
@@ -121,9 +118,9 @@ recommendations to validate against current commit contracts.
 
 ### Phase A — Baseline and shared foundation
 
-- [ ] A1: Capture human-reviewed identity, extraction, and classification examples
-  and baseline outputs. Include same names, aliases, foreign classifications,
-  multiple missed entities, and second-pass endpoint recovery.
+- [ ] A1: Capture human-reviewed identity examples and baseline outputs. Include
+  same names, aliases, foreign classifications, and repeated occurrences.
+  Extraction/classification examples remain proposed until separately reviewed.
 - [x] A2: Add a small async provider adapter with typed Choice/Noul requests,
   response validation, timeout/retry bounds, cancellation, and fake-backed tests.
 - [x] A3: Add independent capability modes, model/question versions, work limits,
@@ -131,7 +128,8 @@ recommendations to validate against current commit contracts.
 - [x] A4: Wire application-owned client lifecycle and dependency injection.
 - [x] A5: Extend frozen ingestion policy and snapshot validation. Credentials stay
   runtime-only. Committed windows resume without new judgments.
-- [ ] A6: Implement decision records and their retention/commit ownership.
+- [x] A6: Verify durable decision records, retention, and atomic commit ownership
+  against PostgreSQL. The implementation and scoped reader are in place.
 
 Phase A progress (2026-09-28): A1 has proposed examples and four captured
 deterministic/fake-backed baseline outputs; human review and broader quality
@@ -155,7 +153,7 @@ verified. A1 human review and A6 durable decision provenance are still pending.
 
 ### Phase B — Entity identity observe pilot
 
-- [ ] I1: Separate visibility/scope/type eligibility from deterministic acceptance
+- [x] I1: Separate visibility/scope/type eligibility from deterministic acceptance
   heuristics; verify disabled behavior remains unchanged.
 - [x] I2: Build bounded candidate handles from the durable candidate snapshot.
   Keep per-occurrence evidence even when searches share a normalized name.
@@ -163,54 +161,183 @@ verified. A1 human review and A6 durable decision provenance are still pending.
   baseline result and hypothetical semantic result without changing resolution.
 - [ ] I4: Measure candidate recall separately from judgment quality. Optionally
   sample deterministic matches to estimate false reuse.
-- [ ] I5: Establish held-out acceptance criteria before adding active acceptance.
+- [x] I5: Establish held-out acceptance criteria before adding active acceptance.
   Do not compare JEV probabilities with the existing score capped at 1.5.
-- [ ] I6: Add active decisions behind mode configuration. Preserve hard boundaries,
+- [x] I6: Add active decisions behind mode configuration. Preserve hard boundaries,
   pending reuse/new-ID fallback, existing classifications, and postcommit publication.
 
 Phase B start (2026-09-30): uncertain deterministic abstentions now receive
 bounded, occurrence-specific Choice and Noul observations from the scoped
 candidate snapshot. The request uses local handles; incompatible and invisible
 candidates are excluded, while foreign-project classifications are neutral.
-Both identity passes share one in-memory call budget. The current baseline ID
-and JEV suggestion appear in the private in-memory identity trace; the JEV
-result never selects an ID or writes an alias. Disabled and active settings retain
+Both identity passes share one in-memory call and elapsed-time budget. The current
+baseline ID and JEV suggestion appear in the private in-memory identity trace and
+an evidence-free bounded JSON diagnostic. Truncated candidate sets are marked
+indeterminate and expose no suggested ID. The JEV result never selects an ID or
+writes an alias. Disabled and active settings retain
 baseline behavior until the active acceptance gate is designed and evaluated.
-I1 hard-boundary extraction and I4 reviewed candidate-recall measurement remain
-incomplete. A1 human-reviewed examples and A6 durable decision provenance also
-remain pending; the pilot trace does not survive a process restart.
+At that point, I1 hard-boundary extraction, I4 reviewed candidate-recall
+measurement, A1 human-reviewed examples, and A6 durable database provenance
+remained pending. The follow-up below updates that status.
+
+Phase A/B follow-up (2026-10-03): hard JEV candidate eligibility now has its own
+resolver boundary. The semantic commit writer stores scoped, bounded identity
+observations atomically with Knowledge, and a project-owned reader exposes them
+for review. Window deletion cascades to these records; otherwise they live with
+the semantic window. A candidate audit retains up to 128 eligible IDs and marks
+larger sets as incomplete. A scoring script separates candidate discovery and
+offer failures from JEV judgment mistakes, but refuses unreviewed labels. A stable
+sample of deterministic reuses can audit false reuse and is off by default. The
+identity review packet is proposed, not yet human-approved. PostgreSQL storage
+contracts and live provider quality are still unverified; active identity reuse
+remains gated on reviewed acceptance criteria.
+
+Phase A storage verification (2026-10-03): a live fresh PostgreSQL run exposed
+and fixed a reserved-word alias in both scoped decision readers. All 18 semantic
+commit contracts then passed, including identity/extraction decision persistence,
+owner-scoped reads, idempotent replay, unowned-evidence rollback, and window
+deletion cascade. The Windows storage fixture now selects the Psycopg-compatible
+Selector event loop and uses the direct IPv4 test address by default.
+
+Phase B active implementation (2026-10-03): `identity-positive-v1` adds a second
+explicit gate beyond `identity_mode: active`. It requires a complete candidate
+set, Choice confidence >= 0.90, selected probability >= 0.80, probability margin
+>= 0.20, and identity-evidence Noul >= 0.80. Failure retains the current pending
+reuse/new-ID path. Accepted IDs must be eligible supplied candidates and must be
+the reused committed ID recorded by the atomic writer. Existing project
+classification remains authoritative. `active` with the default `observe-v1`
+policy retains baseline behavior for backward compatibility.
+
+Before operational enablement, a held-out set must contain at least 200 reviewed
+occurrences, including at least 50 ambiguous/no-match cases. Candidate recall must
+be reported separately and reach 95%. Scored JEV judgments must reach 95%
+accuracy. The active gate must reach at least 99% acceptance precision and no more
+than 1% wrong reuse, with zero scope, type, truncation, or existing-classification
+violations. The evaluator reports candidate discovery, raw judgment quality,
+active acceptance precision, wrong reuse, and abstention separately. These are
+established criteria, not achieved results; A1/I4 and live JEV evaluation remain
+open.
+
+Phase A/B evaluation tooling (2026-10-03): the live pilot runner now converts an
+approved review packet into stable labels, exercises the real resolver and JEV
+client in observe mode, and writes private observations plus a report. It limits
+each case to one provider attempt. Missing observations with a known correct
+entity count as candidate-discovery misses; candidate recall, raw judgment
+accuracy, active-gate precision, wrong reuse, and abstention are reported
+separately. The runner refuses the current proposed packet until a person marks
+it reviewed. A1 and I4 therefore remain open until the labels are approved and a
+live run is completed; the current ten seed cases also do not satisfy the
+200-case activation threshold.
 
 ### Phase C — Bounded extraction observe pilot
 
-- [ ] E1: Refactor gap detection into per-block reasons and literal candidate
+- [x] E1: Refactor gap detection into per-block reasons and literal candidate
   preparation without altering baseline extraction.
-- [ ] E2: Discover candidates from unknown endpoints and known alias gaps.
+- [x] E2: Discover candidates from unknown endpoints and known alias gaps.
   Do not silently lower GLiNER thresholds or add broad candidate discovery.
-- [ ] E3: Build type Choice/Noul requests for candidates without a usable type.
+- [x] E3: Build type Choice/Noul requests for candidates without a usable type.
   Observe results while running existing fallback unchanged.
-- [ ] E4: Add explicit `jev_fallback` origin and validated offset/support semantics.
+- [x] E4: Add explicit `jev_fallback` origin and validated offset/support semantics.
   Supporting-only occurrences may retain nullable Context offsets where validated.
-- [ ] E5: Define and evaluate positive-recovery coverage rules. Recovering Delta
+- [x] E5: Define and evaluate positive-recovery coverage rules. Recovering Delta
   must not be treated as proof that PostgreSQL and Maya in the same block were found.
-- [ ] E6: Add active positive recovery and recompute residual gaps. Unresolved
+- [x] E6: Add active positive recovery and recompute residual gaps. Unresolved
   blocks still reach generative fallback when permitted; negative/uncertain JEV
   answers initially do not suppress fallback.
-- [ ] E7: Preserve independent `llm_ner_mode` semantics and the existing bounded
+- [x] E7: Preserve independent `llm_ner_mode` semantics and the existing bounded
   relationship/entity second pass. Report call avoidance separately from token savings.
+
+Phase C implementation (2026-10-03): literal candidates now come only from
+validated unknown relationship endpoints and known-alias gaps. Observe mode stores
+the judgment and retains the baseline fallback. Active mode accepts only a literal,
+domain-valid positive result above the versioned Choice/Noul gates, then recomputes
+residual gaps. A block that was originally uncovered still reaches generative NER,
+because recovering one supplied name cannot prove exhaustive coverage. JEV and
+`llm_ner_mode` remain independent, and both entity passes share the existing call
+and elapsed-time budget. Private extraction decisions commit atomically with the
+semantic window. Trace counters separate avoided calls, avoided blocks, prompt
+character reduction, and actual LLM fallback work; provider token savings still
+require live measurement. Focused unit and live PostgreSQL semantic-commit tests
+pass. Live JEV quality and broader restart/concurrency checks remain Phase E
+readiness gates.
+
+Phase C review (2026-10-03): active type selection now records whether its
+bounded type list was truncated. A truncated list may be observed but cannot be
+accepted, and the atomic writer rejects any forged accepted result carrying that
+flag. Observe/fallback behavior, literal validation, independent JEV/LLM modes,
+and durable storage contracts otherwise matched the plan. Live quality, recall,
+latency, and savings measurement remain Phase E readiness work rather than a
+claim made by Phase C.
 
 ### Phase D — Project classification and topic selection
 
-- [ ] C1: Extend and validate domain configuration with allowed topics per type
+- [x] C1: Extend and validate domain configuration with allowed topics per type
   and a default; update compilation, serialization, and activation/reclassification
   assumptions. Existing configurations retain their fixed mapping.
-- [ ] C2: Implement topic Choice/Noul in observe mode when alternatives exist.
+- [x] C2: Implement topic Choice/Noul in observe mode when alternatives exist.
   Reuse known valid types; select a topic for first-entry project classification.
-- [ ] C3: Aggregate proposals after identity resolution, preserve existing project
+- [x] C3: Aggregate proposals after identity resolution, preserve existing project
   classification, and handle new-entity conflicts deterministically with diagnostics.
-- [ ] C4: Commit accepted classification provenance atomically. Expose bounded
+- [x] C4: Commit classification decision provenance atomically, including an
+  accepted-topic slot for later active mode. Expose bounded
   decision/evidence records for later review without creating an adjudication loop.
 - [ ] C5: Evaluate topic accuracy and conflict behavior before enabling active topic
   selection independently of identity and bounded extraction.
+
+Phase D start (2026-10-03): entity types retain `topic` as their default and may
+now declare `allowed_topics`. Omitting the new field produces the old one-topic
+mapping. Configuration parsing canonicalizes and validates every allowed topic,
+requires the default to be included, filters inactive choices in the compiled
+snapshot, and preserves older admitted snapshots during replay. Domain previews
+report allowed-topic changes as future-only; existing classifications still
+change only through the reclassification path.
+
+Phase D observe classification (2026-10-04): first-entry classifications whose
+known type has multiple active allowed topics now receive an occurrence-specific
+Choice and independent evidence Noul when `classification_mode` is `observe`.
+Single-topic types are derived without a call. Existing project classifications
+remain authoritative and skip topic observation. The bounded record contains the
+default topic, allowed options, suggestion, response, and truncation status, but
+the staged classification and new-entity write continue using the configured
+default. Truncated sets are indeterminate. Provider failure keeps the default and
+cancellation propagates. The bounded ingestion trace/log path feeds the atomic
+durable classification decision store described in C4. Active topic selection
+remains disabled pending C5 evaluation.
+
+Phase D proposal aggregation (2026-10-04): occurrence-level topic proposals are
+grouped by the entity ID produced by identity resolution. Aggregates distinguish
+one consistent proposal, conflicting proposals, and no usable proposal. Existing
+project classifications never enter this path and remain authoritative. For a
+first-entry entity, agreement is still observational; the configured default is
+the operational topic. When occurrences propose different allowed topics, their
+records are marked `conflicting`, the aggregate retains every proposed topic in
+domain order, and the default remains the deterministic result. Conflicting types
+or a missing valid default fail through the existing classification validation
+path rather than selecting arbitrarily. C5 quality evaluation remains open.
+
+Phase D durable provenance (2026-10-04): each occurrence-level topic decision is
+stored with its entity aggregate in `project_jev_classification_decisions` during
+the same transaction that publishes Knowledge. The writer revalidates the frozen
+domain/model/question policy, evidence ownership, allowed options, JEV response,
+aggregate, and first-entry classification before inserting anything. Observe mode
+requires `accepted_topic` to remain null and leaves the configured default as the
+operational topic. The scoped reader is paginated, replay is idempotent, and
+deleting the semantic window cascades to its records. Live PostgreSQL contracts
+cover successful storage, owner scoping, rollback on unowned evidence, and cascade
+cleanup. Active topic selection remains gated on C5.
+
+Phase D classification evaluation tooling (2026-10-04): the offline scorer,
+review packet, and optional live pilot are implemented. They keep occurrence
+accuracy, non-default-topic accuracy, aggregate accuracy, unavailable results,
+and false conflicts separate. The scorer refuses labels that are not explicitly
+human reviewed. Readiness requires at least 50 reviewed occurrences, 10
+non-default occurrences, and 10 repeated-entity aggregates; 95% judgment,
+non-default, and aggregate accuracy; at most 10% unscorable occurrence or
+aggregate results; and at most a 2% false-conflict rate. The proposed packet now
+contains 50 occurrences, 24 non-default occurrences, and 10 repeated-entity
+aggregates, so it meets the sample-composition gate. The proposed labels were
+human-approved on 2026-10-04, but they have not been sent to the provider. C5 and
+active topic selection therefore remain open only on the live evaluation.
 
 ### Phase E — Integration and active-mode readiness
 

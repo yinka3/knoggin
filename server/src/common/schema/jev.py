@@ -28,19 +28,32 @@ class JevPolicy(JevModel):
     identity_mode: Mode = "disabled"
     extraction_mode: Mode = "disabled"
     classification_mode: Mode = "disabled"
-    model: str = Field("jev-1.13.0", pattern=r"^jev-\d+\.\d+\.\d+$")
+    model: str = Field(
+        "jev-1.13.0",
+        pattern=r"^(?:jev-\d+\.\d+\.\d+|typesafe/jev-\d+\.\d+)$",
+    )
     identity_question_version: Literal["identity-v1"] = "identity-v1"
     extraction_question_version: Literal["extraction-v1"] = "extraction-v1"
     classification_question_version: Literal["classification-v1"] = "classification-v1"
-    # Active acceptance is implemented/evaluated by the later consumer phases.
-    acceptance_policy_version: Literal["observe-v1"] = "observe-v1"
+    acceptance_policy_version: Literal[
+        "observe-v1", "identity-positive-v1"
+    ] = "observe-v1"
+    identity_min_choice_confidence: Probability = 0.9
+    identity_min_choice_probability: Probability = 0.8
+    identity_min_probability_margin: Probability = 0.2
+    identity_min_evidence_noul: Probability = 0.8
+    extraction_acceptance_policy_version: Literal["positive-v1"] = "positive-v1"
+    extraction_min_choice_confidence: Probability = 0.8
+    extraction_min_entity_noul: Probability = 0.8
     max_candidates: int = Field(8, ge=1, le=50)
+    identity_match_sample_rate: float = Field(0, ge=0, le=1, allow_inf_nan=False)
     max_calls_per_window: int = Field(12, ge=1, le=100)
     max_questions_per_request: int = Field(16, ge=1, le=100)
     max_options_per_choice: int = Field(64, ge=2, le=255)
     max_request_bytes: int = Field(24_000, ge=256, le=32_000)
     request_timeout_seconds: float = Field(5, gt=0, le=30, allow_inf_nan=False)
     total_timeout_seconds: float = Field(12, gt=0, le=60, allow_inf_nan=False)
+    max_elapsed_seconds_per_window: float = Field(30, gt=0, le=300, allow_inf_nan=False)
     accounting_timeout_seconds: float = Field(2, gt=0, le=10, allow_inf_nan=False)
     max_retries: int = Field(1, ge=0, le=3)
 
@@ -69,6 +82,11 @@ class JevSettings(JevPolicy):
         from urllib.parse import urlsplit
 
         parsed = urlsplit(value)
+        is_typesafe = parsed.path.endswith("/v1/systemone")
+        is_openrouter = (
+            parsed.hostname == "openrouter.ai"
+            and parsed.path == "/api/alpha/decisions"
+        )
         if (
             parsed.scheme != "https"
             or not parsed.hostname
@@ -76,9 +94,12 @@ class JevSettings(JevPolicy):
             or parsed.password
             or parsed.query
             or parsed.fragment
-            or not parsed.path.endswith("/v1/systemone")
+            or not (is_typesafe or is_openrouter)
         ):
-            raise ValueError("JEV endpoint must be an HTTPS /v1/systemone URL")
+            raise ValueError(
+                "JEV endpoint must be an HTTPS /v1/systemone URL or the "
+                "OpenRouter Decisions API"
+            )
         return value
 
     def capture_policy(self) -> JevPolicy:
@@ -126,12 +147,15 @@ Answer = Annotated[ChoiceAnswer | NoulAnswer, Field(discriminator="type")]
 class JevUsage(JevModel):
     input_tokens: int = Field(ge=0, strict=True)
     output_tokens: int = Field(ge=0, strict=True)
+    cost: float | None = Field(None, ge=0, allow_inf_nan=False)
 
 
 class JevResponse(JevModel):
     model: str = Field(min_length=1)
     answers: dict[str, Answer]
     usage: JevUsage
+    id: str | None = None
+    provider: str | None = None
 
 
 class JevResult(JevModel):
@@ -151,8 +175,8 @@ class JevResult(JevModel):
 class JevDecisionRecord(JevModel):
     """Private decision provenance, not proof or an accepted classification.
 
-    This contract is JSON serializable. Durable ownership is described in the
-    Phase A journal; consumers must not claim the record is persisted yet.
+    This JSON-serializable contract is stored only through the scoped semantic
+    commit writers after they revalidate its evidence and frozen policy.
     """
 
     capability: Capability
@@ -171,7 +195,12 @@ class JevDecisionRecord(JevModel):
     result: JevResult
     baseline_outcome: str
     acceptance_status: Literal[
-        "proposed", "accepted", "rejected", "unavailable", "conflicting"
+        "proposed",
+        "accepted",
+        "rejected",
+        "unavailable",
+        "conflicting",
+        "indeterminate",
     ] = "proposed"
 
     @model_validator(mode="after")

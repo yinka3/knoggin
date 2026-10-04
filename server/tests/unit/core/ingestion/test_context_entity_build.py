@@ -1,5 +1,7 @@
 """Context-first VP-01, entity-resolution, and shadow-evaluation contracts."""
 
+import asyncio
+import json
 import re
 from uuid import uuid4
 
@@ -20,7 +22,7 @@ from common.schema.ingestion.contracts import (
     ProjectEntityClassification,
     UnknownEndpointDiagnostic,
 )
-from common.schema.jev import JevPolicy
+from common.schema.jev import JevPolicy, JevResponse, JevResult
 from common.schema.semantic_window import (
     SemanticWindowOrigin,
     SemanticWindowRecord,
@@ -30,6 +32,7 @@ from common.schema.settings import EntityResolutionSettings, TextProcessorSettin
 from core.ingestion.batch import SemanticWindowBuild
 from core.ingestion.context_entity_build import (
     ContextEntityBuildService,
+    _log_jev_identity_observations,
 )
 from core.ingestion.policy import IngestionPolicy
 from core.ingestion.text_processor import TextProcessor
@@ -199,7 +202,7 @@ def identity_domain():
     ).compile()
 
 
-def policy(compiled_domain, *, llm_ner_mode="fallback"):
+def policy(compiled_domain, *, llm_ner_mode="fallback", jev=None):
     return IngestionPolicy.capture(
         text_processor=TextProcessorSettings(
             gliner_threshold=0.42,
@@ -207,6 +210,7 @@ def policy(compiled_domain, *, llm_ner_mode="fallback"):
         ),
         entity_resolution=EntityResolutionSettings(),
         compiled_domain=compiled_domain,
+        jev=jev,
     )
 
 
@@ -284,7 +288,7 @@ def test_unknown_endpoint_diagnostics_require_typed_eligible_blocks():
                 ),
             )
         )
-def processor(vp01, *, llm=None, llm_ner_mode="fallback"):
+def processor(vp01, *, llm=None, llm_ner_mode="fallback", jev_client=None):
     async def no_profile(_entity_id):
         return None
 
@@ -297,6 +301,7 @@ def processor(vp01, *, llm=None, llm_ner_mode="fallback"):
         settings=TextProcessorSettings(llm_ner_mode=llm_ner_mode),
         model_work=InlineModelWork(),
         llm=llm,
+        jev_client=jev_client,
         user_name="ada" if llm is not None else None,
     )
     result._build_phrase_matcher = lambda: (lambda _doc: [], {})
@@ -313,6 +318,41 @@ class FakeEntityLLM:
     async def generate_structured(self, *, response_model, **kwargs):
         self.calls.append(kwargs)
         return response_model.model_validate({"mentions": self.mentions})
+
+
+class FakeExtractionJev:
+    def __init__(self, *, entity_noul=0.95, choice="type_1", confidence=0.95):
+        self.entity_noul = entity_noul
+        self.choice = choice
+        self.confidence = confidence
+        self.calls = []
+
+    async def evaluate(self, **kwargs):
+        self.calls.append(kwargs)
+        answers = {
+            "entity_evidence": {"type": "noul", "noul": self.entity_noul}
+        }
+        type_question = kwargs["questions"].get("type_choice")
+        if type_question is not None:
+            answers["type_choice"] = {
+                "type": "choice",
+                "choice": self.choice,
+                "probabilities": {
+                    handle: float(handle == self.choice)
+                    for handle in type_question.criteria
+                },
+                "confidence": self.confidence,
+            }
+        return JevResult(
+            outcome="available",
+            response=JevResponse.model_validate(
+                {
+                    "model": "jev-1.13.0",
+                    "answers": answers,
+                    "usage": {"input_tokens": 25, "output_tokens": 0},
+                }
+            ),
+        )
 
 
 def resolver(*, knowledge_store=None, readable_project_ids=None):
@@ -584,6 +624,56 @@ async def test_llm_ner_fallback_is_skipped_when_normal_coverage_is_sufficient():
 
 @pytest.mark.unit
 @pytest.mark.no_network
+def test_fallback_gaps_keep_reasons_per_block():
+    compiled_domain = domain()
+    first = block("Orion approved the selected vendor.")
+    second = block("Zephyr Dynamics joined the project.")
+    semantic_build = build(
+        blocks=(first, second),
+        compiled_domain=compiled_domain,
+        supports={first.block_id: (support(first.block_id, 91),)},
+        message_texts={91: "Acme signed the vendor agreement."},
+    )
+    semantic_build.set_unknown_endpoint_diagnostics(
+        (
+            UnknownEndpointDiagnostic(
+                block_id=first.block_id,
+                name="Orion",
+                entity_type="Company",
+            ),
+        )
+    )
+    text_processor = processor(FakeVP01())
+    text_processor.get_known_aliases = lambda: {"Acme": 701}
+    mentions = [
+        ContextBlockMention(
+            block_ids=(first.block_id,),
+            name="Orion",
+            entity_type="Company",
+            topic="Work",
+            origin="vp01",
+            source_start=0,
+            source_end=5,
+        )
+    ]
+
+    gaps, alias_blocks, endpoint_blocks = text_processor._prepare_fallback_gaps(
+        semantic_build, mentions
+    )
+
+    assert [gap.block.block_id for gap in gaps] == [first.block_id, second.block_id]
+    assert gaps[0].reasons == (
+        "known_alias_missing_from_extraction",
+        "unknown_relationship_endpoint",
+    )
+    assert gaps[0].support_text == "Acme signed the vendor agreement."
+    assert gaps[1].reasons == ("meaningful_context_without_candidates",)
+    assert alias_blocks == {first.block_id}
+    assert endpoint_blocks == {first.block_id}
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 async def test_llm_ner_fallback_recovers_a_literal_missed_entity():
     compiled_domain = domain()
     current = block("Zephyr Dynamics is the selected provider.")
@@ -696,6 +786,324 @@ async def test_unknown_endpoint_diagnostic_triggers_one_targeted_fallback():
 
 @pytest.mark.unit
 @pytest.mark.no_network
+async def test_jev_extraction_observe_records_positive_but_keeps_llm_baseline():
+    compiled_domain = domain()
+    current = block("Orion works with Zephyr Dynamics.")
+    semantic_build = build(blocks=(current,), compiled_domain=compiled_domain)
+    semantic_build.policy = policy(
+        compiled_domain,
+        jev=JevPolicy(extraction_mode="observe"),
+    )
+    semantic_build.set_unknown_endpoint_diagnostics(
+        (
+            UnknownEndpointDiagnostic(
+                block_id=current.block_id,
+                name="Zephyr Dynamics",
+                entity_type="Company",
+            ),
+        )
+    )
+    llm = FakeEntityLLM(
+        [{"block_id": "b1", "name": "Zephyr Dynamics", "type": "Company"}]
+    )
+    jev = FakeExtractionJev()
+    vp01 = FakeVP01(
+        [VP01EntitySpan(text="Orion", label="company", start=0, end=5)]
+    )
+
+    mentions = await processor(
+        vp01, llm=llm, jev_client=jev
+    ).extract_context_mentions(semantic_build)
+
+    assert [(item.name, item.origin) for item in mentions] == [
+        ("Orion", "vp01"),
+        ("Zephyr Dynamics", "llm_fallback"),
+    ]
+    assert len(jev.calls) == 1
+    assert set(jev.calls[0]["questions"]) == {"entity_evidence"}
+    assert len(llm.calls) == 1
+    decision = semantic_build.trace.extraction_decisions[0]
+    assert decision["record"]["acceptance_status"] == "proposed"
+    assert decision["suggested_entity_type"] == "Company"
+    assert decision["accepted_entity_type"] is None
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_active_jev_positive_endpoint_avoids_resolved_llm_fallback():
+    compiled_domain = domain()
+    current = block("Orion works with Zephyr Dynamics.")
+    semantic_build = build(blocks=(current,), compiled_domain=compiled_domain)
+    semantic_build.policy = policy(
+        compiled_domain,
+        jev=JevPolicy(extraction_mode="active"),
+    )
+    semantic_build.set_unknown_endpoint_diagnostics(
+        (
+            UnknownEndpointDiagnostic(
+                block_id=current.block_id,
+                name="Zephyr Dynamics",
+                entity_type="Company",
+            ),
+        )
+    )
+    llm = FakeEntityLLM([])
+    jev = FakeExtractionJev()
+    vp01 = FakeVP01(
+        [VP01EntitySpan(text="Orion", label="company", start=0, end=5)]
+    )
+
+    mentions = await processor(
+        vp01, llm=llm, jev_client=jev
+    ).extract_context_mentions(semantic_build)
+
+    assert [(item.name, item.origin) for item in mentions] == [
+        ("Orion", "vp01"),
+        ("Zephyr Dynamics", "jev_fallback"),
+    ]
+    assert mentions[1].source_start == len("Orion works with ")
+    assert llm.calls == []
+    assert semantic_build.trace.jev_extraction_accepted == 1
+    assert semantic_build.trace.jev_extraction_avoided_fallback_calls == 1
+    assert semantic_build.trace.jev_extraction_avoided_fallback_blocks == 1
+    assert semantic_build.trace.llm_ner_fallback_calls == 0
+    assert semantic_build.trace.extraction_decisions[0]["record"][
+        "acceptance_status"
+    ] == "accepted"
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_active_jev_does_not_treat_one_name_as_complete_uncovered_block():
+    compiled_domain = domain()
+    current = block("Delta uses PostgreSQL with Maya leading migration.")
+    semantic_build = build(blocks=(current,), compiled_domain=compiled_domain)
+    semantic_build.policy = policy(
+        compiled_domain,
+        jev=JevPolicy(extraction_mode="active"),
+    )
+    semantic_build.set_unknown_endpoint_diagnostics(
+        (
+            UnknownEndpointDiagnostic(
+                block_id=current.block_id,
+                name="Delta",
+                entity_type="Company",
+            ),
+        )
+    )
+    llm = FakeEntityLLM(
+        [{"block_id": "b1", "name": "PostgreSQL", "type": "Company"}]
+    )
+
+    mentions = await processor(
+        FakeVP01(), llm=llm, jev_client=FakeExtractionJev()
+    ).extract_context_mentions(semantic_build)
+
+    assert [(item.name, item.origin) for item in mentions] == [
+        ("Delta", "jev_fallback"),
+        ("PostgreSQL", "llm_fallback"),
+    ]
+    assert len(llm.calls) == 1
+    assert semantic_build.trace.jev_extraction_avoided_fallback_calls == 0
+    assert semantic_build.trace.llm_ner_fallback_calls == 1
+    assert semantic_build.trace.llm_ner_fallback_blocks == 1
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_active_jev_negative_keeps_residual_llm_fallback():
+    compiled_domain = domain()
+    current = block("Orion works with Zephyr Dynamics.")
+    semantic_build = build(blocks=(current,), compiled_domain=compiled_domain)
+    semantic_build.policy = policy(
+        compiled_domain,
+        jev=JevPolicy(extraction_mode="active"),
+    )
+    semantic_build.set_unknown_endpoint_diagnostics(
+        (
+            UnknownEndpointDiagnostic(
+                block_id=current.block_id,
+                name="Zephyr Dynamics",
+                entity_type="Company",
+            ),
+        )
+    )
+    llm = FakeEntityLLM(
+        [{"block_id": "b1", "name": "Zephyr Dynamics", "type": "Company"}]
+    )
+    vp01 = FakeVP01(
+        [VP01EntitySpan(text="Orion", label="company", start=0, end=5)]
+    )
+
+    mentions = await processor(
+        vp01,
+        llm=llm,
+        jev_client=FakeExtractionJev(entity_noul=0.2),
+    ).extract_context_mentions(semantic_build)
+
+    assert mentions[-1].origin == "llm_fallback"
+    assert len(llm.calls) == 1
+    assert semantic_build.trace.extraction_decisions[0]["record"][
+        "acceptance_status"
+    ] == "rejected"
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_jev_extraction_provider_failure_keeps_baseline_fallback():
+    class FailingJev:
+        async def evaluate(self, **_kwargs):
+            raise RuntimeError("provider failed")
+
+    compiled_domain = domain()
+    current = block("Orion works with Zephyr Dynamics.")
+    semantic_build = build(blocks=(current,), compiled_domain=compiled_domain)
+    semantic_build.policy = policy(
+        compiled_domain,
+        jev=JevPolicy(extraction_mode="active"),
+    )
+    semantic_build.set_unknown_endpoint_diagnostics(
+        (
+            UnknownEndpointDiagnostic(
+                block_id=current.block_id,
+                name="Zephyr Dynamics",
+                entity_type="Company",
+            ),
+        )
+    )
+    llm = FakeEntityLLM(
+        [{"block_id": "b1", "name": "Zephyr Dynamics", "type": "Company"}]
+    )
+    vp01 = FakeVP01(
+        [VP01EntitySpan(text="Orion", label="company", start=0, end=5)]
+    )
+
+    mentions = await processor(
+        vp01, llm=llm, jev_client=FailingJev()
+    ).extract_context_mentions(semantic_build)
+
+    assert mentions[-1].origin == "llm_fallback"
+    assert semantic_build.trace.extraction_decisions[0]["record"]["result"][
+        "reason"
+    ] == "provider_error"
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_jev_extraction_cancellation_propagates():
+    class CancellingJev:
+        async def evaluate(self, **_kwargs):
+            raise asyncio.CancelledError
+
+    compiled_domain = domain()
+    current = block("Orion works with Zephyr Dynamics.")
+    semantic_build = build(blocks=(current,), compiled_domain=compiled_domain)
+    semantic_build.policy = policy(
+        compiled_domain,
+        jev=JevPolicy(extraction_mode="observe"),
+    )
+    semantic_build.set_unknown_endpoint_diagnostics(
+        (
+            UnknownEndpointDiagnostic(
+                block_id=current.block_id,
+                name="Zephyr Dynamics",
+                entity_type="Company",
+            ),
+        )
+    )
+    vp01 = FakeVP01(
+        [VP01EntitySpan(text="Orion", label="company", start=0, end=5)]
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await processor(
+            vp01,
+            llm=FakeEntityLLM([]),
+            jev_client=CancellingJev(),
+        ).extract_context_mentions(semantic_build)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_active_jev_can_recover_with_llm_ner_disabled():
+    compiled_domain = domain()
+    current = block("Orion works with Zephyr Dynamics.")
+    semantic_build = build(blocks=(current,), compiled_domain=compiled_domain)
+    semantic_build.policy = policy(
+        compiled_domain,
+        llm_ner_mode="disabled",
+        jev=JevPolicy(extraction_mode="active"),
+    )
+    semantic_build.set_unknown_endpoint_diagnostics(
+        (
+            UnknownEndpointDiagnostic(
+                block_id=current.block_id,
+                name="Zephyr Dynamics",
+                entity_type="Company",
+            ),
+        )
+    )
+    vp01 = FakeVP01(
+        [VP01EntitySpan(text="Orion", label="company", start=0, end=5)]
+    )
+
+    mentions = await processor(
+        vp01,
+        llm_ner_mode="disabled",
+        jev_client=FakeExtractionJev(),
+    ).extract_context_mentions(semantic_build)
+
+    assert [(item.name, item.origin) for item in mentions] == [
+        ("Orion", "vp01"),
+        ("Zephyr Dynamics", "jev_fallback"),
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_foreign_alias_uses_type_choice_and_support_only_offsets():
+    compiled_domain = domain()
+    current = block("Orion approved the selected vendor.")
+    semantic_build = build(
+        blocks=(current,),
+        compiled_domain=compiled_domain,
+        supports={current.block_id: (support(current.block_id, 91),)},
+        message_texts={91: "Acme signed the vendor agreement."},
+    )
+    semantic_build.policy = policy(
+        compiled_domain,
+        jev=JevPolicy(extraction_mode="active"),
+    )
+    text_processor = processor(
+        FakeVP01(
+            [VP01EntitySpan(text="Orion", label="company", start=0, end=5)]
+        ),
+        llm=FakeEntityLLM([]),
+        jev_client=FakeExtractionJev(),
+    )
+    text_processor.get_known_aliases = lambda: {"Acme": 701}
+    text_processor.get_profile = lambda _entity_id: _async_value(
+        EntityProfile(
+            canonical_name="Acme",
+            entity_type="Company",
+            topic="Work",
+            project_id="foreign-project",
+        )
+    )
+
+    mentions = await text_processor.extract_context_mentions(semantic_build)
+
+    assert [(item.name, item.origin) for item in mentions] == [
+        ("Orion", "vp01"),
+        ("Acme", "jev_fallback"),
+    ]
+    assert mentions[1].source_start is None
+    questions = text_processor._jev_client.calls[0]["questions"]
+    assert set(questions) == {"type_choice", "entity_evidence"}
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 async def test_disabled_llm_ner_mode_preserves_the_normal_extraction_path():
     compiled_domain = domain()
     current = block("Zephyr Dynamics is the selected provider.")
@@ -760,10 +1168,50 @@ async def test_identity_passes_share_one_window_work_budget():
     budget = semantic_build.jev_work_budget
     assert semantic_build.identity_pass_number == 1
     assert budget.max_calls == 1
+    assert budget.max_elapsed_seconds == 30
 
     await service.build(semantic_build)
     assert semantic_build.identity_pass_number == 2
     assert semantic_build.jev_work_budget is budget
+
+
+def test_jev_identity_observations_are_emitted_as_bounded_json(monkeypatch):
+    emitted = []
+
+    class BoundLogger:
+        def info(self, message, payload):
+            emitted.append((message, payload))
+
+    monkeypatch.setattr(
+        "core.ingestion.context_entity_build.logger.bind",
+        lambda **_fields: BoundLogger(),
+    )
+
+    _log_jev_identity_observations(
+        (
+            {"outcome": "reused"},
+            {
+                "outcome": "abstained",
+                "jev": {
+                    "record": {
+                        "window_id": "window-1",
+                        "result": {"outcome": "available"},
+                    },
+                    "candidate_set_truncated": False,
+                },
+            },
+        )
+    )
+
+    assert len(emitted) == 1
+    assert emitted[0][0] == "jev_identity_observation {}"
+    assert json.loads(emitted[0][1]) == {
+        "record": {
+            "window_id": "window-1",
+            "result": {"outcome": "available"},
+        },
+        "candidate_set_truncated": False,
+    }
 
 
 @pytest.mark.unit

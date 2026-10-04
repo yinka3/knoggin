@@ -46,9 +46,13 @@ def test_domain_config_compiles_canonical_lookups():
 
     assert config.version == 3
     assert config.entity_types[0].topic == "Software Development"
+    assert config.entity_types[0].allowed_topics == ("Software Development",)
     assert config.entity_types[0].labels == ("software project", "application")
     assert compiled.resolve_entity_type(" SOFTWARE PROJECT ") == "Project"
     assert compiled.topic_for_entity_type("project") == "Software Development"
+    assert compiled.allowed_topics_for_entity_type("project") == (
+        "Software Development",
+    )
     assert compiled.normalize_topic("software development") == "Software Development"
     assert compiled.active_topics == ("Software Development",)
     assert compiled.active_entity_types == ("Project", "Technology")
@@ -207,9 +211,75 @@ def test_domain_config_round_trips_through_mapping():
 
 @pytest.mark.unit
 @pytest.mark.no_network
+def test_entity_type_can_allow_multiple_topics_with_a_stable_default():
+    payload = domain_payload()
+    payload["topics"]["Operations"] = {
+        "description": "Running software",
+        "active": True,
+    }
+    payload["entity_types"]["Project"]["allowed_topics"] = [
+        "operations",
+        "SOFTWARE DEVELOPMENT",
+        "Archive",
+    ]
+
+    config = DomainConfig.from_mapping(payload)
+    compiled = config.compile()
+
+    assert config.entity_types[0].topic == "Software Development"
+    assert config.entity_types[0].allowed_topics == (
+        "Operations",
+        "Software Development",
+        "Archive",
+    )
+    assert compiled.topic_for_entity_type("Project") == "Software Development"
+    assert compiled.allowed_topics_for_entity_type("Project") == (
+        "Operations",
+        "Software Development",
+    )
+    assert "Allowed Topics: Operations, Software Development" in compiled.label_block
+    assert type(compiled).from_dict(compiled.to_dict()) == compiled
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("allowed_topics", "message"),
+    [
+        ([], "must not be empty"),
+        (["Operations"], "must include its default topic"),
+        (["Software Development", "Unknown"], "references unknown topics"),
+    ],
+)
+def test_entity_type_rejects_invalid_allowed_topics(allowed_topics, message):
+    payload = domain_payload()
+    payload["topics"]["Operations"] = {"active": True}
+    payload["entity_types"]["Project"]["allowed_topics"] = allowed_topics
+
+    with pytest.raises(DomainConfigError, match=message):
+        DomainConfig.from_mapping(payload)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 def test_compiled_domain_rejects_malformed_context_section_snapshot():
     compiled = DomainConfig.from_mapping(domain_payload()).compile().to_dict()
     compiled["context_sections"] = [{"key": "current_state", "title": ""}]
 
     with pytest.raises(ValueError, match="Invalid compiled Context section"):
         type(DomainConfig.from_mapping(domain_payload()).compile()).from_dict(compiled)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_older_compiled_snapshot_defaults_allowed_topics_to_fixed_mapping():
+    compiled = DomainConfig.from_mapping(domain_payload()).compile()
+    legacy_snapshot = compiled.to_dict()
+    legacy_snapshot.pop("entity_type_to_allowed_topics")
+
+    restored = type(compiled).from_dict(legacy_snapshot)
+
+    assert restored.allowed_topics_for_entity_type("Project") == (
+        "Software Development",
+    )
+    assert restored.allowed_topics_for_entity_type("Archived Item") == ()

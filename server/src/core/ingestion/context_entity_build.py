@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import re
+
+from loguru import logger
 
 from common.schema.ingestion.contracts import (
     ContextEntityResult,
@@ -13,6 +16,30 @@ from core.ingestion.batch import SemanticWindowBuild
 from core.ingestion.text_processor import TextProcessor
 from core.knowledge.entity.resolver import ContextEntityResolution, EntityResolver
 from infrastructure.jev_client import JevWorkBudget
+
+
+def _log_jev_identity_observations(identity_decisions) -> None:
+    """Emit bounded, evidence-free pilot records to the configured log sinks."""
+
+    for decision in identity_decisions:
+        observation = decision.get("jev")
+        if observation is not None:
+            # This excludes raw evidence and remains bounded by the admitted
+            # candidate and call limits. JSON remains usable in plain log sinks.
+            logger.bind(jev_identity_observation=True).info(
+                "jev_identity_observation {}",
+                json.dumps(observation, sort_keys=True, separators=(",", ":")),
+            )
+
+
+def _log_jev_classification_observations(classification_decisions) -> None:
+    """Emit bounded, evidence-free topic proposals for pilot review."""
+
+    for observation in classification_decisions:
+        logger.bind(jev_classification_observation=True).info(
+            "jev_classification_observation {}",
+            json.dumps(observation, sort_keys=True, separators=(",", ":")),
+        )
 
 
 def _literal_mention_is_present(mention: str, text: str) -> bool:
@@ -100,7 +127,8 @@ class ContextEntityBuildService:
 
         if semantic_build.jev_work_budget is None:
             semantic_build.jev_work_budget = JevWorkBudget(
-                semantic_build.policy.jev.max_calls_per_window
+                semantic_build.policy.jev.max_calls_per_window,
+                semantic_build.policy.jev.max_elapsed_seconds_per_window,
             )
         semantic_build.identity_pass_number += 1
         mentions = await self.processor.extract_context_mentions(semantic_build)
@@ -117,4 +145,12 @@ class ContextEntityBuildService:
             work_budget=semantic_build.jev_work_budget,
         )
         semantic_build.trace.identity_decisions.extend(resolution.identity_decisions)
+        semantic_build.trace.classification_decisions.extend(
+            resolution.classification_decisions
+        )
+        semantic_build.trace.classification_aggregates.extend(
+            resolution.classification_aggregates
+        )
+        _log_jev_identity_observations(resolution.identity_decisions)
+        _log_jev_classification_observations(resolution.classification_decisions)
         return assemble_context_entity_result(semantic_build, resolution)

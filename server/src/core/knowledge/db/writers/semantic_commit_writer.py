@@ -16,10 +16,12 @@ from common.schema.ingestion.contracts import (
     ProjectEntityClassification,
     relationship_identity,
 )
+from common.schema.jev import JevDecisionRecord
 from common.schema.semantic_window import SemanticWindowStage
 from common.scoping import IDENTITY_ENTITY_ID, require_scope_value
 from core.ingestion.batch import SemanticWindowBuild
 from core.knowledge.db.projection_rebuilder import GraphBuilder
+from core.knowledge.entity.jev_classification import proposed_topic
 from infrastructure.postgres_client import PostgresClient
 
 
@@ -104,6 +106,15 @@ class SemanticCommitWriter:
                     relationships_written = 0
                     relationships_removed = 0
                 else:
+                    await self._write_jev_identity_decisions(
+                        cur, build, eligible_blocks=context_input.eligible_blocks
+                    )
+                    await self._write_jev_extraction_decisions(
+                        cur, build, eligible_blocks=context_input.eligible_blocks
+                    )
+                    await self._write_jev_classification_decisions(
+                        cur, build, eligible_blocks=context_input.eligible_blocks
+                    )
                     await self._write_entities(
                         cur,
                         entity_result,
@@ -317,6 +328,337 @@ class SemanticCommitWriter:
             },
             reuses_published_context=reuses_published_context,
         )
+
+    @staticmethod
+    async def _write_jev_identity_decisions(
+        cur,
+        build: SemanticWindowBuild,
+        *,
+        eligible_blocks: set[UUID],
+    ) -> None:
+        """Commit private observe records with the window they describe."""
+
+        for decision in build.trace.identity_decisions:
+            observation = decision.get("jev")
+            if observation is None:
+                continue
+            record = JevDecisionRecord.model_validate(observation["record"])
+            if (
+                record.capability != "identity"
+                or record.mode != build.policy.jev.identity_mode
+                or record.window_id != build.window_id
+                or record.project_id != build.project_id
+                or record.domain_version != build.policy.domain.version
+                or record.pinned_model != build.policy.jev.model
+                or record.question_version != build.policy.jev.identity_question_version
+                or record.acceptance_policy_version
+                != build.policy.jev.acceptance_policy_version
+                or not record.evidence_block_ids
+                or not set(record.evidence_block_ids) <= eligible_blocks
+            ):
+                raise ValueError("JEV decision is outside the committed window scope")
+            offered = int(observation["offered_candidate_count"])
+            eligible = int(observation["eligible_candidate_count"])
+            truncated = bool(observation["candidate_set_truncated"])
+            accepted_entity_id = observation.get("accepted_entity_id")
+            if (
+                offered != len(record.option_mapping)
+                or eligible < offered
+                or truncated != (eligible > offered)
+                or (truncated and observation.get("suggested_entity_id") is not None)
+                or (
+                    observation.get("suggested_entity_id") is not None
+                    and str(observation["suggested_entity_id"])
+                    not in record.option_mapping.values()
+                )
+                or (
+                    accepted_entity_id is not None
+                    and (
+                        record.acceptance_status != "accepted"
+                        or accepted_entity_id != observation.get("suggested_entity_id")
+                        or accepted_entity_id not in build.entity_result.entity_ids
+                        or accepted_entity_id in build.entity_result.new_entity_ids
+                    )
+                )
+                or (
+                    record.acceptance_status == "accepted"
+                    and accepted_entity_id is None
+                )
+            ):
+                raise ValueError("JEV decision candidate counts are inconsistent")
+            catalog_ids = observation.get("eligible_candidate_ids", [])
+            if (
+                not isinstance(catalog_ids, list)
+                or len(catalog_ids) > 128
+                or len(catalog_ids) > eligible
+                or any(not isinstance(value, int) or value <= 0 for value in catalog_ids)
+                or not {
+                    int(value) for value in record.option_mapping.values()
+                } <= set(catalog_ids)
+                or bool(observation.get("candidate_catalog_truncated"))
+                != (eligible > len(catalog_ids))
+            ):
+                raise ValueError("JEV decision candidate catalog is inconsistent")
+            payload = json.dumps(observation, sort_keys=True, separators=(",", ":"))
+            if len(payload.encode("utf-8")) > 512_000:
+                raise ValueError("JEV decision exceeds the durable record limit")
+            await cur.execute(
+                """
+                INSERT INTO public.project_jev_identity_decisions (
+                    window_id, project_id, pass_number, occurrence_key, decision,
+                    baseline_entity_id, suggested_entity_id,
+                    accepted_entity_id,
+                    eligible_candidate_count, offered_candidate_count,
+                    candidate_set_truncated
+                ) VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    build.window_id,
+                    build.project_id,
+                    record.pass_number,
+                    record.occurrence_key,
+                    payload,
+                    observation.get("baseline_entity_id"),
+                    observation.get("suggested_entity_id"),
+                    accepted_entity_id,
+                    eligible,
+                    offered,
+                    truncated,
+                ),
+            )
+
+    @staticmethod
+    async def _write_jev_extraction_decisions(
+        cur,
+        build: SemanticWindowBuild,
+        *,
+        eligible_blocks: set[UUID],
+    ) -> None:
+        """Commit private bounded-extraction provenance with Knowledge."""
+
+        for observation in build.trace.extraction_decisions:
+            record = JevDecisionRecord.model_validate(observation["record"])
+            if (
+                record.capability != "extraction"
+                or record.mode != build.policy.jev.extraction_mode
+                or record.window_id != build.window_id
+                or record.project_id != build.project_id
+                or record.domain_version != build.policy.domain.version
+                or record.pinned_model != build.policy.jev.model
+                or record.question_version
+                != build.policy.jev.extraction_question_version
+                or record.acceptance_policy_version
+                != build.policy.jev.extraction_acceptance_policy_version
+                or len(record.evidence_block_ids) != 1
+                or not set(record.evidence_block_ids) <= eligible_blocks
+            ):
+                raise ValueError(
+                    "JEV extraction decision is outside the committed window scope"
+                )
+            proposed_type = observation.get("proposed_entity_type")
+            suggested_type = observation.get("suggested_entity_type")
+            accepted_type = observation.get("accepted_entity_type")
+            valid_types = set(build.policy.domain.active_entity_types)
+            if any(
+                value is not None and value not in valid_types
+                for value in (proposed_type, suggested_type, accepted_type)
+            ) or (accepted_type is not None and record.acceptance_status != "accepted"):
+                raise ValueError("JEV extraction decision has an invalid entity type")
+            if not isinstance(observation.get("has_context_offsets"), bool):
+                raise ValueError("JEV extraction offset provenance is invalid")
+            if not isinstance(observation.get("candidate_set_truncated"), bool):
+                raise ValueError("JEV extraction candidate-set provenance is invalid")
+            if observation["candidate_set_truncated"] and accepted_type is not None:
+                raise ValueError("Truncated JEV extraction choices cannot be accepted")
+            payload = json.dumps(observation, sort_keys=True, separators=(",", ":"))
+            if len(payload.encode("utf-8")) > 256_000:
+                raise ValueError("JEV extraction decision exceeds the durable record limit")
+            await cur.execute(
+                """
+                INSERT INTO public.project_jev_extraction_decisions (
+                    window_id, project_id, pass_number, occurrence_key, decision,
+                    evidence_origin, proposed_entity_type, suggested_entity_type,
+                    accepted_entity_type, has_context_offsets
+                ) VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s)
+                """,
+                (
+                    build.window_id,
+                    build.project_id,
+                    record.pass_number,
+                    record.occurrence_key,
+                    payload,
+                    observation["evidence_origin"],
+                    proposed_type,
+                    suggested_type,
+                    accepted_type,
+                    observation["has_context_offsets"],
+                ),
+            )
+
+    @staticmethod
+    async def _write_jev_classification_decisions(
+        cur,
+        build: SemanticWindowBuild,
+        *,
+        eligible_blocks: set[UUID],
+    ) -> None:
+        """Commit topic proposals and their post-identity aggregate atomically."""
+
+        observations = build.trace.classification_decisions
+        aggregates = build.trace.classification_aggregates
+        grouped: dict[int, list[dict]] = {}
+        for observation in observations:
+            entity_id = observation.get("entity_id")
+            if not isinstance(entity_id, int) or isinstance(entity_id, bool):
+                raise ValueError("JEV classification decision has no resolved entity")
+            grouped.setdefault(entity_id, []).append(observation)
+        aggregates_by_id = {}
+        for aggregate in aggregates:
+            entity_id = aggregate.get("entity_id")
+            if (
+                not isinstance(entity_id, int)
+                or isinstance(entity_id, bool)
+                or entity_id in aggregates_by_id
+            ):
+                raise ValueError("JEV classification aggregate identity is invalid")
+            aggregates_by_id[entity_id] = aggregate
+        if set(aggregates_by_id) != set(grouped):
+            raise ValueError("JEV classification aggregates do not cover decisions")
+
+        for entity_id, items in grouped.items():
+            classification = build.entity_result.project_classifications.get(entity_id)
+            aggregate = aggregates_by_id[entity_id]
+            if (
+                classification is None
+                or classification.membership != "missing"
+                or entity_id not in build.entity_result.entity_ids
+            ):
+                raise ValueError(
+                    "JEV classification decision is not a first-entry entity"
+                )
+            allowed_topics = build.policy.domain.allowed_topics_for_entity_type(
+                classification.entity_type
+            )
+            suggested_topics = {
+                item.get("suggested_topic")
+                for item in items
+                if item.get("suggested_topic") is not None
+            }
+            ordered_suggestions = [
+                topic for topic in allowed_topics if topic in suggested_topics
+            ]
+            expected_status = (
+                "conflicting_proposals"
+                if len(ordered_suggestions) > 1
+                else "consistent_proposal"
+                if len(ordered_suggestions) == 1
+                else "no_proposal"
+            )
+            if aggregate != {
+                "entity_id": entity_id,
+                "entity_type": classification.entity_type,
+                "membership": "missing",
+                "status": expected_status,
+                "proposed_topics": ordered_suggestions,
+                "operational_topic": classification.topic,
+                "observation_count": len(items),
+            }:
+                raise ValueError("JEV classification aggregate is inconsistent")
+            if classification.topic not in allowed_topics:
+                raise ValueError("JEV classification has no valid operational topic")
+
+            for observation in items:
+                record = JevDecisionRecord.model_validate(observation["record"])
+                mapping_topics = tuple(record.option_mapping.values())
+                truncated = observation.get("option_set_truncated")
+                suggested_topic = observation.get("suggested_topic")
+                accepted_topic = observation.get("accepted_topic")
+                expected_acceptance_status = (
+                    "conflicting"
+                    if expected_status == "conflicting_proposals"
+                    and suggested_topic is not None
+                    else "indeterminate"
+                    if record.result.outcome == "available" and truncated
+                    else "proposed"
+                    if record.result.outcome == "available"
+                    else "unavailable"
+                )
+                if (
+                    record.capability != "classification"
+                    or record.mode != build.policy.jev.classification_mode
+                    or record.window_id != build.window_id
+                    or record.project_id != build.project_id
+                    or record.domain_version != build.policy.domain.version
+                    or record.pinned_model != build.policy.jev.model
+                    or record.question_version
+                    != build.policy.jev.classification_question_version
+                    or record.acceptance_policy_version != "observe-v1"
+                    or record.baseline_outcome != "default_topic"
+                    or not record.evidence_block_ids
+                    or not set(record.evidence_block_ids) <= eligible_blocks
+                ):
+                    raise ValueError(
+                        "JEV classification decision is outside the committed window scope"
+                    )
+                if (
+                    observation.get("entity_type") != classification.entity_type
+                    or observation.get("baseline_topic") != classification.topic
+                    or observation.get("allowed_topics") != list(allowed_topics)
+                    or observation.get("aggregation") != aggregate
+                    or "accepted_topic" not in observation
+                    or not isinstance(truncated, bool)
+                    or len(mapping_topics) != len(set(mapping_topics))
+                    or not set(mapping_topics) <= set(allowed_topics)
+                    or truncated != (len(mapping_topics) < len(allowed_topics))
+                    or (truncated and suggested_topic is not None)
+                    or proposed_topic(
+                        record.result,
+                        record.option_mapping,
+                        option_set_truncated=truncated,
+                    )
+                    != suggested_topic
+                    or (
+                        suggested_topic is not None
+                        and suggested_topic not in mapping_topics
+                    )
+                    or accepted_topic is not None
+                    or record.acceptance_status != expected_acceptance_status
+                ):
+                    raise ValueError("JEV classification decision is inconsistent")
+                payload = json.dumps(
+                    observation, sort_keys=True, separators=(",", ":")
+                )
+                if len(payload.encode("utf-8")) > 256_000:
+                    raise ValueError(
+                        "JEV classification decision exceeds the durable record limit"
+                    )
+                await cur.execute(
+                    """
+                    INSERT INTO public.project_jev_classification_decisions (
+                        window_id, project_id, pass_number, occurrence_key,
+                        decision, entity_id, entity_type, baseline_topic,
+                        suggested_topic, accepted_topic, aggregation_status,
+                        operational_topic, option_set_truncated
+                    ) VALUES (
+                        %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s, %s
+                    )
+                    """,
+                    (
+                        build.window_id,
+                        build.project_id,
+                        record.pass_number,
+                        record.occurrence_key,
+                        payload,
+                        entity_id,
+                        classification.entity_type,
+                        observation["baseline_topic"],
+                        suggested_topic,
+                        accepted_topic,
+                        aggregate["status"],
+                        aggregate["operational_topic"],
+                        truncated,
+                    ),
+                )
 
     @staticmethod
     def _require_empty_reused_context_build(build: SemanticWindowBuild) -> None:

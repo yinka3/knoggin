@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 import threading
 from collections.abc import Iterable
@@ -33,8 +34,14 @@ from core.knowledge.entity.candidates import (
     entity_record_for_project,
 )
 from core.knowledge.entity.index import EntityIndex
+from core.knowledge.entity.jev_classification import (
+    aggregate_topic_proposals,
+    prepare_topic_request,
+    proposed_topic,
+)
 from core.knowledge.entity.jev_identity import (
     IdentityOption,
+    accepted_identity,
     prepare_identity_request,
     proposed_identity,
 )
@@ -100,6 +107,8 @@ class ContextEntityResolution:
     resolved_mentions: tuple[ResolvedContextBlockMention, ...]
     block_entity_associations: tuple[ContextBlockEntityAssociation, ...]
     identity_decisions: tuple[dict[str, Any], ...]
+    classification_decisions: tuple[dict[str, Any], ...]
+    classification_aggregates: tuple[dict[str, Any], ...]
 
 
 @dataclass
@@ -119,6 +128,8 @@ class _ContextEntityResolutionState:
     resolved_mentions: list[ResolvedContextBlockMention] = field(default_factory=list)
     associations: list[ContextBlockEntityAssociation] = field(default_factory=list)
     identity_decisions: list[dict[str, Any]] = field(default_factory=list)
+    classification_decisions: list[dict[str, Any]] = field(default_factory=list)
+    classification_aggregates: list[dict[str, Any]] = field(default_factory=list)
 
 
 class EntityResolver:
@@ -205,7 +216,8 @@ class EntityResolver:
         async with self.resolution_lock:
             state = _ContextEntityResolutionState()
             identity_work_budget = work_budget or JevWorkBudget(
-                policy.jev.max_calls_per_window
+                policy.jev.max_calls_per_window,
+                policy.jev.max_elapsed_seconds_per_window,
             )
 
             candidate_snapshot: EntityCandidateSnapshot | None = None
@@ -269,6 +281,13 @@ class EntityResolver:
                     accepted = bool(
                         winner
                         and winner[3].score >= policy.resolution_threshold
+                        and self._identity_candidate_is_eligible(
+                            winner[1],
+                            winner[2],
+                            mention,
+                            policy,
+                            state.project_classifications,
+                        )
                         and self.should_accept_candidate(
                             mention.name,
                             mention.entity_type,
@@ -302,9 +321,28 @@ class EntityResolver:
                     }
                     state.identity_decisions.append(decision)
                     if (
-                        not accepted
-                        and policy.jev.identity_mode == "observe"
+                        (
+                            policy.jev.identity_mode == "observe"
+                            or (
+                                policy.jev.identity_mode == "active"
+                                and policy.jev.acceptance_policy_version
+                                == "identity-positive-v1"
+                            )
+                        )
                         and self._jev_client is not None
+                        and (
+                            not accepted
+                            or (
+                                policy.jev.identity_mode == "observe"
+                                and self._sample_identity_match(
+                                    window_id,
+                                    pass_number,
+                                    index,
+                                    mention,
+                                    policy,
+                                )
+                            )
+                        )
                     ):
                         observation = await self._observe_jev_identity(
                             mention=mention,
@@ -317,9 +355,36 @@ class EntityResolver:
                             pass_number=pass_number,
                             occurrence_index=index,
                             work_budget=identity_work_budget,
+                            baseline_outcome=(
+                                "deterministic_reuse"
+                                if accepted
+                                else "deterministic_abstention"
+                            ),
                         )
                         if observation is not None:
                             decision["jev"] = observation
+                            active_entity_id = observation.get("accepted_entity_id")
+                            if not accepted and active_entity_id is not None:
+                                selected = next(
+                                    (
+                                        item
+                                        for item in ranked
+                                        if item[1] == active_entity_id
+                                    ),
+                                    None,
+                                )
+                                if selected is not None:
+                                    winner = selected
+                                    accepted = True
+                                    decision.update(
+                                        {
+                                            "candidate_id": selected[1],
+                                            "score": selected[0],
+                                            "signals": sorted(selected[4]),
+                                            "outcome": "reused",
+                                            "selection_source": "jev_active",
+                                        }
+                                    )
                     if accepted and winner is not None:
                         candidate_id, profile = winner[1], winner[2]
                         classification = self._classification_for_resolution(
@@ -373,7 +438,11 @@ class EntityResolver:
                         )
                         state.pending_support_by_id[entity_id] = support_text
 
-                if entry[0] == "candidates" and "jev" in decision:
+                if (
+                    entry[0] == "candidates"
+                    and "jev" in decision
+                    and decision["jev"].get("accepted_entity_id") is None
+                ):
                     decision["jev"]["baseline_entity_id"] = entity_id
 
                 classification = self._classification_for_resolution(
@@ -388,6 +457,25 @@ class EntityResolver:
                     raise ValueError(
                         "Context entity resolution produced conflicting project classifications"
                     )
+                if (
+                    classification is not None
+                    and classification.membership == "missing"
+                    and policy.jev.classification_mode == "observe"
+                    and self._jev_client is not None
+                ):
+                    observation = await self._observe_jev_classification(
+                        mention=mention,
+                        support_text=support_text,
+                        entity_id=entity_id,
+                        baseline_topic=classification.topic,
+                        policy=policy,
+                        window_id=window_id,
+                        pass_number=pass_number,
+                        occurrence_index=index,
+                        work_budget=identity_work_budget,
+                    )
+                    if observation is not None:
+                        state.classification_decisions.append(observation)
                 if classification is not None:
                     state.project_classifications[entity_id] = classification
 
@@ -415,6 +503,13 @@ class EntityResolver:
                     for association in state.associations
                 }.values()
             )
+            state.classification_aggregates.extend(
+                aggregate_topic_proposals(
+                    state.classification_decisions,
+                    state.project_classifications,
+                    policy.domain,
+                )
+            )
             return ContextEntityResolution(
                 entity_ids=tuple(state.entity_ids),
                 new_entity_ids=frozenset(state.new_ids),
@@ -428,7 +523,90 @@ class EntityResolver:
                 resolved_mentions=tuple(state.resolved_mentions),
                 block_entity_associations=unique_associations,
                 identity_decisions=tuple(state.identity_decisions),
+                classification_decisions=tuple(state.classification_decisions),
+                classification_aggregates=tuple(state.classification_aggregates),
             )
+
+    async def _observe_jev_classification(
+        self,
+        *,
+        mention: ContextBlockMention,
+        support_text: str,
+        entity_id: int,
+        baseline_topic: str,
+        policy: IngestionPolicy,
+        window_id: UUID | None,
+        pass_number: int,
+        occurrence_index: int,
+        work_budget: JevWorkBudget,
+    ) -> dict[str, Any] | None:
+        """Record a topic proposal without changing the staged classification."""
+
+        request = prepare_topic_request(
+            mention,
+            support_text,
+            policy.domain,
+            policy.jev,
+        )
+        if request is None:
+            return None
+        if window_id is None:
+            raise TypeError("JEV classification observation requires the window ID")
+        if not work_budget.take_observation():
+            return None
+        state, questions, mapping, option_set_truncated = request
+        try:
+            result = await self._jev_client.evaluate(
+                state=state,
+                questions=questions,
+                capability="classification",
+                policy=policy.jev,
+                work_budget=work_budget,
+            )
+        except Exception:
+            result = JevResult(outcome="unavailable", reason="provider_error")
+        suggested_topic = proposed_topic(
+            result,
+            mapping,
+            option_set_truncated=option_set_truncated,
+        )
+        record = JevDecisionRecord(
+            capability="classification",
+            mode="observe",
+            project_id=self.project_id,
+            window_id=window_id,
+            pass_number=pass_number,
+            occurrence_key=(
+                f"{occurrence_index}:{','.join(map(str, mention.block_ids))}:topic"
+            ),
+            evidence_block_ids=mention.block_ids,
+            domain_version=policy.domain.version,
+            question_version=policy.jev.classification_question_version,
+            acceptance_policy_version="observe-v1",
+            pinned_model=policy.jev.model,
+            option_mapping=mapping,
+            result=result,
+            baseline_outcome="default_topic",
+            acceptance_status=(
+                "indeterminate"
+                if result.outcome == "available" and option_set_truncated
+                else "proposed"
+                if result.outcome == "available"
+                else "unavailable"
+            ),
+        )
+        return {
+            "record": record.model_dump(mode="json"),
+            "entity_id": entity_id,
+            "entity_type": mention.entity_type,
+            "baseline_topic": baseline_topic,
+            "suggested_topic": suggested_topic,
+            "accepted_topic": None,
+            "allowed_topics": list(
+                policy.domain.allowed_topics_for_entity_type(mention.entity_type)
+            ),
+            "option_set_truncated": option_set_truncated,
+        }
 
     async def _observe_jev_identity(
         self,
@@ -443,26 +621,17 @@ class EntityResolver:
         pass_number: int,
         occurrence_index: int,
         work_budget: JevWorkBudget,
+        baseline_outcome: str,
     ) -> dict[str, Any] | None:
         """Collect a shadow suggestion without changing resolver acceptance."""
 
-        options = []
-        for _score, candidate_id, profile, _candidate, _signals in ranked:
-            if (
-                candidate_id == IDENTITY_ENTITY_ID
-                or candidate_id <= 0
-                or not self.is_profile_visible(profile)
-                or self.schema_compatibility(
-                    mention.entity_type, mention.topic, profile, policy
-                )
-                == "incompatible"
-                or self._classification_conflicts(
-                    staged,
-                    self._classification_for_resolution(candidate_id, mention, profile),
-                )
-            ):
-                continue
-            options.append(IdentityOption(candidate_id, profile))
+        options = [
+            IdentityOption(candidate_id, profile)
+            for _score, candidate_id, profile, _candidate, _signals in ranked
+            if self._identity_candidate_is_eligible(
+                candidate_id, profile, mention, policy, staged
+            )
+        ]
         request = prepare_identity_request(
             mention,
             support_text,
@@ -475,7 +644,10 @@ class EntityResolver:
             return None
         if window_id is None:
             raise TypeError("JEV identity observation requires the semantic window ID")
+        if not work_budget.take_observation():
+            return None
         state, questions, mapping = request
+        candidate_set_truncated = len(options) > len(mapping)
         try:
             result = await self._jev_client.evaluate(
                 state=state,
@@ -488,9 +660,18 @@ class EntityResolver:
             # Optional observation must not turn an otherwise valid baseline
             # resolution into a failed Knowledge build. Cancellation propagates.
             result = JevResult(outcome="unavailable", reason="provider_error")
+        suggested_entity_id = (
+            None if candidate_set_truncated else proposed_identity(result, mapping)
+        )
+        accepted_entity_id = accepted_identity(
+            result,
+            mapping,
+            policy.jev,
+            candidate_set_truncated=candidate_set_truncated,
+        )
         record = JevDecisionRecord(
             capability="identity",
-            mode="observe",
+            mode=policy.jev.identity_mode,
             project_id=self.project_id,
             window_id=window_id,
             pass_number=pass_number,
@@ -502,18 +683,78 @@ class EntityResolver:
             pinned_model=policy.jev.model,
             option_mapping=mapping,
             result=result,
-            baseline_outcome="deterministic_abstention",
+            baseline_outcome=baseline_outcome,
             acceptance_status=(
-                "proposed" if result.outcome == "available" else "unavailable"
+                "indeterminate"
+                if result.outcome == "available" and candidate_set_truncated
+                else "accepted"
+                if accepted_entity_id is not None
+                else "rejected"
+                if result.outcome == "available"
+                and policy.jev.identity_mode == "active"
+                else "proposed"
+                if result.outcome == "available"
+                else "unavailable"
             ),
         )
         return {
             "record": record.model_dump(mode="json"),
-            "suggested_entity_id": proposed_identity(result, mapping),
+            "baseline_entity_id": None,
+            "suggested_entity_id": suggested_entity_id,
+            "accepted_entity_id": accepted_entity_id,
             "eligible_candidate_count": len(options),
+            # Keep enough IDs to audit candidate recall without placing the
+            # entire potentially large candidate catalog in ordinary records.
+            "eligible_candidate_ids": [option.entity_id for option in options[:128]],
+            "candidate_catalog_truncated": len(options) > 128,
             "offered_candidate_count": len(mapping),
-            "candidate_set_truncated": len(options) > len(mapping),
+            "candidate_set_truncated": candidate_set_truncated,
         }
+
+    def _identity_candidate_is_eligible(
+        self,
+        candidate_id: int,
+        profile: EntityProfile,
+        mention: ContextBlockMention,
+        policy: IngestionPolicy,
+        staged: dict[int, ProjectEntityClassification],
+    ) -> bool:
+        """Hard scope/type boundaries; independent of name and score heuristics."""
+
+        if candidate_id == IDENTITY_ENTITY_ID or candidate_id <= 0:
+            return False
+        if not self.is_profile_visible(profile):
+            return False
+        if (
+            self.schema_compatibility(
+                mention.entity_type, mention.topic, profile, policy
+            )
+            == "incompatible"
+        ):
+            return False
+        classification = self._classification_for_resolution(
+            candidate_id, mention, profile
+        )
+        return not self._classification_conflicts(staged, classification)
+
+    @staticmethod
+    def _sample_identity_match(
+        window_id: UUID | None,
+        pass_number: int,
+        occurrence_index: int,
+        mention: ContextBlockMention,
+        policy: IngestionPolicy,
+    ) -> bool:
+        """Stable sample of baseline reuses for a false-reuse audit."""
+
+        rate = policy.jev.identity_match_sample_rate
+        if rate <= 0 or window_id is None:
+            return False
+        if rate >= 1:
+            return True
+        key = f"{window_id}:{pass_number}:{occurrence_index}:{','.join(map(str, mention.block_ids))}"
+        digest = hashlib.sha256(key.encode("ascii")).digest()
+        return int.from_bytes(digest[:8], "big") / 2**64 < rate
 
     def _identity_decision_signals(
         self,
