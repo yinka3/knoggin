@@ -224,10 +224,18 @@ client in observe mode, and writes private observations plus a report. It limits
 each case to one provider attempt. Missing observations with a known correct
 entity count as candidate-discovery misses; candidate recall, raw judgment
 accuracy, active-gate precision, wrong reuse, and abstention are reported
-separately. The runner refuses the current proposed packet until a person marks
-it reviewed. A1 and I4 therefore remain open until the labels are approved and a
-live run is completed; the current ten seed cases also do not satisfy the
-200-case activation threshold.
+separately. The runner refuses proposed packets until a person marks them
+reviewed. The current ten seed cases do not satisfy the 200-case activation
+threshold.
+
+Phase A/B identity diagnostic (2026-10-05): the ten seed labels were independently
+reviewed and sent to the provider. Candidate recall was 6/7 (85.71%) because the
+intentional `PG` alias miss never reached JEV. JEV scored 8/9 offered judgments
+(88.89%); it incorrectly reused Project Delta for ordinary lowercase `delta`.
+The frozen active gate accepted four matches, all correct, and abstained on six,
+for 100% acceptance precision and zero wrong reuse in this small diagnostic.
+Provider-reported cost was $0.00022277. A1/I4 remain open for the full 200-case
+held-out activation set.
 
 ### Phase C — Bounded extraction observe pilot
 
@@ -269,6 +277,14 @@ and durable storage contracts otherwise matched the plan. Live quality, recall,
 latency, and savings measurement remain Phase E readiness work rather than a
 claim made by Phase C.
 
+Phase C extraction diagnostic (2026-10-05): twelve independently reviewed
+candidate cases were evaluated through the real request builder and frozen
+`positive-v1` acceptance gate. Raw decisions were correct on 11/12 (91.67%).
+The gate accepted four candidates, all correct, for 100% precision and 57.14%
+positive recall; no provider calls were unavailable. Provider-reported cost was
+$0.00027569. This small diagnostic supports the conservative gate but is not
+large enough to claim production extraction quality or fallback savings.
+
 ### Phase D — Project classification and topic selection
 
 - [x] C1: Extend and validate domain configuration with allowed topics per type
@@ -281,7 +297,7 @@ claim made by Phase C.
 - [x] C4: Commit classification decision provenance atomically, including an
   accepted-topic slot for later active mode. Expose bounded
   decision/evidence records for later review without creating an adjudication loop.
-- [ ] C5: Evaluate topic accuracy and conflict behavior before enabling active topic
+- [x] C5: Evaluate topic accuracy and conflict behavior before enabling active topic
   selection independently of identity and bounded extraction.
 
 Phase D start (2026-10-03): entity types retain `topic` as their default and may
@@ -295,6 +311,8 @@ change only through the reclassification path.
 Phase D observe classification (2026-10-04): first-entry classifications whose
 known type has multiple active allowed topics now receive an occurrence-specific
 Choice and independent evidence Noul when `classification_mode` is `observe`.
+`classification-v2` withholds the configured default from the request and tells
+JEV to abstain on generic, indirect, future, multi-topic, and name-only evidence.
 Single-topic types are derived without a call. Existing project classifications
 remain authoritative and skip topic observation. The bounded record contains the
 default topic, allowed options, suggestion, response, and truncation status, but
@@ -327,17 +345,37 @@ cover successful storage, owner scoping, rollback on unowned evidence, and casca
 cleanup. Active topic selection remains gated on C5.
 
 Phase D classification evaluation tooling (2026-10-04): the offline scorer,
-review packet, and optional live pilot are implemented. They keep occurrence
-accuracy, non-default-topic accuracy, aggregate accuracy, unavailable results,
-and false conflicts separate. The scorer refuses labels that are not explicitly
-human reviewed. Readiness requires at least 50 reviewed occurrences, 10
-non-default occurrences, and 10 repeated-entity aggregates; 95% judgment,
-non-default, and aggregate accuracy; at most 10% unscorable occurrence or
-aggregate results; and at most a 2% false-conflict rate. The proposed packet now
-contains 50 occurrences, 24 non-default occurrences, and 10 repeated-entity
-aggregates, so it meets the sample-composition gate. The proposed labels were
-human-approved on 2026-10-04, but they have not been sent to the provider. C5 and
-active topic selection therefore remain open only on the live evaluation.
+review packet, and optional live pilot are implemented. They keep occurrence and
+decisive accuracy, abstention accuracy, non-default override precision/recall,
+aggregate accuracy, unavailable results, and false conflicts separate. The scorer
+refuses labels that are not explicitly human reviewed. Readiness requires at least
+50 reviewed occurrences, 10 non-default occurrences, 10 ambiguous occurrences,
+and 10 repeated-entity aggregates; 95% for every accuracy/precision/recall gate;
+at most 10% unscorable occurrence or aggregate results; and at most a 2%
+false-conflict rate. The packet contains 50 occurrences, 24 non-default, 10
+ambiguous, and 10 repeated-entity aggregates. Its labels were human-approved on
+2026-10-04.
+
+Phase D classification-v2 diagnostic (2026-10-05): the original live run scored
+78% raw and 77.5% aggregate accuracy. Ten of its eleven occurrence errors selected
+the exposed default instead of abstaining. V2 removes that anchor, strengthens the
+general abstention rule, and treats only non-default answers as override proposals.
+On the same packet it scored 96% raw accuracy, 95% decisive accuracy, 100%
+abstention accuracy, 95.83% override precision and recall, and 95% aggregate
+accuracy with no unavailable results or false conflicts. OpenRouter reported
+$0.00131855 for the 50 calls. This packet informed v2, so the result is an A/B
+diagnostic rather than held-out evidence and did not complete C5 by itself.
+
+Phase D held-out and active completion (2026-10-05): an independently reviewed
+50-occurrence packet passed every frozen gate: 96% raw accuracy, 95% decisive
+accuracy, 100% abstention, override precision/recall, and aggregate accuracy, with
+no unavailable results or false conflicts. The run used 31,572 input tokens,
+4,048 output tokens, and $0.00132602 of provider-reported cost. Active selection
+is now separately gated by `classification_mode: active` and
+`override-positive-v1`. It accepts only a unanimous non-default aggregate whose
+contributing proposals meet the frozen Choice confidence/probability/margin and
+evidence-Noul thresholds. Default, weak, unavailable, truncated, and conflicting
+results retain the configured default. Observe mode remains the default.
 
 ### Phase E — Integration and active-mode readiness
 

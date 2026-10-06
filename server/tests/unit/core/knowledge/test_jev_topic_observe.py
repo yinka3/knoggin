@@ -64,7 +64,13 @@ class TopicJev:
         )
 
 
-def policy(mode="observe", *, topics=("Work", "Finance"), max_options=64):
+def policy(
+    mode="observe",
+    *,
+    topics=("Work", "Finance"),
+    max_options=64,
+    acceptance_policy="disabled",
+):
     domain = DomainConfig.from_mapping(
         {
             "version": 4,
@@ -87,6 +93,7 @@ def policy(mode="observe", *, topics=("Work", "Finance"), max_options=64):
         compiled_domain=domain,
         jev=JevPolicy(
             classification_mode=mode,
+            classification_acceptance_policy_version=acceptance_policy,
             max_options_per_choice=max_options,
         ),
     )
@@ -178,6 +185,10 @@ async def test_observe_records_topic_suggestion_but_keeps_default_classification
     assert len(jev.calls) == 1
     assert jev.calls[0]["capability"] == "classification"
     assert set(jev.calls[0]["questions"]) == {"topic_choice", "topic_evidence"}
+    assert "default_topic" not in jev.calls[0]["state"]["mention"]
+    assert "directly connects" in jev.calls[0]["questions"][
+        "topic_choice"
+    ].instructions
     assert jev.calls[0]["state"]["allowed_topics"] == [
         {
             "handle": "topic_1",
@@ -271,6 +282,20 @@ async def test_truncated_topic_options_are_indeterminate():
 
 
 @pytest.mark.no_network
+async def test_default_topic_answer_is_recorded_without_an_override_proposal():
+    result = await resolve(Store(), TopicJev(choice="topic_1"), policy())
+
+    observation = result.classification_decisions[0]
+    assert observation["baseline_topic"] == "Work"
+    assert observation["suggested_topic"] is None
+    assert observation["record"]["result"]["response"]["answers"][
+        "topic_choice"
+    ]["choice"] == "topic_1"
+    assert result.classification_aggregates[0]["status"] == "no_proposal"
+    assert result.classification_aggregates[0]["proposed_topics"] == []
+
+
+@pytest.mark.no_network
 async def test_active_classification_mode_keeps_default_until_a_policy_is_defined():
     jev = TopicJev()
 
@@ -279,6 +304,40 @@ async def test_active_classification_mode_keeps_default_until_a_policy_is_define
     assert result.project_classifications[900].topic == "Work"
     assert result.classification_decisions == ()
     assert jev.calls == []
+
+
+@pytest.mark.no_network
+async def test_active_override_policy_accepts_one_supported_non_default_topic():
+    result = await resolve(
+        Store(),
+        TopicJev(choice="topic_2"),
+        policy("active", acceptance_policy="override-positive-v1"),
+    )
+
+    observation = result.classification_decisions[0]
+    assert result.project_classifications[900].topic == "Finance"
+    assert result.pending_entity_writes[900].topic == "Finance"
+    assert observation["baseline_topic"] == "Work"
+    assert observation["suggested_topic"] == "Finance"
+    assert observation["accepted_topic"] == "Finance"
+    assert observation["record"]["acceptance_status"] == "accepted"
+    assert result.classification_aggregates[0]["operational_topic"] == "Finance"
+
+
+@pytest.mark.no_network
+async def test_active_override_policy_keeps_default_for_default_answer():
+    result = await resolve(
+        Store(),
+        TopicJev(choice="topic_1"),
+        policy("active", acceptance_policy="override-positive-v1"),
+    )
+
+    observation = result.classification_decisions[0]
+    assert result.project_classifications[900].topic == "Work"
+    assert result.pending_entity_writes[900].topic == "Work"
+    assert observation["suggested_topic"] is None
+    assert observation["accepted_topic"] is None
+    assert observation["record"]["acceptance_status"] == "rejected"
 
 
 @pytest.mark.no_network
@@ -328,18 +387,38 @@ async def test_repeated_entity_proposals_are_aggregated_after_identity_resolutio
 
 
 @pytest.mark.no_network
-async def test_conflicting_new_entity_proposals_keep_default_and_record_conflict():
+async def test_conflicting_non_default_proposals_keep_default_and_record_conflict():
     result = await resolve_repeated(
-        TopicJev(choice=["topic_1", "topic_2"]),
-        policy(),
+        TopicJev(choice=["topic_2", "topic_3"]),
+        policy(topics=("Work", "Finance", "Legal")),
     )
 
     aggregate = result.classification_aggregates[0]
     assert aggregate["status"] == "conflicting_proposals"
-    assert aggregate["proposed_topics"] == ["Work", "Finance"]
+    assert aggregate["proposed_topics"] == ["Finance", "Legal"]
     assert aggregate["operational_topic"] == "Work"
     assert result.project_classifications[900].topic == "Work"
     assert result.pending_entity_writes[900].topic == "Work"
+    assert {
+        item["record"]["acceptance_status"]
+        for item in result.classification_decisions
+    } == {"conflicting"}
+
+
+@pytest.mark.no_network
+async def test_active_conflicting_non_default_proposals_keep_default():
+    result = await resolve_repeated(
+        TopicJev(choice=["topic_2", "topic_3"]),
+        policy(
+            "active",
+            topics=("Work", "Finance", "Legal"),
+            acceptance_policy="override-positive-v1",
+        ),
+    )
+
+    assert result.project_classifications[900].topic == "Work"
+    assert result.pending_entity_writes[900].topic == "Work"
+    assert result.classification_aggregates[0]["status"] == "conflicting_proposals"
     assert {
         item["record"]["acceptance_status"]
         for item in result.classification_decisions

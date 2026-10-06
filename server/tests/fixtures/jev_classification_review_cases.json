@@ -42,10 +42,8 @@
           "proposed_choice": "Work"
         }
       ],
-      "proposed_aggregate_status": "consistent_proposal",
-      "proposed_topics": [
-        "Work"
-      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
       "reason": "The evidence is specifically about project work."
     },
     {
@@ -160,10 +158,8 @@
           "proposed_choice": "Work"
         }
       ],
-      "proposed_aggregate_status": "consistent_proposal",
-      "proposed_topics": [
-        "Work"
-      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
       "reason": "Identical delivery evidence should remain Work."
     },
     {
@@ -238,10 +234,8 @@
           "proposed_choice": "Work"
         }
       ],
-      "proposed_aggregate_status": "consistent_proposal",
-      "proposed_topics": [
-        "Work"
-      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
       "reason": "Identical staffing evidence should remain Work."
     },
     {
@@ -340,10 +334,8 @@
           "proposed_choice": "Work"
         }
       ],
-      "proposed_aggregate_status": "consistent_proposal",
-      "proposed_topics": [
-        "Work"
-      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
       "reason": "Identical roadmap evidence should remain Work."
     },
     {
@@ -538,10 +530,8 @@
           "proposed_choice": "Work"
         }
       ],
-      "proposed_aggregate_status": "consistent_proposal",
-      "proposed_topics": [
-        "Work"
-      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
       "reason": "Sprint completion is project-work evidence."
     },
     {
@@ -560,10 +550,8 @@
           "proposed_choice": "Work"
         }
       ],
-      "proposed_aggregate_status": "consistent_proposal",
-      "proposed_topics": [
-        "Work"
-      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
       "reason": "Team staffing is work evidence."
     },
     {
@@ -582,10 +570,8 @@
           "proposed_choice": "Work"
         }
       ],
-      "proposed_aggregate_status": "consistent_proposal",
-      "proposed_topics": [
-        "Work"
-      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
       "reason": "A deployment is work evidence."
     },
     {
@@ -604,10 +590,8 @@
           "proposed_choice": "Work"
         }
       ],
-      "proposed_aggregate_status": "consistent_proposal",
-      "proposed_topics": [
-        "Work"
-      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
       "reason": "Operational ownership is work evidence."
     },
     {
@@ -626,10 +610,8 @@
           "proposed_choice": "Work"
         }
       ],
-      "proposed_aggregate_status": "consistent_proposal",
-      "proposed_topics": [
-        "Work"
-      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
       "reason": "Roadmap planning is work evidence."
     },
     {
@@ -648,10 +630,8 @@
           "proposed_choice": "Work"
         }
       ],
-      "proposed_aggregate_status": "consistent_proposal",
-      "proposed_topics": [
-        "Work"
-      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
       "reason": "Vendor onboarding is work evidence."
     },
     {
@@ -792,10 +772,8 @@
           "proposed_choice": "Work"
         }
       ],
-      "proposed_aggregate_status": "consistent_proposal",
-      "proposed_topics": [
-        "Work"
-      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
       "reason": "The evidence describes implementation work, not a contract dispute or term."
     },
     {
@@ -836,10 +814,8 @@
           "proposed_choice": "Work"
         }
       ],
-      "proposed_aggregate_status": "consistent_proposal",
-      "proposed_topics": [
-        "Work"
-      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
       "reason": "The entity action is team hiring even though the team's subject is finance."
     },
     {
@@ -902,10 +878,8 @@
           "proposed_choice": "Work"
         }
       ],
-      "proposed_aggregate_status": "consistent_proposal",
-      "proposed_topics": [
-        "Work"
-      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
       "reason": "Operational responsibility is work evidence."
     }
   ]

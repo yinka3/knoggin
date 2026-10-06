@@ -172,6 +172,12 @@ active JEV can recover a bounded candidate while LLM NER is disabled. The existi
 maximum of two entity/relationship passes is unchanged, and both passes share the
 same JEV work budget.
 
+The first reviewed live extraction diagnostic ran on 2026-10-05. Raw decisions
+were correct on 11/12 cases; the frozen active gate accepted four candidates,
+all correct, for 100% precision and 57.14% positive recall. Provider-reported
+cost was $0.00027569. This is a small diagnostic, so broader held-out recovery,
+latency, and fallback-savings measurement remain required.
+
 Extraction records are private, window-scoped, and committed atomically in
 `project_jev_extraction_decisions`. Trace counters report candidate judgments,
 accepted/rejected positives, avoided calls, avoided blocks, prompt-character
@@ -209,13 +215,19 @@ rewritten when this configuration changes.
 
 With `classification_mode: observe`, a first-entry entity whose known type has
 multiple active allowed topics receives a bounded topic Choice plus an independent
-evidence Noul. One allowed topic is derived without a provider call. Existing
-project classifications skip this request and remain authoritative. The result is
-recorded as a proposal in the ingestion trace, bounded diagnostic log, and scoped
-semantic-window decision store; the
-configured default still supplies the staged classification and new-entity write.
-Truncated option sets expose no suggestion. `classification_mode: active` also
-keeps the default until the quality gates are completed.
+evidence Noul. `classification-v2` does not expose the configured default to JEV,
+and it explicitly directs generic, indirect, future, multi-topic, and name-only
+evidence to `insufficient_evidence`. One allowed topic is derived without a
+provider call. Existing project classifications skip this request and remain
+authoritative. The raw answer is retained, but only a non-default answer becomes
+an override proposal. The configured default still supplies the staged
+classification and new-entity write. Truncated option sets expose no suggestion.
+`classification_mode: active` changes the first-entry topic only when
+`classification_acceptance_policy_version: override-positive-v1` is also set.
+The accepted non-default aggregate must be consistent, and every contributing
+proposal must meet the frozen Choice confidence, selected-probability,
+probability-margin, and evidence-Noul thresholds. Otherwise the configured
+default remains active.
 
 After identity resolution, occurrence proposals are grouped by resolved entity.
 The aggregate reports a consistent proposal, conflicting proposals, or no usable
@@ -245,16 +257,28 @@ After reviewing `tests/fixtures/jev_classification_review_cases.json`, run:
 python -m tests.fixtures.run_jev_classification_pilot --output-dir <private-directory>
 ```
 
-The report separates raw occurrence accuracy, non-default-topic accuracy,
-entity-level aggregate accuracy, unavailable/indeterminate coverage, and false
-conflicts. It reports `active_ready` only with at least 50 reviewed occurrences,
-10 non-default examples, 10 repeated-entity aggregates, 95% accuracy for all
-three accuracy measures, at most 10% unscorable results, and at most 2% false
-conflicts. The bundled packet contains 50 proposed occurrences, including 24
-non-default occurrences and 10 repeated-entity aggregates. It meets the sample
-composition gate and its proposed labels were human-approved on 2026-10-04. It
-still cannot produce a quality claim or enable active classification until the
-live evaluation runs.
+The report separates raw and decisive accuracy, abstention accuracy,
+non-default override precision and recall, entity-level aggregate accuracy,
+unavailable/indeterminate coverage, and false conflicts. It reports
+`active_ready` only with at least 50 reviewed occurrences, 10 non-default
+examples, 10 ambiguous examples, 10 repeated-entity aggregates, 95% for every
+accuracy/precision/recall gate, at most 10% unscorable results, and at most 2%
+false conflicts. Provider-reported usage and cost are shown separately from the
+configured spending ledger. The bundled packet contains 50 reviewed occurrences,
+including 24 non-default, 10 ambiguous, and 10 repeated-entity aggregates.
+
+The 2026-10-05 same-packet comparison improved raw accuracy from 78% with the
+initial wording to 96% with `classification-v2`; v2 reached 100% abstention,
+95.83% override precision/recall, and 95% aggregate accuracy. Because the current
+wording was designed after inspecting the initial errors on this packet, these
+results are diagnostic and did not enable active classification by themselves.
+
+The separately reviewed 50-occurrence held-out packet passed on 2026-10-05 with
+96% raw accuracy, 95% decisive accuracy, 100% abstention, override
+precision/recall, and aggregate accuracy, with no unavailable results or false
+conflicts. The run reported $0.00132602 of provider cost. This completed C5 and
+allowed the separately gated active override path to be implemented; observe
+mode remains the default.
 
 ## Baseline capture
 

@@ -12,6 +12,7 @@ from common.schema.jev import (
     ChoiceQuestion,
     JevPolicy,
     JevResult,
+    NoulAnswer,
     NoulQuestion,
 )
 
@@ -41,13 +42,15 @@ def prepare_topic_request(
             or f"The entity belongs to the configured {topic} topic."
         )
     criteria["insufficient_evidence"] = (
-        "The supplied context does not support one allowed topic."
+        "Choose this unless the supplied context directly connects this entity "
+        "to exactly one allowed topic. A name-only mention, attendance, generic "
+        "update, future possibility, or relationship without topic-specific "
+        "activity is insufficient."
     )
     state = {
         "mention": {
             "name": mention.name[:200],
             "entity_type": mention.entity_type[:100],
-            "default_topic": domain.topic_for_entity_type(mention.entity_type),
         },
         "support_text": support_text[:6000],
         "support_truncated": len(support_text) > 6000,
@@ -60,21 +63,24 @@ def prepare_topic_request(
             for handle, topic in mapping.items()
         ],
     }
+    choice_instructions = (
+        "Select an allowed topic only when the supplied context directly connects "
+        "the named entity to topic-specific activity. Do not infer a topic from the "
+        "entity type, a general association, or the entity's presence. When the "
+        "evidence is generic, indirect, future, or fits multiple topics, choose "
+        "insufficient_evidence."
+    )
+    evidence_instructions = (
+        "The supplied context directly connects this entity to one specific allowed "
+        "topic through topic-specific activity, rather than merely mentioning the "
+        "entity or describing a general association."
+    )
     questions = {
         "topic_choice": ChoiceQuestion(
-            instructions=(
-                "Which allowed project topic best classifies this entity in the "
-                "supplied context? Use insufficient_evidence when one topic is not "
-                "supported."
-            ),
+            instructions=choice_instructions,
             criteria=criteria,
         ),
-        "topic_evidence": NoulQuestion(
-            instructions=(
-                "The supplied evidence supports assigning one specific allowed "
-                "topic to this entity in the current project."
-            )
-        ),
+        "topic_evidence": NoulQuestion(instructions=evidence_instructions),
     }
     return state, questions, mapping, option_set_truncated
 
@@ -83,16 +89,61 @@ def proposed_topic(
     result: JevResult,
     mapping: dict[str, str],
     *,
+    baseline_topic: str,
     option_set_truncated: bool,
 ) -> str | None:
-    """Return an observable suggestion; it never changes classification."""
+    """Return an observable override suggestion; it never changes classification."""
 
     if option_set_truncated or result.outcome != "available" or result.response is None:
         return None
     answer = result.response.answers.get("topic_choice")
     if not isinstance(answer, ChoiceAnswer) or answer.choice not in mapping:
         return None
-    return mapping[answer.choice]
+    topic = mapping[answer.choice]
+    if topic == baseline_topic:
+        return None
+    return topic
+
+
+def accepted_classification_topic(
+    result: JevResult,
+    mapping: dict[str, str],
+    baseline_topic: str,
+    policy: JevPolicy,
+    *,
+    option_set_truncated: bool,
+) -> str | None:
+    """Return one strongly supported non-default override under the active gate."""
+
+    if policy.classification_acceptance_policy_version != "override-positive-v1":
+        return None
+    topic = proposed_topic(
+        result,
+        mapping,
+        baseline_topic=baseline_topic,
+        option_set_truncated=option_set_truncated,
+    )
+    if topic is None or result.response is None:
+        return None
+    choice = result.response.answers.get("topic_choice")
+    evidence = result.response.answers.get("topic_evidence")
+    if not isinstance(choice, ChoiceAnswer) or not isinstance(evidence, NoulAnswer):
+        return None
+    selected = choice.probabilities.get(choice.choice)
+    if selected is None:
+        return None
+    runner_up = max(
+        (value for handle, value in choice.probabilities.items() if handle != choice.choice),
+        default=0.0,
+    )
+    if (
+        choice.confidence < policy.classification_min_choice_confidence
+        or selected < policy.classification_min_choice_probability
+        or selected - runner_up < policy.classification_min_probability_margin
+        or evidence.noul < policy.classification_min_evidence_noul
+    ):
+        return None
+    return topic
 
 
 def aggregate_topic_proposals(

@@ -26,6 +26,7 @@ from core.knowledge.entity.resolver import EntityResolver
 from infrastructure.external_model_budget import ExternalModelSpendingLedger
 from infrastructure.jev_client import JevClient
 from tests.fixtures.evaluate_jev_classification import (
+    MIN_AMBIGUOUS_OCCURRENCES,
     MIN_NON_DEFAULT_OCCURRENCES,
     MIN_REPEATED_ENTITY_AGGREGATES,
     MIN_REVIEWED_OCCURRENCES,
@@ -52,13 +53,20 @@ def review_packet_coverage(cases: list[dict]) -> dict[str, int | bool]:
         for occurrence in case.get("occurrences", ())
     )
     repeated = sum(len(case.get("occurrences", ())) > 1 for case in cases)
+    ambiguous = sum(
+        occurrence.get("proposed_choice") == "insufficient_evidence"
+        for case in cases
+        for occurrence in case.get("occurrences", ())
+    )
     return {
         "occurrences": occurrences,
         "non_default_occurrences": non_default,
+        "ambiguous_occurrences": ambiguous,
         "repeated_entity_aggregates": repeated,
         "meets_sample_gate": (
             occurrences >= MIN_REVIEWED_OCCURRENCES
             and non_default >= MIN_NON_DEFAULT_OCCURRENCES
+            and ambiguous >= MIN_AMBIGUOUS_OCCURRENCES
             and repeated >= MIN_REPEATED_ENTITY_AGGREGATES
         ),
     }
@@ -89,7 +97,11 @@ def validate_review_cases(cases: list[dict]) -> None:
         choices = {item["proposed_choice"] for item in occurrences}
         if not choices <= {*allowed_topics, "insufficient_evidence"}:
             raise ValueError("A reviewed classification choice is outside allowed topics")
-        proposed = [topic for topic in allowed_topics if topic in choices]
+        proposed = [
+            topic
+            for topic in allowed_topics
+            if topic in choices and topic != case["default_topic"]
+        ]
         expected_status = (
             "conflicting_proposals"
             if len(proposed) > 1
@@ -173,6 +185,26 @@ def build_review_labels(cases: list[dict]) -> dict[str, list[dict]]:
             }
         )
     return {"occurrences": occurrence_labels, "aggregates": aggregate_labels}
+
+
+def provider_usage_summary(observations: list[dict]) -> dict[str, int | float]:
+    """Summarize exact provider usage separately from configured budget pricing."""
+
+    results = [item["record"]["result"] for item in observations]
+    reported_costs = [
+        float(result["cost_usd"])
+        for result in results
+        if result.get("cost_usd") is not None
+    ]
+    return {
+        "requests": len(results),
+        "cost_reported_requests": len(reported_costs),
+        "input_tokens": sum(int(result.get("input_tokens", 0)) for result in results),
+        "output_tokens": sum(
+            int(result.get("output_tokens", 0)) for result in results
+        ),
+        "reported_cost_usd": round(sum(reported_costs), 8),
+    }
 
 
 def _policy(case: dict, settings: JevSettings) -> IngestionPolicy:
@@ -279,6 +311,7 @@ async def _main() -> None:
     observations, aggregates, spending = await run_pilot(cases, api_key)
     report = evaluate_classification_observations(labels, observations, aggregates)
     report["spending"] = spending
+    report["provider_usage"] = provider_usage_summary(observations)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     for name, value in (
         ("jev_classification_labels.json", labels),

@@ -34,7 +34,14 @@ class JevPolicy(JevModel):
     )
     identity_question_version: Literal["identity-v1"] = "identity-v1"
     extraction_question_version: Literal["extraction-v1"] = "extraction-v1"
-    classification_question_version: Literal["classification-v1"] = "classification-v1"
+    classification_question_version: Literal["classification-v2"] = "classification-v2"
+    classification_acceptance_policy_version: Literal[
+        "disabled", "override-positive-v1"
+    ] = "disabled"
+    classification_min_choice_confidence: Probability = 0.85
+    classification_min_choice_probability: Probability = 0.85
+    classification_min_probability_margin: Probability = 0.5
+    classification_min_evidence_noul: Probability = 0.8
     acceptance_policy_version: Literal[
         "observe-v1", "identity-positive-v1"
     ] = "observe-v1"

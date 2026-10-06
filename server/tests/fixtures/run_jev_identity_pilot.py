@@ -105,6 +105,24 @@ def build_review_labels(cases: list[dict]) -> list[dict]:
     return [_gold_label(case) for case in cases]
 
 
+def provider_usage_summary(observations: list[dict]) -> dict[str, int | float]:
+    results = [item["record"]["result"] for item in observations]
+    costs = [
+        float(result["cost_usd"])
+        for result in results
+        if result.get("cost_usd") is not None
+    ]
+    return {
+        "requests": len(results),
+        "cost_reported_requests": len(costs),
+        "input_tokens": sum(int(result.get("input_tokens", 0)) for result in results),
+        "output_tokens": sum(
+            int(result.get("output_tokens", 0)) for result in results
+        ),
+        "reported_cost_usd": round(sum(costs), 8),
+    }
+
+
 def _entity_rows(case: dict) -> list[dict]:
     supplied = [*case.get("candidates", [])]
     if case.get("stored_identity") is not None:
@@ -236,6 +254,7 @@ async def _main() -> None:
         "observation_quality": evaluate_identity_observations(labels, observations),
         "active_policy": evaluate_identity_acceptance(labels, observations),
         "spending": spending,
+        "provider_usage": provider_usage_summary(observations),
     }
     args.output_dir.mkdir(parents=True, exist_ok=True)
     (args.output_dir / "jev_identity_labels.json").write_text(

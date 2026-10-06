@@ -5,7 +5,7 @@ import hashlib
 import re
 import threading
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 from uuid import UUID
 
@@ -35,6 +35,7 @@ from core.knowledge.entity.candidates import (
 )
 from core.knowledge.entity.index import EntityIndex
 from core.knowledge.entity.jev_classification import (
+    accepted_classification_topic,
     aggregate_topic_proposals,
     prepare_topic_request,
     proposed_topic,
@@ -460,7 +461,14 @@ class EntityResolver:
                 if (
                     classification is not None
                     and classification.membership == "missing"
-                    and policy.jev.classification_mode == "observe"
+                    and (
+                        policy.jev.classification_mode == "observe"
+                        or (
+                            policy.jev.classification_mode == "active"
+                            and policy.jev.classification_acceptance_policy_version
+                            == "override-positive-v1"
+                        )
+                    )
                     and self._jev_client is not None
                 ):
                     observation = await self._observe_jev_classification(
@@ -503,13 +511,61 @@ class EntityResolver:
                     for association in state.associations
                 }.values()
             )
-            state.classification_aggregates.extend(
-                aggregate_topic_proposals(
-                    state.classification_decisions,
-                    state.project_classifications,
-                    policy.domain,
-                )
+            if policy.jev.classification_mode == "active":
+                for item in state.classification_decisions:
+                    if (
+                        item["record"]["result"]["outcome"] == "available"
+                        and not item["option_set_truncated"]
+                    ):
+                        item["record"]["acceptance_status"] = "rejected"
+            aggregates = aggregate_topic_proposals(
+                state.classification_decisions,
+                state.project_classifications,
+                policy.domain,
             )
+            if policy.jev.classification_mode == "active":
+                for aggregate in aggregates:
+                    if aggregate["status"] != "consistent_proposal":
+                        continue
+                    topic = aggregate["proposed_topics"][0]
+                    items = [
+                        item
+                        for item in state.classification_decisions
+                        if item["entity_id"] == aggregate["entity_id"]
+                        and item.get("suggested_topic") == topic
+                    ]
+                    if not items or any(
+                        accepted_classification_topic(
+                            JevResult.model_validate(item["record"]["result"]),
+                            item["record"]["option_mapping"],
+                            item["baseline_topic"],
+                            policy.jev,
+                            option_set_truncated=item["option_set_truncated"],
+                        )
+                        != topic
+                        for item in items
+                    ):
+                        continue
+                    entity_id = aggregate["entity_id"]
+                    classification = state.project_classifications[entity_id]
+                    state.project_classifications[entity_id] = replace(
+                        classification, topic=topic
+                    )
+                    if entity_id in state.pending_entity_writes:
+                        state.pending_entity_writes[entity_id] = replace(
+                            state.pending_entity_writes[entity_id], topic=topic
+                        )
+                    aggregate["operational_topic"] = topic
+                    for item in state.classification_decisions:
+                        if item["entity_id"] != entity_id:
+                            continue
+                        item["aggregation"]["operational_topic"] = topic
+                        if item.get("suggested_topic") == topic:
+                            item["accepted_topic"] = topic
+                            item["record"]["acceptance_status"] = "accepted"
+                        elif item["record"]["result"]["outcome"] == "available":
+                            item["record"]["acceptance_status"] = "rejected"
+            state.classification_aggregates.extend(aggregates)
             return ContextEntityResolution(
                 entity_ids=tuple(state.entity_ids),
                 new_entity_ids=frozenset(state.new_ids),
@@ -568,11 +624,12 @@ class EntityResolver:
         suggested_topic = proposed_topic(
             result,
             mapping,
+            baseline_topic=baseline_topic,
             option_set_truncated=option_set_truncated,
         )
         record = JevDecisionRecord(
             capability="classification",
-            mode="observe",
+            mode=policy.jev.classification_mode,
             project_id=self.project_id,
             window_id=window_id,
             pass_number=pass_number,
@@ -582,7 +639,9 @@ class EntityResolver:
             evidence_block_ids=mention.block_ids,
             domain_version=policy.domain.version,
             question_version=policy.jev.classification_question_version,
-            acceptance_policy_version="observe-v1",
+            acceptance_policy_version=(
+                policy.jev.classification_acceptance_policy_version
+            ),
             pinned_model=policy.jev.model,
             option_mapping=mapping,
             result=result,

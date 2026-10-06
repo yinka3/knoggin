@@ -21,7 +21,10 @@ from common.schema.semantic_window import SemanticWindowStage
 from common.scoping import IDENTITY_ENTITY_ID, require_scope_value
 from core.ingestion.batch import SemanticWindowBuild
 from core.knowledge.db.projection_rebuilder import GraphBuilder
-from core.knowledge.entity.jev_classification import proposed_topic
+from core.knowledge.entity.jev_classification import (
+    accepted_classification_topic,
+    proposed_topic,
+)
 from infrastructure.postgres_client import PostgresClient
 
 
@@ -539,6 +542,10 @@ class SemanticCommitWriter:
             allowed_topics = build.policy.domain.allowed_topics_for_entity_type(
                 classification.entity_type
             )
+            baseline_topics = {item.get("baseline_topic") for item in items}
+            if len(baseline_topics) != 1:
+                raise ValueError("JEV classification decisions disagree on baseline")
+            baseline_topic = next(iter(baseline_topics))
             suggested_topics = {
                 item.get("suggested_topic")
                 for item in items
@@ -564,7 +571,11 @@ class SemanticCommitWriter:
                 "observation_count": len(items),
             }:
                 raise ValueError("JEV classification aggregate is inconsistent")
-            if classification.topic not in allowed_topics:
+            if (
+                classification.topic not in allowed_topics
+                or baseline_topic
+                != build.policy.domain.topic_for_entity_type(classification.entity_type)
+            ):
                 raise ValueError("JEV classification has no valid operational topic")
 
             for observation in items:
@@ -574,6 +585,11 @@ class SemanticCommitWriter:
                 suggested_topic = observation.get("suggested_topic")
                 accepted_topic = observation.get("accepted_topic")
                 expected_acceptance_status = (
+                    "accepted"
+                    if accepted_topic is not None
+                    else "rejected"
+                    if record.mode == "active" and record.result.outcome == "available"
+                    else
                     "conflicting"
                     if expected_status == "conflicting_proposals"
                     and suggested_topic is not None
@@ -592,7 +608,8 @@ class SemanticCommitWriter:
                     or record.pinned_model != build.policy.jev.model
                     or record.question_version
                     != build.policy.jev.classification_question_version
-                    or record.acceptance_policy_version != "observe-v1"
+                    or record.acceptance_policy_version
+                    != build.policy.jev.classification_acceptance_policy_version
                     or record.baseline_outcome != "default_topic"
                     or not record.evidence_block_ids
                     or not set(record.evidence_block_ids) <= eligible_blocks
@@ -602,7 +619,7 @@ class SemanticCommitWriter:
                     )
                 if (
                     observation.get("entity_type") != classification.entity_type
-                    or observation.get("baseline_topic") != classification.topic
+                    or observation.get("baseline_topic") != baseline_topic
                     or observation.get("allowed_topics") != list(allowed_topics)
                     or observation.get("aggregation") != aggregate
                     or "accepted_topic" not in observation
@@ -614,6 +631,7 @@ class SemanticCommitWriter:
                     or proposed_topic(
                         record.result,
                         record.option_mapping,
+                        baseline_topic=baseline_topic,
                         option_set_truncated=truncated,
                     )
                     != suggested_topic
@@ -621,7 +639,22 @@ class SemanticCommitWriter:
                         suggested_topic is not None
                         and suggested_topic not in mapping_topics
                     )
-                    or accepted_topic is not None
+                    or (
+                        accepted_topic is not None
+                        and (
+                            record.mode != "active"
+                            or accepted_topic != classification.topic
+                            or suggested_topic != accepted_topic
+                            or accepted_classification_topic(
+                                record.result,
+                                record.option_mapping,
+                                baseline_topic,
+                                build.policy.jev,
+                                option_set_truncated=truncated,
+                            )
+                            != accepted_topic
+                        )
+                    )
                     or record.acceptance_status != expected_acceptance_status
                 ):
                     raise ValueError("JEV classification decision is inconsistent")

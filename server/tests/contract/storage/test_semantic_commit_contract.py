@@ -267,7 +267,9 @@ def _add_jev_classification_observation(
         evidence_block_ids=(evidence_block_id or block_id,),
         domain_version=build.policy.domain.version,
         question_version=build.policy.jev.classification_question_version,
-        acceptance_policy_version="observe-v1",
+        acceptance_policy_version=(
+            build.policy.jev.classification_acceptance_policy_version
+        ),
         pinned_model=build.policy.jev.model,
         option_mapping={"topic_1": "Work", "topic_2": "Finance"},
         result=result,

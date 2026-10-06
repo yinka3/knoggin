@@ -40,20 +40,23 @@ def _pair(number, expected, actual, *, aggregate_status=None):
             },
         },
     }
-    expected_topics = [] if expected is None else [expected]
+    expected_topics = (
+        [] if expected is None or expected == label["default_topic"] else [expected]
+    )
     aggregate_label = {
         "window_id": f"window-{number}",
         "pass_number": 1,
         "anchor_occurrence_key": occurrence_key,
         "review_status": "reviewed",
         "expected_status": (
-            "no_proposal" if expected is None else "consistent_proposal"
+            "no_proposal" if not expected_topics else "consistent_proposal"
         ),
         "expected_proposed_topics": expected_topics,
         "observation_count": 1,
     }
+    actual_is_override = actual is not None and actual != label["default_topic"]
     actual_aggregate_status = aggregate_status or (
-        "no_proposal" if actual is None else "consistent_proposal"
+        "consistent_proposal" if actual_is_override else "no_proposal"
     )
     aggregate = {
         "window_id": f"window-{number}",
@@ -90,6 +93,10 @@ def test_scores_topic_accuracy_and_false_conflicts_separately():
     assert report["judgments_scored"] == 4
     assert report["judgments_correct"] == 3
     assert report["judgment_accuracy"] == 0.75
+    assert report["decisive_accuracy"] == pytest.approx(2 / 3)
+    assert report["abstention_accuracy"] == 1.0
+    assert report["override_precision"] == pytest.approx(2 / 3)
+    assert report["override_recall"] == 1.0
     assert report["non_default_accuracy"] == 1.0
     assert report["aggregates_correct"] == 2
     assert report["conflicts_observed"] == 1
@@ -145,8 +152,8 @@ def test_active_readiness_accepts_the_configured_balanced_clean_set():
     pairs = [
         _pair(
             number,
-            "Finance" if number <= 10 else "Work",
-            "Finance" if number <= 10 else "Work",
+            "Finance" if number <= 10 else None if number <= 20 else "Work",
+            "Finance" if number <= 10 else None if number <= 20 else "Work",
         )
         for number in range(1, 51)
     ]

@@ -7,6 +7,7 @@ import pytest
 from tests.fixtures.run_jev_identity_pilot import (
     build_review_labels,
     load_reviewed_cases,
+    provider_usage_summary,
 )
 
 
@@ -61,3 +62,25 @@ def test_review_choices_become_stable_evaluator_labels():
     ]
     assert len({item["window_id"] for item in labels}) == 3
     assert all(item["review_status"] == "reviewed" for item in labels)
+
+
+def test_provider_usage_uses_exact_reported_cost():
+    observations = [
+        {
+            "record": {
+                "result": {
+                    "input_tokens": 50,
+                    "output_tokens": 10,
+                    "cost_usd": 0.00002,
+                }
+            }
+        }
+    ]
+
+    assert provider_usage_summary(observations) == {
+        "requests": 1,
+        "cost_reported_requests": 1,
+        "input_tokens": 50,
+        "output_tokens": 10,
+        "reported_cost_usd": 0.00002,
+    }

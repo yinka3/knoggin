@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "review_status": "pending_human_review",
+  "review_status": "reviewed",
   "purpose": "Proposed identity labels for a future held-out JEV evaluation. These are not quality results.",
   "review_instructions": "A human reviewer must approve or correct every proposed_choice and reason before changing review_status to reviewed. Do not infer approval from tests or baseline behavior.",
   "cases": [

@@ -14,6 +14,7 @@ from pathlib import Path
 
 MIN_REVIEWED_OCCURRENCES = 50
 MIN_NON_DEFAULT_OCCURRENCES = 10
+MIN_AMBIGUOUS_OCCURRENCES = 10
 MIN_REPEATED_ENTITY_AGGREGATES = 10
 MIN_ACCURACY = 0.95
 MAX_UNSCORABLE_RATE = 0.10
@@ -59,6 +60,16 @@ def evaluate_classification_observations(
         "judgments_scored": 0,
         "judgments_correct": 0,
         "judgments_wrong": 0,
+        "decisive_reviewed": 0,
+        "decisive_scored": 0,
+        "decisive_correct": 0,
+        "ambiguous_reviewed": 0,
+        "ambiguous_scored": 0,
+        "ambiguous_correct": 0,
+        "override_expected": 0,
+        "override_proposed": 0,
+        "override_true_positive": 0,
+        "override_false_positive": 0,
         "unavailable_or_indeterminate": 0,
         "non_default_reviewed": 0,
         "non_default_scored": 0,
@@ -74,8 +85,13 @@ def evaluate_classification_observations(
     }
     for label in occurrence_labels:
         expected_topic = label.get("expected_topic")
+        if expected_topic is None:
+            counts["ambiguous_reviewed"] += 1
+        else:
+            counts["decisive_reviewed"] += 1
         if expected_topic is not None and expected_topic != label["default_topic"]:
             counts["non_default_reviewed"] += 1
+            counts["override_expected"] += 1
         observation = keyed_observations.get(_key(label))
         if observation is None:
             counts["observation_missing"] += 1
@@ -90,13 +106,28 @@ def evaluate_classification_observations(
             counts["unavailable_or_indeterminate"] += 1
             continue
         choice = record["result"]["response"]["answers"]["topic_choice"]["choice"]
+        actual_topic = record["option_mapping"].get(choice)
         correct = (
-            record["option_mapping"].get(choice) == expected_topic
+            actual_topic == expected_topic
             if expected_topic is not None
             else choice == label["expected_choice"]
         )
         counts["judgments_scored"] += 1
         counts["judgments_correct" if correct else "judgments_wrong"] += 1
+        if expected_topic is None:
+            counts["ambiguous_scored"] += 1
+            if correct:
+                counts["ambiguous_correct"] += 1
+        else:
+            counts["decisive_scored"] += 1
+            if correct:
+                counts["decisive_correct"] += 1
+        if actual_topic is not None and actual_topic != label["default_topic"]:
+            counts["override_proposed"] += 1
+            if correct:
+                counts["override_true_positive"] += 1
+            else:
+                counts["override_false_positive"] += 1
         if expected_topic is not None and expected_topic != label["default_topic"]:
             counts["non_default_scored"] += 1
             if correct:
@@ -138,12 +169,36 @@ def evaluate_classification_observations(
     non_default_scored = int(counts["non_default_scored"])
     aggregate_scored = int(counts["aggregates_scored"])
     reviewed = int(counts["reviewed_occurrences"])
+    decisive_scored = int(counts["decisive_scored"])
+    ambiguous_scored = int(counts["ambiguous_scored"])
+    override_expected = int(counts["override_expected"])
+    override_proposed = int(counts["override_proposed"])
     counts["judgment_accuracy"] = (
         int(counts["judgments_correct"]) / scored if scored else 0.0
     )
     counts["non_default_accuracy"] = (
         int(counts["non_default_correct"]) / non_default_scored
         if non_default_scored
+        else 0.0
+    )
+    counts["decisive_accuracy"] = (
+        int(counts["decisive_correct"]) / decisive_scored
+        if decisive_scored
+        else 0.0
+    )
+    counts["abstention_accuracy"] = (
+        int(counts["ambiguous_correct"]) / ambiguous_scored
+        if ambiguous_scored
+        else 0.0
+    )
+    counts["override_precision"] = (
+        int(counts["override_true_positive"]) / override_proposed
+        if override_proposed
+        else 0.0
+    )
+    counts["override_recall"] = (
+        int(counts["override_true_positive"]) / override_expected
+        if override_expected
         else 0.0
     )
     counts["aggregate_accuracy"] = (
@@ -175,11 +230,19 @@ def evaluate_classification_observations(
             "non_default_reviewed",
         ),
         (
+            int(counts["ambiguous_reviewed"]) >= MIN_AMBIGUOUS_OCCURRENCES,
+            "ambiguous_reviewed",
+        ),
+        (
             int(counts["repeated_entity_aggregates"])
             >= MIN_REPEATED_ENTITY_AGGREGATES,
             "repeated_entity_aggregates",
         ),
         (counts["judgment_accuracy"] >= MIN_ACCURACY, "judgment_accuracy"),
+        (counts["decisive_accuracy"] >= MIN_ACCURACY, "decisive_accuracy"),
+        (counts["abstention_accuracy"] >= MIN_ACCURACY, "abstention_accuracy"),
+        (counts["override_precision"] >= MIN_ACCURACY, "override_precision"),
+        (counts["override_recall"] >= MIN_ACCURACY, "override_recall"),
         (counts["non_default_accuracy"] >= MIN_ACCURACY, "non_default_accuracy"),
         (counts["aggregate_accuracy"] >= MIN_ACCURACY, "aggregate_accuracy"),
         (

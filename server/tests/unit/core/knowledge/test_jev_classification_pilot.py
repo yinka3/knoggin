@@ -8,6 +8,7 @@ import pytest
 from tests.fixtures.run_jev_classification_pilot import (
     build_review_labels,
     load_reviewed_cases,
+    provider_usage_summary,
     review_packet_coverage,
     validate_review_cases,
 )
@@ -83,6 +84,56 @@ def test_bundled_review_packet_meets_the_agreed_sample_composition():
     assert review_packet_coverage(packet["cases"]) == {
         "occurrences": 50,
         "non_default_occurrences": 24,
+        "ambiguous_occurrences": 10,
         "repeated_entity_aggregates": 10,
         "meets_sample_gate": True,
+    }
+
+
+def test_heldout_packet_is_frozen_reviewed_and_meets_sample_gate():
+    packet = json.loads(
+        Path("tests/fixtures/jev_classification_heldout_cases.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert packet["review_status"] == "reviewed"
+    assert validate_review_cases(packet["cases"]) is None
+    assert review_packet_coverage(packet["cases"]) == {
+        "occurrences": 50,
+        "non_default_occurrences": 28,
+        "ambiguous_occurrences": 10,
+        "repeated_entity_aggregates": 10,
+        "meets_sample_gate": True,
+    }
+
+
+def test_provider_usage_is_reported_without_configured_budget_pricing():
+    observations = [
+        {
+            "record": {
+                "result": {
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "cost_usd": 0.00012,
+                }
+            }
+        },
+        {
+            "record": {
+                "result": {
+                    "input_tokens": 80,
+                    "output_tokens": 10,
+                    "cost_usd": None,
+                }
+            }
+        },
+    ]
+
+    assert provider_usage_summary(observations) == {
+        "requests": 2,
+        "cost_reported_requests": 1,
+        "input_tokens": 180,
+        "output_tokens": 30,
+        "reported_cost_usd": 0.00012,
     }

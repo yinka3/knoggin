@@ -1,0 +1,109 @@
+{
+  "version": 1,
+  "review_status": "reviewed",
+  "purpose": "Proposed labels for the first live bounded-extraction diagnostic.",
+  "review_instructions": "Approve or correct every expected_type and reason before changing review_status to reviewed.",
+  "cases": [
+    {
+      "id": "unknown_company",
+      "candidate": "Northstar Labs",
+      "context": "Northstar Labs acquired the smaller software vendor.",
+      "proposed_type": null,
+      "expected_type": "Company",
+      "reason": "The candidate is explicitly acting as a company."
+    },
+    {
+      "id": "unknown_person",
+      "candidate": "Maya Patel",
+      "context": "Maya Patel approved the architecture proposal.",
+      "proposed_type": null,
+      "expected_type": "Person",
+      "reason": "The candidate is a named person performing an action."
+    },
+    {
+      "id": "unknown_project",
+      "candidate": "Project Lantern",
+      "context": "Project Lantern reached its first delivery milestone.",
+      "proposed_type": null,
+      "expected_type": "Project",
+      "reason": "The literal name and milestone identify a project."
+    },
+    {
+      "id": "unknown_database",
+      "candidate": "PostgreSQL",
+      "context": "PostgreSQL stores the service's relational data.",
+      "proposed_type": null,
+      "expected_type": "Database",
+      "reason": "The candidate is explicitly used as a database."
+    },
+    {
+      "id": "ordinary_delta",
+      "candidate": "delta",
+      "context": "The delta between the two estimates is small.",
+      "proposed_type": null,
+      "expected_type": null,
+      "expected_choice": "not_an_entity",
+      "reason": "Delta is ordinary text in this sentence."
+    },
+    {
+      "id": "ordinary_may",
+      "candidate": "May",
+      "context": "The deployment may finish tomorrow.",
+      "proposed_type": null,
+      "expected_type": null,
+      "expected_choice": "not_an_entity",
+      "reason": "May is a modal verb here, not an entity."
+    },
+    {
+      "id": "ambiguous_mercury",
+      "candidate": "Mercury",
+      "context": "Mercury was discussed during the meeting.",
+      "proposed_type": null,
+      "expected_type": null,
+      "expected_choice": "insufficient_evidence",
+      "reason": "The context cannot distinguish a company, project, person, or database."
+    },
+    {
+      "id": "ambiguous_phoenix",
+      "candidate": "Phoenix",
+      "context": "Phoenix will be reviewed next week.",
+      "proposed_type": null,
+      "expected_type": null,
+      "expected_choice": "insufficient_evidence",
+      "reason": "The name has no evidence supporting one configured type."
+    },
+    {
+      "id": "known_company",
+      "candidate": "Acme",
+      "context": "Acme signed the supplier agreement.",
+      "proposed_type": "Company",
+      "expected_type": "Company",
+      "reason": "The known company alias is used as an entity."
+    },
+    {
+      "id": "known_person",
+      "candidate": "Robert Chen",
+      "context": "Robert Chen joined the incident review.",
+      "proposed_type": "Person",
+      "expected_type": "Person",
+      "reason": "The known person alias is used as an entity."
+    },
+    {
+      "id": "known_project",
+      "candidate": "Orion",
+      "context": "Orion completed the migration milestone.",
+      "proposed_type": "Project",
+      "expected_type": "Project",
+      "reason": "The known project alias is used as an entity."
+    },
+    {
+      "id": "known_alias_wrong_context",
+      "candidate": "Atlas",
+      "context": "The atlas contains maps of the entire region.",
+      "proposed_type": "Project",
+      "expected_type": null,
+      "expected_choice": "not_an_entity",
+      "reason": "The known alias is ordinary text in this context and must not be recovered."
+    }
+  ]
+}
