@@ -14,30 +14,32 @@ from pathlib import Path
 
 from common.schema.jev import JevPolicy, JevResult
 from core.knowledge.entity.jev_identity import accepted_identity
+from tests.fixtures.jev_review_validation import index_unique
+
+
+def _key(record):
+    return (record["window_id"], record["pass_number"], record["occurrence_key"])
+
+
+def _validated_observations(labels, observations):
+    if any(label.get("review_status") != "reviewed" for label in labels):
+        raise ValueError("Identity labels must be human reviewed before scoring")
+    index_unique(labels, _key, "identity label")
+    return index_unique(
+        observations, lambda item: _key(item["record"]), "identity observation"
+    )
 
 
 def evaluate_identity_observations(
     labels: list[dict], observations: list[dict]
-) -> dict[str, int | float]:
-    if any(label.get("review_status") != "reviewed" for label in labels):
-        raise ValueError("Identity labels must be human reviewed before scoring")
-
-    keyed = {}
-    for observation in observations:
-        record = observation["record"]
-        key = (
-            record["window_id"],
-            record["pass_number"],
-            record["occurrence_key"],
-        )
-        if key in keyed:
-            raise ValueError("Duplicate identity observation key")
-        keyed[key] = observation
+) -> dict:
+    keyed = _validated_observations(labels, observations)
 
     counts = {
         "reviewed": 0,
         "observed": 0,
         "observation_missing": 0,
+        "observation_missing_reasons": {},
         "candidate_found": 0,
         "candidate_missing": 0,
         "candidate_recall_unknown": 0,
@@ -53,8 +55,14 @@ def evaluate_identity_observations(
         observation = keyed.get(key)
         if observation is None:
             counts["observation_missing"] += 1
+            reason = label.get("observation_missing_reason") or "unknown"
+            reasons = counts["observation_missing_reasons"]
+            reasons[reason] = reasons.get(reason, 0) + 1
             if label.get("correct_entity_id") is not None:
-                counts["candidate_missing"] += 1
+                if label.get("observation_missing_reason") == "candidate_discovery_miss":
+                    counts["candidate_missing"] += 1
+                else:
+                    counts["candidate_recall_unknown"] += 1
             continue
         counts["observed"] += 1
         gold_id = label.get("correct_entity_id")
@@ -104,16 +112,7 @@ def evaluate_identity_acceptance(
 ) -> dict[str, int | float]:
     """Score the frozen positive-v1 gate separately from raw JEV judgment."""
 
-    if any(label.get("review_status") != "reviewed" for label in labels):
-        raise ValueError("Identity labels must be human reviewed before scoring")
-    keyed = {
-        (
-            item["record"]["window_id"],
-            item["record"]["pass_number"],
-            item["record"]["occurrence_key"],
-        ): item
-        for item in observations
-    }
+    keyed = _validated_observations(labels, observations)
     policy = JevPolicy(
         identity_mode="active",
         acceptance_policy_version="identity-positive-v1",

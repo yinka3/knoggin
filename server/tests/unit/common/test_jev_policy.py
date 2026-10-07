@@ -58,6 +58,16 @@ def test_frozen_snapshot_round_trip_and_legacy_disabled_replay():
     assert IngestionPolicy.from_semantic_window_snapshot(snapshot).jev == JevPolicy()
 
 
+@pytest.mark.parametrize("mode", ["disabled", "observe"])
+def test_phase_a_v1_snapshot_retains_admitted_question_version(mode):
+    snapshot = policy(JevPolicy(classification_mode=mode)).semantic_window_snapshot()
+    snapshot["jev_policy"]["classification_question_version"] = "classification-v1"
+    reopened = IngestionPolicy.from_semantic_window_snapshot(snapshot)
+    assert reopened.jev.classification_question_version == "classification-v1"
+    assert reopened.jev.classification_mode == mode
+    assert reopened.semantic_window_snapshot() == snapshot
+
+
 @pytest.mark.parametrize(
     "update",
     [

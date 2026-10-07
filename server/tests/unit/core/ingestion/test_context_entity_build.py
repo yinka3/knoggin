@@ -355,6 +355,13 @@ class FakeExtractionJev:
         )
 
 
+class BudgetedExtractionJev(FakeExtractionJev):
+    async def evaluate(self, **kwargs):
+        if not kwargs["work_budget"].take():
+            return JevResult(outcome="unavailable", reason="work_budget_exhausted")
+        return await super().evaluate(**kwargs)
+
+
 def resolver(*, knowledge_store=None, readable_project_ids=None):
     return EntityResolver(
         knowledge_store=knowledge_store or FakeKnowledgeStore(),
@@ -1179,6 +1186,66 @@ async def test_identity_passes_share_one_window_work_budget():
     assert semantic_build.trace.resolver_timings[1]["pass_number"] == 2
     assert semantic_build.trace.resolver_timings[1]["held_seconds"] >= 0
     assert semantic_build.trace.resolver_timings[1]["jev_calls_consumed"] == 1
+
+
+@pytest.mark.parametrize("remove_candidate", [False, True])
+async def test_second_pass_revalidates_first_pass_acceptance_with_exhausted_budget(remove_candidate):
+    class BudgetedIdentityJev:
+        def __init__(self):
+            self.calls = 0
+
+        async def evaluate(self, **kwargs):
+            if not kwargs["work_budget"].take():
+                return JevResult(outcome="unavailable", reason="work_budget_exhausted")
+            self.calls += 1
+            handles = kwargs["questions"]["identity_choice"].criteria
+            return JevResult(outcome="available", response=JevResponse.model_validate({
+                "model": "jev-1.13.0",
+                "answers": {
+                    "identity_choice": {"type": "choice", "choice": "candidate_1",
+                        "confidence": 0.95,
+                        "probabilities": {handle: float(handle == "candidate_1") for handle in handles}},
+                    "identity_evidence": {"type": "noul", "noul": 0.95},
+                }, "usage": {"input_tokens": 20, "output_tokens": 0},
+            }))
+
+    store = FakeKnowledgeStore([
+        {"id": entity_id, "canonical_name": name, "aliases": ["Bob"], "contexts": [
+            {"project_id": "project-1", "entity_type": "Person", "topic": "Work"}
+        ]} for entity_id, name in ((701, "Robert Chen"), (702, "Bob Smith"))
+    ])
+    current = block("Bob joined the meeting.")
+    semantic_build = build(blocks=(current,), compiled_domain=identity_domain())
+    semantic_build.policy = policy(identity_domain(), llm_ner_mode="disabled", jev=JevPolicy(
+        identity_mode="active", acceptance_policy_version="identity-positive-v1", max_calls_per_window=1,
+    ))
+    jev = BudgetedIdentityJev()
+    service = ContextEntityBuildService(
+        processor=processor(FakeVP01([VP01EntitySpan(text="Bob", label="person", start=0, end=3)]), llm_ner_mode="disabled"),
+        resolver=EntityResolver(store, "project-1", ["project-1"], jev_client=jev),
+        allocate_entity_id=lambda: _async_value(900),
+    )
+    first = await service.build(semantic_build)
+    assert first.entity_ids == (701,)
+    budget = semantic_build.jev_work_budget
+    budget.max_observations = 1
+    if remove_candidate:
+        store.entities[701]["status"] = "retired"
+    second = await service.build(semantic_build)
+    assert semantic_build.jev_work_budget is budget
+    assert budget.calls == 1
+    assert jev.calls == 1
+    accepted = [item["jev"] for item in semantic_build.trace.identity_decisions
+        if item.get("jev", {}).get("accepted_entity_id") is not None]
+    if remove_candidate:
+        assert 701 not in second.entity_ids
+        assert accepted == []
+        assert semantic_build.trace.identity_decisions[0]["jev"]["superseded_by_pass"] == 2
+    else:
+        assert second.entity_ids == (701,)
+        assert len(accepted) == 1
+        assert accepted[0]["reused_for_pass"] == 2
+        assert budget.observations == 1
 
 
 def test_jev_identity_observations_are_emitted_as_bounded_json(monkeypatch):

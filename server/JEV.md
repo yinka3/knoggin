@@ -55,6 +55,9 @@ with an ingestion window. Credentials, endpoint, and the shutdown timeout remain
 runtime-only. Old
 development windows without JEV policy reopen with JEV disabled. Policy freezing
 does not guarantee identical probabilistic responses on an uncommitted retry.
+Admitted `classification-v1` windows also remain readable and reuse the original
+v1 question wording and proposal rules. New windows default to v2. The evaluated
+active topic-override gate requires v2; replay never upgrades a stored template.
 
 ## Spending and request ownership
 
@@ -92,6 +95,8 @@ starts with the first provider attempt and spans later requests and both identit
 passes. It includes retry backoff and foreground accounting waits. Invalid
 compressed responses return typed unavailable results like other malformed
 responses.
+Storage failures during reservation admission return `reservation_unavailable`
+without dispatching a provider request. Caller cancellation still propagates.
 
 Accounting has a separate bounded attempt. If it fails or outlasts the request,
 the client retains the reservation and usage for retry and reports
@@ -140,6 +145,19 @@ JEV currently holds the resolver lock,
 but the shared elapsed budget now bounds that wait; lock occupancy still needs
 measurement before active rollout.
 
+Observe mode also stays observational when `identity-positive-v1` is configured.
+JEV's candidate eligibility groups every qualifying fuzzy name into identities
+before bounding the offered list, so many aliases cannot hide a competitor. The
+baseline resolver retains its historical name-search limit.
+
+Within the same window, the second pass may carry an already accepted identity
+decision after rechecking the current snapshot under the resolver lock. Evidence,
+candidate options, and frozen policy must match the original request fingerprint.
+It consumes no extra provider call or observation slot and retains one provenance
+record. Changed inputs invalidate carry-forward; superseded private decisions
+cannot claim accepted durable metadata. This is limited to accepted in-memory
+window decisions, not a general provider-response cache.
+
 `JevDecisionRecord` retains scoped occurrence/evidence references, domain/model/
 question versions, option mapping, Choice/Noul results, usage/cost/timing, baseline
 outcome, and acceptance status. Observe records cannot be marked accepted.
@@ -172,11 +190,30 @@ active JEV can recover a bounded candidate while LLM NER is disabled. The existi
 maximum of two entity/relationship passes is unchanged, and both passes share the
 same JEV work budget.
 
+Occurrence deduplication and residual coverage include the block version ID, so
+supporting-only mentions with null offsets remain distinct across blocks. A
+recovery clears only its own block's gap. During a second build, an already
+accepted extraction may be carried forward after revalidating literal support,
+offsets, type options, domain, and policy against its original fingerprint. It
+uses no additional provider call or observation slot and keeps one provenance
+record. Changed or unapplied decisions cannot remain marked accepted.
+
 The first reviewed live extraction diagnostic ran on 2026-10-05. Raw decisions
 were correct on 11/12 cases; the frozen active gate accepted four candidates,
 all correct, for 100% precision and 57.14% positive recall. Provider-reported
 cost was $0.00027569. This is a small diagnostic, so broader held-out recovery,
 latency, and fallback-savings measurement remain required.
+
+The original combined raw-accuracy figures above used acceptance decisions for
+known-type candidates and are superseded by the Phase E reporting fix. Extraction
+reports now score unknown-type Choice answers separately. Known-type requests
+have no Choice answer: their raw entity-evidence Noul is retained and scored as
+mean squared error against reviewed entity/non-entity labels (Brier score; lower
+is better). This score measures entity support, not type correctness, and does
+not change with the acceptance threshold. Acceptance precision and positive
+recall remain separate. A report with no scored Choice answers has null raw
+accuracy. Both identity and extraction reject duplicate review IDs and scoring
+keys, including before live requests.
 
 Extraction records are private, window-scoped, and committed atomically in
 `project_jev_extraction_decisions`. Trace counters report candidate judgments,
@@ -196,6 +233,10 @@ Ownership:
   scoped source evidence. It does not treat the earlier judgment as proof.
 - The window/pass/occurrence key is unique. Project and window ownership is
   checked during writes and reads; committed replay skips provider work.
+- Accepted identity/extraction records are rechecked at commit against the frozen
+  provider response and acceptance gate. Identity must match the recorded reuse;
+  extraction must match a staged block association and its entity type. Invalid
+  acceptance rolls back the semantic commit.
 - Observe records live for the lifetime of the semantic window. Deleting the
   project removes its windows and records. The referenced Context block versions
   remain subject to existing Context retention rules.
@@ -236,9 +277,22 @@ keeps all proposed topics for review in configured domain order. The configured
 default remains the operational topic for every first-entry entity in observe
 mode. Existing project classifications are excluded from aggregation.
 
+On a second build, an unchanged available topic response can be reused without
+another provider call or observation-budget charge. Reuse requires the same
+window, occurrence, full evidence, options, and frozen policy. The resolver
+attaches the response to the current resolved entity ID and recomputes the final
+aggregate; stale IDs and duplicate aggregates from the first pass are discarded.
+The decision records its source pass as `reused_from_pass`.
+
+Compiled policy replay rejects invalid active allowed-topic lists, including
+unknown or inactive topics and missing defaults. Reclassification preserves an
+existing topic when it remains allowed for the resulting type; otherwise it
+uses that type's configured default.
+
 The atomic writer stores each occurrence together with that aggregate only after
 rechecking its frozen domain/model/question versions, evidence ownership, option
-mapping, response-derived suggestion, and first-entry entity classification. The
+mapping, full response model and option distribution, response-derived suggestion,
+and first-entry entity classification. The
 bounded reader requires window, user, and project scope. Replay does not duplicate
 records, and deleting the semantic window deletes its classification records.
 The schema already reserves a nullable `accepted_topic`; observe mode requires it
@@ -299,8 +353,10 @@ python -m tests.fixtures.capture_jev_baseline
 It writes `tests/fixtures/jev_baseline_outputs.json` using the existing fake-backed
 ingestion test harness and deterministic resolver. No provider calls or model
 downloads occur. `jev_identity_review_cases.json` contains additional proposed examples.
-Both still require human review and broader held-out examples before they can
-serve as quality ground truth. These artifacts do not establish live JEV quality.
+The checked-in baseline and seed identity labels are human reviewed. Baseline
+review acknowledges recorded behavior and known mistakes; it does not approve
+those mistakes or establish live JEV quality. Recapturing the baseline resets its
+review marker to pending. Representative held-out evidence remains required.
 
 After `jev_identity_review_cases.json` has been human-reviewed and its top-level
 status changed to `reviewed`, the identity pilot reads the same root `.env` key.

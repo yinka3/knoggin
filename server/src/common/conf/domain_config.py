@@ -584,6 +584,7 @@ class CompiledDomain:
 
         if not isinstance(version, int) or isinstance(version, bool) or version < 0:
             raise ValueError("CompiledDomain version must be a non-negative integer")
+
         return cls(
             version=version,
             active_topics=(),
@@ -695,6 +696,34 @@ class CompiledDomain:
             or vp01_language not in {"en", "multilingual"}
         ):
             raise ValueError("Invalid compiled Context configuration")
+        if any(
+            not isinstance(value, str) or not value.strip()
+            for value in (*active_topics, *active_entity_types)
+        ):
+            raise ValueError("Invalid compiled active topic or entity type")
+        active_type_keys = {value.casefold() for value in active_entity_types}
+        if (
+            len(active_type_keys) != len(active_entity_types)
+            or len({value.casefold() for value in active_topics}) != len(active_topics)
+            or not active_type_keys <= set(entity_type_to_topic)
+            or set(entity_type_to_allowed_topics) != set(entity_type_to_topic)
+        ):
+            raise ValueError("Invalid compiled topic mappings")
+        for key, allowed in entity_type_to_allowed_topics.items():
+            # Inactive types retain their durable mappings but cannot supply
+            # runtime choices; older snapshots also retain their inactive default.
+            if key not in active_type_keys:
+                continue
+            if (
+                not allowed
+                or any(
+                    not isinstance(topic, str) or topic not in active_topics
+                    for topic in allowed
+                )
+                or len(set(allowed)) != len(allowed)
+                or entity_type_to_topic[key] not in allowed
+            ):
+                raise ValueError("Invalid compiled allowed topics")
         context_section_by_key: dict[str, ContextSectionDefinition] = {}
         context_section_titles: set[str] = set()
         for section in context_sections:

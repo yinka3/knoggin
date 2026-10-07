@@ -1,7 +1,9 @@
 """Shared real-service fixtures for ingestion integration contracts."""
 
+import asyncio
 import json
 import os
+import sys
 import uuid
 from pathlib import Path
 
@@ -15,13 +17,22 @@ from tests.fixtures.factories import make_domain_config
 
 DB_URL = os.environ.get(
     "KNOGGIN_TEST_DATABASE_URL",
-    "postgresql://knoggin:knoggin@localhost:5432/knoggin_db",
+    "postgresql://knoggin:knoggin@127.0.0.1:5432/knoggin_db",
 )
+
+
+@pytest.fixture(scope="session")
+def event_loop_policy():
+    """Psycopg async requires a Selector loop on Windows."""
+    if sys.platform == "win32":
+        return asyncio.WindowsSelectorEventLoopPolicy()
+    return asyncio.DefaultEventLoopPolicy()
 
 
 def _database_url(database: str) -> str:
     params = conninfo_to_dict(DB_URL)
     params["dbname"] = database
+    params.setdefault("connect_timeout", "2")
     return make_conninfo(**params)
 
 
@@ -35,37 +46,38 @@ async def real_server_scope():
     ).read_text(encoding="utf-8")
     with psycopg.connect(admin_url, autocommit=True) as admin:
         admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database)))
-    with psycopg.connect(database_url, autocommit=True) as connection:
-        connection.execute("CREATE EXTENSION vector")
-        connection.execute("CREATE EXTENSION age")
-        connection.execute("LOAD 'age'")
-        connection.execute('SET search_path = ag_catalog, "$user", public')
-        connection.execute(schema_sql)
-        connection.execute("SELECT ag_catalog.create_graph('knoggin_graph')")
-
-    postgres = PostgresClient(dsn=database_url, min_size=1, max_size=2)
-    await postgres.connect()
-    suffix = uuid.uuid4().hex[:12]
-    user_name = "server_acceptance_test_user"
-    project_id = f"server-acceptance-project-{suffix}"
-    session_id = f"server-acceptance-session-{suffix}"
-    await postgres.execute(
-        """
-        INSERT INTO projects (project_id, user_name, name, domain_config)
-        VALUES (%s, %s, %s, %s)
-        """,
-        (
-            project_id,
-            user_name,
-            "Server acceptance integration",
-            json.dumps(make_domain_config().to_dict()),
-        ),
-    )
-    await postgres.execute(
-        "INSERT INTO sessions (session_id, user_name, project_id) VALUES (%s, %s, %s)",
-        (session_id, user_name, project_id),
-    )
+    postgres = None
     try:
+        with psycopg.connect(database_url, autocommit=True) as connection:
+            connection.execute("CREATE EXTENSION vector")
+            connection.execute("CREATE EXTENSION age")
+            connection.execute("LOAD 'age'")
+            connection.execute('SET search_path = ag_catalog, "$user", public')
+            connection.execute(schema_sql)
+            connection.execute("SELECT ag_catalog.create_graph('knoggin_graph')")
+
+        postgres = PostgresClient(dsn=database_url, min_size=1, max_size=2)
+        await postgres.connect()
+        suffix = uuid.uuid4().hex[:12]
+        user_name = "server_acceptance_test_user"
+        project_id = f"server-acceptance-project-{suffix}"
+        session_id = f"server-acceptance-session-{suffix}"
+        await postgres.execute(
+            """
+            INSERT INTO projects (project_id, user_name, name, domain_config)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (
+                project_id,
+                user_name,
+                "Server acceptance integration",
+                json.dumps(make_domain_config().to_dict()),
+            ),
+        )
+        await postgres.execute(
+            "INSERT INTO sessions (session_id, user_name, project_id) VALUES (%s, %s, %s)",
+            (session_id, user_name, project_id),
+        )
         yield {
             "postgres": postgres,
             "user_name": user_name,
@@ -73,11 +85,16 @@ async def real_server_scope():
             "session_id": session_id,
         }
     finally:
-        await postgres.close()
-        with psycopg.connect(admin_url, autocommit=True) as admin:
-            admin.execute(
-                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                "WHERE datname = %s AND pid <> pg_backend_pid()",
-                (database,),
-            )
-            admin.execute(sql.SQL("DROP DATABASE IF EXISTS {}").format(sql.Identifier(database)))
+        try:
+            if postgres is not None:
+                await postgres.close()
+        finally:
+            with psycopg.connect(admin_url, autocommit=True) as admin:
+                admin.execute(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                    "WHERE datname = %s AND pid <> pg_backend_pid()",
+                    (database,),
+                )
+                admin.execute(
+                    sql.SQL("DROP DATABASE IF EXISTS {}").format(sql.Identifier(database))
+                )

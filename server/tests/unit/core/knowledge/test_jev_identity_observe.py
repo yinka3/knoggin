@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -361,6 +362,69 @@ async def test_sampled_deterministic_reuse_is_observed_without_changing_identity
     assert result.identity_decisions[0]["jev"]["record"]["baseline_outcome"] == (
         "deterministic_reuse"
     )
+
+
+async def test_observe_positive_policy_never_accepts_or_changes_baseline():
+    jev = FakeJev(confidence=0.95, evidence_noul=0.95)
+    resolver = EntityResolver(Store([
+        entity(701, "Robert Chen", "Person"), entity(702, "Bob Smith", "Person"),
+    ]), "project-1", ["project-1"], jev_client=jev)
+    result = await resolve(resolver, identity_policy(
+        "observe", acceptance_policy_version="identity-positive-v1",
+    ), ["Bob joined the meeting."])
+    observation = result.identity_decisions[0]["jev"]
+    assert result.entity_ids == (900,)
+    assert observation["accepted_entity_id"] is None
+    assert observation["record"]["acceptance_status"] == "proposed"
+
+
+async def test_many_aliases_cannot_hide_competing_identity_from_jev():
+    first = entity(701, "Robert A 000", "Person")
+    first["aliases"] = [f"Robert A {i:03d}" for i in range(61)]
+    second = entity(702, "Robert Z 999", "Person")
+    second["aliases"] = []
+    resolver = EntityResolver(Store([first, second]), "project-1", ["project-1"],
+        jev_client=FakeJev(confidence=0.95, evidence_noul=0.95))
+    result = await resolve(resolver, identity_policy(
+        "active", max_candidates=1, acceptance_policy_version="identity-positive-v1",
+    ), ["Robert Z 999."], name="Robert")
+    observation = result.identity_decisions[0]["jev"]
+    assert set(observation["eligible_candidate_ids"]) == {701, 702}
+    assert observation["candidate_set_truncated"]
+    assert observation["accepted_entity_id"] is None
+    assert result.entity_ids == (900,)
+
+
+@pytest.mark.parametrize("changed", [None, "evidence", "policy"])
+async def test_accepted_decision_is_carried_only_for_identical_frozen_inputs(changed):
+    jev = FakeJev(confidence=0.95, evidence_noul=0.95)
+    resolver = EntityResolver(Store([
+        entity(701, "Robert Chen", "Person"), entity(702, "Bob Smith", "Person"),
+    ]), "project-1", ["project-1"], jev_client=jev)
+    frozen = identity_policy("active", acceptance_policy_version="identity-positive-v1")
+    block_id, window_id = uuid4(), uuid4()
+    mention = ContextBlockMention(block_ids=(block_id,), name="Bob", entity_type="Person", topic="Work", origin="vp01")
+
+    async def allocate():
+        return 900
+
+    first = await resolver.resolve_context_block_mentions([mention],
+        block_text_by_id={block_id: "Bob joined the meeting."}, policy=frozen,
+        allocate_entity_id=allocate, window_id=window_id)
+    assert first.entity_ids == (701,)
+    unavailable = FakeJev(unavailable=True)
+    resolver._jev_client = unavailable
+    second = await resolver.resolve_context_block_mentions([mention],
+        block_text_by_id={block_id: "Bob reviewed an invoice." if changed == "evidence" else "Bob joined the meeting."},
+        policy=replace(frozen, candidate_fuzzy_threshold=84) if changed == "policy" else frozen,
+        allocate_entity_id=allocate, window_id=window_id, pass_number=2,
+        previous_identity_decisions=first.identity_decisions)
+    if changed is None:
+        assert second.entity_ids == (701,)
+        assert unavailable.calls == []
+    else:
+        assert second.entity_ids == (900,)
+        assert len(unavailable.calls) == 1
 
 
 @pytest.mark.no_network

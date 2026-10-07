@@ -16,15 +16,22 @@ from common.schema.ingestion.contracts import (
     ProjectEntityClassification,
     relationship_identity,
 )
-from common.schema.jev import JevDecisionRecord
+from common.schema.jev import ChoiceQuestion, JevDecisionRecord, NoulQuestion
 from common.schema.semantic_window import SemanticWindowStage
 from common.scoping import IDENTITY_ENTITY_ID, require_scope_value
 from core.ingestion.batch import SemanticWindowBuild
+from core.ingestion.jev_extraction import (
+    ExtractionCandidate,
+    accepted_extraction_type,
+    prepare_extraction_request,
+)
 from core.knowledge.db.projection_rebuilder import GraphBuilder
 from core.knowledge.entity.jev_classification import (
     accepted_classification_topic,
     proposed_topic,
 )
+from core.knowledge.entity.jev_identity import accepted_identity
+from infrastructure.jev_client import JevClient
 from infrastructure.postgres_client import PostgresClient
 
 
@@ -364,6 +371,33 @@ class SemanticCommitWriter:
             eligible = int(observation["eligible_candidate_count"])
             truncated = bool(observation["candidate_set_truncated"])
             accepted_entity_id = observation.get("accepted_entity_id")
+            if accepted_entity_id is not None:
+                if record.result.response is None:
+                    raise ValueError("Accepted JEV identity requires a valid response")
+                JevClient._validate_response(
+                    record.result.response,
+                    {
+                        "identity_choice": ChoiceQuestion(
+                            instructions="Validate recorded identity options",
+                            criteria={
+                                **dict.fromkeys(record.option_mapping),
+                                "none_of_these": None,
+                                "insufficient_evidence": None,
+                            },
+                        ),
+                        "identity_evidence": NoulQuestion(instructions="Validate evidence"),
+                    },
+                    build.policy.jev,
+                )
+                if (
+                    accepted_identity(
+                        record.result, record.option_mapping, build.policy.jev,
+                        candidate_set_truncated=truncated,
+                    ) != accepted_entity_id
+                    or decision.get("outcome") != "reused"
+                    or decision.get("candidate_id") != accepted_entity_id
+                ):
+                    raise ValueError("JEV identity acceptance does not match the committed reuse")
             if (
                 offered != len(record.option_mapping)
                 or eligible < offered
@@ -473,6 +507,40 @@ class SemanticCommitWriter:
                 raise ValueError("JEV extraction candidate-set provenance is invalid")
             if observation["candidate_set_truncated"] and accepted_type is not None:
                 raise ValueError("Truncated JEV extraction choices cannot be accepted")
+            if (record.acceptance_status == "accepted") != (accepted_type is not None):
+                raise ValueError("JEV extraction acceptance status is inconsistent")
+            if accepted_type is not None:
+                candidate = ExtractionCandidate(
+                    block_id=record.evidence_block_ids[0],
+                    name=observation["candidate_name"],
+                    evidence_origin=observation["evidence_origin"],
+                    support_text="", proposed_type=proposed_type,
+                    source_start=None, source_end=None,
+                )
+                _, questions, mapping, truncated = prepare_extraction_request(
+                    candidate, build.policy
+                )
+                if record.result.response is None:
+                    raise ValueError("Accepted JEV extraction requires a valid response")
+                JevClient._validate_response(record.result.response, questions, build.policy.jev)
+                if (
+                    mapping != record.option_mapping
+                    or truncated != observation["candidate_set_truncated"]
+                    or accepted_type != suggested_type
+                    or accepted_extraction_type(
+                        record.result, candidate, mapping, build.policy.jev,
+                        candidate_set_truncated=truncated,
+                    ) != accepted_type
+                    or not any(
+                        association.block_id == candidate.block_id
+                        and association.mention_text.casefold() == candidate.name.casefold()
+                        and build.entity_result.project_classifications[
+                            association.entity_id
+                        ].entity_type == accepted_type
+                        for association in build.entity_result.block_entity_associations
+                    )
+                ):
+                    raise ValueError("JEV extraction acceptance does not match the committed mention")
             payload = json.dumps(observation, sort_keys=True, separators=(",", ":"))
             if len(payload.encode("utf-8")) > 256_000:
                 raise ValueError("JEV extraction decision exceeds the durable record limit")
@@ -600,6 +668,20 @@ class SemanticCommitWriter:
 
             for observation in items:
                 record = JevDecisionRecord.model_validate(observation["record"])
+                if record.result.outcome == "available":
+                    if record.result.response is None:
+                        raise ValueError("Available JEV classification requires a response")
+                    JevClient._validate_response(
+                        record.result.response,
+                        {
+                            "topic_choice": ChoiceQuestion(
+                                instructions="Validate recorded topic options",
+                                criteria={**dict.fromkeys(record.option_mapping), "insufficient_evidence": None},
+                            ),
+                            "topic_evidence": NoulQuestion(instructions="Validate evidence"),
+                        },
+                        build.policy.jev,
+                    )
                 mapping_topics = tuple(record.option_mapping.values())
                 truncated = observation.get("option_set_truncated")
                 suggested_topic = observation.get("suggested_topic")
@@ -655,6 +737,7 @@ class SemanticCommitWriter:
                         record.option_mapping,
                         baseline_topic=baseline_topic,
                         option_set_truncated=truncated,
+                        question_version=build.policy.jev.classification_question_version,
                     )
                     != suggested_topic
                     or (

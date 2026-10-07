@@ -1,7 +1,9 @@
 import asyncio
+import hashlib
 import json
 import re
 import threading
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Dict, Iterable, Optional, Tuple
 from uuid import UUID
@@ -184,6 +186,16 @@ class TextProcessor:
 
         if not isinstance(build, SemanticWindowBuild):
             raise TypeError("extract_context_mentions requires a SemanticWindowBuild")
+        previous_acceptances = [
+            deepcopy(item)
+            for item in build.trace.extraction_decisions
+            if item.get("accepted_entity_type") is not None
+        ]
+        for item in build.trace.extraction_decisions:
+            if item.get("accepted_entity_type") is not None:
+                item["accepted_entity_type"] = None
+                item["record"]["acceptance_status"] = "rejected"
+                item["superseded_by_pass"] = max(1, build.identity_pass_number)
         blocks = build.knowledge_input_blocks
         if not blocks:
             build.set_mentions(())
@@ -225,7 +237,7 @@ class TextProcessor:
         )
         build.trace.known_mentions = len(known_matches)
         mentions: list[ContextBlockMention] = []
-        seen_occurrences: set[tuple[int, int, str, str]] = set()
+        seen_occurrences: set[tuple[tuple[UUID, ...], int, int, str, str]] = set()
 
         def add_mention(mention: ContextBlockMention) -> bool:
             """Keep distinct typed occurrences, not just distinct surfaces."""
@@ -236,6 +248,7 @@ class TextProcessor:
             ):
                 raise ValueError("Extracted Context mentions require source offsets")
             key = (
+                mention.block_ids,
                 mention.source_start if mention.source_start is not None else -1,
                 mention.source_end if mention.source_end is not None else -1,
                 mention.name.casefold(),
@@ -337,6 +350,7 @@ class TextProcessor:
             assembled=assembled,
             mentions=mentions,
             add_mention=add_mention,
+            previous_acceptances=previous_acceptances,
         )
         build.set_mentions(mentions)
         return mentions
@@ -348,6 +362,7 @@ class TextProcessor:
         assembled: _ContextBlockText,
         mentions: list[ContextBlockMention],
         add_mention,
+        previous_acceptances: list[dict] | None = None,
     ) -> None:
         """Run structured NER only for meaningful blocks left uncovered."""
 
@@ -379,6 +394,7 @@ class TextProcessor:
                     build,
                     candidate=candidate,
                     occurrence_index=index,
+                    previous_acceptances=previous_acceptances,
                 )
                 if accepted is None:
                     continue
@@ -410,6 +426,10 @@ class TextProcessor:
                         resolved_endpoints.add(
                             (candidate.block_id, candidate.name.casefold())
                         )
+                else:
+                    decision["record"]["acceptance_status"] = "rejected"
+                    decision["accepted_entity_type"] = None
+                    build.trace.jev_extraction_rejected += 1
             if extraction_mode == "active":
                 gaps, alias_gap_blocks, endpoint_gap_blocks = (
                     self._prepare_fallback_gaps(
@@ -569,7 +589,11 @@ class TextProcessor:
         resolved_endpoints = resolved_endpoints or set()
         forced_uncovered_blocks = forced_uncovered_blocks or set()
         covered = {block_id for mention in mentions for block_id in mention.block_ids}
-        represented_names = {mention.name.casefold() for mention in mentions}
+        represented_names = {
+            (block_id, mention.name.casefold())
+            for mention in mentions
+            for block_id in mention.block_ids
+        }
         known_aliases = {
             name.casefold(): name for name in self.get_known_aliases() if name.strip()
         }
@@ -583,7 +607,8 @@ class TextProcessor:
             support_text_by_block[block.block_id] = support_text
             normalized_support = support_text.casefold()
             if any(
-                alias not in represented_names and alias in normalized_support
+                (block.block_id, alias) not in represented_names
+                and alias in normalized_support
                 for alias in known_aliases
             ):
                 alias_gap_blocks.add(block.block_id)
@@ -631,7 +656,11 @@ class TextProcessor:
         block_offsets = {
             block_id: start for block_id, start, _end in assembled.offsets
         }
-        represented = {mention.name.casefold() for mention in mentions}
+        represented = {
+            (block_id, mention.name.casefold())
+            for mention in mentions
+            for block_id in mention.block_ids
+        }
         candidates: list[ExtractionCandidate] = []
         seen: set[tuple[UUID, str]] = set()
 
@@ -674,7 +703,9 @@ class TextProcessor:
 
         for diagnostic in build.unknown_endpoint_diagnostics:
             gap = gaps_by_id.get(diagnostic.block_id)
-            if gap is None or diagnostic.name.casefold() in represented:
+            if gap is None or (
+                diagnostic.block_id, diagnostic.name.casefold()
+            ) in represented:
                 continue
             append_candidate(
                 gap=gap,
@@ -688,7 +719,7 @@ class TextProcessor:
         for alias, entity_id in sorted(
             self.get_known_aliases().items(), key=lambda item: item[0].casefold()
         ):
-            if not alias.strip() or alias.casefold() in represented:
+            if not alias.strip():
                 continue
             profile = await self.get_profile(entity_id)
             proposed_type = None
@@ -697,6 +728,8 @@ class TextProcessor:
                     profile.entity_type
                 ) or build.policy.domain.resolve_entity_type(profile.entity_type)
             for gap in gaps:
+                if (gap.block.block_id, alias.casefold()) in represented:
+                    continue
                 append_candidate(
                     gap=gap,
                     name=alias,
@@ -711,6 +744,7 @@ class TextProcessor:
         *,
         candidate: ExtractionCandidate,
         occurrence_index: int,
+        previous_acceptances: list[dict] | None = None,
     ) -> tuple[str, dict] | None:
         """Record one bounded judgment and return active positive recovery only."""
 
@@ -719,11 +753,48 @@ class TextProcessor:
                 build.policy.jev.max_calls_per_window,
                 build.policy.jev.max_elapsed_seconds_per_window,
             )
-        if not build.jev_work_budget.take_observation():
-            return None
         state, questions, mapping, candidate_set_truncated = (
             prepare_extraction_request(candidate, build.policy)
         )
+        fingerprint_inputs = {
+            "window_id": str(build.window_id),
+            "project_id": build.project_id,
+            "block_id": str(candidate.block_id),
+            "name": candidate.name,
+            "support": candidate.support_text,
+            "offsets": [candidate.source_start, candidate.source_end],
+            "state": state,
+            "questions": {key: value.model_dump() for key, value in questions.items()},
+            "policy": build.policy.semantic_window_snapshot(),
+        }
+        fingerprint = hashlib.sha256(
+            json.dumps(fingerprint_inputs, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        for previous in previous_acceptances or ():
+            if previous.get("request_fingerprint") != fingerprint:
+                continue
+            accepted = accepted_extraction_type(
+                JevResult.model_validate(previous["record"]["result"]),
+                candidate,
+                mapping,
+                build.policy.jev,
+                candidate_set_truncated=candidate_set_truncated,
+            )
+            if accepted is None or build.policy.jev.extraction_mode != "active":
+                continue
+            previous_acceptances.remove(previous)
+            previous["reused_for_pass"] = max(1, build.identity_pass_number)
+            key = (
+                previous["record"]["pass_number"],
+                previous["record"]["occurrence_key"],
+            )
+            for index, item in enumerate(build.trace.extraction_decisions):
+                if (item["record"]["pass_number"], item["record"]["occurrence_key"]) == key:
+                    build.trace.extraction_decisions[index] = previous
+                    break
+            return accepted, previous
+        if not build.jev_work_budget.take_observation():
+            return None
         try:
             result = await self._jev_client.evaluate(
                 state=state,
@@ -779,6 +850,7 @@ class TextProcessor:
             ),
         )
         observation = {
+            "request_fingerprint": fingerprint,
             "record": record.model_dump(mode="json"),
             "candidate_name": candidate.name,
             "evidence_origin": candidate.evidence_origin,

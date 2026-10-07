@@ -1,7 +1,14 @@
 {
   "version": 1,
   "kind": "deterministic_and_fake_backed_baseline",
-  "human_review_status": "pending",
+  "human_review_status": "reviewed",
+  "human_review_date": "2026-10-07",
+  "review_note": "The user approved recording the captured baseline behavior, including its known weaknesses. This does not approve incorrect baseline outcomes as desired behavior or establish production readiness.",
+  "known_weaknesses": [
+    {"case_id": "ordinary_word", "issue": "Ordinary lowercase delta incorrectly reuses Project Delta."},
+    {"case_id": "candidate_discovery_miss", "issue": "PG (PostgreSQL) creates a new ID because name search cannot discover the stored identity without a PG alias."},
+    {"case_id": "one_mention_covers_block", "issue": "Detecting Orion leaves Zephyr Dynamics missing without generative fallback unless an unknown endpoint flags the gap."}
+  ],
   "live_provider_calls": 0,
   "records": [
     {

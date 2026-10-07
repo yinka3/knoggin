@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import re
 import threading
 import time
 from collections.abc import Iterable
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 from uuid import UUID
@@ -200,6 +202,8 @@ class EntityResolver:
         pass_number: int = 1,
         work_budget: JevWorkBudget | None = None,
         timing: dict[str, float] | None = None,
+        previous_identity_decisions: tuple[dict, ...] = (),
+        previous_classification_decisions: tuple[dict, ...] = (),
     ) -> ContextEntityResolution:
         """Resolve typed Context-block mentions without manufacturing message refs.
 
@@ -219,6 +223,16 @@ class EntityResolver:
 
         async with self._measured_resolution_lock(timing):
             state = _ContextEntityResolutionState()
+            previous_acceptances = [
+                deepcopy(item["jev"])
+                for item in previous_identity_decisions
+                if item.get("jev", {}).get("accepted_entity_id") is not None
+            ]
+            previous_topic_proposals = [
+                deepcopy(item)
+                for item in previous_classification_decisions
+                if item["record"]["result"]["outcome"] == "available"
+            ]
             identity_work_budget = work_budget or JevWorkBudget(
                 policy.jev.max_calls_per_window,
                 policy.jev.max_elapsed_seconds_per_window,
@@ -351,7 +365,6 @@ class EntityResolver:
                         observation = await self._observe_jev_identity(
                             mention=mention,
                             support_text=support_text,
-                            ranked=ranked,
                             snapshot=candidate_snapshot,
                             policy=policy,
                             staged=state.project_classifications,
@@ -364,6 +377,7 @@ class EntityResolver:
                                 if accepted
                                 else "deterministic_abstention"
                             ),
+                            previous_acceptances=previous_acceptances,
                         )
                         if observation is not None:
                             decision["jev"] = observation
@@ -484,6 +498,7 @@ class EntityResolver:
                         pass_number=pass_number,
                         occurrence_index=index,
                         work_budget=identity_work_budget,
+                        previous_proposals=previous_topic_proposals,
                     )
                     if observation is not None:
                         state.classification_decisions.append(observation)
@@ -611,8 +626,9 @@ class EntityResolver:
         pass_number: int,
         occurrence_index: int,
         work_budget: JevWorkBudget,
+        previous_proposals: list[dict] | None = None,
     ) -> dict[str, Any] | None:
-        """Record a topic proposal without changing the staged classification."""
+        """Reuse unchanged topic evidence or observe it for this resolved ID."""
 
         request = prepare_topic_request(
             mention,
@@ -624,24 +640,54 @@ class EntityResolver:
             return None
         if window_id is None:
             raise TypeError("JEV classification observation requires the window ID")
-        if not work_budget.take_observation():
-            return None
         state, questions, mapping, option_set_truncated = request
-        try:
-            result = await self._jev_client.evaluate(
-                state=state,
-                questions=questions,
-                capability="classification",
-                policy=policy.jev,
-                work_budget=work_budget,
-            )
-        except Exception:
-            result = JevResult(outcome="unavailable", reason="provider_error")
+        # Allocated IDs can change between passes; the semantic question cannot.
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                {
+                    "window_id": str(window_id),
+                    "project_id": self.project_id,
+                    "blocks": list(map(str, mention.block_ids)),
+                    "name": mention.name,
+                    "support": support_text,
+                    "baseline_topic": baseline_topic,
+                    "state": state,
+                    "questions": {
+                        key: question.model_dump()
+                        for key, question in questions.items()
+                    },
+                    "policy": policy.semantic_window_snapshot(),
+                },
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        result = None
+        reused_from_pass = None
+        for previous in previous_proposals or ():
+            if previous.get("request_fingerprint") == fingerprint:
+                result = JevResult.model_validate(previous["record"]["result"])
+                reused_from_pass = previous["record"]["pass_number"]
+                previous_proposals.remove(previous)
+                break
+        if result is None:
+            if not work_budget.take_observation():
+                return None
+            try:
+                result = await self._jev_client.evaluate(
+                    state=state,
+                    questions=questions,
+                    capability="classification",
+                    policy=policy.jev,
+                    work_budget=work_budget,
+                )
+            except Exception:
+                result = JevResult(outcome="unavailable", reason="provider_error")
         suggested_topic = proposed_topic(
             result,
             mapping,
             baseline_topic=baseline_topic,
             option_set_truncated=option_set_truncated,
+            question_version=policy.jev.classification_question_version,
         )
         record = JevDecisionRecord(
             capability="classification",
@@ -671,6 +717,8 @@ class EntityResolver:
             ),
         )
         return {
+            "request_fingerprint": fingerprint,
+            **({"reused_from_pass": reused_from_pass} if reused_from_pass is not None else {}),
             "record": record.model_dump(mode="json"),
             "entity_id": entity_id,
             "entity_type": mention.entity_type,
@@ -688,7 +736,6 @@ class EntityResolver:
         *,
         mention: ContextBlockMention,
         support_text: str,
-        ranked: list,
         snapshot: EntityCandidateSnapshot,
         policy: IngestionPolicy,
         staged: dict[int, ProjectEntityClassification],
@@ -697,12 +744,36 @@ class EntityResolver:
         occurrence_index: int,
         work_budget: JevWorkBudget,
         baseline_outcome: str,
+        previous_acceptances: list[dict] | None = None,
     ) -> dict[str, Any] | None:
         """Collect a shadow suggestion without changing resolver acceptance."""
 
+        # Baseline matching keeps its historical name limit. JEV's safety
+        # boundary must see every qualifying identity before bounding options.
+        complete_ranked = []
+        for candidate in self._get_candidate_ids_from_snapshot(
+            mention.name,
+            candidate_fuzzy_threshold=policy.candidate_fuzzy_threshold,
+            snapshot=snapshot,
+            complete=True,
+        ):
+            profile = snapshot.get_profile(candidate.entity_id)
+            if profile is None:
+                continue
+            signals, score = self._identity_decision_signals(
+                mention.name, mention.entity_type, mention.topic, support_text,
+                profile, candidate.entity_id, policy=policy,
+                compatibility=self.schema_compatibility(
+                    mention.entity_type, mention.topic, profile, policy
+                ), candidate=candidate, candidate_snapshot=snapshot,
+            )
+            complete_ranked.append(
+                (score, candidate.entity_id, profile, candidate, signals)
+            )
+        complete_ranked.sort(key=lambda item: (-item[0], item[1]))
         options = [
             IdentityOption(candidate_id, profile)
-            for _score, candidate_id, profile, _candidate, _signals in ranked
+            for _score, candidate_id, profile, _candidate, _signals in complete_ranked
             if self._identity_candidate_is_eligible(
                 candidate_id, profile, mention, policy, staged
             )
@@ -719,9 +790,34 @@ class EntityResolver:
             return None
         if window_id is None:
             raise TypeError("JEV identity observation requires the semantic window ID")
+        state, questions, mapping = request
+        fingerprint_inputs = {
+            "window_id": str(window_id),
+            "project_id": self.project_id,
+            "blocks": list(map(str, mention.block_ids)),
+            "support": support_text,
+            "state": state,
+            "questions": {key: q.model_dump() for key, q in questions.items()},
+            "mapping": mapping,
+            "eligible_ids": [option.entity_id for option in options],
+            "policy": policy.semantic_window_snapshot(),
+        }
+        fingerprint = hashlib.sha256(
+            json.dumps(fingerprint_inputs, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        # Carry only already accepted, unchanged window decisions. The fresh
+        # snapshot/eligibility checks above run under the resolver lock.
+        for previous in previous_acceptances or ():
+            if previous.get("request_fingerprint") == fingerprint:
+                result = JevResult.model_validate(previous["record"]["result"])
+                if accepted_identity(
+                    result, mapping, policy.jev, candidate_set_truncated=False
+                ) == previous["accepted_entity_id"]:
+                    previous_acceptances.remove(previous)
+                    previous["reused_for_pass"] = pass_number
+                    return previous
         if not work_budget.take_observation():
             return None
-        state, questions, mapping = request
         candidate_set_truncated = len(options) > len(mapping)
         try:
             result = await self._jev_client.evaluate(
@@ -738,11 +834,15 @@ class EntityResolver:
         suggested_entity_id = (
             None if candidate_set_truncated else proposed_identity(result, mapping)
         )
-        accepted_entity_id = accepted_identity(
-            result,
-            mapping,
-            policy.jev,
-            candidate_set_truncated=candidate_set_truncated,
+        accepted_entity_id = (
+            accepted_identity(
+                result,
+                mapping,
+                policy.jev,
+                candidate_set_truncated=candidate_set_truncated,
+            )
+            if policy.jev.identity_mode == "active"
+            else None
         )
         record = JevDecisionRecord(
             capability="identity",
@@ -774,6 +874,7 @@ class EntityResolver:
         )
         return {
             "record": record.model_dump(mode="json"),
+            "request_fingerprint": fingerprint,
             "baseline_entity_id": None,
             "suggested_entity_id": suggested_entity_id,
             "accepted_entity_id": accepted_entity_id,
@@ -1448,6 +1549,7 @@ class EntityResolver:
         *,
         candidate_fuzzy_threshold: int | None,
         snapshot: EntityCandidateSnapshot,
+        complete: bool = False,
     ) -> List[EntityCandidate]:
         mention_lower = self._candidate_search_key(mention) if mention else ""
         if not mention_lower:
@@ -1471,7 +1573,7 @@ class EntityResolver:
         results = process.extract(
             mention_lower,
             snapshot.iter_names(),
-            limit=50,
+            limit=None if complete else 50,
             score_cutoff=fuzzy_threshold,
             scorer=scorer,
         )

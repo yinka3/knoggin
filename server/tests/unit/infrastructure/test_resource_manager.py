@@ -213,6 +213,7 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
 
 @pytest.mark.no_network
 async def test_resource_manager_raises_if_database_url_missing(monkeypatch):
+    monkeypatch.setattr(resources_module, "load_dotenv", MagicMock())
     monkeypatch.delenv("DATABASE_URL", raising=False)
     with pytest.raises(
         ConfigurationError, match="DATABASE_URL environment variable is not set"

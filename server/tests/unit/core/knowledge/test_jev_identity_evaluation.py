@@ -99,6 +99,7 @@ def test_candidate_recall_and_judgment_quality_are_scored_separately():
         "reviewed": 6,
         "observed": 6,
         "observation_missing": 0,
+        "observation_missing_reasons": {},
         "candidate_found": 4,
         "candidate_missing": 1,
         "candidate_recall_unknown": 0,
@@ -160,6 +161,7 @@ def test_missing_observation_counts_as_candidate_discovery_miss():
     label, _observation = _case(
         1, gold_id=42, eligible=[], offered=[], choice="none_of_these"
     )
+    label["observation_missing_reason"] = "candidate_discovery_miss"
 
     quality = evaluate_identity_observations([label], [])
     acceptance = evaluate_identity_acceptance([label], [])
@@ -168,6 +170,7 @@ def test_missing_observation_counts_as_candidate_discovery_miss():
         "reviewed": 1,
         "observed": 0,
         "observation_missing": 1,
+        "observation_missing_reasons": {"candidate_discovery_miss": 1},
         "candidate_found": 0,
         "candidate_missing": 1,
         "candidate_recall_unknown": 0,
@@ -189,3 +192,23 @@ def test_missing_observation_counts_as_candidate_discovery_miss():
         "acceptance_precision": 0.0,
         "wrong_reuse_rate": 0.0,
     }
+
+
+def test_unexplained_missing_observation_does_not_claim_discovery_failure():
+    label, _ = _case(1, gold_id=42, eligible=[42], offered=[42], choice="candidate_1")
+    quality = evaluate_identity_observations([label], [])
+    assert quality["candidate_missing"] == 0
+    assert quality["candidate_recall_unknown"] == 1
+    assert quality["observation_missing_reasons"] == {"unknown": 1}
+
+
+def test_sampling_and_observation_limits_are_reported_separately():
+    labels = []
+    for index, reason in enumerate(("not_sampled", "observation_limit")):
+        label, _ = _case(index, gold_id=42, eligible=[42], offered=[42], choice="candidate_1")
+        label["observation_missing_reason"] = reason
+        labels.append(label)
+    quality = evaluate_identity_observations(labels, [])
+    assert quality["candidate_missing"] == 0
+    assert quality["candidate_recall_unknown"] == 2
+    assert quality["observation_missing_reasons"] == {"not_sampled": 1, "observation_limit": 1}

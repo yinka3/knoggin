@@ -75,6 +75,23 @@ def prepare_topic_request(
         "topic through topic-specific activity, rather than merely mentioning the "
         "entity or describing a general association."
     )
+    # Admitted windows retain their original template on restart.
+    if policy.classification_question_version == "classification-v1":
+        state["mention"]["default_topic"] = domain.topic_for_entity_type(
+            mention.entity_type
+        )
+        criteria["insufficient_evidence"] = (
+            "The supplied context does not support one allowed topic."
+        )
+        choice_instructions = (
+            "Which allowed project topic best classifies this entity in the "
+            "supplied context? Use insufficient_evidence when one topic is not "
+            "supported."
+        )
+        evidence_instructions = (
+            "The supplied evidence supports assigning one specific allowed "
+            "topic to this entity in the current project."
+        )
     questions = {
         "topic_choice": ChoiceQuestion(
             instructions=choice_instructions,
@@ -91,6 +108,7 @@ def proposed_topic(
     *,
     baseline_topic: str,
     option_set_truncated: bool,
+    question_version: str = "classification-v2",
 ) -> str | None:
     """Return an observable override suggestion; it never changes classification."""
 
@@ -100,7 +118,7 @@ def proposed_topic(
     if not isinstance(answer, ChoiceAnswer) or answer.choice not in mapping:
         return None
     topic = mapping[answer.choice]
-    if topic == baseline_topic:
+    if topic == baseline_topic and question_version != "classification-v1":
         return None
     return topic
 
@@ -115,7 +133,10 @@ def accepted_classification_topic(
 ) -> str | None:
     """Return one strongly supported non-default override under the active gate."""
 
-    if policy.classification_acceptance_policy_version != "override-positive-v1":
+    if (
+        policy.classification_acceptance_policy_version != "override-positive-v1"
+        or policy.classification_question_version != "classification-v2"
+    ):
         return None
     topic = proposed_topic(
         result,

@@ -118,7 +118,7 @@ recommendations to validate against current commit contracts.
 
 ### Phase A — Baseline and shared foundation
 
-- [ ] A1: Capture human-reviewed identity examples and baseline outputs. Include
+- [x] A1: Capture human-reviewed identity examples and baseline outputs. Include
   same names, aliases, foreign classifications, and repeated occurrences.
   Extraction/classification examples remain proposed until separately reviewed.
 - [x] A2: Add a small async provider adapter with typed Choice/Noul requests,
@@ -150,6 +150,27 @@ their estimate using the existing tables. No consumer behavior or schema changed
 Validation: 183 focused regression tests passed; five isolated PostgreSQL tests
 skipped because the test service was unavailable. Live SQL behavior remains to be
 verified. A1 human review and A6 durable decision provenance are still pending.
+
+Phase A review fixes (2026-10-07): admitted `classification-v1` snapshots now
+reopen with their original question wording and proposal behavior; new windows
+still default to v2, and active topic overrides require v2. Spending-reservation
+storage failures return typed `reservation_unavailable` results without provider
+dispatch, while cancellation propagates. The atomic identity/extraction writers
+now recompute accepted judgments from validated responses and frozen gates, and
+check the recorded reuse or staged extraction association before storing them.
+Weak, unavailable, malformed, or mismatched acceptance rolls back the commit.
+The unrelated missing-`DATABASE_URL` test now isolates dotenv loading.
+Validation: 243 combined policy/provider/runtime/ingestion/evaluation/LLM and
+live PostgreSQL tests passed; Ruff and diff checks passed. No live provider calls
+were made. A1's captured baseline outputs still require human review; these fixes
+do not mark that requirement complete.
+
+Phase A baseline review (2026-10-07): the user approved the captured baseline
+behavior with the ordinary-word false reuse, PG candidate-discovery miss, and
+partial-block extraction coverage limitation explicitly recorded. The baseline
+file is now marked reviewed. This completes A1's baseline capture/review; it does
+not approve those errors as desired behavior or establish representative active
+readiness. The broader Phase B/V4 evaluation requirements remain separate.
 
 ### Phase B — Entity identity observe pilot
 
@@ -237,6 +258,35 @@ for 100% acceptance precision and zero wrong reuse in this small diagnostic.
 Provider-reported cost was $0.00022277. A1/I4 remain open for the full 200-case
 held-out activation set.
 
+Phase B review (2026-10-07): four gaps were reproduced without live provider
+calls. Observe mode with `identity-positive-v1` can produce an accepted record
+and fail the non-active provenance validator. The fuzzy name search's 50-alias
+limit can omit competing identities without setting candidate truncation. A
+second entity pass with an exhausted shared budget can discard an accepted
+first-pass identity, allocate a new ID, and fail durable acceptance consistency.
+The evaluator also treats a missing observation as a candidate-discovery miss
+even when observation limits or sampling explain its absence. These need fixes;
+Phase B is not fully verified. Validation: 155 existing identity, ingestion,
+restart/publication, and PostgreSQL tests passed, plus four temporary reproductions.
+One model-dependent smoke test skipped. Representative identity readiness/I4
+remains open; the reviewed synthetic stress packet does not replace it.
+
+Phase B review fixes (2026-10-07): observe mode cannot apply the positive identity
+gate. JEV eligibility now groups all qualifying fuzzy names into identities before
+bounding options; the historical baseline search is unchanged. An accepted
+first-pass decision can survive the second pass only after a fresh locked
+snapshot produces identical evidence, options, domain, and policy inputs. This
+uses the existing window decision, consumes no additional call/observation slot,
+and stores/logs it once. Changed or removed decisions lose their acceptance
+status before the final commit. Missing-observation reporting now separates
+explicit discovery misses from unknown recall and reports supplied skip reasons;
+the pilot marks its deliberate discovery-miss cases explicitly.
+Validation: 258 identity, ingestion, restart/publication, classification,
+provider/policy, and live PostgreSQL tests passed; one local-model smoke test
+skipped. The PostgreSQL regression confirms accepted carry-forward commits once
+after shared-budget exhaustion. Representative identity readiness/I4 remains open.
+No live provider calls or production setting changes were made.
+
 ### Phase C — Bounded extraction observe pilot
 
 - [x] E1: Refactor gap detection into per-block reasons and literal candidate
@@ -284,6 +334,37 @@ The gate accepted four candidates, all correct, for 100% precision and 57.14%
 positive recall; no provider calls were unavailable. Provider-reported cost was
 $0.00027569. This small diagnostic supports the conservative gate but is not
 large enough to claim production extraction quality or fallback savings.
+
+Phase C review (2026-10-07): three integration gaps were reproduced without live
+provider calls. A second entity build with an exhausted shared budget can drop an
+accepted first-pass extraction while leaving its record accepted, causing commit
+validation to fail. Supporting-only occurrences use identical null-offset
+deduplication keys across different blocks, so one mention disappears while both
+decisions can claim acceptance. Finally, represented-name sets are window-wide;
+recovering an alias in one block can clear another block's unresolved alias gap
+and incorrectly suppress generative fallback. Required fixes are extraction
+carry-forward/revalidation, block-scoped occurrence deduplication, and block-scoped
+residual coverage. Validation: 104 existing extraction, relationship, ingestion,
+restart/publication, and PostgreSQL tests passed, plus three temporary reproductions.
+Phase C is not fully verified; representative quality and actual fallback-savings
+evidence remain separate open readiness work.
+
+Phase C review fixes (2026-10-07): occurrence deduplication, candidate discovery,
+and residual alias coverage now include the source block ID. Supporting-only
+mentions in separate blocks remain distinct, and a recovery in one block cannot
+clear another block's unresolved gap. Accepted extraction decisions survive a
+second build only when freshly validated literal evidence, offsets, type options,
+domain, and policy match their original fingerprint. Carry-forward consumes no
+extra call or observation slot and retains one durable decision record; stale or
+unapplied decisions lose their acceptance status. Regression coverage includes
+active/observe/disabled behavior, residual fallback under partial exhaustion,
+changed evidence/policy, removed gaps, and supporting-only occurrences.
+Validation: 228 combined extraction, relationship, ingestion, identity,
+classification, provider/policy, and live PostgreSQL tests passed. The new SQL
+contract confirms both supporting-only recoveries persist once after an exhausted
+second-pass rebuild and remain owner scoped. Ruff and diff checks passed. No live
+provider calls or production mode changes were made. Representative quality and
+actual fallback savings remain Phase E readiness work.
 
 ### Phase D — Project classification and topic selection
 
@@ -376,6 +457,45 @@ is now separately gated by `classification_mode: active` and
 contributing proposals meet the frozen Choice confidence/probability/margin and
 evidence-Noul thresholds. Default, weak, unavailable, truncated, and conflicting
 results retain the configured default. Observe mode remains the default.
+
+Phase D review (2026-10-07): four gaps were reproduced without live provider
+calls. The second entity build appends classification decisions and aggregates
+from both passes without reconciling final entity IDs, causing commit failures
+and loss of first-pass active overrides under budget exhaustion. Classification
+commit validation checks acceptance thresholds but does not validate the response
+model or full option distribution. Compiled snapshot hydration accepts allowed
+topics outside the active topic set; a malformed admitted snapshot can therefore
+stage an unconfigured topic. Finally, reclassification still forces the default
+topic even when an existing alternative remains allowed. Required fixes are
+proposal carry-forward/remapping and final aggregation, response revalidation,
+compiled allowed-topic validation, and reclassification semantics that preserve
+valid alternatives unless a reset is explicitly requested.
+Validation: 145 existing configuration, classification, reclassification,
+ingestion, runtime, and PostgreSQL tests passed, plus five temporary reproductions
+covering the four gaps. Phase D is not fully verified; its earlier quality
+measurements do not cover these integration failures.
+
+Phase D review fixes (2026-10-07): unchanged available topic responses now carry
+across in-memory rebuilds using a fingerprint of the window, occurrence, full
+evidence, options, and frozen policy. They are remapped to the final entity IDs,
+then aggregated again without another call or observation-budget charge. The
+final trace replaces stale classification decisions and aggregates and records
+`reused_from_pass`. Changed evidence or policy prevents reuse. The semantic
+writer now revalidates available response models and complete distributions,
+rolling back malformed decisions atomically. Compiled domain replay validates
+active allowed topics and defaults while retaining legacy inactive mappings.
+Reclassification preserves an existing allowed alternative and uses the default
+when that alternative is no longer allowed.
+
+Validation: 271 tests passed across classification, configuration and activation,
+reclassification, identity, extraction, provider validation, and live local
+PostgreSQL contracts. New regressions cover both rebuild modes, evidence/policy
+invalidation, stale-ID removal, malformed model/distribution/missing-response
+rollback, invalid compiled topic lists, and preservation of valid alternatives.
+The end-to-end PostgreSQL test preserves an active override after exhausting both
+call and observation budgets, commits only its final ID, and replays once without
+duplicates. Ruff and `git diff --check` passed. These four reproduced integration
+gaps are resolved; no live JEV calls or production mode changes were made.
 
 ### Phase E — Integration and active-mode readiness
 
@@ -483,6 +603,65 @@ their numerical composition targets but do not establish production readiness.
 V4 remains open for representative ingestion evidence and actual fallback savings.
 The user deferred these real-ingestion runs on 2026-10-07. Existing diagnostic
 and stress results are recorded; production mode settings remain unchanged.
+
+Phase E review (2026-10-07): two evaluation-report defects were reproduced
+offline, plus a Windows integration-fixture failure. For proposed-type extraction
+candidates, the pilot writes `raw_choice`
+from the thresholded accepted type instead of retaining the raw evidence Noul.
+An identical 0.79 response is reported as incorrect at a 0.80 gate and correct
+at a 0.70 gate, so raw quality and acceptance quality are not independent.
+Known-type Noul results need their own explicitly defined quality metric and
+must not invent a provider Choice answer. Identity scorers and the extraction
+scorer also accept duplicate labels/case IDs: one identity observation counted
+as 200 reviewed correct judgments, and one extraction observation counted as
+60 reviewed correct answers. Reject duplicate labels and observation keys before
+scoring or reporting sample composition. Classification already rejects duplicate
+label and observation keys.
+
+The ingestion PostgreSQL fixture also lacks the Windows Selector event-loop
+policy used by the storage fixtures. Its default Proactor loop makes psycopg's
+async pool initialization fail after 30 seconds before the test body runs.
+Selecting the compatible loop for the test process made all seven ingestion
+integration tests pass. Initial synchronous fixture connections also have no
+connection timeout; the review used a two-second timeout and explicit local IPv4
+to keep database setup bounded.
+
+Validation: 229 JEV unit/storage checks, five durable spending-budget checks,
+and seven ingestion PostgreSQL integration checks passed (241 total). Two
+temporary offline reproductions confirmed the scoring defects and were removed.
+The four shipped identity/extraction packets currently have no duplicate case
+IDs. `git diff --check` passed. This review changed only the plan; the three
+findings remain to be fixed, and no live JEV calls were made.
+
+These findings concern evaluation integrity; they do not demonstrate a broken
+operational acceptance gate. V2 response caching and V4 representative ingestion,
+fallback savings, and production latency evidence remain deferred by agreement.
+The synthetic packets remain diagnostic, and production settings were unchanged.
+
+Phase E review fixes (2026-10-07): extraction observations now retain the raw
+entity-evidence Noul and never invent a Choice answer for known-type requests.
+Raw Choice accuracy covers only unknown-type cases, with a scored-case count and
+null accuracy when none were scored. Known-type evidence has a separate Brier
+score (mean squared error against reviewed entity/non-entity labels); this
+measures entity support, not type correctness, and is independent of acceptance
+thresholds. Acceptance precision and positive recall remain separate. Earlier
+combined extraction raw-accuracy figures are historical and must not be treated
+as independent raw quality under the corrected metric.
+
+Identity quality and acceptance scorers now reject duplicate label and
+observation keys. Extraction rejects duplicate case and observation IDs, and
+both pilot loaders/runners reject duplicate case IDs before provider work. The
+ingestion PostgreSQL fixture now selects the Windows-compatible event loop,
+defaults to local IPv4 with a bounded connection timeout, and cleans up its
+isolated database even if setup fails after creation.
+
+Validation: 253 tests passed in a normal pytest run, including all seven
+ingestion PostgreSQL integration tests without the earlier event-loop workaround.
+Twelve new regressions cover threshold-independent raw evidence, mixed Choice
+and Noul reports, duplicate scoring keys, packet loaders, and rejection before
+client creation. Ruff and `git diff --check` passed. The three review findings
+are resolved. V2 and V4's agreed deferrals remain open; no live JEV calls or
+production settings changes were made.
 
 ## 5. Main file owners
 

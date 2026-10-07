@@ -10,6 +10,7 @@ from common.schema.ingestion.contracts import ContextBlockMention
 from common.schema.jev import JevPolicy, JevResponse, JevResult
 from common.schema.settings import EntityResolutionSettings, TextProcessorSettings
 from core.ingestion.policy import IngestionPolicy
+from core.knowledge.entity.jev_classification import accepted_classification_topic
 from core.knowledge.entity.resolver import EntityResolver
 
 
@@ -140,6 +141,42 @@ async def resolve(store, jev, frozen_policy):
         allocate_entity_id=allocate,
         window_id=uuid4(),
     )
+
+
+async def test_reopened_v1_uses_original_questions_and_default_proposal():
+    frozen = policy()
+    snapshot = frozen.semantic_window_snapshot()
+    snapshot["jev_policy"]["classification_question_version"] = "classification-v1"
+    reopened = IngestionPolicy.from_semantic_window_snapshot(snapshot)
+    jev = TopicJev(choice="topic_1")
+    result = await resolve(Store(), jev, reopened)
+    assert jev.calls[0]["state"]["mention"]["default_topic"] == "Work"
+    assert jev.calls[0]["questions"]["topic_choice"].instructions == (
+        "Which allowed project topic best classifies this entity in the "
+        "supplied context? Use insufficient_evidence when one topic is not "
+        "supported."
+    )
+    observation = result.classification_decisions[0]
+    assert observation["suggested_topic"] == "Work"
+    assert observation["record"]["question_version"] == "classification-v1"
+
+
+async def test_v1_questions_cannot_enable_v2_active_override_policy():
+    frozen = policy(mode="active", acceptance_policy="override-positive-v1")
+    snapshot = frozen.semantic_window_snapshot()
+    snapshot["jev_policy"]["classification_question_version"] = "classification-v1"
+    reopened = IngestionPolicy.from_semantic_window_snapshot(snapshot)
+    jev = TopicJev()
+    result = await resolve(Store(), jev, reopened)
+    observation = result.classification_decisions[0]
+    assert observation["suggested_topic"] == "Finance"
+    assert observation["accepted_topic"] is None
+    assert result.project_classifications[900].topic == "Work"
+    record = observation["record"]
+    assert accepted_classification_topic(
+        JevResult.model_validate(record["result"]), record["option_mapping"],
+        "Work", reopened.jev, option_set_truncated=False,
+    ) is None
 
 
 async def resolve_repeated(jev, frozen_policy):

@@ -23,6 +23,7 @@ from core.ingestion.policy import IngestionPolicy
 from infrastructure.external_model_budget import ExternalModelSpendingLedger
 from infrastructure.jev_client import JevClient, JevWorkBudget
 from tests.fixtures.jev_measurements import summarize_results
+from tests.fixtures.jev_review_validation import index_unique, validate_case_ids
 
 REPOSITORY_ENV = Path(__file__).resolve().parents[3] / ".env"
 OPENROUTER_ENDPOINT = "https://openrouter.ai/api/alpha/decisions"
@@ -38,6 +39,7 @@ def load_reviewed_cases(path: Path) -> list[dict]:
         raise ValueError("Extraction review packet has no cases")
     if any(not case.get("reason") or "expected_type" not in case for case in cases):
         raise ValueError("Every extraction case needs an expected type and reason")
+    validate_case_ids(cases)
     return cases
 
 
@@ -65,6 +67,11 @@ def _policy(settings: JevSettings) -> IngestionPolicy:
 
 
 def evaluate(cases: list[dict], observations: list[dict]) -> dict:
+    validate_case_ids(cases)
+    keyed = index_unique(
+        observations, lambda item: item["case_id"], "extraction observation"
+    )
+    evidence_errors = []
     counts = {
         "reviewed": len(cases),
         "observed": len(observations),
@@ -75,8 +82,9 @@ def evaluate(cases: list[dict], observations: list[dict]) -> dict:
         "accepted": 0,
         "correct_accepts": 0,
         "wrong_accepts": 0,
+        "known_type_evidence_scored": 0,
+        "known_type_evidence_missing": 0,
     }
-    keyed = {item["case_id"]: item for item in observations}
     for case in cases:
         item = keyed.get(case["id"])
         expected_type = case["expected_type"]
@@ -85,9 +93,23 @@ def evaluate(cases: list[dict], observations: list[dict]) -> dict:
         if item is None or item["result"]["outcome"] != "available":
             counts["unavailable"] += 1
             continue
-        actual = item["raw_choice"]
-        expected = expected_type or case.get("expected_choice")
-        counts["raw_correct" if actual == expected else "raw_wrong"] += 1
+        if case.get("proposed_type") is not None:
+            # This request has only an evidence Noul, never a type Choice.
+            response = item["result"].get("response") or {}
+            evidence = (
+                response.get("answers", {}).get("entity_evidence", {}).get("noul")
+            )
+            if evidence is None:
+                counts["known_type_evidence_missing"] += 1
+            else:
+                counts["known_type_evidence_scored"] += 1
+                evidence_errors.append(
+                    (evidence - float(expected_type is not None)) ** 2
+                )
+        else:
+            actual = item["raw_choice"]
+            expected = expected_type or case.get("expected_choice")
+            counts["raw_correct" if actual == expected else "raw_wrong"] += 1
         accepted = item["accepted_type"]
         if accepted is not None:
             counts["accepted"] += 1
@@ -96,7 +118,16 @@ def evaluate(cases: list[dict], observations: list[dict]) -> dict:
             else:
                 counts["wrong_accepts"] += 1
     scored = counts["raw_correct"] + counts["raw_wrong"]
-    counts["raw_accuracy"] = counts["raw_correct"] / scored if scored else 0.0
+    counts["raw_choice_scored"] = scored
+    counts["raw_accuracy"] = counts["raw_correct"] / scored if scored else None
+    counts["known_type_evidence_brier_score"] = (
+        sum(evidence_errors) / len(evidence_errors) if evidence_errors else None
+    )
+    counts["raw_accuracy_scope"] = "Unknown-type Choice answers only"
+    counts["known_type_evidence_scope"] = (
+        "Mean squared error of raw entity-evidence Noul against entity/non-entity labels; "
+        "lower is better, independent of acceptance thresholds; does not measure type correctness"
+    )
     counts["acceptance_precision"] = (
         counts["correct_accepts"] / counts["accepted"] if counts["accepted"] else 0.0
     )
@@ -109,6 +140,7 @@ def evaluate(cases: list[dict], observations: list[dict]) -> dict:
 
 
 async def run(cases: list[dict], api_key: str):
+    validate_case_ids(cases)
     settings = JevSettings(
         api_key=api_key,
         endpoint=OPENROUTER_ENDPOINT,
@@ -149,10 +181,10 @@ async def run(cases: list[dict], api_key: str):
                 candidate_set_truncated=truncated,
             )
             raw_choice = None
+            raw_entity_noul = None
             if result.response is not None:
-                if candidate.proposed_type is not None:
-                    raw_choice = candidate.proposed_type if accepted else "not_an_entity"
-                else:
+                raw_entity_noul = result.response.answers["entity_evidence"].noul
+                if candidate.proposed_type is None:
                     choice = result.response.answers["type_choice"].choice
                     raw_choice = mapping.get(choice, choice)
             observations.append(
@@ -161,6 +193,7 @@ async def run(cases: list[dict], api_key: str):
                     "result": result.model_dump(mode="json"),
                     "option_mapping": mapping,
                     "raw_choice": raw_choice,
+                    "raw_entity_noul": raw_entity_noul,
                     "accepted_type": accepted,
                     "candidate_set_truncated": truncated,
                 }

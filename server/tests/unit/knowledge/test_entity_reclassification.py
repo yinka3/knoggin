@@ -89,3 +89,20 @@ def test_reclassification_does_not_guess_from_entity_name():
 
     assert plan.changed == 0
     assert plan.unmapped == 1
+
+
+@pytest.mark.parametrize("old_topic,allowed,new_topic", [
+    ("Finance", ["Work", "Finance"], "Finance"),
+    ("finance", ["Work", "Finance"], "Finance"),
+    ("Finance", ["Work"], "Work"),
+])
+def test_reclassification_preserves_only_allowed_alternative_topics(old_topic, allowed, new_topic):
+    domain = DomainConfig.from_mapping({
+        "version": 9,
+        "topics": {"Work": {}, "Finance": {}},
+        "entity_types": {"Company": {"topic": "Work", "allowed_topics": allowed, "labels": ["company"]}},
+    }).compile()
+    plan = plan_reclassification([
+        {"entity_id": 2, "canonical_name": "Acme", "type": "company", "topic": old_topic}
+    ], domain)
+    assert plan.changes[0].new_topic == new_topic

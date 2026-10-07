@@ -232,6 +232,44 @@ async def test_elapsed_work_budget_is_shared_across_requests():
     await client.close()
 
 
+async def test_reservation_storage_failure_returns_unavailable_without_http():
+    client, policy, ledger = setup_client(
+        lambda _: pytest.fail("Failed admission must not call the provider")
+    )
+    original_reserve = ledger.reserve
+
+    async def broken_reserve(**kwargs):
+        raise RuntimeError("database unavailable")
+
+    ledger.reserve = broken_reserve
+    result = await evaluate(client, policy)
+    assert result.outcome == "unavailable"
+    assert result.reason == "reservation_unavailable"
+    assert result.attempts == 0
+    assert not result.accounting_pending
+    ledger.reserve = original_reserve
+    await client.close()
+
+
+async def test_cancellation_during_reservation_propagates_without_http():
+    entered = asyncio.Event()
+    client, policy, ledger = setup_client(
+        lambda _: pytest.fail("Cancelled admission must not call the provider")
+    )
+
+    async def wait_for_reservation(**kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    ledger.reserve = wait_for_reservation
+    task = asyncio.create_task(evaluate(client, policy))
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await client.close()
+
+
 async def test_openrouter_decisions_response_and_dated_model_are_supported():
     requests = []
     response = deepcopy(RESPONSE)

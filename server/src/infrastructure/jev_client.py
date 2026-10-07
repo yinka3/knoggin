@@ -281,6 +281,11 @@ class JevClient:
                     except ConfigurationError:
                         reason = "missing_model_pricing"
                         break
+                    except Exception:
+                        # Optional provider work fails closed if accounting
+                        # admission is unavailable. Cancellation still propagates.
+                        reason = "reservation_unavailable"
+                        break
                     progress["reservation"] = reservation
                     usage = None
                     failed = True

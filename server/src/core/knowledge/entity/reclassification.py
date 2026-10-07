@@ -79,6 +79,9 @@ def _target_for_row(
     new_topic = domain.topic_for_entity_type(new_type)
     if new_topic is None:
         return None
+    old_topic = domain.normalize_topic(_clean_text(row.get("topic")))
+    if old_topic in domain.allowed_topics_for_entity_type(new_type):
+        new_topic = old_topic
     return new_type, new_topic
 
 

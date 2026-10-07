@@ -34,7 +34,9 @@ class JevPolicy(JevModel):
     )
     identity_question_version: Literal["identity-v1"] = "identity-v1"
     extraction_question_version: Literal["extraction-v1"] = "extraction-v1"
-    classification_question_version: Literal["classification-v2"] = "classification-v2"
+    classification_question_version: Literal[
+        "classification-v1", "classification-v2"
+    ] = "classification-v2"
     classification_acceptance_policy_version: Literal[
         "disabled", "override-positive-v1"
     ] = "disabled"

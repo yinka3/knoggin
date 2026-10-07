@@ -23,7 +23,7 @@ def _log_jev_identity_observations(identity_decisions) -> None:
 
     for decision in identity_decisions:
         observation = decision.get("jev")
-        if observation is not None:
+        if observation is not None and "reused_for_pass" not in observation:
             # This excludes raw evidence and remains bounded by the admitted
             # candidate and call limits. JSON remains usable in plain log sinks.
             logger.bind(jev_identity_observation=True).info(
@@ -36,6 +36,8 @@ def _log_jev_classification_observations(classification_decisions) -> None:
     """Emit bounded, evidence-free topic proposals for pilot review."""
 
     for observation in classification_decisions:
+        if "reused_from_pass" in observation:
+            continue
         logger.bind(jev_classification_observation=True).info(
             "jev_classification_observation {}",
             json.dumps(observation, sort_keys=True, separators=(",", ":")),
@@ -145,6 +147,8 @@ class ContextEntityBuildService:
             pass_number=semantic_build.identity_pass_number,
             work_budget=semantic_build.jev_work_budget,
             timing=timing,
+            previous_identity_decisions=tuple(semantic_build.trace.identity_decisions),
+            previous_classification_decisions=tuple(semantic_build.trace.classification_decisions),
         )
         semantic_build.trace.resolver_timings.append(
             {
@@ -154,13 +158,30 @@ class ContextEntityBuildService:
                 "jev_remaining_seconds": semantic_build.jev_work_budget.remaining_seconds(),
             }
         )
+        reused_keys = {
+            (item["jev"]["record"]["pass_number"], item["jev"]["record"]["occurrence_key"])
+            for item in resolution.identity_decisions
+            if "reused_for_pass" in item.get("jev", {})
+        }
+        retained = []
+        for decision in semantic_build.trace.identity_decisions:
+            observation = decision.get("jev", {})
+            record = observation.get("record", {})
+            if (record.get("pass_number"), record.get("occurrence_key")) in reused_keys:
+                continue
+            if observation.get("accepted_entity_id") is not None:
+                # An earlier in-memory application that no longer survives the
+                # final rebuild must not claim durable acceptance.
+                observation["accepted_entity_id"] = None
+                record["acceptance_status"] = "rejected"
+                observation["superseded_by_pass"] = semantic_build.identity_pass_number
+            retained.append(decision)
+        semantic_build.trace.identity_decisions[:] = retained
         semantic_build.trace.identity_decisions.extend(resolution.identity_decisions)
-        semantic_build.trace.classification_decisions.extend(
-            resolution.classification_decisions
-        )
-        semantic_build.trace.classification_aggregates.extend(
-            resolution.classification_aggregates
-        )
+        # Topic proposals belong to the final resolved IDs, including IDs that
+        # were privately reallocated by this rebuild. Recompute one aggregate.
+        semantic_build.trace.classification_decisions[:] = resolution.classification_decisions
+        semantic_build.trace.classification_aggregates[:] = resolution.classification_aggregates
         _log_jev_identity_observations(resolution.identity_decisions)
         _log_jev_classification_observations(resolution.classification_decisions)
         return assemble_context_entity_result(semantic_build, resolution)

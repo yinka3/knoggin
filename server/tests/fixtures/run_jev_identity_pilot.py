@@ -33,6 +33,7 @@ from tests.fixtures.evaluate_jev_identity import (
     evaluate_identity_observations,
 )
 from tests.fixtures.jev_measurements import summarize_results
+from tests.fixtures.jev_review_validation import validate_case_ids
 
 API_KEY_ENV = "OPENROUTER_API_KEY"
 REPOSITORY_ENV = Path(__file__).resolve().parents[3] / ".env"
@@ -68,6 +69,7 @@ def load_reviewed_cases(path: Path) -> list[dict]:
         raise ValueError("Identity review packet has no cases")
     if any("proposed_choice" not in case or not case.get("reason") for case in cases):
         raise ValueError("Every identity review case needs a choice and reason")
+    validate_case_ids(cases)
     return cases
 
 
@@ -99,6 +101,9 @@ def _gold_label(case: dict) -> dict:
         "review_status": "reviewed",
         "correct_entity_id": correct_entity_id,
         "expected_choice": expected_choice,
+        "observation_missing_reason": (
+            "candidate_discovery_miss" if proposed == "candidate_recall_failure" else None
+        ),
     }
 
 
@@ -176,6 +181,7 @@ def _pilot_policy(settings: JevSettings) -> IngestionPolicy:
 
 
 async def run_pilot(cases: list[dict], api_key: str):
+    validate_case_ids(cases)
     settings = JevSettings(
         api_key=api_key,
         endpoint=OPENROUTER_DECISIONS_ENDPOINT,

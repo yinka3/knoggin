@@ -283,3 +283,12 @@ def test_older_compiled_snapshot_defaults_allowed_topics_to_fixed_mapping():
         "Software Development",
     )
     assert restored.allowed_topics_for_entity_type("Archived Item") == ()
+
+
+@pytest.mark.parametrize("allowed", [[], ["Unknown"], ["Archive", "Software Development"], ["Software Development", "Software Development"], ["software development"]])
+def test_compiled_snapshot_rejects_invalid_active_allowed_topics(allowed):
+    compiled = DomainConfig.from_mapping(domain_payload()).compile()
+    snapshot = compiled.to_dict()
+    snapshot["entity_type_to_allowed_topics"]["Project"] = allowed
+    with pytest.raises(ValueError):
+        type(compiled).from_dict(snapshot)
