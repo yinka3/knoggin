@@ -289,6 +289,30 @@ def test_older_compiled_snapshot_defaults_allowed_topics_to_fixed_mapping():
 def test_compiled_snapshot_rejects_invalid_active_allowed_topics(allowed):
     compiled = DomainConfig.from_mapping(domain_payload()).compile()
     snapshot = compiled.to_dict()
-    snapshot["entity_type_to_allowed_topics"]["Project"] = allowed
+    snapshot["entity_type_to_allowed_topics"]["project"] = allowed
     with pytest.raises(ValueError):
         type(compiled).from_dict(snapshot)
+
+
+@pytest.mark.parametrize("mutation", ["blank_topic", "duplicate_topic", "duplicate_type", "missing_map", "unknown_type"])
+def test_compiled_snapshot_rejects_corrupt_topic_catalog(mutation):
+    compiled = DomainConfig.from_mapping(domain_payload()).compile()
+    snapshot = compiled.to_dict()
+    if mutation == "blank_topic":
+        snapshot["active_topics"] = [""]
+    elif mutation == "duplicate_topic":
+        snapshot["active_topics"] *= 2
+    elif mutation == "duplicate_type":
+        snapshot["active_entity_types"] *= 2
+    elif mutation == "missing_map":
+        snapshot["entity_type_to_allowed_topics"].pop("project")
+    else:
+        snapshot["active_entity_types"].append("Unconfigured")
+    with pytest.raises(ValueError, match="Invalid compiled"):
+        type(compiled).from_dict(snapshot)
+
+
+def test_allowed_topic_lookup_rejects_non_string_and_inactive_type():
+    compiled = DomainConfig.from_mapping(domain_payload()).compile()
+    assert compiled.allowed_topics_for_entity_type(None) == ()
+    assert compiled.allowed_topics_for_entity_type("Archived Item") == ()

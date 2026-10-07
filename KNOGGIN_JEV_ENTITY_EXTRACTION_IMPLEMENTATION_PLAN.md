@@ -663,6 +663,29 @@ client creation. Ruff and `git diff --check` passed. The three review findings
 are resolved. V2 and V4's agreed deferrals remain open; no live JEV calls or
 production settings changes were made.
 
+Coverage follow-up (2026-10-07): added regression cases for corrupt frozen build
+inputs, invalid staging outputs, bounded owner-scoped decision reads, topic
+aggregation and evidence gates, malformed private provenance, valid provenance
+inserts, provider failures, and admitted work-budget enforcement. Invalid writer
+inputs are checked to fail before SQL inserts. The existing 90% gate and coverage
+configuration are unchanged; production code was not altered for coverage.
+
+Validation: all 121 focused checks passed, including 98 new regression cases.
+The CI diff-cover command against `origin/main`, including branch coverage,
+reports 91% from the fast report alone (827 changed executable lines, 71 missing).
+The full fast lane passed 2,010 tests and encountered nine local failures outside
+JEV in benchmarking, document extraction, filesystem/symlink behavior, and
+project-file cleanup. The broader service lane also encountered failures
+and was interrupted; affected JEV service contracts are checked
+separately. Ruff passed. No live provider calls were made.
+
+Final coverage verification: all 52 affected PostgreSQL/ingestion service checks
+passed. The fast and affected-service reports together pass the unchanged
+`diff-cover --compare-branch origin/main --branch-coverage --fail-under 90` gate
+at 92% (827 changed executable lines, 59 missing). The allowed-topic regression
+now uses the canonical compiled `project` key, so it tests malformed topic values
+rather than merely rejecting an extra mapping key. Diff and lint checks passed.
+
 ## 5. Main file owners
 
 Paths below are relative to `server/src/`; new filenames are proposed.
