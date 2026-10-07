@@ -1169,10 +1169,16 @@ async def test_identity_passes_share_one_window_work_budget():
     assert semantic_build.identity_pass_number == 1
     assert budget.max_calls == 1
     assert budget.max_elapsed_seconds == 30
+    assert budget.take() is True
 
     await service.build(semantic_build)
     assert semantic_build.identity_pass_number == 2
     assert semantic_build.jev_work_budget is budget
+    assert budget.take() is False
+    assert len(semantic_build.trace.resolver_timings) == 2
+    assert semantic_build.trace.resolver_timings[1]["pass_number"] == 2
+    assert semantic_build.trace.resolver_timings[1]["held_seconds"] >= 0
+    assert semantic_build.trace.resolver_timings[1]["jev_calls_consumed"] == 1
 
 
 def test_jev_identity_observations_are_emitted_as_bounded_json(monkeypatch):

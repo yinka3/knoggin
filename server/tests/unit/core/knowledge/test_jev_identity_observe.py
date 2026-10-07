@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from types import SimpleNamespace
 from uuid import uuid4
 
 import httpx
@@ -138,7 +139,7 @@ def identity_policy(
     )
 
 
-async def resolve(resolver, policy, supports, *, name="Bob", work_budget=None):
+async def resolve(resolver, policy, supports, *, name="Bob", work_budget=None, timing=None):
     block_ids = [uuid4() for _ in supports]
     next_id = iter(range(900, 900 + len(supports)))
 
@@ -161,7 +162,25 @@ async def resolve(resolver, policy, supports, *, name="Bob", work_budget=None):
         allocate_entity_id=allocate,
         window_id=uuid4(),
         work_budget=work_budget,
+        timing=timing,
     )
+
+
+@pytest.mark.no_network
+async def test_resolution_lock_measures_wait_and_hold_even_on_failure(monkeypatch):
+    resolver = EntityResolver(Store([]), "project-1", ["project-1"])
+    clock = iter((1.0, 1.25, 2.0))
+    monkeypatch.setattr(
+        "core.knowledge.entity.resolver.time",
+        SimpleNamespace(monotonic=lambda: next(clock)),
+    )
+    timing = {}
+    with pytest.raises(RuntimeError, match="test failure"):
+        async with resolver._measured_resolution_lock(timing):
+            assert resolver.resolution_lock.locked()
+            raise RuntimeError("test failure")
+    assert timing == {"wait_seconds": 0.25, "held_seconds": 0.75}
+    assert not resolver.resolution_lock.locked()
 
 
 @pytest.mark.no_network

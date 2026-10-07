@@ -561,6 +561,26 @@ class SemanticCommitWriter:
                 if len(ordered_suggestions) == 1
                 else "no_proposal"
             )
+            accepted_override = None
+            contributors = [item for item in items if item.get("suggested_topic") is not None]
+            if (
+                build.policy.jev.classification_mode == "active"
+                and expected_status == "consistent_proposal"
+                and contributors
+                and all(
+                    accepted_classification_topic(
+                        JevDecisionRecord.model_validate(item["record"]).result,
+                        item["record"]["option_mapping"],
+                        baseline_topic,
+                        build.policy.jev,
+                        option_set_truncated=item["option_set_truncated"],
+                    ) == ordered_suggestions[0]
+                    for item in contributors
+                )
+            ):
+                accepted_override = ordered_suggestions[0]
+            if classification.topic != (accepted_override or baseline_topic):
+                raise ValueError("JEV classification operational topic is inconsistent")
             if aggregate != {
                 "entity_id": entity_id,
                 "entity_type": classification.entity_type,
@@ -585,16 +605,15 @@ class SemanticCommitWriter:
                 suggested_topic = observation.get("suggested_topic")
                 accepted_topic = observation.get("accepted_topic")
                 expected_acceptance_status = (
-                    "accepted"
-                    if accepted_topic is not None
-                    else "rejected"
-                    if record.mode == "active" and record.result.outcome == "available"
-                    else
                     "conflicting"
                     if expected_status == "conflicting_proposals"
                     and suggested_topic is not None
                     else "indeterminate"
                     if record.result.outcome == "available" and truncated
+                    else "accepted"
+                    if accepted_override is not None and suggested_topic == accepted_override
+                    else "rejected"
+                    if record.mode == "active" and record.result.outcome == "available"
                     else "proposed"
                     if record.result.outcome == "available"
                     else "unavailable"
@@ -623,6 +642,9 @@ class SemanticCommitWriter:
                     or observation.get("allowed_topics") != list(allowed_topics)
                     or observation.get("aggregation") != aggregate
                     or "accepted_topic" not in observation
+                    or accepted_topic != (
+                        accepted_override if suggested_topic == accepted_override else None
+                    )
                     or not isinstance(truncated, bool)
                     or len(mapping_topics) != len(set(mapping_topics))
                     or not set(mapping_topics) <= set(allowed_topics)

@@ -1,6 +1,7 @@
 """Fresh-schema contracts for Context-first semantic Knowledge commits."""
 
 import asyncio
+from dataclasses import replace
 from uuid import uuid4
 
 import pytest
@@ -721,8 +722,10 @@ async def test_jev_extraction_decision_commits_once_and_is_owner_scoped(
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
+@pytest.mark.parametrize("active", [False, True, "forged"])
 async def test_jev_classification_decision_commits_once_and_is_owner_scoped(
     real_postgres_client,
+    active,
 ):
     await _seed_message(real_postgres_client)
     window = _window()
@@ -753,7 +756,32 @@ async def test_jev_classification_decision_commits_once_and_is_owner_scoped(
         ingestion_policy=_classification_policy(),
     )
     _add_jev_classification_observation(build, block.block_id)
+    if active:
+        build.policy = replace(build.policy, jev=build.policy.jev.model_copy(update={
+            "classification_mode": "active",
+            "classification_acceptance_policy_version": "override-positive-v1",
+        }))
+        classification = build.entity_result.project_classifications[10]
+        build.entity_result.project_classifications[10] = replace(classification, topic="Finance")
+        build.entity_result.pending_entity_writes[10] = replace(
+            build.entity_result.pending_entity_writes[10], topic="Finance"
+        )
+        observation = build.trace.classification_decisions[0]
+        observation["accepted_topic"] = "Finance"
+        observation["record"].update(mode="active", acceptance_status="accepted",
+            acceptance_policy_version="override-positive-v1")
+        observation["aggregation"]["operational_topic"] = "Finance"
+        if active == "forged":
+            observation["record"]["result"]["response"]["answers"]["topic_evidence"]["noul"] = 0.1
     writer = SemanticCommitWriter(real_postgres_client)
+    if active == "forged":
+        with pytest.raises(ValueError, match="operational topic is inconsistent"):
+            await writer.commit(build)
+        assert await real_postgres_client.fetch_one(
+            "SELECT count(*) AS count FROM public.project_jev_classification_decisions WHERE window_id = %s",
+            (window.window_id,),
+        ) == {"count": 0}
+        return
     assert (await writer.commit(build)).resumed is False
     assert (await writer.commit(build)).resumed is True
 
@@ -763,8 +791,8 @@ async def test_jev_classification_decision_commits_once_and_is_owner_scoped(
     )
     assert len(records) == 1
     assert records[0]["suggested_topic"] == "Finance"
-    assert records[0]["accepted_topic"] is None
-    assert records[0]["aggregation"]["operational_topic"] == "Work"
+    assert records[0]["accepted_topic"] == ("Finance" if active else None)
+    assert records[0]["aggregation"]["operational_topic"] == ("Finance" if active else "Work")
     assert (
         await reader.list_jev_classification_decisions(
             window.window_id, user_name="other", project_id="project-1"

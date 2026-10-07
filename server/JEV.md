@@ -282,6 +282,14 @@ mode remains the default.
 
 ## Baseline capture
 
+All live pilot reports include `measurements`: attempted requests, provider
+attempts, token totals, mean/p50/p95/max latency, known cost, and total cost.
+Missing provider cost makes the total unknown. Request latency includes retries
+and accounting but excludes candidate discovery and resolver lock wait. Identity
+and extraction diagnostics explicitly report `active_ready: false`; their small
+packets do not authorize rollout. These evaluation reports do not change runtime
+mode settings.
+
 From `server`, run the project interpreter with:
 
 ```text

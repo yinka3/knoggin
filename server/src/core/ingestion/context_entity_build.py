@@ -132,6 +132,7 @@ class ContextEntityBuildService:
             )
         semantic_build.identity_pass_number += 1
         mentions = await self.processor.extract_context_mentions(semantic_build)
+        timing = {}
         resolution = await self.resolver.resolve_context_block_mentions(
             mentions,
             block_text_by_id={
@@ -143,6 +144,15 @@ class ContextEntityBuildService:
             window_id=semantic_build.window_id,
             pass_number=semantic_build.identity_pass_number,
             work_budget=semantic_build.jev_work_budget,
+            timing=timing,
+        )
+        semantic_build.trace.resolver_timings.append(
+            {
+                "pass_number": semantic_build.identity_pass_number,
+                **timing,
+                "jev_calls_consumed": semantic_build.jev_work_budget.calls,
+                "jev_remaining_seconds": semantic_build.jev_work_budget.remaining_seconds(),
+            }
         )
         semantic_build.trace.identity_decisions.extend(resolution.identity_decisions)
         semantic_build.trace.classification_decisions.extend(

@@ -379,14 +379,110 @@ results retain the configured default. Observe mode remains the default.
 
 ### Phase E — Integration and active-mode readiness
 
-- [ ] V1: Bound requests across both ingestion passes; measure resolver lock
+PostgreSQL verification (2026-10-06): after starting the existing local Docker
+PostgreSQL service, all 20 semantic commit contracts passed in 38.72 seconds.
+The suite used a temporary database and covers scoped JEV decision persistence,
+atomic rollback, replay, and semantic publication. These existing classification
+contracts exercise observe records; dedicated active-override persistence coverage
+remains part of V3.
+
+- [x] V1: Bound requests across both ingestion passes; measure resolver lock
   occupancy. Do not release its lock around HTTP without snapshot revalidation.
-- [ ] V2: Cache only immutable semantic responses keyed by occurrence, evidence,
-  options, domain/model/question/policy versions. Never cache private allocated IDs.
-- [ ] V3: Verify cancellation, provider failure, budget exhaustion, admitted-policy
+- [ ] V2 (deferred by agreement, 2026-10-07): Reconsider caching after measuring
+  repeated requests and expected cache-hit rate. Completed semantic-window replay
+  already skips provider work; no additional response cache is implemented.
+  Any future cache must contain only immutable semantic responses keyed by
+  occurrence, evidence, options, domain/model/question/policy versions, and must
+  never contain private allocated entity IDs.
+
+V1 progress (2026-10-07): extraction and resolution use the same window-owned
+JEV budget across both passes; retries consume its call limit and its elapsed
+deadline is not reset by a second pass. The ingestion trace now records each
+resolver pass's lock wait time, lock hold time, cumulative JEV calls, and remaining
+JEV time. Lock timing is measured with a monotonic clock and the lock remains held
+through provider work. A focused resolver/client suite passed 78 tests, including
+timing on failure. The two-pass ingestion test was strengthened to prove that an
+exhausted first-pass budget stays exhausted, but its execution is currently blocked
+by Windows Application Control preventing a spaCy DLL from loading. V1 remains
+open until that integration check and representative lock-occupancy measurements
+are completed.
+
+V1 completion (2026-10-07): the spaCy DLL loaded successfully on retry, and the
+full ingestion/resolver/client regression passed 123 tests, including the
+two-pass exhaustion check. The approved classification held-out pilot now saves
+per-case resolver lock timings. A fresh 50-request live run across 40 cases
+measured lock hold mean 0.322 seconds, p50 0.250 seconds, p95 0.500 seconds,
+and maximum 1.765 seconds. This includes candidate loading, resolution, and one
+or two JEV calls per case. Lock wait was zero in this sequential fixture-backed
+pilot; these measurements do not establish contention or production-database
+performance. The run retained 96% raw quality and 100% override precision/recall
+and aggregate accuracy, with $0.00132602 provider-reported cost. The lock remains
+held during provider calls; releasing it still requires snapshot revalidation.
+- [x] V3: Verify cancellation, provider failure, budget exhaustion, admitted-policy
   restart, atomic commit, and publication only after commit.
+
+V3 verification (2026-10-07): 93 client/policy/semantic-stage tests passed,
+covering cancellation and accounting recovery, provider failure, shared budget
+exhaustion, frozen policy snapshots, restart checkpoints, and publication after
+durable Knowledge commit. All 22 PostgreSQL semantic commit contracts passed,
+including accepted classification override persistence, owner-scoped reads,
+idempotent replay, and rejection of a forged weak-evidence override. Commit
+validation now recomputes acceptance for the entire proposal aggregate and checks
+that the staged operational topic follows that gate. Active conflict/truncation
+statuses are validated in the same priority order as resolution. Ruff and diff
+checks passed. V1's separate spaCy-blocked two-pass test and representative timing
+measurements remain open.
 - [ ] V4: Record held-out quality, latency, and total spend. Enable capabilities
   independently only when their quality gates pass.
+
+V4 measurement progress (2026-10-07): all three live runners now report request
+mean/p50/p95/max latency, provider attempts, tokens, and provider-reported cost.
+Unknown cost remains null rather than being counted as zero. Latency covers the
+client request including retries and accounting; it excludes resolver lock wait,
+candidate discovery, and end-to-end ingestion. Percentiles use nearest rank.
+Saved 2026-10-05 observations produced the following measurements without new
+provider calls:
+
+| Capability | Attempted requests | p50 seconds | p95 seconds | Total USD | Evidence |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Classification | 50 | 0.172 | 0.265 | 0.00132602 | Reviewed held-out packet |
+| Identity | 9 | 0.187 | 0.438 | 0.00022277 | Ten-case diagnostic; one discovery miss |
+| Extraction | 12 | 0.157 | 0.375 | 0.00027569 | Small candidate diagnostic |
+
+Classification passed its packet quality gates and has a separately opt-in active
+policy. Identity and extraction reports explicitly remain diagnostic-only and
+not active-ready. No production mode settings were changed. V4 remains open for
+the 200-case identity held-out set, broader extraction held-out quality and actual
+fallback savings, and representative end-to-end latency/lock measurements.
+
+V4 packet preparation (2026-10-07): new proposed review files contain 200
+identity cases (140 explicit matches, 40 ambiguous, 15 different identities,
+and five discovery misses) and 60 extraction cases (40 explicit known/unknown
+type positives and 20 ambiguous names). Both are marked `pending_human_review`
+and `synthetic_stress`. Their template variants are correlated; meeting a numeric
+sample threshold is not sufficient to claim representative held-out readiness.
+No live calls have been made on these packets. Human label review is next,
+followed by frozen-policy stress scoring and separate representative project
+ingestion evidence for extraction discovery recall, fallback savings, and rollout.
+
+V4 reviewed stress results (2026-10-07): the user approved both packets unchanged.
+Identity produced 195/195 correct offered judgments, candidate recall 140/145
+(96.55%), and 140 correct active-gate accepts with zero wrong reuse. All 55
+ambiguous/no-match cases abstained under the active gate; the five deliberately
+missing aliases produced no provider request. Request p50/p95 were 0.203/0.312
+seconds and total provider cost was $0.00522220.
+
+Extraction produced 54/60 correct diagnostic answers (90%), accepted 32/40
+positives (80% positive recall), and made zero false accepts. Eight unknown-type
+Person positives had correct Choice answers but evidence Noul below the frozen
+0.80 threshold. Six ambiguous first names were incorrectly typed Person, but
+their evidence Noul also remained below that threshold, so they were not accepted.
+Request p50/p95 were 0.203/0.297 seconds and cost was $0.00138373. No thresholds
+were changed after seeing these results. The correlated synthetic packets meet
+their numerical composition targets but do not establish production readiness.
+V4 remains open for representative ingestion evidence and actual fallback savings.
+The user deferred these real-ingestion runs on 2026-10-07. Existing diagnostic
+and stress results are recorded; production mode settings remain unchanged.
 
 ## 5. Main file owners
 

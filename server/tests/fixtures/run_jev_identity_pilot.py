@@ -32,6 +32,7 @@ from tests.fixtures.evaluate_jev_identity import (
     evaluate_identity_acceptance,
     evaluate_identity_observations,
 )
+from tests.fixtures.jev_measurements import summarize_results
 
 API_KEY_ENV = "OPENROUTER_API_KEY"
 REPOSITORY_ENV = Path(__file__).resolve().parents[3] / ".env"
@@ -255,6 +256,23 @@ async def _main() -> None:
         "active_policy": evaluate_identity_acceptance(labels, observations),
         "spending": spending,
         "provider_usage": provider_usage_summary(observations),
+        "measurements": summarize_results(
+            [item["record"]["result"] for item in observations]
+        ),
+    }
+    ambiguous = sum(
+        label["expected_choice"] in {"none_of_these", "insufficient_evidence"}
+        for label in labels
+    )
+    report["active_ready"] = False
+    report["readiness_reason"] = (
+        "A separately reviewed held-out activation set and boundary verification "
+        "are required; this runner reports diagnostic quality only"
+    )
+    report["activation_sample"] = {
+        "reviewed": len(labels),
+        "ambiguous_or_no_match": ambiguous,
+        "meets_sample_gate": len(labels) >= 200 and ambiguous >= 50,
     }
     args.output_dir.mkdir(parents=True, exist_ok=True)
     (args.output_dir / "jev_identity_labels.json").write_text(

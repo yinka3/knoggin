@@ -32,6 +32,7 @@ from tests.fixtures.evaluate_jev_classification import (
     MIN_REVIEWED_OCCURRENCES,
     evaluate_classification_observations,
 )
+from tests.fixtures.jev_measurements import summarize_results
 
 API_KEY_ENV = "OPENROUTER_API_KEY"
 REPOSITORY_ENV = Path(__file__).resolve().parents[3] / ".env"
@@ -246,6 +247,7 @@ async def run_pilot(cases: list[dict], api_key: str):
     client = JevClient(settings, spending_ledger=ledger)
     observations = []
     aggregates = []
+    resolver_timings = []
     try:
         for case_index, case in enumerate(cases):
             window_id, _ = _ids(case["id"], 0)
@@ -255,6 +257,7 @@ async def run_pilot(cases: list[dict], api_key: str):
             async def allocate_entity_id():
                 return next(next_id)
 
+            timing = {}
             result = await EntityResolver(
                 EmptyKnowledgeStore(),
                 "project-1",
@@ -281,7 +284,9 @@ async def run_pilot(cases: list[dict], api_key: str):
                 allocate_entity_id=allocate_entity_id,
                 window_id=window_id,
                 pass_number=1,
+                timing=timing,
             )
+            resolver_timings.append({"case_id": case["id"], **timing})
             observations.extend(result.classification_decisions)
             aggregates.extend(
                 {"window_id": str(window_id), **aggregate}
@@ -289,7 +294,9 @@ async def run_pilot(cases: list[dict], api_key: str):
             )
     finally:
         await client.close()
-    return observations, aggregates, await ledger.snapshot()
+    spending = await ledger.snapshot()
+    spending["resolver_timings"] = resolver_timings
+    return observations, aggregates, spending
 
 
 async def _main() -> None:
@@ -310,8 +317,12 @@ async def _main() -> None:
     labels = build_review_labels(cases)
     observations, aggregates, spending = await run_pilot(cases, api_key)
     report = evaluate_classification_observations(labels, observations, aggregates)
+    report["resolver_timings"] = spending.pop("resolver_timings")
     report["spending"] = spending
     report["provider_usage"] = provider_usage_summary(observations)
+    report["measurements"] = summarize_results(
+        [item["record"]["result"] for item in observations]
+    )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     for name, value in (
         ("jev_classification_labels.json", labels),

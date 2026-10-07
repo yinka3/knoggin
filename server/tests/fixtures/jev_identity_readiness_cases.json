@@ -1,0 +1,5154 @@
+{
+  "version": 1,
+  "review_status": "reviewed",
+  "evaluation_role": "synthetic_stress",
+  "purpose": "New synthetic stress cases for frozen JEV policies. Template variants are correlated and do not replace representative project evidence.",
+  "review_instructions": "Review every label and reason before marking reviewed. Do not tune policy after observing this packet's model results.",
+  "cases": [
+    {
+      "id": "explicit_0_0",
+      "family": "explicit_0",
+      "mention": "Lena",
+      "context": "Lena, formally named Lena Ortiz, is the subject of this record.",
+      "candidates": [
+        {
+          "entity_id": 1000,
+          "canonical_name": "Lena Ortiz",
+          "aliases": [
+            "Lena"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1001,
+          "canonical_name": "Lena Alternative",
+          "aliases": [
+            "Lena"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1000,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_0_1",
+      "family": "explicit_1",
+      "mention": "Lena",
+      "context": "The record expands Lena as Lena Ortiz.",
+      "candidates": [
+        {
+          "entity_id": 1001,
+          "canonical_name": "Lena Alternative",
+          "aliases": [
+            "Lena"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1000,
+          "canonical_name": "Lena Ortiz",
+          "aliases": [
+            "Lena"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1000,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_0_2",
+      "family": "explicit_2",
+      "mention": "Lena",
+      "context": "Here Lena refers specifically to Lena Ortiz, rather than Lena Alternative.",
+      "candidates": [
+        {
+          "entity_id": 1000,
+          "canonical_name": "Lena Ortiz",
+          "aliases": [
+            "Lena"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1001,
+          "canonical_name": "Lena Alternative",
+          "aliases": [
+            "Lena"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1000,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_0_3",
+      "family": "explicit_3",
+      "mention": "Lena",
+      "context": "We use Lena as the short name for Lena Ortiz in this report.",
+      "candidates": [
+        {
+          "entity_id": 1001,
+          "canonical_name": "Lena Alternative",
+          "aliases": [
+            "Lena"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1000,
+          "canonical_name": "Lena Ortiz",
+          "aliases": [
+            "Lena"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1000,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_0_4",
+      "family": "explicit_4",
+      "mention": "Lena",
+      "context": "The item described as Lena has the full name Lena Ortiz.",
+      "candidates": [
+        {
+          "entity_id": 1000,
+          "canonical_name": "Lena Ortiz",
+          "aliases": [
+            "Lena"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1001,
+          "canonical_name": "Lena Alternative",
+          "aliases": [
+            "Lena"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1000,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_0_5",
+      "family": "explicit_5",
+      "mention": "Lena",
+      "context": "This occurrence of Lena identifies Lena Ortiz; Lena Alternative is a separate identity.",
+      "candidates": [
+        {
+          "entity_id": 1001,
+          "canonical_name": "Lena Alternative",
+          "aliases": [
+            "Lena"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1000,
+          "canonical_name": "Lena Ortiz",
+          "aliases": [
+            "Lena"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1000,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_0_6",
+      "family": "explicit_6",
+      "mention": "Lena",
+      "context": "The report identifies Lena (Lena Ortiz) as the subject.",
+      "candidates": [
+        {
+          "entity_id": 1000,
+          "canonical_name": "Lena Ortiz",
+          "aliases": [
+            "Lena"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1001,
+          "canonical_name": "Lena Alternative",
+          "aliases": [
+            "Lena"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1000,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "ambiguous_0_0",
+      "family": "shared_alias_ambiguous",
+      "mention": "Lena",
+      "context": "Lena was mentioned yesterday.",
+      "candidates": [
+        {
+          "entity_id": 1000,
+          "canonical_name": "Lena Ortiz",
+          "aliases": [
+            "Lena"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1001,
+          "canonical_name": "Lena Alternative",
+          "aliases": [
+            "Lena"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "ambiguous_0_1",
+      "family": "shared_alias_ambiguous",
+      "mention": "Lena",
+      "context": "A future update about Lena is expected.",
+      "candidates": [
+        {
+          "entity_id": 1000,
+          "canonical_name": "Lena Ortiz",
+          "aliases": [
+            "Lena"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1001,
+          "canonical_name": "Lena Alternative",
+          "aliases": [
+            "Lena"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "discovery_0",
+      "family": "missing_alias",
+      "mention": "UnlistedHandle0",
+      "context": "UnlistedHandle0 is the new alias for Lena Ortiz.",
+      "candidates": [],
+      "stored_identity": {
+        "entity_id": 1000,
+        "canonical_name": "Lena Ortiz",
+        "aliases": [],
+        "type": "Person"
+      },
+      "proposed_choice": "candidate_recall_failure",
+      "reason": "The stored identity has no lexical alias matching the supplied handle."
+    },
+    {
+      "id": "explicit_1_0",
+      "family": "explicit_0",
+      "mention": "Owen",
+      "context": "Owen, formally named Owen Reed, is the subject of this record.",
+      "candidates": [
+        {
+          "entity_id": 1010,
+          "canonical_name": "Owen Reed",
+          "aliases": [
+            "Owen"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1011,
+          "canonical_name": "Owen Alternative",
+          "aliases": [
+            "Owen"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1010,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_1_1",
+      "family": "explicit_1",
+      "mention": "Owen",
+      "context": "The record expands Owen as Owen Reed.",
+      "candidates": [
+        {
+          "entity_id": 1011,
+          "canonical_name": "Owen Alternative",
+          "aliases": [
+            "Owen"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1010,
+          "canonical_name": "Owen Reed",
+          "aliases": [
+            "Owen"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1010,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_1_2",
+      "family": "explicit_2",
+      "mention": "Owen",
+      "context": "Here Owen refers specifically to Owen Reed, rather than Owen Alternative.",
+      "candidates": [
+        {
+          "entity_id": 1010,
+          "canonical_name": "Owen Reed",
+          "aliases": [
+            "Owen"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1011,
+          "canonical_name": "Owen Alternative",
+          "aliases": [
+            "Owen"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1010,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_1_3",
+      "family": "explicit_3",
+      "mention": "Owen",
+      "context": "We use Owen as the short name for Owen Reed in this report.",
+      "candidates": [
+        {
+          "entity_id": 1011,
+          "canonical_name": "Owen Alternative",
+          "aliases": [
+            "Owen"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1010,
+          "canonical_name": "Owen Reed",
+          "aliases": [
+            "Owen"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1010,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_1_4",
+      "family": "explicit_4",
+      "mention": "Owen",
+      "context": "The item described as Owen has the full name Owen Reed.",
+      "candidates": [
+        {
+          "entity_id": 1010,
+          "canonical_name": "Owen Reed",
+          "aliases": [
+            "Owen"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1011,
+          "canonical_name": "Owen Alternative",
+          "aliases": [
+            "Owen"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1010,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_1_5",
+      "family": "explicit_5",
+      "mention": "Owen",
+      "context": "This occurrence of Owen identifies Owen Reed; Owen Alternative is a separate identity.",
+      "candidates": [
+        {
+          "entity_id": 1011,
+          "canonical_name": "Owen Alternative",
+          "aliases": [
+            "Owen"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1010,
+          "canonical_name": "Owen Reed",
+          "aliases": [
+            "Owen"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1010,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_1_6",
+      "family": "explicit_6",
+      "mention": "Owen",
+      "context": "The report identifies Owen (Owen Reed) as the subject.",
+      "candidates": [
+        {
+          "entity_id": 1010,
+          "canonical_name": "Owen Reed",
+          "aliases": [
+            "Owen"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1011,
+          "canonical_name": "Owen Alternative",
+          "aliases": [
+            "Owen"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1010,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "ambiguous_1_0",
+      "family": "shared_alias_ambiguous",
+      "mention": "Owen",
+      "context": "Owen was mentioned yesterday.",
+      "candidates": [
+        {
+          "entity_id": 1010,
+          "canonical_name": "Owen Reed",
+          "aliases": [
+            "Owen"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1011,
+          "canonical_name": "Owen Alternative",
+          "aliases": [
+            "Owen"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "ambiguous_1_1",
+      "family": "shared_alias_ambiguous",
+      "mention": "Owen",
+      "context": "A future update about Owen is expected.",
+      "candidates": [
+        {
+          "entity_id": 1010,
+          "canonical_name": "Owen Reed",
+          "aliases": [
+            "Owen"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1011,
+          "canonical_name": "Owen Alternative",
+          "aliases": [
+            "Owen"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "discovery_1",
+      "family": "missing_alias",
+      "mention": "UnlistedHandle1",
+      "context": "UnlistedHandle1 is the new alias for Owen Reed.",
+      "candidates": [],
+      "stored_identity": {
+        "entity_id": 1010,
+        "canonical_name": "Owen Reed",
+        "aliases": [],
+        "type": "Person"
+      },
+      "proposed_choice": "candidate_recall_failure",
+      "reason": "The stored identity has no lexical alias matching the supplied handle."
+    },
+    {
+      "id": "explicit_2_0",
+      "family": "explicit_0",
+      "mention": "Nadia",
+      "context": "Nadia, formally named Nadia Shah, is the subject of this record.",
+      "candidates": [
+        {
+          "entity_id": 1020,
+          "canonical_name": "Nadia Shah",
+          "aliases": [
+            "Nadia"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1021,
+          "canonical_name": "Nadia Alternative",
+          "aliases": [
+            "Nadia"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1020,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_2_1",
+      "family": "explicit_1",
+      "mention": "Nadia",
+      "context": "The record expands Nadia as Nadia Shah.",
+      "candidates": [
+        {
+          "entity_id": 1021,
+          "canonical_name": "Nadia Alternative",
+          "aliases": [
+            "Nadia"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1020,
+          "canonical_name": "Nadia Shah",
+          "aliases": [
+            "Nadia"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1020,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_2_2",
+      "family": "explicit_2",
+      "mention": "Nadia",
+      "context": "Here Nadia refers specifically to Nadia Shah, rather than Nadia Alternative.",
+      "candidates": [
+        {
+          "entity_id": 1020,
+          "canonical_name": "Nadia Shah",
+          "aliases": [
+            "Nadia"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1021,
+          "canonical_name": "Nadia Alternative",
+          "aliases": [
+            "Nadia"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1020,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_2_3",
+      "family": "explicit_3",
+      "mention": "Nadia",
+      "context": "We use Nadia as the short name for Nadia Shah in this report.",
+      "candidates": [
+        {
+          "entity_id": 1021,
+          "canonical_name": "Nadia Alternative",
+          "aliases": [
+            "Nadia"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1020,
+          "canonical_name": "Nadia Shah",
+          "aliases": [
+            "Nadia"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1020,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_2_4",
+      "family": "explicit_4",
+      "mention": "Nadia",
+      "context": "The item described as Nadia has the full name Nadia Shah.",
+      "candidates": [
+        {
+          "entity_id": 1020,
+          "canonical_name": "Nadia Shah",
+          "aliases": [
+            "Nadia"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1021,
+          "canonical_name": "Nadia Alternative",
+          "aliases": [
+            "Nadia"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1020,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_2_5",
+      "family": "explicit_5",
+      "mention": "Nadia",
+      "context": "This occurrence of Nadia identifies Nadia Shah; Nadia Alternative is a separate identity.",
+      "candidates": [
+        {
+          "entity_id": 1021,
+          "canonical_name": "Nadia Alternative",
+          "aliases": [
+            "Nadia"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1020,
+          "canonical_name": "Nadia Shah",
+          "aliases": [
+            "Nadia"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1020,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_2_6",
+      "family": "explicit_6",
+      "mention": "Nadia",
+      "context": "The report identifies Nadia (Nadia Shah) as the subject.",
+      "candidates": [
+        {
+          "entity_id": 1020,
+          "canonical_name": "Nadia Shah",
+          "aliases": [
+            "Nadia"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1021,
+          "canonical_name": "Nadia Alternative",
+          "aliases": [
+            "Nadia"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1020,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "ambiguous_2_0",
+      "family": "shared_alias_ambiguous",
+      "mention": "Nadia",
+      "context": "Nadia was mentioned yesterday.",
+      "candidates": [
+        {
+          "entity_id": 1020,
+          "canonical_name": "Nadia Shah",
+          "aliases": [
+            "Nadia"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1021,
+          "canonical_name": "Nadia Alternative",
+          "aliases": [
+            "Nadia"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "ambiguous_2_1",
+      "family": "shared_alias_ambiguous",
+      "mention": "Nadia",
+      "context": "A future update about Nadia is expected.",
+      "candidates": [
+        {
+          "entity_id": 1020,
+          "canonical_name": "Nadia Shah",
+          "aliases": [
+            "Nadia"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1021,
+          "canonical_name": "Nadia Alternative",
+          "aliases": [
+            "Nadia"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "discovery_2",
+      "family": "missing_alias",
+      "mention": "UnlistedHandle2",
+      "context": "UnlistedHandle2 is the new alias for Nadia Shah.",
+      "candidates": [],
+      "stored_identity": {
+        "entity_id": 1020,
+        "canonical_name": "Nadia Shah",
+        "aliases": [],
+        "type": "Person"
+      },
+      "proposed_choice": "candidate_recall_failure",
+      "reason": "The stored identity has no lexical alias matching the supplied handle."
+    },
+    {
+      "id": "explicit_3_0",
+      "family": "explicit_0",
+      "mention": "Evan",
+      "context": "Evan, formally named Evan Brooks, is the subject of this record.",
+      "candidates": [
+        {
+          "entity_id": 1030,
+          "canonical_name": "Evan Brooks",
+          "aliases": [
+            "Evan"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1031,
+          "canonical_name": "Evan Alternative",
+          "aliases": [
+            "Evan"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1030,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_3_1",
+      "family": "explicit_1",
+      "mention": "Evan",
+      "context": "The record expands Evan as Evan Brooks.",
+      "candidates": [
+        {
+          "entity_id": 1031,
+          "canonical_name": "Evan Alternative",
+          "aliases": [
+            "Evan"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1030,
+          "canonical_name": "Evan Brooks",
+          "aliases": [
+            "Evan"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1030,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_3_2",
+      "family": "explicit_2",
+      "mention": "Evan",
+      "context": "Here Evan refers specifically to Evan Brooks, rather than Evan Alternative.",
+      "candidates": [
+        {
+          "entity_id": 1030,
+          "canonical_name": "Evan Brooks",
+          "aliases": [
+            "Evan"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1031,
+          "canonical_name": "Evan Alternative",
+          "aliases": [
+            "Evan"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1030,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_3_3",
+      "family": "explicit_3",
+      "mention": "Evan",
+      "context": "We use Evan as the short name for Evan Brooks in this report.",
+      "candidates": [
+        {
+          "entity_id": 1031,
+          "canonical_name": "Evan Alternative",
+          "aliases": [
+            "Evan"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1030,
+          "canonical_name": "Evan Brooks",
+          "aliases": [
+            "Evan"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1030,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_3_4",
+      "family": "explicit_4",
+      "mention": "Evan",
+      "context": "The item described as Evan has the full name Evan Brooks.",
+      "candidates": [
+        {
+          "entity_id": 1030,
+          "canonical_name": "Evan Brooks",
+          "aliases": [
+            "Evan"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1031,
+          "canonical_name": "Evan Alternative",
+          "aliases": [
+            "Evan"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1030,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_3_5",
+      "family": "explicit_5",
+      "mention": "Evan",
+      "context": "This occurrence of Evan identifies Evan Brooks; Evan Alternative is a separate identity.",
+      "candidates": [
+        {
+          "entity_id": 1031,
+          "canonical_name": "Evan Alternative",
+          "aliases": [
+            "Evan"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1030,
+          "canonical_name": "Evan Brooks",
+          "aliases": [
+            "Evan"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1030,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_3_6",
+      "family": "explicit_6",
+      "mention": "Evan",
+      "context": "The report identifies Evan (Evan Brooks) as the subject.",
+      "candidates": [
+        {
+          "entity_id": 1030,
+          "canonical_name": "Evan Brooks",
+          "aliases": [
+            "Evan"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1031,
+          "canonical_name": "Evan Alternative",
+          "aliases": [
+            "Evan"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1030,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "ambiguous_3_0",
+      "family": "shared_alias_ambiguous",
+      "mention": "Evan",
+      "context": "Evan was mentioned yesterday.",
+      "candidates": [
+        {
+          "entity_id": 1030,
+          "canonical_name": "Evan Brooks",
+          "aliases": [
+            "Evan"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1031,
+          "canonical_name": "Evan Alternative",
+          "aliases": [
+            "Evan"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "ambiguous_3_1",
+      "family": "shared_alias_ambiguous",
+      "mention": "Evan",
+      "context": "A future update about Evan is expected.",
+      "candidates": [
+        {
+          "entity_id": 1030,
+          "canonical_name": "Evan Brooks",
+          "aliases": [
+            "Evan"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1031,
+          "canonical_name": "Evan Alternative",
+          "aliases": [
+            "Evan"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "discovery_3",
+      "family": "missing_alias",
+      "mention": "UnlistedHandle3",
+      "context": "UnlistedHandle3 is the new alias for Evan Brooks.",
+      "candidates": [],
+      "stored_identity": {
+        "entity_id": 1030,
+        "canonical_name": "Evan Brooks",
+        "aliases": [],
+        "type": "Person"
+      },
+      "proposed_choice": "candidate_recall_failure",
+      "reason": "The stored identity has no lexical alias matching the supplied handle."
+    },
+    {
+      "id": "explicit_4_0",
+      "family": "explicit_0",
+      "mention": "Tessa",
+      "context": "Tessa, formally named Tessa Wu, is the subject of this record.",
+      "candidates": [
+        {
+          "entity_id": 1040,
+          "canonical_name": "Tessa Wu",
+          "aliases": [
+            "Tessa"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1041,
+          "canonical_name": "Tessa Alternative",
+          "aliases": [
+            "Tessa"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1040,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_4_1",
+      "family": "explicit_1",
+      "mention": "Tessa",
+      "context": "The record expands Tessa as Tessa Wu.",
+      "candidates": [
+        {
+          "entity_id": 1041,
+          "canonical_name": "Tessa Alternative",
+          "aliases": [
+            "Tessa"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1040,
+          "canonical_name": "Tessa Wu",
+          "aliases": [
+            "Tessa"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1040,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_4_2",
+      "family": "explicit_2",
+      "mention": "Tessa",
+      "context": "Here Tessa refers specifically to Tessa Wu, rather than Tessa Alternative.",
+      "candidates": [
+        {
+          "entity_id": 1040,
+          "canonical_name": "Tessa Wu",
+          "aliases": [
+            "Tessa"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1041,
+          "canonical_name": "Tessa Alternative",
+          "aliases": [
+            "Tessa"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1040,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_4_3",
+      "family": "explicit_3",
+      "mention": "Tessa",
+      "context": "We use Tessa as the short name for Tessa Wu in this report.",
+      "candidates": [
+        {
+          "entity_id": 1041,
+          "canonical_name": "Tessa Alternative",
+          "aliases": [
+            "Tessa"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1040,
+          "canonical_name": "Tessa Wu",
+          "aliases": [
+            "Tessa"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1040,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_4_4",
+      "family": "explicit_4",
+      "mention": "Tessa",
+      "context": "The item described as Tessa has the full name Tessa Wu.",
+      "candidates": [
+        {
+          "entity_id": 1040,
+          "canonical_name": "Tessa Wu",
+          "aliases": [
+            "Tessa"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1041,
+          "canonical_name": "Tessa Alternative",
+          "aliases": [
+            "Tessa"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1040,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_4_5",
+      "family": "explicit_5",
+      "mention": "Tessa",
+      "context": "This occurrence of Tessa identifies Tessa Wu; Tessa Alternative is a separate identity.",
+      "candidates": [
+        {
+          "entity_id": 1041,
+          "canonical_name": "Tessa Alternative",
+          "aliases": [
+            "Tessa"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1040,
+          "canonical_name": "Tessa Wu",
+          "aliases": [
+            "Tessa"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1040,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_4_6",
+      "family": "explicit_6",
+      "mention": "Tessa",
+      "context": "The report identifies Tessa (Tessa Wu) as the subject.",
+      "candidates": [
+        {
+          "entity_id": 1040,
+          "canonical_name": "Tessa Wu",
+          "aliases": [
+            "Tessa"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1041,
+          "canonical_name": "Tessa Alternative",
+          "aliases": [
+            "Tessa"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1040,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "ambiguous_4_0",
+      "family": "shared_alias_ambiguous",
+      "mention": "Tessa",
+      "context": "Tessa was mentioned yesterday.",
+      "candidates": [
+        {
+          "entity_id": 1040,
+          "canonical_name": "Tessa Wu",
+          "aliases": [
+            "Tessa"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1041,
+          "canonical_name": "Tessa Alternative",
+          "aliases": [
+            "Tessa"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "ambiguous_4_1",
+      "family": "shared_alias_ambiguous",
+      "mention": "Tessa",
+      "context": "A future update about Tessa is expected.",
+      "candidates": [
+        {
+          "entity_id": 1040,
+          "canonical_name": "Tessa Wu",
+          "aliases": [
+            "Tessa"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1041,
+          "canonical_name": "Tessa Alternative",
+          "aliases": [
+            "Tessa"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "discovery_4",
+      "family": "missing_alias",
+      "mention": "UnlistedHandle4",
+      "context": "UnlistedHandle4 is the new alias for Tessa Wu.",
+      "candidates": [],
+      "stored_identity": {
+        "entity_id": 1040,
+        "canonical_name": "Tessa Wu",
+        "aliases": [],
+        "type": "Person"
+      },
+      "proposed_choice": "candidate_recall_failure",
+      "reason": "The stored identity has no lexical alias matching the supplied handle."
+    },
+    {
+      "id": "explicit_5_0",
+      "family": "explicit_0",
+      "mention": "Iris",
+      "context": "Iris, formally named Iris Cole, is the subject of this record.",
+      "candidates": [
+        {
+          "entity_id": 1050,
+          "canonical_name": "Iris Cole",
+          "aliases": [
+            "Iris"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1051,
+          "canonical_name": "Iris Alternative",
+          "aliases": [
+            "Iris"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1050,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_5_1",
+      "family": "explicit_1",
+      "mention": "Iris",
+      "context": "The record expands Iris as Iris Cole.",
+      "candidates": [
+        {
+          "entity_id": 1051,
+          "canonical_name": "Iris Alternative",
+          "aliases": [
+            "Iris"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1050,
+          "canonical_name": "Iris Cole",
+          "aliases": [
+            "Iris"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1050,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_5_2",
+      "family": "explicit_2",
+      "mention": "Iris",
+      "context": "Here Iris refers specifically to Iris Cole, rather than Iris Alternative.",
+      "candidates": [
+        {
+          "entity_id": 1050,
+          "canonical_name": "Iris Cole",
+          "aliases": [
+            "Iris"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1051,
+          "canonical_name": "Iris Alternative",
+          "aliases": [
+            "Iris"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1050,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_5_3",
+      "family": "explicit_3",
+      "mention": "Iris",
+      "context": "We use Iris as the short name for Iris Cole in this report.",
+      "candidates": [
+        {
+          "entity_id": 1051,
+          "canonical_name": "Iris Alternative",
+          "aliases": [
+            "Iris"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1050,
+          "canonical_name": "Iris Cole",
+          "aliases": [
+            "Iris"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1050,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_5_4",
+      "family": "explicit_4",
+      "mention": "Iris",
+      "context": "The item described as Iris has the full name Iris Cole.",
+      "candidates": [
+        {
+          "entity_id": 1050,
+          "canonical_name": "Iris Cole",
+          "aliases": [
+            "Iris"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1051,
+          "canonical_name": "Iris Alternative",
+          "aliases": [
+            "Iris"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1050,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_5_5",
+      "family": "explicit_5",
+      "mention": "Iris",
+      "context": "This occurrence of Iris identifies Iris Cole; Iris Alternative is a separate identity.",
+      "candidates": [
+        {
+          "entity_id": 1051,
+          "canonical_name": "Iris Alternative",
+          "aliases": [
+            "Iris"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1050,
+          "canonical_name": "Iris Cole",
+          "aliases": [
+            "Iris"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1050,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_5_6",
+      "family": "explicit_6",
+      "mention": "Iris",
+      "context": "The report identifies Iris (Iris Cole) as the subject.",
+      "candidates": [
+        {
+          "entity_id": 1050,
+          "canonical_name": "Iris Cole",
+          "aliases": [
+            "Iris"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1051,
+          "canonical_name": "Iris Alternative",
+          "aliases": [
+            "Iris"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1050,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "ambiguous_5_0",
+      "family": "shared_alias_ambiguous",
+      "mention": "Iris",
+      "context": "Iris was mentioned yesterday.",
+      "candidates": [
+        {
+          "entity_id": 1050,
+          "canonical_name": "Iris Cole",
+          "aliases": [
+            "Iris"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1051,
+          "canonical_name": "Iris Alternative",
+          "aliases": [
+            "Iris"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "ambiguous_5_1",
+      "family": "shared_alias_ambiguous",
+      "mention": "Iris",
+      "context": "A future update about Iris is expected.",
+      "candidates": [
+        {
+          "entity_id": 1050,
+          "canonical_name": "Iris Cole",
+          "aliases": [
+            "Iris"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1051,
+          "canonical_name": "Iris Alternative",
+          "aliases": [
+            "Iris"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "different_5",
+      "family": "explicit_different_identity",
+      "mention": "Iris",
+      "context": "Here Iris is a new identity called Iris Distinct, unrelated to Iris Cole or Iris Alternative.",
+      "candidates": [
+        {
+          "entity_id": 1050,
+          "canonical_name": "Iris Cole",
+          "aliases": [
+            "Iris"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1051,
+          "canonical_name": "Iris Alternative",
+          "aliases": [
+            "Iris"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": "none_of_these",
+      "reason": "The context explicitly states that neither stored identity is the subject."
+    },
+    {
+      "id": "explicit_6_0",
+      "family": "explicit_0",
+      "mention": "Felix",
+      "context": "Felix, formally named Felix Grant, is the subject of this record.",
+      "candidates": [
+        {
+          "entity_id": 1060,
+          "canonical_name": "Felix Grant",
+          "aliases": [
+            "Felix"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1061,
+          "canonical_name": "Felix Alternative",
+          "aliases": [
+            "Felix"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1060,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_6_1",
+      "family": "explicit_1",
+      "mention": "Felix",
+      "context": "The record expands Felix as Felix Grant.",
+      "candidates": [
+        {
+          "entity_id": 1061,
+          "canonical_name": "Felix Alternative",
+          "aliases": [
+            "Felix"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1060,
+          "canonical_name": "Felix Grant",
+          "aliases": [
+            "Felix"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1060,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_6_2",
+      "family": "explicit_2",
+      "mention": "Felix",
+      "context": "Here Felix refers specifically to Felix Grant, rather than Felix Alternative.",
+      "candidates": [
+        {
+          "entity_id": 1060,
+          "canonical_name": "Felix Grant",
+          "aliases": [
+            "Felix"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1061,
+          "canonical_name": "Felix Alternative",
+          "aliases": [
+            "Felix"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1060,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_6_3",
+      "family": "explicit_3",
+      "mention": "Felix",
+      "context": "We use Felix as the short name for Felix Grant in this report.",
+      "candidates": [
+        {
+          "entity_id": 1061,
+          "canonical_name": "Felix Alternative",
+          "aliases": [
+            "Felix"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1060,
+          "canonical_name": "Felix Grant",
+          "aliases": [
+            "Felix"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1060,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_6_4",
+      "family": "explicit_4",
+      "mention": "Felix",
+      "context": "The item described as Felix has the full name Felix Grant.",
+      "candidates": [
+        {
+          "entity_id": 1060,
+          "canonical_name": "Felix Grant",
+          "aliases": [
+            "Felix"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1061,
+          "canonical_name": "Felix Alternative",
+          "aliases": [
+            "Felix"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1060,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_6_5",
+      "family": "explicit_5",
+      "mention": "Felix",
+      "context": "This occurrence of Felix identifies Felix Grant; Felix Alternative is a separate identity.",
+      "candidates": [
+        {
+          "entity_id": 1061,
+          "canonical_name": "Felix Alternative",
+          "aliases": [
+            "Felix"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1060,
+          "canonical_name": "Felix Grant",
+          "aliases": [
+            "Felix"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1060,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_6_6",
+      "family": "explicit_6",
+      "mention": "Felix",
+      "context": "The report identifies Felix (Felix Grant) as the subject.",
+      "candidates": [
+        {
+          "entity_id": 1060,
+          "canonical_name": "Felix Grant",
+          "aliases": [
+            "Felix"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1061,
+          "canonical_name": "Felix Alternative",
+          "aliases": [
+            "Felix"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1060,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "ambiguous_6_0",
+      "family": "shared_alias_ambiguous",
+      "mention": "Felix",
+      "context": "Felix was mentioned yesterday.",
+      "candidates": [
+        {
+          "entity_id": 1060,
+          "canonical_name": "Felix Grant",
+          "aliases": [
+            "Felix"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1061,
+          "canonical_name": "Felix Alternative",
+          "aliases": [
+            "Felix"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "ambiguous_6_1",
+      "family": "shared_alias_ambiguous",
+      "mention": "Felix",
+      "context": "A future update about Felix is expected.",
+      "candidates": [
+        {
+          "entity_id": 1060,
+          "canonical_name": "Felix Grant",
+          "aliases": [
+            "Felix"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1061,
+          "canonical_name": "Felix Alternative",
+          "aliases": [
+            "Felix"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "different_6",
+      "family": "explicit_different_identity",
+      "mention": "Felix",
+      "context": "Here Felix is a new identity called Felix Distinct, unrelated to Felix Grant or Felix Alternative.",
+      "candidates": [
+        {
+          "entity_id": 1060,
+          "canonical_name": "Felix Grant",
+          "aliases": [
+            "Felix"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1061,
+          "canonical_name": "Felix Alternative",
+          "aliases": [
+            "Felix"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": "none_of_these",
+      "reason": "The context explicitly states that neither stored identity is the subject."
+    },
+    {
+      "id": "explicit_7_0",
+      "family": "explicit_0",
+      "mention": "Zara",
+      "context": "Zara, formally named Zara Bell, is the subject of this record.",
+      "candidates": [
+        {
+          "entity_id": 1070,
+          "canonical_name": "Zara Bell",
+          "aliases": [
+            "Zara"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1071,
+          "canonical_name": "Zara Alternative",
+          "aliases": [
+            "Zara"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1070,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_7_1",
+      "family": "explicit_1",
+      "mention": "Zara",
+      "context": "The record expands Zara as Zara Bell.",
+      "candidates": [
+        {
+          "entity_id": 1071,
+          "canonical_name": "Zara Alternative",
+          "aliases": [
+            "Zara"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1070,
+          "canonical_name": "Zara Bell",
+          "aliases": [
+            "Zara"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1070,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_7_2",
+      "family": "explicit_2",
+      "mention": "Zara",
+      "context": "Here Zara refers specifically to Zara Bell, rather than Zara Alternative.",
+      "candidates": [
+        {
+          "entity_id": 1070,
+          "canonical_name": "Zara Bell",
+          "aliases": [
+            "Zara"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1071,
+          "canonical_name": "Zara Alternative",
+          "aliases": [
+            "Zara"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1070,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_7_3",
+      "family": "explicit_3",
+      "mention": "Zara",
+      "context": "We use Zara as the short name for Zara Bell in this report.",
+      "candidates": [
+        {
+          "entity_id": 1071,
+          "canonical_name": "Zara Alternative",
+          "aliases": [
+            "Zara"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1070,
+          "canonical_name": "Zara Bell",
+          "aliases": [
+            "Zara"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1070,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_7_4",
+      "family": "explicit_4",
+      "mention": "Zara",
+      "context": "The item described as Zara has the full name Zara Bell.",
+      "candidates": [
+        {
+          "entity_id": 1070,
+          "canonical_name": "Zara Bell",
+          "aliases": [
+            "Zara"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1071,
+          "canonical_name": "Zara Alternative",
+          "aliases": [
+            "Zara"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1070,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_7_5",
+      "family": "explicit_5",
+      "mention": "Zara",
+      "context": "This occurrence of Zara identifies Zara Bell; Zara Alternative is a separate identity.",
+      "candidates": [
+        {
+          "entity_id": 1071,
+          "canonical_name": "Zara Alternative",
+          "aliases": [
+            "Zara"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1070,
+          "canonical_name": "Zara Bell",
+          "aliases": [
+            "Zara"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1070,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_7_6",
+      "family": "explicit_6",
+      "mention": "Zara",
+      "context": "The report identifies Zara (Zara Bell) as the subject.",
+      "candidates": [
+        {
+          "entity_id": 1070,
+          "canonical_name": "Zara Bell",
+          "aliases": [
+            "Zara"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1071,
+          "canonical_name": "Zara Alternative",
+          "aliases": [
+            "Zara"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": 1070,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "ambiguous_7_0",
+      "family": "shared_alias_ambiguous",
+      "mention": "Zara",
+      "context": "Zara was mentioned yesterday.",
+      "candidates": [
+        {
+          "entity_id": 1070,
+          "canonical_name": "Zara Bell",
+          "aliases": [
+            "Zara"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1071,
+          "canonical_name": "Zara Alternative",
+          "aliases": [
+            "Zara"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "ambiguous_7_1",
+      "family": "shared_alias_ambiguous",
+      "mention": "Zara",
+      "context": "A future update about Zara is expected.",
+      "candidates": [
+        {
+          "entity_id": 1070,
+          "canonical_name": "Zara Bell",
+          "aliases": [
+            "Zara"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1071,
+          "canonical_name": "Zara Alternative",
+          "aliases": [
+            "Zara"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "different_7",
+      "family": "explicit_different_identity",
+      "mention": "Zara",
+      "context": "Here Zara is a new identity called Zara Distinct, unrelated to Zara Bell or Zara Alternative.",
+      "candidates": [
+        {
+          "entity_id": 1070,
+          "canonical_name": "Zara Bell",
+          "aliases": [
+            "Zara"
+          ],
+          "type": "Person"
+        },
+        {
+          "entity_id": 1071,
+          "canonical_name": "Zara Alternative",
+          "aliases": [
+            "Zara"
+          ],
+          "type": "Person"
+        }
+      ],
+      "proposed_choice": "none_of_these",
+      "reason": "The context explicitly states that neither stored identity is the subject."
+    },
+    {
+      "id": "explicit_8_0",
+      "family": "explicit_0",
+      "mention": "Aster",
+      "context": "Aster, formally named Aster Systems, is the subject of this record.",
+      "candidates": [
+        {
+          "entity_id": 1080,
+          "canonical_name": "Aster Systems",
+          "aliases": [
+            "Aster"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1081,
+          "canonical_name": "Aster Alternative",
+          "aliases": [
+            "Aster"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1080,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_8_1",
+      "family": "explicit_1",
+      "mention": "Aster",
+      "context": "The record expands Aster as Aster Systems.",
+      "candidates": [
+        {
+          "entity_id": 1081,
+          "canonical_name": "Aster Alternative",
+          "aliases": [
+            "Aster"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1080,
+          "canonical_name": "Aster Systems",
+          "aliases": [
+            "Aster"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1080,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_8_2",
+      "family": "explicit_2",
+      "mention": "Aster",
+      "context": "Here Aster refers specifically to Aster Systems, rather than Aster Alternative.",
+      "candidates": [
+        {
+          "entity_id": 1080,
+          "canonical_name": "Aster Systems",
+          "aliases": [
+            "Aster"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1081,
+          "canonical_name": "Aster Alternative",
+          "aliases": [
+            "Aster"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1080,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_8_3",
+      "family": "explicit_3",
+      "mention": "Aster",
+      "context": "We use Aster as the short name for Aster Systems in this report.",
+      "candidates": [
+        {
+          "entity_id": 1081,
+          "canonical_name": "Aster Alternative",
+          "aliases": [
+            "Aster"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1080,
+          "canonical_name": "Aster Systems",
+          "aliases": [
+            "Aster"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1080,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_8_4",
+      "family": "explicit_4",
+      "mention": "Aster",
+      "context": "The item described as Aster has the full name Aster Systems.",
+      "candidates": [
+        {
+          "entity_id": 1080,
+          "canonical_name": "Aster Systems",
+          "aliases": [
+            "Aster"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1081,
+          "canonical_name": "Aster Alternative",
+          "aliases": [
+            "Aster"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1080,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_8_5",
+      "family": "explicit_5",
+      "mention": "Aster",
+      "context": "This occurrence of Aster identifies Aster Systems; Aster Alternative is a separate identity.",
+      "candidates": [
+        {
+          "entity_id": 1081,
+          "canonical_name": "Aster Alternative",
+          "aliases": [
+            "Aster"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1080,
+          "canonical_name": "Aster Systems",
+          "aliases": [
+            "Aster"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1080,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_8_6",
+      "family": "explicit_6",
+      "mention": "Aster",
+      "context": "The report identifies Aster (Aster Systems) as the subject.",
+      "candidates": [
+        {
+          "entity_id": 1080,
+          "canonical_name": "Aster Systems",
+          "aliases": [
+            "Aster"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1081,
+          "canonical_name": "Aster Alternative",
+          "aliases": [
+            "Aster"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1080,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "ambiguous_8_0",
+      "family": "shared_alias_ambiguous",
+      "mention": "Aster",
+      "context": "Aster was mentioned yesterday.",
+      "candidates": [
+        {
+          "entity_id": 1080,
+          "canonical_name": "Aster Systems",
+          "aliases": [
+            "Aster"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1081,
+          "canonical_name": "Aster Alternative",
+          "aliases": [
+            "Aster"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "ambiguous_8_1",
+      "family": "shared_alias_ambiguous",
+      "mention": "Aster",
+      "context": "A future update about Aster is expected.",
+      "candidates": [
+        {
+          "entity_id": 1080,
+          "canonical_name": "Aster Systems",
+          "aliases": [
+            "Aster"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1081,
+          "canonical_name": "Aster Alternative",
+          "aliases": [
+            "Aster"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "different_8",
+      "family": "explicit_different_identity",
+      "mention": "Aster",
+      "context": "Here Aster is a new identity called Aster Distinct, unrelated to Aster Systems or Aster Alternative.",
+      "candidates": [
+        {
+          "entity_id": 1080,
+          "canonical_name": "Aster Systems",
+          "aliases": [
+            "Aster"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1081,
+          "canonical_name": "Aster Alternative",
+          "aliases": [
+            "Aster"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": "none_of_these",
+      "reason": "The context explicitly states that neither stored identity is the subject."
+    },
+    {
+      "id": "explicit_9_0",
+      "family": "explicit_0",
+      "mention": "Birch",
+      "context": "Birch, formally named Birch Dynamics, is the subject of this record.",
+      "candidates": [
+        {
+          "entity_id": 1090,
+          "canonical_name": "Birch Dynamics",
+          "aliases": [
+            "Birch"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1091,
+          "canonical_name": "Birch Alternative",
+          "aliases": [
+            "Birch"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1090,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_9_1",
+      "family": "explicit_1",
+      "mention": "Birch",
+      "context": "The record expands Birch as Birch Dynamics.",
+      "candidates": [
+        {
+          "entity_id": 1091,
+          "canonical_name": "Birch Alternative",
+          "aliases": [
+            "Birch"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1090,
+          "canonical_name": "Birch Dynamics",
+          "aliases": [
+            "Birch"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1090,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_9_2",
+      "family": "explicit_2",
+      "mention": "Birch",
+      "context": "Here Birch refers specifically to Birch Dynamics, rather than Birch Alternative.",
+      "candidates": [
+        {
+          "entity_id": 1090,
+          "canonical_name": "Birch Dynamics",
+          "aliases": [
+            "Birch"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1091,
+          "canonical_name": "Birch Alternative",
+          "aliases": [
+            "Birch"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1090,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_9_3",
+      "family": "explicit_3",
+      "mention": "Birch",
+      "context": "We use Birch as the short name for Birch Dynamics in this report.",
+      "candidates": [
+        {
+          "entity_id": 1091,
+          "canonical_name": "Birch Alternative",
+          "aliases": [
+            "Birch"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1090,
+          "canonical_name": "Birch Dynamics",
+          "aliases": [
+            "Birch"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1090,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_9_4",
+      "family": "explicit_4",
+      "mention": "Birch",
+      "context": "The item described as Birch has the full name Birch Dynamics.",
+      "candidates": [
+        {
+          "entity_id": 1090,
+          "canonical_name": "Birch Dynamics",
+          "aliases": [
+            "Birch"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1091,
+          "canonical_name": "Birch Alternative",
+          "aliases": [
+            "Birch"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1090,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_9_5",
+      "family": "explicit_5",
+      "mention": "Birch",
+      "context": "This occurrence of Birch identifies Birch Dynamics; Birch Alternative is a separate identity.",
+      "candidates": [
+        {
+          "entity_id": 1091,
+          "canonical_name": "Birch Alternative",
+          "aliases": [
+            "Birch"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1090,
+          "canonical_name": "Birch Dynamics",
+          "aliases": [
+            "Birch"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1090,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_9_6",
+      "family": "explicit_6",
+      "mention": "Birch",
+      "context": "The report identifies Birch (Birch Dynamics) as the subject.",
+      "candidates": [
+        {
+          "entity_id": 1090,
+          "canonical_name": "Birch Dynamics",
+          "aliases": [
+            "Birch"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1091,
+          "canonical_name": "Birch Alternative",
+          "aliases": [
+            "Birch"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1090,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "ambiguous_9_0",
+      "family": "shared_alias_ambiguous",
+      "mention": "Birch",
+      "context": "Birch was mentioned yesterday.",
+      "candidates": [
+        {
+          "entity_id": 1090,
+          "canonical_name": "Birch Dynamics",
+          "aliases": [
+            "Birch"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1091,
+          "canonical_name": "Birch Alternative",
+          "aliases": [
+            "Birch"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "ambiguous_9_1",
+      "family": "shared_alias_ambiguous",
+      "mention": "Birch",
+      "context": "A future update about Birch is expected.",
+      "candidates": [
+        {
+          "entity_id": 1090,
+          "canonical_name": "Birch Dynamics",
+          "aliases": [
+            "Birch"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1091,
+          "canonical_name": "Birch Alternative",
+          "aliases": [
+            "Birch"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "different_9",
+      "family": "explicit_different_identity",
+      "mention": "Birch",
+      "context": "Here Birch is a new identity called Birch Distinct, unrelated to Birch Dynamics or Birch Alternative.",
+      "candidates": [
+        {
+          "entity_id": 1090,
+          "canonical_name": "Birch Dynamics",
+          "aliases": [
+            "Birch"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1091,
+          "canonical_name": "Birch Alternative",
+          "aliases": [
+            "Birch"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": "none_of_these",
+      "reason": "The context explicitly states that neither stored identity is the subject."
+    },
+    {
+      "id": "explicit_10_0",
+      "family": "explicit_0",
+      "mention": "Cypress",
+      "context": "Cypress, formally named Cypress Labs, is the subject of this record.",
+      "candidates": [
+        {
+          "entity_id": 1100,
+          "canonical_name": "Cypress Labs",
+          "aliases": [
+            "Cypress"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1101,
+          "canonical_name": "Cypress Alternative",
+          "aliases": [
+            "Cypress"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1100,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_10_1",
+      "family": "explicit_1",
+      "mention": "Cypress",
+      "context": "The record expands Cypress as Cypress Labs.",
+      "candidates": [
+        {
+          "entity_id": 1101,
+          "canonical_name": "Cypress Alternative",
+          "aliases": [
+            "Cypress"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1100,
+          "canonical_name": "Cypress Labs",
+          "aliases": [
+            "Cypress"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1100,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_10_2",
+      "family": "explicit_2",
+      "mention": "Cypress",
+      "context": "Here Cypress refers specifically to Cypress Labs, rather than Cypress Alternative.",
+      "candidates": [
+        {
+          "entity_id": 1100,
+          "canonical_name": "Cypress Labs",
+          "aliases": [
+            "Cypress"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1101,
+          "canonical_name": "Cypress Alternative",
+          "aliases": [
+            "Cypress"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1100,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_10_3",
+      "family": "explicit_3",
+      "mention": "Cypress",
+      "context": "We use Cypress as the short name for Cypress Labs in this report.",
+      "candidates": [
+        {
+          "entity_id": 1101,
+          "canonical_name": "Cypress Alternative",
+          "aliases": [
+            "Cypress"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1100,
+          "canonical_name": "Cypress Labs",
+          "aliases": [
+            "Cypress"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1100,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_10_4",
+      "family": "explicit_4",
+      "mention": "Cypress",
+      "context": "The item described as Cypress has the full name Cypress Labs.",
+      "candidates": [
+        {
+          "entity_id": 1100,
+          "canonical_name": "Cypress Labs",
+          "aliases": [
+            "Cypress"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1101,
+          "canonical_name": "Cypress Alternative",
+          "aliases": [
+            "Cypress"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1100,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_10_5",
+      "family": "explicit_5",
+      "mention": "Cypress",
+      "context": "This occurrence of Cypress identifies Cypress Labs; Cypress Alternative is a separate identity.",
+      "candidates": [
+        {
+          "entity_id": 1101,
+          "canonical_name": "Cypress Alternative",
+          "aliases": [
+            "Cypress"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1100,
+          "canonical_name": "Cypress Labs",
+          "aliases": [
+            "Cypress"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1100,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_10_6",
+      "family": "explicit_6",
+      "mention": "Cypress",
+      "context": "The report identifies Cypress (Cypress Labs) as the subject.",
+      "candidates": [
+        {
+          "entity_id": 1100,
+          "canonical_name": "Cypress Labs",
+          "aliases": [
+            "Cypress"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1101,
+          "canonical_name": "Cypress Alternative",
+          "aliases": [
+            "Cypress"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1100,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "ambiguous_10_0",
+      "family": "shared_alias_ambiguous",
+      "mention": "Cypress",
+      "context": "Cypress was mentioned yesterday.",
+      "candidates": [
+        {
+          "entity_id": 1100,
+          "canonical_name": "Cypress Labs",
+          "aliases": [
+            "Cypress"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1101,
+          "canonical_name": "Cypress Alternative",
+          "aliases": [
+            "Cypress"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "ambiguous_10_1",
+      "family": "shared_alias_ambiguous",
+      "mention": "Cypress",
+      "context": "A future update about Cypress is expected.",
+      "candidates": [
+        {
+          "entity_id": 1100,
+          "canonical_name": "Cypress Labs",
+          "aliases": [
+            "Cypress"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1101,
+          "canonical_name": "Cypress Alternative",
+          "aliases": [
+            "Cypress"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "different_10",
+      "family": "explicit_different_identity",
+      "mention": "Cypress",
+      "context": "Here Cypress is a new identity called Cypress Distinct, unrelated to Cypress Labs or Cypress Alternative.",
+      "candidates": [
+        {
+          "entity_id": 1100,
+          "canonical_name": "Cypress Labs",
+          "aliases": [
+            "Cypress"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1101,
+          "canonical_name": "Cypress Alternative",
+          "aliases": [
+            "Cypress"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": "none_of_these",
+      "reason": "The context explicitly states that neither stored identity is the subject."
+    },
+    {
+      "id": "explicit_11_0",
+      "family": "explicit_0",
+      "mention": "Dune",
+      "context": "Dune, formally named Dune Networks, is the subject of this record.",
+      "candidates": [
+        {
+          "entity_id": 1110,
+          "canonical_name": "Dune Networks",
+          "aliases": [
+            "Dune"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1111,
+          "canonical_name": "Dune Alternative",
+          "aliases": [
+            "Dune"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1110,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_11_1",
+      "family": "explicit_1",
+      "mention": "Dune",
+      "context": "The record expands Dune as Dune Networks.",
+      "candidates": [
+        {
+          "entity_id": 1111,
+          "canonical_name": "Dune Alternative",
+          "aliases": [
+            "Dune"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1110,
+          "canonical_name": "Dune Networks",
+          "aliases": [
+            "Dune"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1110,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_11_2",
+      "family": "explicit_2",
+      "mention": "Dune",
+      "context": "Here Dune refers specifically to Dune Networks, rather than Dune Alternative.",
+      "candidates": [
+        {
+          "entity_id": 1110,
+          "canonical_name": "Dune Networks",
+          "aliases": [
+            "Dune"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1111,
+          "canonical_name": "Dune Alternative",
+          "aliases": [
+            "Dune"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1110,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_11_3",
+      "family": "explicit_3",
+      "mention": "Dune",
+      "context": "We use Dune as the short name for Dune Networks in this report.",
+      "candidates": [
+        {
+          "entity_id": 1111,
+          "canonical_name": "Dune Alternative",
+          "aliases": [
+            "Dune"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1110,
+          "canonical_name": "Dune Networks",
+          "aliases": [
+            "Dune"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1110,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_11_4",
+      "family": "explicit_4",
+      "mention": "Dune",
+      "context": "The item described as Dune has the full name Dune Networks.",
+      "candidates": [
+        {
+          "entity_id": 1110,
+          "canonical_name": "Dune Networks",
+          "aliases": [
+            "Dune"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1111,
+          "canonical_name": "Dune Alternative",
+          "aliases": [
+            "Dune"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1110,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_11_5",
+      "family": "explicit_5",
+      "mention": "Dune",
+      "context": "This occurrence of Dune identifies Dune Networks; Dune Alternative is a separate identity.",
+      "candidates": [
+        {
+          "entity_id": 1111,
+          "canonical_name": "Dune Alternative",
+          "aliases": [
+            "Dune"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1110,
+          "canonical_name": "Dune Networks",
+          "aliases": [
+            "Dune"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1110,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_11_6",
+      "family": "explicit_6",
+      "mention": "Dune",
+      "context": "The report identifies Dune (Dune Networks) as the subject.",
+      "candidates": [
+        {
+          "entity_id": 1110,
+          "canonical_name": "Dune Networks",
+          "aliases": [
+            "Dune"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1111,
+          "canonical_name": "Dune Alternative",
+          "aliases": [
+            "Dune"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1110,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "ambiguous_11_0",
+      "family": "shared_alias_ambiguous",
+      "mention": "Dune",
+      "context": "Dune was mentioned yesterday.",
+      "candidates": [
+        {
+          "entity_id": 1110,
+          "canonical_name": "Dune Networks",
+          "aliases": [
+            "Dune"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1111,
+          "canonical_name": "Dune Alternative",
+          "aliases": [
+            "Dune"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "ambiguous_11_1",
+      "family": "shared_alias_ambiguous",
+      "mention": "Dune",
+      "context": "A future update about Dune is expected.",
+      "candidates": [
+        {
+          "entity_id": 1110,
+          "canonical_name": "Dune Networks",
+          "aliases": [
+            "Dune"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1111,
+          "canonical_name": "Dune Alternative",
+          "aliases": [
+            "Dune"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "different_11",
+      "family": "explicit_different_identity",
+      "mention": "Dune",
+      "context": "Here Dune is a new identity called Dune Distinct, unrelated to Dune Networks or Dune Alternative.",
+      "candidates": [
+        {
+          "entity_id": 1110,
+          "canonical_name": "Dune Networks",
+          "aliases": [
+            "Dune"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1111,
+          "canonical_name": "Dune Alternative",
+          "aliases": [
+            "Dune"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": "none_of_these",
+      "reason": "The context explicitly states that neither stored identity is the subject."
+    },
+    {
+      "id": "explicit_12_0",
+      "family": "explicit_0",
+      "mention": "Echo",
+      "context": "Echo, formally named Echo Analytics, is the subject of this record.",
+      "candidates": [
+        {
+          "entity_id": 1120,
+          "canonical_name": "Echo Analytics",
+          "aliases": [
+            "Echo"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1121,
+          "canonical_name": "Echo Alternative",
+          "aliases": [
+            "Echo"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1120,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_12_1",
+      "family": "explicit_1",
+      "mention": "Echo",
+      "context": "The record expands Echo as Echo Analytics.",
+      "candidates": [
+        {
+          "entity_id": 1121,
+          "canonical_name": "Echo Alternative",
+          "aliases": [
+            "Echo"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1120,
+          "canonical_name": "Echo Analytics",
+          "aliases": [
+            "Echo"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1120,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_12_2",
+      "family": "explicit_2",
+      "mention": "Echo",
+      "context": "Here Echo refers specifically to Echo Analytics, rather than Echo Alternative.",
+      "candidates": [
+        {
+          "entity_id": 1120,
+          "canonical_name": "Echo Analytics",
+          "aliases": [
+            "Echo"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1121,
+          "canonical_name": "Echo Alternative",
+          "aliases": [
+            "Echo"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1120,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_12_3",
+      "family": "explicit_3",
+      "mention": "Echo",
+      "context": "We use Echo as the short name for Echo Analytics in this report.",
+      "candidates": [
+        {
+          "entity_id": 1121,
+          "canonical_name": "Echo Alternative",
+          "aliases": [
+            "Echo"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1120,
+          "canonical_name": "Echo Analytics",
+          "aliases": [
+            "Echo"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1120,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_12_4",
+      "family": "explicit_4",
+      "mention": "Echo",
+      "context": "The item described as Echo has the full name Echo Analytics.",
+      "candidates": [
+        {
+          "entity_id": 1120,
+          "canonical_name": "Echo Analytics",
+          "aliases": [
+            "Echo"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1121,
+          "canonical_name": "Echo Alternative",
+          "aliases": [
+            "Echo"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1120,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_12_5",
+      "family": "explicit_5",
+      "mention": "Echo",
+      "context": "This occurrence of Echo identifies Echo Analytics; Echo Alternative is a separate identity.",
+      "candidates": [
+        {
+          "entity_id": 1121,
+          "canonical_name": "Echo Alternative",
+          "aliases": [
+            "Echo"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1120,
+          "canonical_name": "Echo Analytics",
+          "aliases": [
+            "Echo"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1120,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_12_6",
+      "family": "explicit_6",
+      "mention": "Echo",
+      "context": "The report identifies Echo (Echo Analytics) as the subject.",
+      "candidates": [
+        {
+          "entity_id": 1120,
+          "canonical_name": "Echo Analytics",
+          "aliases": [
+            "Echo"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1121,
+          "canonical_name": "Echo Alternative",
+          "aliases": [
+            "Echo"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1120,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "ambiguous_12_0",
+      "family": "shared_alias_ambiguous",
+      "mention": "Echo",
+      "context": "Echo was mentioned yesterday.",
+      "candidates": [
+        {
+          "entity_id": 1120,
+          "canonical_name": "Echo Analytics",
+          "aliases": [
+            "Echo"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1121,
+          "canonical_name": "Echo Alternative",
+          "aliases": [
+            "Echo"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "ambiguous_12_1",
+      "family": "shared_alias_ambiguous",
+      "mention": "Echo",
+      "context": "A future update about Echo is expected.",
+      "candidates": [
+        {
+          "entity_id": 1120,
+          "canonical_name": "Echo Analytics",
+          "aliases": [
+            "Echo"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1121,
+          "canonical_name": "Echo Alternative",
+          "aliases": [
+            "Echo"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "different_12",
+      "family": "explicit_different_identity",
+      "mention": "Echo",
+      "context": "Here Echo is a new identity called Echo Distinct, unrelated to Echo Analytics or Echo Alternative.",
+      "candidates": [
+        {
+          "entity_id": 1120,
+          "canonical_name": "Echo Analytics",
+          "aliases": [
+            "Echo"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1121,
+          "canonical_name": "Echo Alternative",
+          "aliases": [
+            "Echo"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": "none_of_these",
+      "reason": "The context explicitly states that neither stored identity is the subject."
+    },
+    {
+      "id": "explicit_13_0",
+      "family": "explicit_0",
+      "mention": "Flint",
+      "context": "Flint, formally named Flint Software, is the subject of this record.",
+      "candidates": [
+        {
+          "entity_id": 1130,
+          "canonical_name": "Flint Software",
+          "aliases": [
+            "Flint"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1131,
+          "canonical_name": "Flint Alternative",
+          "aliases": [
+            "Flint"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1130,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_13_1",
+      "family": "explicit_1",
+      "mention": "Flint",
+      "context": "The record expands Flint as Flint Software.",
+      "candidates": [
+        {
+          "entity_id": 1131,
+          "canonical_name": "Flint Alternative",
+          "aliases": [
+            "Flint"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1130,
+          "canonical_name": "Flint Software",
+          "aliases": [
+            "Flint"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1130,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_13_2",
+      "family": "explicit_2",
+      "mention": "Flint",
+      "context": "Here Flint refers specifically to Flint Software, rather than Flint Alternative.",
+      "candidates": [
+        {
+          "entity_id": 1130,
+          "canonical_name": "Flint Software",
+          "aliases": [
+            "Flint"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1131,
+          "canonical_name": "Flint Alternative",
+          "aliases": [
+            "Flint"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1130,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_13_3",
+      "family": "explicit_3",
+      "mention": "Flint",
+      "context": "We use Flint as the short name for Flint Software in this report.",
+      "candidates": [
+        {
+          "entity_id": 1131,
+          "canonical_name": "Flint Alternative",
+          "aliases": [
+            "Flint"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1130,
+          "canonical_name": "Flint Software",
+          "aliases": [
+            "Flint"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1130,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_13_4",
+      "family": "explicit_4",
+      "mention": "Flint",
+      "context": "The item described as Flint has the full name Flint Software.",
+      "candidates": [
+        {
+          "entity_id": 1130,
+          "canonical_name": "Flint Software",
+          "aliases": [
+            "Flint"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1131,
+          "canonical_name": "Flint Alternative",
+          "aliases": [
+            "Flint"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1130,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_13_5",
+      "family": "explicit_5",
+      "mention": "Flint",
+      "context": "This occurrence of Flint identifies Flint Software; Flint Alternative is a separate identity.",
+      "candidates": [
+        {
+          "entity_id": 1131,
+          "canonical_name": "Flint Alternative",
+          "aliases": [
+            "Flint"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1130,
+          "canonical_name": "Flint Software",
+          "aliases": [
+            "Flint"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1130,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_13_6",
+      "family": "explicit_6",
+      "mention": "Flint",
+      "context": "The report identifies Flint (Flint Software) as the subject.",
+      "candidates": [
+        {
+          "entity_id": 1130,
+          "canonical_name": "Flint Software",
+          "aliases": [
+            "Flint"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1131,
+          "canonical_name": "Flint Alternative",
+          "aliases": [
+            "Flint"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": 1130,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "ambiguous_13_0",
+      "family": "shared_alias_ambiguous",
+      "mention": "Flint",
+      "context": "Flint was mentioned yesterday.",
+      "candidates": [
+        {
+          "entity_id": 1130,
+          "canonical_name": "Flint Software",
+          "aliases": [
+            "Flint"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1131,
+          "canonical_name": "Flint Alternative",
+          "aliases": [
+            "Flint"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "ambiguous_13_1",
+      "family": "shared_alias_ambiguous",
+      "mention": "Flint",
+      "context": "A future update about Flint is expected.",
+      "candidates": [
+        {
+          "entity_id": 1130,
+          "canonical_name": "Flint Software",
+          "aliases": [
+            "Flint"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1131,
+          "canonical_name": "Flint Alternative",
+          "aliases": [
+            "Flint"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "different_13",
+      "family": "explicit_different_identity",
+      "mention": "Flint",
+      "context": "Here Flint is a new identity called Flint Distinct, unrelated to Flint Software or Flint Alternative.",
+      "candidates": [
+        {
+          "entity_id": 1130,
+          "canonical_name": "Flint Software",
+          "aliases": [
+            "Flint"
+          ],
+          "type": "Company"
+        },
+        {
+          "entity_id": 1131,
+          "canonical_name": "Flint Alternative",
+          "aliases": [
+            "Flint"
+          ],
+          "type": "Company"
+        }
+      ],
+      "proposed_choice": "none_of_these",
+      "reason": "The context explicitly states that neither stored identity is the subject."
+    },
+    {
+      "id": "explicit_14_0",
+      "family": "explicit_0",
+      "mention": "Grove",
+      "context": "Grove, formally named Grove Platform, is the subject of this record.",
+      "candidates": [
+        {
+          "entity_id": 1140,
+          "canonical_name": "Grove Platform",
+          "aliases": [
+            "Grove"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1141,
+          "canonical_name": "Grove Alternative",
+          "aliases": [
+            "Grove"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": 1140,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_14_1",
+      "family": "explicit_1",
+      "mention": "Grove",
+      "context": "The record expands Grove as Grove Platform.",
+      "candidates": [
+        {
+          "entity_id": 1141,
+          "canonical_name": "Grove Alternative",
+          "aliases": [
+            "Grove"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1140,
+          "canonical_name": "Grove Platform",
+          "aliases": [
+            "Grove"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": 1140,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_14_2",
+      "family": "explicit_2",
+      "mention": "Grove",
+      "context": "Here Grove refers specifically to Grove Platform, rather than Grove Alternative.",
+      "candidates": [
+        {
+          "entity_id": 1140,
+          "canonical_name": "Grove Platform",
+          "aliases": [
+            "Grove"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1141,
+          "canonical_name": "Grove Alternative",
+          "aliases": [
+            "Grove"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": 1140,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_14_3",
+      "family": "explicit_3",
+      "mention": "Grove",
+      "context": "We use Grove as the short name for Grove Platform in this report.",
+      "candidates": [
+        {
+          "entity_id": 1141,
+          "canonical_name": "Grove Alternative",
+          "aliases": [
+            "Grove"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1140,
+          "canonical_name": "Grove Platform",
+          "aliases": [
+            "Grove"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": 1140,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_14_4",
+      "family": "explicit_4",
+      "mention": "Grove",
+      "context": "The item described as Grove has the full name Grove Platform.",
+      "candidates": [
+        {
+          "entity_id": 1140,
+          "canonical_name": "Grove Platform",
+          "aliases": [
+            "Grove"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1141,
+          "canonical_name": "Grove Alternative",
+          "aliases": [
+            "Grove"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": 1140,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_14_5",
+      "family": "explicit_5",
+      "mention": "Grove",
+      "context": "This occurrence of Grove identifies Grove Platform; Grove Alternative is a separate identity.",
+      "candidates": [
+        {
+          "entity_id": 1141,
+          "canonical_name": "Grove Alternative",
+          "aliases": [
+            "Grove"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1140,
+          "canonical_name": "Grove Platform",
+          "aliases": [
+            "Grove"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": 1140,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_14_6",
+      "family": "explicit_6",
+      "mention": "Grove",
+      "context": "The report identifies Grove (Grove Platform) as the subject.",
+      "candidates": [
+        {
+          "entity_id": 1140,
+          "canonical_name": "Grove Platform",
+          "aliases": [
+            "Grove"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1141,
+          "canonical_name": "Grove Alternative",
+          "aliases": [
+            "Grove"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": 1140,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "ambiguous_14_0",
+      "family": "shared_alias_ambiguous",
+      "mention": "Grove",
+      "context": "Grove was mentioned yesterday.",
+      "candidates": [
+        {
+          "entity_id": 1140,
+          "canonical_name": "Grove Platform",
+          "aliases": [
+            "Grove"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1141,
+          "canonical_name": "Grove Alternative",
+          "aliases": [
+            "Grove"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "ambiguous_14_1",
+      "family": "shared_alias_ambiguous",
+      "mention": "Grove",
+      "context": "A future update about Grove is expected.",
+      "candidates": [
+        {
+          "entity_id": 1140,
+          "canonical_name": "Grove Platform",
+          "aliases": [
+            "Grove"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1141,
+          "canonical_name": "Grove Alternative",
+          "aliases": [
+            "Grove"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "different_14",
+      "family": "explicit_different_identity",
+      "mention": "Grove",
+      "context": "Here Grove is a new identity called Grove Distinct, unrelated to Grove Platform or Grove Alternative.",
+      "candidates": [
+        {
+          "entity_id": 1140,
+          "canonical_name": "Grove Platform",
+          "aliases": [
+            "Grove"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1141,
+          "canonical_name": "Grove Alternative",
+          "aliases": [
+            "Grove"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": "none_of_these",
+      "reason": "The context explicitly states that neither stored identity is the subject."
+    },
+    {
+      "id": "explicit_15_0",
+      "family": "explicit_0",
+      "mention": "Haven",
+      "context": "Haven, formally named Haven Migration, is the subject of this record.",
+      "candidates": [
+        {
+          "entity_id": 1150,
+          "canonical_name": "Haven Migration",
+          "aliases": [
+            "Haven"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1151,
+          "canonical_name": "Haven Alternative",
+          "aliases": [
+            "Haven"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": 1150,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_15_1",
+      "family": "explicit_1",
+      "mention": "Haven",
+      "context": "The record expands Haven as Haven Migration.",
+      "candidates": [
+        {
+          "entity_id": 1151,
+          "canonical_name": "Haven Alternative",
+          "aliases": [
+            "Haven"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1150,
+          "canonical_name": "Haven Migration",
+          "aliases": [
+            "Haven"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": 1150,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_15_2",
+      "family": "explicit_2",
+      "mention": "Haven",
+      "context": "Here Haven refers specifically to Haven Migration, rather than Haven Alternative.",
+      "candidates": [
+        {
+          "entity_id": 1150,
+          "canonical_name": "Haven Migration",
+          "aliases": [
+            "Haven"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1151,
+          "canonical_name": "Haven Alternative",
+          "aliases": [
+            "Haven"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": 1150,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_15_3",
+      "family": "explicit_3",
+      "mention": "Haven",
+      "context": "We use Haven as the short name for Haven Migration in this report.",
+      "candidates": [
+        {
+          "entity_id": 1151,
+          "canonical_name": "Haven Alternative",
+          "aliases": [
+            "Haven"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1150,
+          "canonical_name": "Haven Migration",
+          "aliases": [
+            "Haven"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": 1150,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_15_4",
+      "family": "explicit_4",
+      "mention": "Haven",
+      "context": "The item described as Haven has the full name Haven Migration.",
+      "candidates": [
+        {
+          "entity_id": 1150,
+          "canonical_name": "Haven Migration",
+          "aliases": [
+            "Haven"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1151,
+          "canonical_name": "Haven Alternative",
+          "aliases": [
+            "Haven"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": 1150,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_15_5",
+      "family": "explicit_5",
+      "mention": "Haven",
+      "context": "This occurrence of Haven identifies Haven Migration; Haven Alternative is a separate identity.",
+      "candidates": [
+        {
+          "entity_id": 1151,
+          "canonical_name": "Haven Alternative",
+          "aliases": [
+            "Haven"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1150,
+          "canonical_name": "Haven Migration",
+          "aliases": [
+            "Haven"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": 1150,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_15_6",
+      "family": "explicit_6",
+      "mention": "Haven",
+      "context": "The report identifies Haven (Haven Migration) as the subject.",
+      "candidates": [
+        {
+          "entity_id": 1150,
+          "canonical_name": "Haven Migration",
+          "aliases": [
+            "Haven"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1151,
+          "canonical_name": "Haven Alternative",
+          "aliases": [
+            "Haven"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": 1150,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "ambiguous_15_0",
+      "family": "shared_alias_ambiguous",
+      "mention": "Haven",
+      "context": "Haven was mentioned yesterday.",
+      "candidates": [
+        {
+          "entity_id": 1150,
+          "canonical_name": "Haven Migration",
+          "aliases": [
+            "Haven"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1151,
+          "canonical_name": "Haven Alternative",
+          "aliases": [
+            "Haven"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "ambiguous_15_1",
+      "family": "shared_alias_ambiguous",
+      "mention": "Haven",
+      "context": "A future update about Haven is expected.",
+      "candidates": [
+        {
+          "entity_id": 1150,
+          "canonical_name": "Haven Migration",
+          "aliases": [
+            "Haven"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1151,
+          "canonical_name": "Haven Alternative",
+          "aliases": [
+            "Haven"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "different_15",
+      "family": "explicit_different_identity",
+      "mention": "Haven",
+      "context": "Here Haven is a new identity called Haven Distinct, unrelated to Haven Migration or Haven Alternative.",
+      "candidates": [
+        {
+          "entity_id": 1150,
+          "canonical_name": "Haven Migration",
+          "aliases": [
+            "Haven"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1151,
+          "canonical_name": "Haven Alternative",
+          "aliases": [
+            "Haven"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": "none_of_these",
+      "reason": "The context explicitly states that neither stored identity is the subject."
+    },
+    {
+      "id": "explicit_16_0",
+      "family": "explicit_0",
+      "mention": "Indigo",
+      "context": "Indigo, formally named Indigo Release, is the subject of this record.",
+      "candidates": [
+        {
+          "entity_id": 1160,
+          "canonical_name": "Indigo Release",
+          "aliases": [
+            "Indigo"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1161,
+          "canonical_name": "Indigo Alternative",
+          "aliases": [
+            "Indigo"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": 1160,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_16_1",
+      "family": "explicit_1",
+      "mention": "Indigo",
+      "context": "The record expands Indigo as Indigo Release.",
+      "candidates": [
+        {
+          "entity_id": 1161,
+          "canonical_name": "Indigo Alternative",
+          "aliases": [
+            "Indigo"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1160,
+          "canonical_name": "Indigo Release",
+          "aliases": [
+            "Indigo"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": 1160,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_16_2",
+      "family": "explicit_2",
+      "mention": "Indigo",
+      "context": "Here Indigo refers specifically to Indigo Release, rather than Indigo Alternative.",
+      "candidates": [
+        {
+          "entity_id": 1160,
+          "canonical_name": "Indigo Release",
+          "aliases": [
+            "Indigo"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1161,
+          "canonical_name": "Indigo Alternative",
+          "aliases": [
+            "Indigo"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": 1160,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_16_3",
+      "family": "explicit_3",
+      "mention": "Indigo",
+      "context": "We use Indigo as the short name for Indigo Release in this report.",
+      "candidates": [
+        {
+          "entity_id": 1161,
+          "canonical_name": "Indigo Alternative",
+          "aliases": [
+            "Indigo"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1160,
+          "canonical_name": "Indigo Release",
+          "aliases": [
+            "Indigo"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": 1160,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_16_4",
+      "family": "explicit_4",
+      "mention": "Indigo",
+      "context": "The item described as Indigo has the full name Indigo Release.",
+      "candidates": [
+        {
+          "entity_id": 1160,
+          "canonical_name": "Indigo Release",
+          "aliases": [
+            "Indigo"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1161,
+          "canonical_name": "Indigo Alternative",
+          "aliases": [
+            "Indigo"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": 1160,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_16_5",
+      "family": "explicit_5",
+      "mention": "Indigo",
+      "context": "This occurrence of Indigo identifies Indigo Release; Indigo Alternative is a separate identity.",
+      "candidates": [
+        {
+          "entity_id": 1161,
+          "canonical_name": "Indigo Alternative",
+          "aliases": [
+            "Indigo"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1160,
+          "canonical_name": "Indigo Release",
+          "aliases": [
+            "Indigo"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": 1160,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_16_6",
+      "family": "explicit_6",
+      "mention": "Indigo",
+      "context": "The report identifies Indigo (Indigo Release) as the subject.",
+      "candidates": [
+        {
+          "entity_id": 1160,
+          "canonical_name": "Indigo Release",
+          "aliases": [
+            "Indigo"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1161,
+          "canonical_name": "Indigo Alternative",
+          "aliases": [
+            "Indigo"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": 1160,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "ambiguous_16_0",
+      "family": "shared_alias_ambiguous",
+      "mention": "Indigo",
+      "context": "Indigo was mentioned yesterday.",
+      "candidates": [
+        {
+          "entity_id": 1160,
+          "canonical_name": "Indigo Release",
+          "aliases": [
+            "Indigo"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1161,
+          "canonical_name": "Indigo Alternative",
+          "aliases": [
+            "Indigo"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "ambiguous_16_1",
+      "family": "shared_alias_ambiguous",
+      "mention": "Indigo",
+      "context": "A future update about Indigo is expected.",
+      "candidates": [
+        {
+          "entity_id": 1160,
+          "canonical_name": "Indigo Release",
+          "aliases": [
+            "Indigo"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1161,
+          "canonical_name": "Indigo Alternative",
+          "aliases": [
+            "Indigo"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "different_16",
+      "family": "explicit_different_identity",
+      "mention": "Indigo",
+      "context": "Here Indigo is a new identity called Indigo Distinct, unrelated to Indigo Release or Indigo Alternative.",
+      "candidates": [
+        {
+          "entity_id": 1160,
+          "canonical_name": "Indigo Release",
+          "aliases": [
+            "Indigo"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1161,
+          "canonical_name": "Indigo Alternative",
+          "aliases": [
+            "Indigo"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": "none_of_these",
+      "reason": "The context explicitly states that neither stored identity is the subject."
+    },
+    {
+      "id": "explicit_17_0",
+      "family": "explicit_0",
+      "mention": "Jade",
+      "context": "Jade, formally named Jade Upgrade, is the subject of this record.",
+      "candidates": [
+        {
+          "entity_id": 1170,
+          "canonical_name": "Jade Upgrade",
+          "aliases": [
+            "Jade"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1171,
+          "canonical_name": "Jade Alternative",
+          "aliases": [
+            "Jade"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": 1170,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_17_1",
+      "family": "explicit_1",
+      "mention": "Jade",
+      "context": "The record expands Jade as Jade Upgrade.",
+      "candidates": [
+        {
+          "entity_id": 1171,
+          "canonical_name": "Jade Alternative",
+          "aliases": [
+            "Jade"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1170,
+          "canonical_name": "Jade Upgrade",
+          "aliases": [
+            "Jade"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": 1170,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_17_2",
+      "family": "explicit_2",
+      "mention": "Jade",
+      "context": "Here Jade refers specifically to Jade Upgrade, rather than Jade Alternative.",
+      "candidates": [
+        {
+          "entity_id": 1170,
+          "canonical_name": "Jade Upgrade",
+          "aliases": [
+            "Jade"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1171,
+          "canonical_name": "Jade Alternative",
+          "aliases": [
+            "Jade"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": 1170,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_17_3",
+      "family": "explicit_3",
+      "mention": "Jade",
+      "context": "We use Jade as the short name for Jade Upgrade in this report.",
+      "candidates": [
+        {
+          "entity_id": 1171,
+          "canonical_name": "Jade Alternative",
+          "aliases": [
+            "Jade"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1170,
+          "canonical_name": "Jade Upgrade",
+          "aliases": [
+            "Jade"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": 1170,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_17_4",
+      "family": "explicit_4",
+      "mention": "Jade",
+      "context": "The item described as Jade has the full name Jade Upgrade.",
+      "candidates": [
+        {
+          "entity_id": 1170,
+          "canonical_name": "Jade Upgrade",
+          "aliases": [
+            "Jade"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1171,
+          "canonical_name": "Jade Alternative",
+          "aliases": [
+            "Jade"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": 1170,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_17_5",
+      "family": "explicit_5",
+      "mention": "Jade",
+      "context": "This occurrence of Jade identifies Jade Upgrade; Jade Alternative is a separate identity.",
+      "candidates": [
+        {
+          "entity_id": 1171,
+          "canonical_name": "Jade Alternative",
+          "aliases": [
+            "Jade"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1170,
+          "canonical_name": "Jade Upgrade",
+          "aliases": [
+            "Jade"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": 1170,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_17_6",
+      "family": "explicit_6",
+      "mention": "Jade",
+      "context": "The report identifies Jade (Jade Upgrade) as the subject.",
+      "candidates": [
+        {
+          "entity_id": 1170,
+          "canonical_name": "Jade Upgrade",
+          "aliases": [
+            "Jade"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1171,
+          "canonical_name": "Jade Alternative",
+          "aliases": [
+            "Jade"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": 1170,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "ambiguous_17_0",
+      "family": "shared_alias_ambiguous",
+      "mention": "Jade",
+      "context": "Jade was mentioned yesterday.",
+      "candidates": [
+        {
+          "entity_id": 1170,
+          "canonical_name": "Jade Upgrade",
+          "aliases": [
+            "Jade"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1171,
+          "canonical_name": "Jade Alternative",
+          "aliases": [
+            "Jade"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "ambiguous_17_1",
+      "family": "shared_alias_ambiguous",
+      "mention": "Jade",
+      "context": "A future update about Jade is expected.",
+      "candidates": [
+        {
+          "entity_id": 1170,
+          "canonical_name": "Jade Upgrade",
+          "aliases": [
+            "Jade"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1171,
+          "canonical_name": "Jade Alternative",
+          "aliases": [
+            "Jade"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "different_17",
+      "family": "explicit_different_identity",
+      "mention": "Jade",
+      "context": "Here Jade is a new identity called Jade Distinct, unrelated to Jade Upgrade or Jade Alternative.",
+      "candidates": [
+        {
+          "entity_id": 1170,
+          "canonical_name": "Jade Upgrade",
+          "aliases": [
+            "Jade"
+          ],
+          "type": "Project"
+        },
+        {
+          "entity_id": 1171,
+          "canonical_name": "Jade Alternative",
+          "aliases": [
+            "Jade"
+          ],
+          "type": "Project"
+        }
+      ],
+      "proposed_choice": "none_of_these",
+      "reason": "The context explicitly states that neither stored identity is the subject."
+    },
+    {
+      "id": "explicit_18_0",
+      "family": "explicit_0",
+      "mention": "Kestrel",
+      "context": "Kestrel, formally named Kestrel Store, is the subject of this record.",
+      "candidates": [
+        {
+          "entity_id": 1180,
+          "canonical_name": "Kestrel Store",
+          "aliases": [
+            "Kestrel"
+          ],
+          "type": "Database"
+        },
+        {
+          "entity_id": 1181,
+          "canonical_name": "Kestrel Alternative",
+          "aliases": [
+            "Kestrel"
+          ],
+          "type": "Database"
+        }
+      ],
+      "proposed_choice": 1180,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_18_1",
+      "family": "explicit_1",
+      "mention": "Kestrel",
+      "context": "The record expands Kestrel as Kestrel Store.",
+      "candidates": [
+        {
+          "entity_id": 1181,
+          "canonical_name": "Kestrel Alternative",
+          "aliases": [
+            "Kestrel"
+          ],
+          "type": "Database"
+        },
+        {
+          "entity_id": 1180,
+          "canonical_name": "Kestrel Store",
+          "aliases": [
+            "Kestrel"
+          ],
+          "type": "Database"
+        }
+      ],
+      "proposed_choice": 1180,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_18_2",
+      "family": "explicit_2",
+      "mention": "Kestrel",
+      "context": "Here Kestrel refers specifically to Kestrel Store, rather than Kestrel Alternative.",
+      "candidates": [
+        {
+          "entity_id": 1180,
+          "canonical_name": "Kestrel Store",
+          "aliases": [
+            "Kestrel"
+          ],
+          "type": "Database"
+        },
+        {
+          "entity_id": 1181,
+          "canonical_name": "Kestrel Alternative",
+          "aliases": [
+            "Kestrel"
+          ],
+          "type": "Database"
+        }
+      ],
+      "proposed_choice": 1180,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_18_3",
+      "family": "explicit_3",
+      "mention": "Kestrel",
+      "context": "We use Kestrel as the short name for Kestrel Store in this report.",
+      "candidates": [
+        {
+          "entity_id": 1181,
+          "canonical_name": "Kestrel Alternative",
+          "aliases": [
+            "Kestrel"
+          ],
+          "type": "Database"
+        },
+        {
+          "entity_id": 1180,
+          "canonical_name": "Kestrel Store",
+          "aliases": [
+            "Kestrel"
+          ],
+          "type": "Database"
+        }
+      ],
+      "proposed_choice": 1180,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_18_4",
+      "family": "explicit_4",
+      "mention": "Kestrel",
+      "context": "The item described as Kestrel has the full name Kestrel Store.",
+      "candidates": [
+        {
+          "entity_id": 1180,
+          "canonical_name": "Kestrel Store",
+          "aliases": [
+            "Kestrel"
+          ],
+          "type": "Database"
+        },
+        {
+          "entity_id": 1181,
+          "canonical_name": "Kestrel Alternative",
+          "aliases": [
+            "Kestrel"
+          ],
+          "type": "Database"
+        }
+      ],
+      "proposed_choice": 1180,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_18_5",
+      "family": "explicit_5",
+      "mention": "Kestrel",
+      "context": "This occurrence of Kestrel identifies Kestrel Store; Kestrel Alternative is a separate identity.",
+      "candidates": [
+        {
+          "entity_id": 1181,
+          "canonical_name": "Kestrel Alternative",
+          "aliases": [
+            "Kestrel"
+          ],
+          "type": "Database"
+        },
+        {
+          "entity_id": 1180,
+          "canonical_name": "Kestrel Store",
+          "aliases": [
+            "Kestrel"
+          ],
+          "type": "Database"
+        }
+      ],
+      "proposed_choice": 1180,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_18_6",
+      "family": "explicit_6",
+      "mention": "Kestrel",
+      "context": "The report identifies Kestrel (Kestrel Store) as the subject.",
+      "candidates": [
+        {
+          "entity_id": 1180,
+          "canonical_name": "Kestrel Store",
+          "aliases": [
+            "Kestrel"
+          ],
+          "type": "Database"
+        },
+        {
+          "entity_id": 1181,
+          "canonical_name": "Kestrel Alternative",
+          "aliases": [
+            "Kestrel"
+          ],
+          "type": "Database"
+        }
+      ],
+      "proposed_choice": 1180,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "ambiguous_18_0",
+      "family": "shared_alias_ambiguous",
+      "mention": "Kestrel",
+      "context": "Kestrel was mentioned yesterday.",
+      "candidates": [
+        {
+          "entity_id": 1180,
+          "canonical_name": "Kestrel Store",
+          "aliases": [
+            "Kestrel"
+          ],
+          "type": "Database"
+        },
+        {
+          "entity_id": 1181,
+          "canonical_name": "Kestrel Alternative",
+          "aliases": [
+            "Kestrel"
+          ],
+          "type": "Database"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "ambiguous_18_1",
+      "family": "shared_alias_ambiguous",
+      "mention": "Kestrel",
+      "context": "A future update about Kestrel is expected.",
+      "candidates": [
+        {
+          "entity_id": 1180,
+          "canonical_name": "Kestrel Store",
+          "aliases": [
+            "Kestrel"
+          ],
+          "type": "Database"
+        },
+        {
+          "entity_id": 1181,
+          "canonical_name": "Kestrel Alternative",
+          "aliases": [
+            "Kestrel"
+          ],
+          "type": "Database"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "different_18",
+      "family": "explicit_different_identity",
+      "mention": "Kestrel",
+      "context": "Here Kestrel is a new identity called Kestrel Distinct, unrelated to Kestrel Store or Kestrel Alternative.",
+      "candidates": [
+        {
+          "entity_id": 1180,
+          "canonical_name": "Kestrel Store",
+          "aliases": [
+            "Kestrel"
+          ],
+          "type": "Database"
+        },
+        {
+          "entity_id": 1181,
+          "canonical_name": "Kestrel Alternative",
+          "aliases": [
+            "Kestrel"
+          ],
+          "type": "Database"
+        }
+      ],
+      "proposed_choice": "none_of_these",
+      "reason": "The context explicitly states that neither stored identity is the subject."
+    },
+    {
+      "id": "explicit_19_0",
+      "family": "explicit_0",
+      "mention": "Lotus",
+      "context": "Lotus, formally named Lotus Engine, is the subject of this record.",
+      "candidates": [
+        {
+          "entity_id": 1190,
+          "canonical_name": "Lotus Engine",
+          "aliases": [
+            "Lotus"
+          ],
+          "type": "Database"
+        },
+        {
+          "entity_id": 1191,
+          "canonical_name": "Lotus Alternative",
+          "aliases": [
+            "Lotus"
+          ],
+          "type": "Database"
+        }
+      ],
+      "proposed_choice": 1190,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_19_1",
+      "family": "explicit_1",
+      "mention": "Lotus",
+      "context": "The record expands Lotus as Lotus Engine.",
+      "candidates": [
+        {
+          "entity_id": 1191,
+          "canonical_name": "Lotus Alternative",
+          "aliases": [
+            "Lotus"
+          ],
+          "type": "Database"
+        },
+        {
+          "entity_id": 1190,
+          "canonical_name": "Lotus Engine",
+          "aliases": [
+            "Lotus"
+          ],
+          "type": "Database"
+        }
+      ],
+      "proposed_choice": 1190,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_19_2",
+      "family": "explicit_2",
+      "mention": "Lotus",
+      "context": "Here Lotus refers specifically to Lotus Engine, rather than Lotus Alternative.",
+      "candidates": [
+        {
+          "entity_id": 1190,
+          "canonical_name": "Lotus Engine",
+          "aliases": [
+            "Lotus"
+          ],
+          "type": "Database"
+        },
+        {
+          "entity_id": 1191,
+          "canonical_name": "Lotus Alternative",
+          "aliases": [
+            "Lotus"
+          ],
+          "type": "Database"
+        }
+      ],
+      "proposed_choice": 1190,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_19_3",
+      "family": "explicit_3",
+      "mention": "Lotus",
+      "context": "We use Lotus as the short name for Lotus Engine in this report.",
+      "candidates": [
+        {
+          "entity_id": 1191,
+          "canonical_name": "Lotus Alternative",
+          "aliases": [
+            "Lotus"
+          ],
+          "type": "Database"
+        },
+        {
+          "entity_id": 1190,
+          "canonical_name": "Lotus Engine",
+          "aliases": [
+            "Lotus"
+          ],
+          "type": "Database"
+        }
+      ],
+      "proposed_choice": 1190,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_19_4",
+      "family": "explicit_4",
+      "mention": "Lotus",
+      "context": "The item described as Lotus has the full name Lotus Engine.",
+      "candidates": [
+        {
+          "entity_id": 1190,
+          "canonical_name": "Lotus Engine",
+          "aliases": [
+            "Lotus"
+          ],
+          "type": "Database"
+        },
+        {
+          "entity_id": 1191,
+          "canonical_name": "Lotus Alternative",
+          "aliases": [
+            "Lotus"
+          ],
+          "type": "Database"
+        }
+      ],
+      "proposed_choice": 1190,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_19_5",
+      "family": "explicit_5",
+      "mention": "Lotus",
+      "context": "This occurrence of Lotus identifies Lotus Engine; Lotus Alternative is a separate identity.",
+      "candidates": [
+        {
+          "entity_id": 1191,
+          "canonical_name": "Lotus Alternative",
+          "aliases": [
+            "Lotus"
+          ],
+          "type": "Database"
+        },
+        {
+          "entity_id": 1190,
+          "canonical_name": "Lotus Engine",
+          "aliases": [
+            "Lotus"
+          ],
+          "type": "Database"
+        }
+      ],
+      "proposed_choice": 1190,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "explicit_19_6",
+      "family": "explicit_6",
+      "mention": "Lotus",
+      "context": "The report identifies Lotus (Lotus Engine) as the subject.",
+      "candidates": [
+        {
+          "entity_id": 1190,
+          "canonical_name": "Lotus Engine",
+          "aliases": [
+            "Lotus"
+          ],
+          "type": "Database"
+        },
+        {
+          "entity_id": 1191,
+          "canonical_name": "Lotus Alternative",
+          "aliases": [
+            "Lotus"
+          ],
+          "type": "Database"
+        }
+      ],
+      "proposed_choice": 1190,
+      "reason": "The context explicitly links the short mention to the selected canonical identity."
+    },
+    {
+      "id": "ambiguous_19_0",
+      "family": "shared_alias_ambiguous",
+      "mention": "Lotus",
+      "context": "Lotus was mentioned yesterday.",
+      "candidates": [
+        {
+          "entity_id": 1190,
+          "canonical_name": "Lotus Engine",
+          "aliases": [
+            "Lotus"
+          ],
+          "type": "Database"
+        },
+        {
+          "entity_id": 1191,
+          "canonical_name": "Lotus Alternative",
+          "aliases": [
+            "Lotus"
+          ],
+          "type": "Database"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "ambiguous_19_1",
+      "family": "shared_alias_ambiguous",
+      "mention": "Lotus",
+      "context": "A future update about Lotus is expected.",
+      "candidates": [
+        {
+          "entity_id": 1190,
+          "canonical_name": "Lotus Engine",
+          "aliases": [
+            "Lotus"
+          ],
+          "type": "Database"
+        },
+        {
+          "entity_id": 1191,
+          "canonical_name": "Lotus Alternative",
+          "aliases": [
+            "Lotus"
+          ],
+          "type": "Database"
+        }
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "Both identities share the alias and the context does not distinguish them."
+    },
+    {
+      "id": "different_19",
+      "family": "explicit_different_identity",
+      "mention": "Lotus",
+      "context": "Here Lotus is a new identity called Lotus Distinct, unrelated to Lotus Engine or Lotus Alternative.",
+      "candidates": [
+        {
+          "entity_id": 1190,
+          "canonical_name": "Lotus Engine",
+          "aliases": [
+            "Lotus"
+          ],
+          "type": "Database"
+        },
+        {
+          "entity_id": 1191,
+          "canonical_name": "Lotus Alternative",
+          "aliases": [
+            "Lotus"
+          ],
+          "type": "Database"
+        }
+      ],
+      "proposed_choice": "none_of_these",
+      "reason": "The context explicitly states that neither stored identity is the subject."
+    }
+  ]
+}

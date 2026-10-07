@@ -22,6 +22,7 @@ from core.ingestion.jev_extraction import (
 from core.ingestion.policy import IngestionPolicy
 from infrastructure.external_model_budget import ExternalModelSpendingLedger
 from infrastructure.jev_client import JevClient, JevWorkBudget
+from tests.fixtures.jev_measurements import summarize_results
 
 REPOSITORY_ENV = Path(__file__).resolve().parents[3] / ".env"
 OPENROUTER_ENDPOINT = "https://openrouter.ai/api/alpha/decisions"
@@ -190,6 +191,9 @@ async def main():
         sum(float(cost) for cost in costs if cost is not None), 8
     )
     report["spending"] = spending
+    report["measurements"] = summarize_results([item["result"] for item in observations])
+    report["active_ready"] = False
+    report["readiness_reason"] = "Diagnostic packet only; held-out quality and fallback savings are unverified"
     args.output_dir.mkdir(parents=True, exist_ok=True)
     for name, value in (
         ("jev_extraction_observations.json", observations),

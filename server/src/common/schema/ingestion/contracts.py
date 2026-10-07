@@ -49,6 +49,7 @@ class ExtractionTrace(BaseModel):
     extraction_decisions: List[Dict[str, Any]] = Field(default_factory=list)
     classification_decisions: List[Dict[str, Any]] = Field(default_factory=list)
     classification_aggregates: List[Dict[str, Any]] = Field(default_factory=list)
+    resolver_timings: List[Dict[str, Any]] = Field(default_factory=list)
     jev_extraction_candidates: int = 0
     jev_extraction_observed: int = 0
     jev_extraction_accepted: int = 0

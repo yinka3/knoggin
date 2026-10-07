@@ -4,7 +4,9 @@ import asyncio
 import hashlib
 import re
 import threading
+import time
 from collections.abc import Iterable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 from uuid import UUID
@@ -197,6 +199,7 @@ class EntityResolver:
         window_id: UUID | None = None,
         pass_number: int = 1,
         work_budget: JevWorkBudget | None = None,
+        timing: dict[str, float] | None = None,
     ) -> ContextEntityResolution:
         """Resolve typed Context-block mentions without manufacturing message refs.
 
@@ -214,7 +217,7 @@ class EntityResolver:
         ):
             raise TypeError("Context entity resolution requires block text by ID")
 
-        async with self.resolution_lock:
+        async with self._measured_resolution_lock(timing):
             state = _ContextEntityResolutionState()
             identity_work_budget = work_budget or JevWorkBudget(
                 policy.jev.max_calls_per_window,
@@ -582,6 +585,19 @@ class EntityResolver:
                 classification_decisions=tuple(state.classification_decisions),
                 classification_aggregates=tuple(state.classification_aggregates),
             )
+
+    @asynccontextmanager
+    async def _measured_resolution_lock(self, timing):
+        waiting_at = time.monotonic()
+        async with self.resolution_lock:
+            acquired_at = time.monotonic()
+            if timing is not None:
+                timing["wait_seconds"] = acquired_at - waiting_at
+            try:
+                yield
+            finally:
+                if timing is not None:
+                    timing["held_seconds"] = time.monotonic() - acquired_at
 
     async def _observe_jev_classification(
         self,
