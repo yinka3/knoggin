@@ -6,7 +6,7 @@ if [ "$1" = "--prefetch-models" ]; then
         echo "Generate .env first: ./setup.sh"
         exit 1
     fi
-    # Optional: downloads/exports the embedder, reranker, NLI, spaCy, and GLiNER
+    # Optional: downloads/exports the embedder, reranker, spaCy, and GLiNER
     # without starting Postgres or the application server.
     uv run --project server python server/scripts/prefetch_models.py
     exit $?
@@ -35,7 +35,6 @@ KNOGGIN_EMBEDDING_BACKEND=onnx
 KNOGGIN_ONNX_PROVIDER=auto
 KNOGGIN_EMBEDDING_MODEL=dunzhang/stella_en_1.5B_v5
 KNOGGIN_RERANKER_MODEL=BAAI/bge-reranker-large
-KNOGGIN_NLI_MODEL=MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli
 EOF
 
 echo "Generated .env with secure passwords"

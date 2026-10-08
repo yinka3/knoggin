@@ -485,13 +485,31 @@ class TextProcessor:
         support_text_by_block = {gap.block.block_id: gap.support_text for gap in gaps}
         known_names = sorted(self.get_known_aliases())[:50]
         supporting_excerpts = []
+        local_message_ref_by_id: dict[int, str] = {}
+        local_message_text_by_ref: dict[str, str] = {}
+        local_message_refs_by_block: dict[UUID, set[str]] = {}
         for local_id, block in local_to_block.items():
-            excerpts = [
-                excerpt[:500]
-                for excerpt in support_text_by_block.get(block.block_id, "").splitlines()
-                if excerpt
-            ][:3]
-            supporting_excerpts.append({"block_id": local_id, "excerpts": excerpts})
+            messages = []
+            for support in build.block_supports.get(block.block_id, ())[:3]:
+                message_id = int(support.message_id)
+                message_text = build.message_text_by_id.get(message_id)
+                if not message_text:
+                    continue
+                local_message_ref = local_message_ref_by_id.get(message_id)
+                if local_message_ref is None:
+                    local_message_ref = f"m{len(local_message_ref_by_id) + 1}"
+                    local_message_ref_by_id[message_id] = local_message_ref
+                    local_message_text_by_ref[local_message_ref] = message_text
+                local_message_refs_by_block.setdefault(block.block_id, set()).add(
+                    local_message_ref
+                )
+                messages.append(
+                    {
+                        "message_id": local_message_ref,
+                        "excerpt": message_text[:500],
+                    }
+                )
+            supporting_excerpts.append({"block_id": local_id, "messages": messages})
         prompt = json.dumps(
             {
                 "trigger": trigger,
@@ -562,6 +580,38 @@ class TextProcessor:
             if literal is None and supporting_literal is None:
                 self._reject_fallback(build, returned.name, "literal_support_missing")
                 continue
+            if literal is None:
+                message_ref = returned.supporting_message_id
+                message_text = local_message_text_by_ref.get(message_ref or "")
+                quote = returned.evidence_quote
+                if (
+                    message_ref not in local_message_refs_by_block.get(block.block_id, set())
+                    or message_text is None
+                    or not quote
+                    or quote not in message_text
+                    or not re.search(
+                        self._literal_expression(returned.name),
+                        quote,
+                        re.IGNORECASE,
+                    )
+                ):
+                    self._reject_fallback(
+                        build,
+                        returned.name,
+                        "supporting_message_evidence_invalid",
+                    )
+                    continue
+                self._reject_fallback(
+                    build,
+                    returned.name,
+                    "supporting_message_name_unresolved",
+                    metadata={
+                        "block_id": str(block.block_id),
+                        "supporting_message_id": message_ref,
+                        "evidence_quote": quote,
+                    },
+                )
+                continue
             block_start, _ = block_offsets[block.block_id]
             if add_mention(
                 ContextBlockMention(
@@ -570,8 +620,8 @@ class TextProcessor:
                     entity_type=entity_type,
                     topic=topic,
                     origin="llm_fallback",
-                    source_start=(block_start + literal.start()) if literal else None,
-                    source_end=(block_start + literal.end()) if literal else None,
+                    source_start=block_start + literal.start(),
+                    source_end=block_start + literal.end(),
                 )
             ):
                 build.trace.llm_mentions_accepted += 1
@@ -679,10 +729,7 @@ class TextProcessor:
                 return
             expression = self._literal_expression(normalized)
             literal = re.search(expression, gap.block.markdown, re.IGNORECASE)
-            supporting_literal = re.search(
-                expression, gap.support_text, re.IGNORECASE
-            )
-            if literal is None and supporting_literal is None:
+            if literal is None:
                 return
             seen.add(key)
             block_start = block_offsets[gap.block.block_id]
@@ -696,8 +743,8 @@ class TextProcessor:
                         f"Supporting excerpts:\n{gap.support_text}"
                     ),
                     proposed_type=proposed_type,
-                    source_start=(block_start + literal.start()) if literal else None,
-                    source_end=(block_start + literal.end()) if literal else None,
+                    source_start=block_start + literal.start(),
+                    source_end=block_start + literal.end(),
                 )
             )
 
@@ -882,7 +929,11 @@ class TextProcessor:
 
     @staticmethod
     def _reject_fallback(
-        build: SemanticWindowBuild, name: str, reason: str
+        build: SemanticWindowBuild,
+        name: str,
+        reason: str,
+        *,
+        metadata: dict | None = None,
     ) -> None:
         build.trace.llm_mentions_rejected += 1
         build.issues.append(
@@ -891,7 +942,7 @@ class TextProcessor:
                 code="llm_ner_mention_rejected",
                 message="Context NER fallback mention failed validation",
                 item_ref=name,
-                metadata={"reason": reason},
+                metadata={"reason": reason, **(metadata or {})},
             )
         )
 

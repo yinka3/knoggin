@@ -41,10 +41,6 @@ async def prefetch_models() -> None:
         reranker_model=os.getenv(
             "KNOGGIN_RERANKER_MODEL", "BAAI/bge-reranker-large"
         ),
-        nli_model=os.getenv(
-            "KNOGGIN_NLI_MODEL",
-            "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli",
-        ),
         device=device,
         batch_size=profile.embedding_batch_size,
     )
@@ -56,7 +52,6 @@ async def prefetch_models() -> None:
         )
         await embedding.load_models()
         await embedding.load_reranker(priority=ModelWorkPriority.BACKGROUND)
-        await embedding.load_nli_model(priority=ModelWorkPriority.BACKGROUND)
         await asyncio.to_thread(
             GLiNER25VP01Adapter.load,
             language="en",

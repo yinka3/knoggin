@@ -60,7 +60,7 @@ docker compose up -d
 uv sync --package server
 ```
 
-The first engine start downloads the embedding, reranking, NLI, spaCy, and GLiNER models. To download those before integrating the engine, run:
+The engine uses embedding, reranking, spaCy, and GLiNER models. To download their artifacts before first use, run:
 
 ```powershell
 ./setup.sh --prefetch-models

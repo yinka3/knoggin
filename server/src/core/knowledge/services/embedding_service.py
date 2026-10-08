@@ -5,9 +5,8 @@ import json
 import os
 import sys
 import threading
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import List
 
 import numpy as np
 import onnxruntime as ort
@@ -105,16 +104,6 @@ class _DirectOnnxSentenceEmbedder:
         self._tokenizer = None
 
 
-@dataclass(frozen=True)
-class TextPairClassification:
-    """Natural language inference result for a pair of texts."""
-
-    premise: str
-    hypothesis: str
-    label: str
-    scores: Dict[str, float] = field(default_factory=dict)
-
-
 class EmbeddingService:
     """Embedding infrastructure for the knowledge graph."""
 
@@ -132,7 +121,6 @@ class EmbeddingService:
         self,
         embedding_model: str = "dunzhang/stella_en_1.5B_v5",
         reranker_model: str = "BAAI/bge-reranker-large",
-        nli_model: str = ("MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli"),
         device: str = None,
         batch_size: int = 32,
         model_work: ModelWorkCoordinator | None = None,
@@ -154,7 +142,6 @@ class EmbeddingService:
 
         self._embedder = None
         self._reranker = None
-        self._nli = None
         self._embedding_dim = None
         self._config_kwargs = {}
         if str(self.device) == "cpu":
@@ -175,7 +162,6 @@ class EmbeddingService:
         self._embedding_revision = os.getenv("KNOGGIN_EMBEDDING_REVISION")
         self._embedding_model = embedding_model
         self._reranker_model = reranker_model
-        self._nli_model = nli_model
         self._model_work = model_work
 
         logger.info(
@@ -386,43 +372,12 @@ class EmbeddingService:
                 )
                 logger.info(f"Loaded reranker model on {self.device}")
 
-    async def load_nli_model(
-        self,
-        *,
-        priority: ModelWorkPriority = ModelWorkPriority.FOREGROUND,
-    ) -> None:
-        """Load NLI only for workflows that need evidence classification."""
-        if self._nli is not None:
-            return
-        await self._run_blocking(
-            self._load_nli_model_sync,
-            name="nli-model-load",
-            priority=priority,
-            work_kind="nli",
-        )
-
-    def _load_nli_model_sync(self) -> None:
-        with self._lock:
-            if self._nli is None:
-                self._nli = CrossEncoder(
-                    self._nli_model,
-                    device=self.device,
-                    model_kwargs=self._cross_encoder_model_kwargs,
-                    backend=self._backend,
-                )
-                logger.info(f"Loaded NLI model on {self.device}")
-
     @property
     def embedding_dim(self) -> int:
         """Dynamically determined dimension of the loaded embedding model."""
         if self._embedding_dim is None:
             return 1024
         return self._embedding_dim
-
-    @property
-    def nli_model(self) -> str:
-        """Configured NLI model name. Loaded only when NLI support is wired in."""
-        return self._nli_model
 
     @property
     def embedding_backend(self) -> str:
@@ -560,77 +515,6 @@ class EmbeddingService:
 
         return all_scores
 
-    async def classify_text_pairs(
-        self,
-        pairs: List[Tuple[str, str]],
-        batch_size: int = None,
-    ) -> List[TextPairClassification]:
-        """Classify text pairs as entailment, contradiction, or neutral."""
-        if not pairs:
-            return []
-        await self.load_nli_model()
-        return await self._run_blocking(
-            lambda: self._classify_text_pairs_sync(pairs, batch_size),
-            name="embedding-nli",
-            priority=ModelWorkPriority.FOREGROUND,
-            work_kind="nli",
-        )
-
-    def _classify_text_pairs_sync(
-        self,
-        pairs: List[Tuple[str, str]],
-        batch_size: int = None,
-    ) -> List[TextPairClassification]:
-        if self._nli is None:
-            raise RuntimeError("NLI model failed to load")
-
-        batch_size = batch_size or self.batch_size
-        judgments = []
-        labels = self._nli_labels()
-
-        for i in range(0, len(pairs), batch_size):
-            chunk = pairs[i : i + batch_size]
-            with self._lock:
-                raw_scores = self._nli.predict(chunk)
-
-            for pair, raw_score in zip(chunk, raw_scores):
-                scores = self._nli_score_map(raw_score, labels)
-                label = max(scores, key=scores.get)
-                judgments.append(
-                    TextPairClassification(
-                        premise=pair[0],
-                        hypothesis=pair[1],
-                        label=label,
-                        scores=scores,
-                    )
-                )
-
-        return judgments
-
-    def _nli_labels(self) -> List[str]:
-        config = getattr(getattr(self._nli, "model", None), "config", None)
-        id2label = getattr(config, "id2label", None)
-        if id2label:
-            return [str(id2label[index]).casefold() for index in sorted(id2label)]
-        return ["contradiction", "entailment", "neutral"]
-
-    @staticmethod
-    def _nli_score_map(raw_score, labels: List[str]) -> Dict[str, float]:
-        scores = np.asarray(raw_score, dtype=float)
-        if scores.ndim == 0:
-            scores = np.asarray([float(scores)])
-        shifted = scores - np.max(scores)
-        exp_scores = np.exp(shifted)
-        denominator = float(exp_scores.sum())
-        probabilities = (
-            exp_scores / denominator if denominator else np.zeros_like(exp_scores)
-        )
-
-        return {
-            labels[index] if index < len(labels) else f"label_{index}": float(score)
-            for index, score in enumerate(probabilities)
-        }
-
     def cleanup(self):
         """Explicitly free model memory."""
         if hasattr(self, "_embedder") and self._embedder is not None:
@@ -643,10 +527,6 @@ class EmbeddingService:
         if hasattr(self, "_reranker") and self._reranker is not None:
             del self._reranker
             self._reranker = None
-
-        if hasattr(self, "_nli") and self._nli is not None:
-            del self._nli
-            self._nli = None
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

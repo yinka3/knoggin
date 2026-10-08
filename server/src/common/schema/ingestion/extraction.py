@@ -3,7 +3,7 @@
 import re
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from common.schema.llm import (
     StructuredLLMOutput,
@@ -34,18 +34,36 @@ class EntityExtraction(StructuredLLMOutput):
 
 
 class ContextEntityMention(BaseModel):
-    """One fallback mention tied to a local Context block reference."""
+    """One fallback candidate tied to a Context block and optional source quote."""
 
     model_config = ConfigDict(extra="forbid")
 
     block_id: str = Field(..., pattern=r"^b[1-9]\d*$")
     name: str
     type: str
+    supporting_message_id: Optional[str] = Field(
+        default=None,
+        pattern=r"^m[1-9]\d*$",
+    )
+    evidence_quote: Optional[str] = Field(default=None, max_length=300)
 
     @field_validator("name", "type")
     @classmethod
     def validate_required_text(cls, value: str, info) -> str:
         return normalize_required_text(value, field_name=info.field_name)
+
+    @field_validator("evidence_quote")
+    @classmethod
+    def validate_evidence_quote(cls, value: Optional[str]) -> Optional[str]:
+        return normalize_optional_text(value, field_name="evidence_quote")
+
+    @model_validator(mode="after")
+    def require_message_citation_pair(self):
+        if bool(self.supporting_message_id) != bool(self.evidence_quote):
+            raise ValueError(
+                "supporting_message_id and evidence_quote must be supplied together"
+            )
+        return self
 
 
 class ContextEntityExtraction(StructuredLLMOutput):

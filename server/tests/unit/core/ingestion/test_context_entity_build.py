@@ -288,7 +288,13 @@ def test_unknown_endpoint_diagnostics_require_typed_eligible_blocks():
                 ),
             )
         )
-def processor(vp01, *, llm=None, llm_ner_mode="fallback", jev_client=None):
+def processor(
+    vp01,
+    *,
+    llm=None,
+    llm_ner_mode="fallback",
+    jev_client=None,
+):
     async def no_profile(_entity_id):
         return None
 
@@ -724,36 +730,155 @@ async def test_llm_ner_fallback_rejects_a_mention_without_literal_support():
 
 @pytest.mark.unit
 @pytest.mark.no_network
-async def test_llm_ner_fallback_uses_known_alias_support_when_block_is_covered():
+async def test_llm_ner_fallback_keeps_message_only_name_unresolved():
     compiled_domain = domain()
-    current = block("Orion approved the selected vendor.")
+    current = block("The approved vendor will oversee the rollout.")
     semantic_build = build(
         blocks=(current,),
         compiled_domain=compiled_domain,
         supports={current.block_id: (support(current.block_id, 91),)},
-        message_texts={91: "Acme signed the vendor agreement."},
+        message_texts={91: "Acme has been chosen to manage the launch."},
     )
     llm = FakeEntityLLM(
-        [{"block_id": "b1", "name": "Acme", "type": "Company"}]
+        [
+            {
+                "block_id": "b1",
+                "name": "Acme",
+                "type": "Company",
+                "supporting_message_id": "m1",
+                "evidence_quote": "Acme has been chosen to manage the launch.",
+            }
+        ]
     )
-    text_processor = processor(
-        FakeVP01(
-            [VP01EntitySpan(text="Orion", label="company", start=0, end=5)]
-        ),
-        llm=llm,
-    )
-    text_processor.get_known_aliases = lambda: {"Acme": 701}
+    result = await ContextEntityBuildService(
+        processor=processor(FakeVP01(), llm=llm),
+        resolver=resolver(),
+        allocate_entity_id=lambda: _async_value(703),
+    ).build(semantic_build)
 
-    mentions = await text_processor.extract_context_mentions(semantic_build)
-
-    assert [(item.name, item.origin) for item in mentions] == [
-        ("Orion", "vp01"),
-        ("Acme", "llm_fallback"),
-    ]
-    assert mentions[1].source_start is None
+    assert result.entity_ids == ()
+    assert result.block_entity_associations == ()
+    assert result.message_entity_refs == ()
+    assert semantic_build.trace.llm_mentions_rejected == 1
+    assert semantic_build.issues[-1].metadata == {
+        "reason": "supporting_message_name_unresolved",
+        "block_id": str(current.block_id),
+        "supporting_message_id": "m1",
+        "evidence_quote": "Acme has been chosen to manage the launch.",
+    }
     assert semantic_build.trace.fallbacks[-1]["trigger"] == (
-        "known_alias_missing_from_extraction"
+        "meaningful_context_without_candidates"
     )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_llm_ner_fallback_rejects_unrelated_same_message_name():
+    compiled_domain = domain()
+    current = block("The approved vendor will oversee the rollout.")
+    semantic_build = build(
+        blocks=(current,),
+        compiled_domain=compiled_domain,
+        supports={current.block_id: (support(current.block_id, 92),)},
+        message_texts={
+            92: "Acme moved offices. The approved vendor will oversee the rollout."
+        },
+    )
+    llm = FakeEntityLLM(
+        [
+            {
+                "block_id": "b1",
+                "name": "Acme",
+                "type": "Company",
+                "supporting_message_id": "m1",
+                "evidence_quote": "Acme moved offices.",
+            }
+        ]
+    )
+
+    result = await ContextEntityBuildService(
+        processor=processor(FakeVP01(), llm=llm),
+        resolver=resolver(),
+        allocate_entity_id=lambda: _async_value(704),
+    ).build(semantic_build)
+
+    assert result.entity_ids == ()
+    assert result.block_entity_associations == ()
+    assert semantic_build.trace.llm_mentions_rejected == 1
+    assert semantic_build.issues[-1].metadata == {
+        "reason": "supporting_message_name_unresolved",
+        "block_id": str(current.block_id),
+        "supporting_message_id": "m1",
+        "evidence_quote": "Acme moved offices.",
+    }
+    prompt = json.loads(llm.calls[0]["user"])
+    assert prompt["supporting_excerpts"] == [
+        {
+            "block_id": "b1",
+            "messages": [
+                {"message_id": "m1", "excerpt": semantic_build.message_text_by_id[92]}
+            ],
+        }
+    ]
+    assert "same claim" in llm.calls[0]["system"]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("message_text", "message_ref", "quote"),
+    [
+        (
+            "Acme has been chosen to manage the launch.",
+            "m1",
+            "Acme completed the launch.",
+        ),
+        (
+            "Acme moved offices. The approved vendor will oversee the rollout.",
+            "m1",
+            "The approved vendor will oversee the rollout.",
+        ),
+        (
+            "Acme has been chosen to manage the launch.",
+            "m2",
+            "Acme has been chosen to manage the launch.",
+        ),
+    ],
+)
+async def test_llm_ner_fallback_rejects_invalid_source_quote(
+    message_text, message_ref, quote
+):
+    compiled_domain = domain()
+    current = block("The approved vendor will oversee the rollout.")
+    semantic_build = build(
+        blocks=(current,),
+        compiled_domain=compiled_domain,
+        supports={current.block_id: (support(current.block_id, 94),)},
+        message_texts={94: message_text},
+    )
+    llm = FakeEntityLLM(
+        [
+            {
+                "block_id": "b1",
+                "name": "Acme",
+                "type": "Company",
+                "supporting_message_id": message_ref,
+                "evidence_quote": quote,
+            }
+        ]
+    )
+
+    result = await ContextEntityBuildService(
+        processor=processor(FakeVP01(), llm=llm),
+        resolver=resolver(),
+        allocate_entity_id=lambda: _async_value(705),
+    ).build(semantic_build)
+
+    assert result.entity_ids == ()
+    assert result.block_entity_associations == ()
+    assert semantic_build.issues[-1].metadata == {
+        "reason": "supporting_message_evidence_invalid"
+    }
 
 
 @pytest.mark.unit
@@ -1068,24 +1193,23 @@ async def test_active_jev_can_recover_with_llm_ner_disabled():
 
 @pytest.mark.unit
 @pytest.mark.no_network
-async def test_foreign_alias_uses_type_choice_and_support_only_offsets():
+async def test_foreign_alias_in_support_does_not_trigger_jev_or_entity_link():
     compiled_domain = domain()
-    current = block("Orion approved the selected vendor.")
+    current = block("The approved vendor will handle the launch.")
     semantic_build = build(
         blocks=(current,),
         compiled_domain=compiled_domain,
         supports={current.block_id: (support(current.block_id, 91),)},
-        message_texts={91: "Acme signed the vendor agreement."},
+        message_texts={91: "Acme was selected to handle the launch."},
     )
     semantic_build.policy = policy(
         compiled_domain,
+        llm_ner_mode="disabled",
         jev=JevPolicy(extraction_mode="active"),
     )
     text_processor = processor(
-        FakeVP01(
-            [VP01EntitySpan(text="Orion", label="company", start=0, end=5)]
-        ),
-        llm=FakeEntityLLM([]),
+        FakeVP01(),
+        llm_ner_mode="disabled",
         jev_client=FakeExtractionJev(),
     )
     text_processor.get_known_aliases = lambda: {"Acme": 701}
@@ -1100,13 +1224,10 @@ async def test_foreign_alias_uses_type_choice_and_support_only_offsets():
 
     mentions = await text_processor.extract_context_mentions(semantic_build)
 
-    assert [(item.name, item.origin) for item in mentions] == [
-        ("Orion", "vp01"),
-        ("Acme", "jev_fallback"),
-    ]
-    assert mentions[1].source_start is None
-    questions = text_processor._jev_client.calls[0]["questions"]
-    assert set(questions) == {"type_choice", "entity_evidence"}
+    assert mentions == []
+    assert text_processor._jev_client.calls == []
+    assert semantic_build.trace.jev_extraction_candidates == 0
+    assert semantic_build.trace.jev_extraction_accepted == 0
 
 
 @pytest.mark.unit

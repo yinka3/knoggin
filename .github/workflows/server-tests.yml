@@ -242,7 +242,7 @@ jobs:
 
   # Model artifacts are intentionally outside ordinary push/PR gates. A
   # release or an explicitly requested dispatch downloads the configured
-  # artifacts, then requires the embedding/reranker/NLI and runtime smoke
+  # artifacts, then requires the embedding/reranker and runtime smoke
   # tests to execute instead of silently accepting cache-miss skips.
   model:
     name: Cached model smoke
@@ -257,8 +257,6 @@ jobs:
       KNOGGIN_SEMANTIC_SMOKE_MODEL_REVISION: 7817065102fd9e1b031fe874e910c01f40b2f001
       KNOGGIN_SEMANTIC_SMOKE_RERANKER_MODEL: BAAI/bge-reranker-large
       KNOGGIN_SEMANTIC_SMOKE_RERANKER_REVISION: 55611d7bca2a7133960a6d3b71e083071bbfc312
-      KNOGGIN_SEMANTIC_SMOKE_NLI_MODEL: cross-encoder/nli-MiniLM2-L6-H768
-      KNOGGIN_SEMANTIC_SMOKE_NLI_REVISION: b95119ce93d3e065de6214e38cd4a97b0f2f2c6d
       KNOGGIN_VP01_MODEL: fastino/gliner2.5-base-v1
       KNOGGIN_VP01_REVISION: 1a8bc24e00dc7300b9017c81d63e3dcdabb26596
       KNOGGIN_EMBEDDING_BACKEND: onnx
@@ -286,7 +284,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .hf-cache
-          key: knoggin-models-${{ runner.os }}-stella-v5-bge-reranker-large-nli-vp01-v1
+          key: knoggin-models-${{ runner.os }}-stella-v5-bge-reranker-large-vp01-v1
 
       - name: Provision configured model artifacts
         working-directory: server
@@ -298,7 +296,6 @@ jobs:
           artifacts = (
               ("KNOGGIN_SEMANTIC_SMOKE_MODEL", "KNOGGIN_SEMANTIC_SMOKE_MODEL_REVISION"),
               ("KNOGGIN_SEMANTIC_SMOKE_RERANKER_MODEL", "KNOGGIN_SEMANTIC_SMOKE_RERANKER_REVISION"),
-              ("KNOGGIN_SEMANTIC_SMOKE_NLI_MODEL", "KNOGGIN_SEMANTIC_SMOKE_NLI_REVISION"),
               ("KNOGGIN_VP01_MODEL", "KNOGGIN_VP01_REVISION"),
           )
           for model_variable, revision_variable in artifacts:

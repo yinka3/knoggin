@@ -16,8 +16,8 @@ from tests.unit.core.knowledge.test_retrieval_embedding_smoke import (
 @pytest.mark.slow
 @pytest.mark.model
 @pytest.mark.no_network
-async def test_cached_model_stack_concurrency_chunking_reload_and_classification():
-    service = await load_local_embedding_service(include_nli=True)
+async def test_cached_model_stack_concurrency_chunking_and_reload():
+    service = await load_local_embedding_service()
     try:
         assert isinstance(service, EmbeddingService)
         assert service.embedding_backend in {"onnx", "torch"}
@@ -66,27 +66,10 @@ async def test_cached_model_stack_concurrency_chunking_reload_and_classification
         assert len(rerank_scores) == 2
         assert all(math.isfinite(score) for score in rerank_scores)
 
-        judgments = await service.classify_text_pairs(
-            [
-                ("The cat sat on the mat.", "An animal sat on a mat."),
-                ("The cat sat on the mat.", "The cat was not on the mat."),
-            ]
-        )
-        assert len(judgments) == 2
-        assert {judgment.label for judgment in judgments} <= {
-            "entailment",
-            "contradiction",
-            "neutral",
-        }
-        for judgment in judgments:
-            assert judgment.scores
-            assert math.isclose(sum(judgment.scores.values()), 1.0, rel_tol=1e-5)
-
         provider = service.onnx_provider
         service.cleanup()
         assert service._embedder is None
         assert service._reranker is None
-        assert service._nli is None
 
         await service.load_models()
         assert service.embedding_dim == len(await service.encode_single(texts[0]))

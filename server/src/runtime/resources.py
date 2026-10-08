@@ -283,10 +283,6 @@ class RuntimeResources:
                 "KNOGGIN_EMBEDDING_MODEL", "dunzhang/stella_en_1.5B_v5"
             ),
             reranker_model=os.getenv("KNOGGIN_RERANKER_MODEL", "BAAI/bge-reranker-large"),
-            nli_model=os.getenv(
-                "KNOGGIN_NLI_MODEL",
-                "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli",
-            ),
             device=device,
             batch_size=self.resource_profile.embedding_batch_size,
             model_work=self.model_work,
