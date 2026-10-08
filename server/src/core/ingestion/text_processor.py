@@ -74,6 +74,9 @@ class _FallbackGap:
     support_text: str
 
 
+_JEV_EXTRACTION_PREPARATION_CHECK_LIMIT = 512
+
+
 class TextProcessor:
     """Extract typed Context-block mentions for Context-first resolution."""
 
@@ -702,6 +705,15 @@ class TextProcessor:
     ) -> list[ExtractionCandidate]:
         """Create bounded literal candidates from existing diagnostics and aliases."""
 
+        if build.jev_work_budget is None:
+            build.jev_work_budget = JevWorkBudget(
+                build.policy.jev.max_calls_per_window,
+                build.policy.jev.max_elapsed_seconds_per_window,
+            )
+        budget = build.jev_work_budget
+        candidate_limit = budget.max_observations - budget.observations
+        if candidate_limit <= 0:
+            return []
         gaps_by_id = {gap.block.block_id: gap for gap in gaps}
         block_offsets = {
             block_id: start for block_id, start, _end in assembled.offsets
@@ -713,6 +725,7 @@ class TextProcessor:
         }
         candidates: list[ExtractionCandidate] = []
         seen: set[tuple[UUID, str]] = set()
+        checks = 0
 
         def append_candidate(
             *,
@@ -749,6 +762,12 @@ class TextProcessor:
             )
 
         for diagnostic in build.unknown_endpoint_diagnostics:
+            if (
+                checks >= _JEV_EXTRACTION_PREPARATION_CHECK_LIMIT
+                or len(candidates) >= candidate_limit
+            ):
+                break
+            checks += 1
             gap = gaps_by_id.get(diagnostic.block_id)
             if gap is None or (
                 diagnostic.block_id, diagnostic.name.casefold()
@@ -766,7 +785,27 @@ class TextProcessor:
         for alias, entity_id in sorted(
             self.get_known_aliases().items(), key=lambda item: item[0].casefold()
         ):
+            if (
+                checks >= _JEV_EXTRACTION_PREPARATION_CHECK_LIMIT
+                or len(candidates) >= candidate_limit
+            ):
+                break
             if not alias.strip():
+                continue
+            matching_gaps = []
+            expression = self._literal_expression(alias)
+            for gap in gaps:
+                if (
+                    checks >= _JEV_EXTRACTION_PREPARATION_CHECK_LIMIT
+                    or len(candidates) + len(matching_gaps) >= candidate_limit
+                ):
+                    break
+                checks += 1
+                if (gap.block.block_id, alias.casefold()) in represented:
+                    continue
+                if re.search(expression, gap.block.markdown, re.IGNORECASE):
+                    matching_gaps.append(gap)
+            if not matching_gaps:
                 continue
             profile = await self.get_profile(entity_id)
             proposed_type = None
@@ -774,9 +813,7 @@ class TextProcessor:
                 proposed_type = build.policy.domain.canonical_entity_type(
                     profile.entity_type
                 ) or build.policy.domain.resolve_entity_type(profile.entity_type)
-            for gap in gaps:
-                if (gap.block.block_id, alias.casefold()) in represented:
-                    continue
+            for gap in matching_gaps:
                 append_candidate(
                     gap=gap,
                     name=alias,

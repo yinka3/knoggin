@@ -1,5 +1,6 @@
 import pytest
 
+from common.exceptions import DependencyError
 from core.knowledge.documents import extraction as extraction_module
 from core.knowledge.documents.extraction import (
     DocumentChunk,
@@ -8,6 +9,7 @@ from core.knowledge.documents.extraction import (
     LayoutRegion,
     NativePdfTextCell,
 )
+from core.knowledge.documents.indexer import DocumentIndexer
 from tests.fixtures.documents import (
     build_docx_bytes,
     build_notebook_bytes,
@@ -101,14 +103,24 @@ def test_layout_region_locator_preserves_optional_coordinates_and_text_offsets()
 @pytest.mark.unit
 @pytest.mark.no_network
 @pytest.mark.parametrize(
-    ("detail", "expected"),
+    ("detail", "expected", "error_type", "classification"),
     [
-        ("LocalEntryNotFoundError: missing cache", "models are not installed"),
-        ("malformed package", "could not parse"),
+        (
+            "LocalEntryNotFoundError: missing cache",
+            "models are not installed",
+            DependencyError,
+            ("transient_dependency", True),
+        ),
+        (
+            "malformed package",
+            "could not parse",
+            ValueError,
+            ("invalid_content", False),
+        ),
     ],
 )
 def test_docling_parse_failures_distinguish_missing_models_from_bad_content(
-    monkeypatch, detail, expected
+    monkeypatch, detail, expected, error_type, classification
 ):
     class FailingConverter:
         def convert(self, _stream):
@@ -116,8 +128,9 @@ def test_docling_parse_failures_distinguish_missing_models_from_bad_content(
 
     monkeypatch.setattr(extraction_module, "_docling_converter", lambda: FailingConverter())
 
-    with pytest.raises((RuntimeError, ValueError), match=expected):
+    with pytest.raises(error_type, match=expected) as error:
         extraction_module._parse_with_docling(b"document", ".pdf")
+    assert DocumentIndexer._classify_index_failure(error.value) == classification
 
 
 @pytest.mark.unit

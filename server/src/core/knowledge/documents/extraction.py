@@ -34,6 +34,7 @@ from llama_index.core.node_parser import SentenceSplitter
 from PIL import Image as PILImage
 from tree_sitter import Language, Parser
 
+from common.exceptions import DependencyError
 from core.knowledge.documents.constants import (
     ACCEPTED_EXTENSIONS,
     CHUNK_OVERLAP_TOKENS,
@@ -433,7 +434,7 @@ def _parse_with_docling(content: bytes, extension: str):
     except Exception as exc:
         detail = str(exc).strip() or type(exc).__name__
         if "LocalEntryNotFoundError" in detail or "huggingface.co" in detail:
-            raise RuntimeError(
+            raise DependencyError(
                 "Docling PDF models are not installed; run "
                 "./setup.sh --prefetch-models before indexing PDFs"
             ) from exc

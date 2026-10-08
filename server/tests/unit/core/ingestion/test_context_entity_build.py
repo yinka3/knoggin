@@ -35,7 +35,7 @@ from core.ingestion.context_entity_build import (
     _log_jev_identity_observations,
 )
 from core.ingestion.policy import IngestionPolicy
-from core.ingestion.text_processor import TextProcessor
+from core.ingestion.text_processor import TextProcessor, _ContextBlockText, _FallbackGap
 from core.ingestion.vp01 import (
     GLINER25_ENGLISH_MODEL,
     GLINER25_MULTILINGUAL_MODEL,
@@ -1228,6 +1228,63 @@ async def test_foreign_alias_in_support_does_not_trigger_jev_or_entity_link():
     assert text_processor._jev_client.calls == []
     assert semantic_build.trace.jev_extraction_candidates == 0
     assert semantic_build.trace.jev_extraction_accepted == 0
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_jev_candidate_preparation_bounds_alias_work_before_provider_calls():
+    compiled_domain = domain()
+    current = block("Acme supplies hardware.")
+    semantic_build = build(blocks=(current,), compiled_domain=compiled_domain)
+    semantic_build.policy = policy(
+        compiled_domain,
+        jev=JevPolicy(extraction_mode="observe"),
+    )
+    text_processor = processor(FakeVP01())
+    text_processor.get_known_aliases = lambda: {
+        "Acme": 1,
+        **{f"ZZZ Absent Alias {index}": index + 2 for index in range(600)},
+    }
+    profile_lookups = []
+
+    async def get_profile(entity_id):
+        profile_lookups.append(entity_id)
+        return None
+
+    text_processor.get_profile = get_profile
+    literal_checks = []
+    literal_expression = text_processor._literal_expression
+
+    def counted_expression(name):
+        literal_checks.append(name)
+        return literal_expression(name)
+
+    text_processor._literal_expression = counted_expression
+
+    candidates = await text_processor._prepare_jev_extraction_candidates(
+        semantic_build,
+        assembled=_ContextBlockText.from_blocks((current,)),
+        gaps=[_FallbackGap(current, ("known_alias_missing_from_extraction",), "")],
+        mentions=[],
+    )
+
+    assert [candidate.name for candidate in candidates] == ["Acme"]
+    assert profile_lookups == [1]
+    assert len(literal_checks) == 513  # one candidate build plus 512 bounded checks
+
+    semantic_build.jev_work_budget.observations = (
+        semantic_build.jev_work_budget.max_observations
+    )
+    profile_lookups.clear()
+    literal_checks.clear()
+    assert await text_processor._prepare_jev_extraction_candidates(
+        semantic_build,
+        assembled=_ContextBlockText.from_blocks((current,)),
+        gaps=[_FallbackGap(current, ("known_alias_missing_from_extraction",), "")],
+        mentions=[],
+    ) == []
+    assert profile_lookups == []
+    assert literal_checks == []
 
 
 @pytest.mark.unit
