@@ -1,0 +1,890 @@
+{
+  "version": 1,
+  "review_status": "reviewed",
+  "purpose": "Held-out classification-v2 labels created after the question contract was frozen. These are not quality results until independently reviewed.",
+  "review_instructions": "A human reviewer must approve or correct every proposed_choice and reason before changing review_status to reviewed. Do not tune classification-v2 after seeing provider results from this packet.",
+  "cases": [
+    {
+      "id": "finance_dividend",
+      "entity_name": "Northstar Foods",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Northstar Foods declared a quarterly cash dividend for shareholders.",
+          "proposed_choice": "Finance"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Finance"
+      ],
+      "reason": "A declared cash dividend is direct financial activity."
+    },
+    {
+      "id": "finance_bond",
+      "entity_name": "Lumen Transit",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Lumen Transit priced a $200 million bond issuance to refinance debt.",
+          "proposed_choice": "Finance"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Finance"
+      ],
+      "reason": "Debt issuance and refinancing directly support Finance."
+    },
+    {
+      "id": "finance_receivables",
+      "entity_name": "Harbor Systems",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Harbor Systems reported that overdue accounts receivable increased this quarter.",
+          "proposed_choice": "Finance"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Finance"
+      ],
+      "reason": "Accounts receivable are direct financial evidence."
+    },
+    {
+      "id": "finance_tax",
+      "entity_name": "Maple Robotics",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Maple Robotics recorded a deferred tax liability in its annual accounts.",
+          "proposed_choice": "Finance"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Finance"
+      ],
+      "reason": "Tax liabilities in company accounts are financial activity."
+    },
+    {
+      "id": "finance_cashflow",
+      "entity_name": "Quartz Health",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Quartz Health revised its operating cash-flow forecast after collections slowed.",
+          "proposed_choice": "Finance"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Finance"
+      ],
+      "reason": "A cash-flow forecast directly supports Finance."
+    },
+    {
+      "id": "finance_loan",
+      "entity_name": "Cedar Energy",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Cedar Energy refinanced its revolving credit facility with two banks.",
+          "proposed_choice": "Finance"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Finance"
+      ],
+      "reason": "Loan refinancing directly supports Finance."
+    },
+    {
+      "id": "finance_margin",
+      "entity_name": "Beacon Retail",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Beacon Retail said gross margin fell after supplier prices increased.",
+          "proposed_choice": "Finance"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Finance"
+      ],
+      "reason": "Gross margin is direct financial evidence."
+    },
+    {
+      "id": "legal_subpoena",
+      "entity_name": "Orchid Media",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Orchid Media received a subpoena and retained counsel to prepare its response.",
+          "proposed_choice": "Legal"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Legal"
+      ],
+      "reason": "A subpoena and legal response directly support Legal."
+    },
+    {
+      "id": "legal_patent",
+      "entity_name": "Summit Devices",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Summit Devices filed a patent-infringement complaint in federal court.",
+          "proposed_choice": "Legal"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Legal"
+      ],
+      "reason": "A court complaint directly supports Legal."
+    },
+    {
+      "id": "legal_consent",
+      "entity_name": "Atlas Biotech",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Atlas Biotech entered a regulatory consent decree with the agency.",
+          "proposed_choice": "Legal"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Legal"
+      ],
+      "reason": "A consent decree is direct legal evidence."
+    },
+    {
+      "id": "legal_license",
+      "entity_name": "Pioneer Audio",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Pioneer Audio negotiated the licensing terms for protected recordings.",
+          "proposed_choice": "Legal"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Legal"
+      ],
+      "reason": "Licensing terms directly support Legal."
+    },
+    {
+      "id": "legal_arbitration",
+      "entity_name": "Mosaic Freight",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Mosaic Freight submitted its contract dispute to binding arbitration.",
+          "proposed_choice": "Legal"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Legal"
+      ],
+      "reason": "Binding arbitration is direct legal activity."
+    },
+    {
+      "id": "legal_antitrust",
+      "entity_name": "Nimbus Markets",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Nimbus Markets responded to an antitrust investigation by regulators.",
+          "proposed_choice": "Legal"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Legal"
+      ],
+      "reason": "An antitrust investigation directly supports Legal."
+    },
+    {
+      "id": "legal_dpa",
+      "entity_name": "Juniper Cloud",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Juniper Cloud signed a data-processing agreement defining its privacy obligations.",
+          "proposed_choice": "Legal"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Legal"
+      ],
+      "reason": "A signed agreement defining obligations supports Legal."
+    },
+    {
+      "id": "work_release",
+      "entity_name": "Copper Labs",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Copper Labs deployed version 4.2 to production after the release review.",
+          "proposed_choice": "Work"
+        }
+      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
+      "reason": "A production deployment is direct operational work."
+    },
+    {
+      "id": "work_outage",
+      "entity_name": "Silver Hosting",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Silver Hosting repaired the outage and restored all customer traffic.",
+          "proposed_choice": "Work"
+        }
+      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
+      "reason": "Repairing an outage is direct operational work."
+    },
+    {
+      "id": "work_hiring",
+      "entity_name": "Elm Analytics",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Elm Analytics hired three engineers for the search team.",
+          "proposed_choice": "Work"
+        }
+      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
+      "reason": "Team hiring is direct organizational work."
+    },
+    {
+      "id": "work_roadmap",
+      "entity_name": "Kite Software",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Kite Software approved the next product roadmap and assigned feature owners.",
+          "proposed_choice": "Work"
+        }
+      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
+      "reason": "Roadmap ownership is direct project work."
+    },
+    {
+      "id": "work_support",
+      "entity_name": "Willow Telecom",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Willow Telecom cleared its backlog of customer support tickets.",
+          "proposed_choice": "Work"
+        }
+      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
+      "reason": "Handling support tickets is direct operational work."
+    },
+    {
+      "id": "work_migration",
+      "entity_name": "Aurora Travel",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Aurora Travel migrated the booking service to the new database cluster.",
+          "proposed_choice": "Work"
+        }
+      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
+      "reason": "A database migration is direct technical work."
+    },
+    {
+      "id": "work_design",
+      "entity_name": "Granite Security",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Granite Security completed the architecture review for its authentication service.",
+          "proposed_choice": "Work"
+        }
+      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
+      "reason": "An architecture review is direct technical work."
+    },
+    {
+      "id": "work_training",
+      "entity_name": "Fieldstone Bank",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Fieldstone Bank rolled out fraud-response training to branch employees.",
+          "proposed_choice": "Work"
+        }
+      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
+      "reason": "Rolling out employee training is direct operational work."
+    },
+    {
+      "id": "ambiguous_meeting",
+      "entity_name": "Redwood Group",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Redwood Group was mentioned during Monday's meeting.",
+          "proposed_choice": "insufficient_evidence"
+        }
+      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
+      "reason": "A mention does not establish a topic."
+    },
+    {
+      "id": "ambiguous_summit",
+      "entity_name": "Bluebird Works",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Bluebird Works attended the regional summit.",
+          "proposed_choice": "insufficient_evidence"
+        }
+      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
+      "reason": "Attendance alone does not establish a topic."
+    },
+    {
+      "id": "ambiguous_update",
+      "entity_name": "Cobalt Studio",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Cobalt Studio expects to provide an update next month.",
+          "proposed_choice": "insufficient_evidence"
+        }
+      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
+      "reason": "A future generic update has no topic-specific activity."
+    },
+    {
+      "id": "ambiguous_partner",
+      "entity_name": "Aspen Networks",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Aspen Networks may become a partner later this year.",
+          "proposed_choice": "insufficient_evidence"
+        }
+      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
+      "reason": "A possible future partnership does not establish a topic."
+    },
+    {
+      "id": "ambiguous_discussed",
+      "entity_name": "Marble Industries",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "The team discussed Marble Industries yesterday.",
+          "proposed_choice": "insufficient_evidence"
+        }
+      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
+      "reason": "Generic discussion does not establish a topic."
+    },
+    {
+      "id": "ambiguous_dashboard",
+      "entity_name": "Saffron Logistics",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Saffron Logistics appeared on the weekly dashboard.",
+          "proposed_choice": "insufficient_evidence"
+        }
+      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
+      "reason": "Dashboard presence alone does not establish a topic."
+    },
+    {
+      "id": "ambiguous_announcement",
+      "entity_name": "Tundra Mobile",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Tundra Mobile plans to make an announcement soon.",
+          "proposed_choice": "insufficient_evidence"
+        }
+      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
+      "reason": "An unspecified future announcement is insufficient."
+    },
+    {
+      "id": "ambiguous_collaboration",
+      "entity_name": "Riverstone Design",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Riverstone Design is involved in a new collaboration.",
+          "proposed_choice": "insufficient_evidence"
+        }
+      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
+      "reason": "An unspecified collaboration can fit multiple topics."
+    },
+    {
+      "id": "repeat_finance_earnings",
+      "entity_name": "Violet Aerospace",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Violet Aerospace reported a 12 percent increase in quarterly net income.",
+          "proposed_choice": "Finance"
+        },
+        {
+          "context": "Violet Aerospace reported a 12 percent increase in quarterly net income.",
+          "proposed_choice": "Finance"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Finance"
+      ],
+      "reason": "Repeated earnings evidence should yield one Finance override."
+    },
+    {
+      "id": "repeat_finance_credit",
+      "entity_name": "Oakline Manufacturing",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Oakline Manufacturing extended the maturity date on its credit agreement.",
+          "proposed_choice": "Finance"
+        },
+        {
+          "context": "Oakline Manufacturing extended the maturity date on its credit agreement.",
+          "proposed_choice": "Finance"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Finance"
+      ],
+      "reason": "Repeated credit-agreement evidence should yield one Finance override."
+    },
+    {
+      "id": "repeat_finance_writeoff",
+      "entity_name": "Horizon Textiles",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Horizon Textiles recorded an inventory write-off in its quarterly results.",
+          "proposed_choice": "Finance"
+        },
+        {
+          "context": "Horizon Textiles recorded an inventory write-off in its quarterly results.",
+          "proposed_choice": "Finance"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Finance"
+      ],
+      "reason": "Repeated accounting evidence should yield one Finance override."
+    },
+    {
+      "id": "repeat_finance_funding",
+      "entity_name": "Ember Motors",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Ember Motors closed a new equity financing round.",
+          "proposed_choice": "Finance"
+        },
+        {
+          "context": "Ember Motors closed a new equity financing round.",
+          "proposed_choice": "Finance"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Finance"
+      ],
+      "reason": "Repeated financing evidence should yield one Finance override."
+    },
+    {
+      "id": "repeat_legal_injunction",
+      "entity_name": "Prairie Pharma",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Prairie Pharma asked the court to dissolve the preliminary injunction.",
+          "proposed_choice": "Legal"
+        },
+        {
+          "context": "Prairie Pharma asked the court to dissolve the preliminary injunction.",
+          "proposed_choice": "Legal"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Legal"
+      ],
+      "reason": "Repeated court evidence should yield one Legal override."
+    },
+    {
+      "id": "repeat_legal_settlement",
+      "entity_name": "Sequoia Mining",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Sequoia Mining executed a settlement agreement resolving the claim.",
+          "proposed_choice": "Legal"
+        },
+        {
+          "context": "Sequoia Mining executed a settlement agreement resolving the claim.",
+          "proposed_choice": "Legal"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Legal"
+      ],
+      "reason": "Repeated settlement evidence should yield one Legal override."
+    },
+    {
+      "id": "repeat_legal_audit",
+      "entity_name": "Coral Payments",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Coral Payments received a formal regulatory enforcement notice.",
+          "proposed_choice": "Legal"
+        },
+        {
+          "context": "Coral Payments received a formal regulatory enforcement notice.",
+          "proposed_choice": "Legal"
+        }
+      ],
+      "proposed_aggregate_status": "consistent_proposal",
+      "proposed_topics": [
+        "Legal"
+      ],
+      "reason": "Repeated enforcement evidence should yield one Legal override."
+    },
+    {
+      "id": "repeat_work_launch",
+      "entity_name": "Frostline Apps",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Frostline Apps launched the redesigned mobile application.",
+          "proposed_choice": "Work"
+        },
+        {
+          "context": "Frostline Apps launched the redesigned mobile application.",
+          "proposed_choice": "Work"
+        }
+      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
+      "reason": "Repeated launch evidence should leave the Work default unchanged."
+    },
+    {
+      "id": "repeat_work_testing",
+      "entity_name": "Meadow Games",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Meadow Games completed performance testing for the multiplayer service.",
+          "proposed_choice": "Work"
+        },
+        {
+          "context": "Meadow Games completed performance testing for the multiplayer service.",
+          "proposed_choice": "Work"
+        }
+      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
+      "reason": "Repeated testing evidence should leave the Work default unchanged."
+    },
+    {
+      "id": "repeat_ambiguous",
+      "entity_name": "Sunrise Materials",
+      "entity_type": "Company",
+      "default_topic": "Work",
+      "allowed_topics": [
+        "Work",
+        "Finance",
+        "Legal"
+      ],
+      "occurrences": [
+        {
+          "context": "Sunrise Materials was included in the presentation.",
+          "proposed_choice": "insufficient_evidence"
+        },
+        {
+          "context": "Sunrise Materials was included in the presentation.",
+          "proposed_choice": "insufficient_evidence"
+        }
+      ],
+      "proposed_aggregate_status": "no_proposal",
+      "proposed_topics": [],
+      "reason": "Repeated generic evidence should remain insufficient without conflict."
+    }
+  ]
+}

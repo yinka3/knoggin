@@ -1,7 +1,14 @@
 {
   "version": 1,
   "kind": "deterministic_and_fake_backed_baseline",
-  "human_review_status": "pending",
+  "human_review_status": "reviewed",
+  "human_review_date": "2026-10-07",
+  "review_note": "The user approved recording the captured baseline behavior, including its known weaknesses. This does not approve incorrect baseline outcomes as desired behavior or establish production readiness.",
+  "known_weaknesses": [
+    {"case_id": "ordinary_word", "issue": "Ordinary lowercase delta incorrectly reuses Project Delta."},
+    {"case_id": "candidate_discovery_miss", "issue": "PG (PostgreSQL) creates a new ID because name search cannot discover the stored identity without a PG alias."},
+    {"case_id": "one_mention_covers_block", "issue": "Detecting Orion leaves Zephyr Dynamics missing without generative fallback unless an unknown endpoint flags the gap."}
+  ],
   "live_provider_calls": 0,
   "records": [
     {
@@ -21,6 +28,92 @@
       ],
       "new_entity_ids": [],
       "identity_outcome": "reused"
+    },
+    {
+      "case_id": "ambiguous_alias",
+      "entity_ids": [
+        900
+      ],
+      "new_entity_ids": [
+        900
+      ],
+      "identity_outcome": "abstained"
+    },
+    {
+      "case_id": "explicit_full_name",
+      "entity_ids": [
+        701
+      ],
+      "new_entity_ids": [],
+      "identity_outcome": "reused"
+    },
+    {
+      "case_id": "same_name_different_people",
+      "entity_ids": [
+        900
+      ],
+      "new_entity_ids": [
+        900
+      ],
+      "identity_outcome": "abstained"
+    },
+    {
+      "case_id": "abbreviation",
+      "entity_ids": [
+        721
+      ],
+      "new_entity_ids": [],
+      "identity_outcome": "reused"
+    },
+    {
+      "case_id": "ordinary_word",
+      "entity_ids": [
+        731
+      ],
+      "new_entity_ids": [],
+      "identity_outcome": "reused"
+    },
+    {
+      "case_id": "renamed_project",
+      "entity_ids": [
+        741
+      ],
+      "new_entity_ids": [],
+      "identity_outcome": "reused"
+    },
+    {
+      "case_id": "foreign_classification",
+      "entity_ids": [
+        751
+      ],
+      "new_entity_ids": [],
+      "identity_outcome": "reused"
+    },
+    {
+      "case_id": "repeated_surface_first",
+      "entity_ids": [
+        761
+      ],
+      "new_entity_ids": [],
+      "identity_outcome": "reused"
+    },
+    {
+      "case_id": "repeated_surface_second",
+      "entity_ids": [
+        762
+      ],
+      "new_entity_ids": [],
+      "identity_outcome": "reused"
+    },
+    {
+      "case_id": "candidate_discovery_miss",
+      "entity_ids": [
+        900
+      ],
+      "new_entity_ids": [
+        900
+      ],
+      "identity_outcome": "new_id_no_candidates"
     },
     {
       "case_id": "one_mention_covers_block",

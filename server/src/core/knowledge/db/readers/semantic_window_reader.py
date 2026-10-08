@@ -76,6 +76,108 @@ class SemanticWindowReader:
     def __init__(self, client: PostgresClient) -> None:
         self.client = client
 
+    async def list_jev_identity_decisions(
+        self,
+        window_id: UUID | str,
+        *,
+        user_name: str,
+        project_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict]:
+        """Read a bounded page of private decisions for one owned window."""
+
+        user_name, project_id = self._scope(
+            user_name, project_id, "list_jev_identity_decisions"
+        )
+        window_id = self._uuid(window_id, "window_id")
+        if not 1 <= limit <= 500 or offset < 0:
+            raise ValueError("JEV decision page is out of bounds")
+        rows = await self.client.fetch_all(
+            """
+            SELECT decision.decision
+            FROM public.project_jev_identity_decisions AS decision
+            JOIN public.project_semantic_windows AS semantic_window
+              ON semantic_window.window_id = decision.window_id
+             AND semantic_window.project_id = decision.project_id
+            WHERE semantic_window.window_id = %s
+              AND semantic_window.user_name = %s
+              AND semantic_window.project_id = %s
+            ORDER BY decision.pass_number, decision.occurrence_key
+            LIMIT %s OFFSET %s
+            """,
+            (window_id, user_name, project_id, limit, offset),
+        )
+        return [row["decision"] for row in rows]
+
+    async def list_jev_extraction_decisions(
+        self,
+        window_id: UUID | str,
+        *,
+        user_name: str,
+        project_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict]:
+        """Read a bounded page of private extraction decisions."""
+
+        user_name, project_id = self._scope(
+            user_name, project_id, "list_jev_extraction_decisions"
+        )
+        window_id = self._uuid(window_id, "window_id")
+        if not 1 <= limit <= 500 or offset < 0:
+            raise ValueError("JEV decision page is out of bounds")
+        rows = await self.client.fetch_all(
+            """
+            SELECT decision.decision
+            FROM public.project_jev_extraction_decisions AS decision
+            JOIN public.project_semantic_windows AS semantic_window
+              ON semantic_window.window_id = decision.window_id
+             AND semantic_window.project_id = decision.project_id
+            WHERE semantic_window.window_id = %s
+              AND semantic_window.user_name = %s
+              AND semantic_window.project_id = %s
+            ORDER BY decision.pass_number, decision.occurrence_key
+            LIMIT %s OFFSET %s
+            """,
+            (window_id, user_name, project_id, limit, offset),
+        )
+        return [row["decision"] for row in rows]
+
+    async def list_jev_classification_decisions(
+        self,
+        window_id: UUID | str,
+        *,
+        user_name: str,
+        project_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict]:
+        """Read a bounded page of private topic-classification decisions."""
+
+        user_name, project_id = self._scope(
+            user_name, project_id, "list_jev_classification_decisions"
+        )
+        window_id = self._uuid(window_id, "window_id")
+        if not 1 <= limit <= 500 or offset < 0:
+            raise ValueError("JEV decision page is out of bounds")
+        rows = await self.client.fetch_all(
+            """
+            SELECT decision.decision
+            FROM public.project_jev_classification_decisions AS decision
+            JOIN public.project_semantic_windows AS semantic_window
+              ON semantic_window.window_id = decision.window_id
+             AND semantic_window.project_id = decision.project_id
+            WHERE semantic_window.window_id = %s
+              AND semantic_window.user_name = %s
+              AND semantic_window.project_id = %s
+            ORDER BY decision.pass_number, decision.occurrence_key
+            LIMIT %s OFFSET %s
+            """,
+            (window_id, user_name, project_id, limit, offset),
+        )
+        return [row["decision"] for row in rows]
+
     async def get_window(
         self,
         window_id: UUID | str,

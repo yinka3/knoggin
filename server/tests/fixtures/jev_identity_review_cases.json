@@ -1,0 +1,114 @@
+{
+  "version": 1,
+  "review_status": "reviewed",
+  "purpose": "Proposed identity labels for a future held-out JEV evaluation. These are not quality results.",
+  "review_instructions": "A human reviewer must approve or correct every proposed_choice and reason before changing review_status to reviewed. Do not infer approval from tests or baseline behavior.",
+  "cases": [
+    {
+      "id": "ambiguous_alias",
+      "mention": "Bob",
+      "context": "Bob joined the project planning meeting.",
+      "candidates": [
+        {"entity_id": 701, "canonical_name": "Robert Chen", "aliases": ["Bob"], "type": "Person"},
+        {"entity_id": 702, "canonical_name": "Bob Smith", "aliases": ["Bob"], "type": "Person"}
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "The sentence does not distinguish the two people."
+    },
+    {
+      "id": "explicit_full_name",
+      "mention": "Bob",
+      "context": "Bob, whose full name is Robert Chen, joined the planning meeting.",
+      "candidates": [
+        {"entity_id": 701, "canonical_name": "Robert Chen", "aliases": ["Bob"], "type": "Person"},
+        {"entity_id": 702, "canonical_name": "Bob Smith", "aliases": ["Bob"], "type": "Person"}
+      ],
+      "proposed_choice": 701,
+      "reason": "The block names Robert Chen explicitly."
+    },
+    {
+      "id": "same_name_different_people",
+      "mention": "Alex Morgan",
+      "context": "Alex Morgan will review the design.",
+      "candidates": [
+        {"entity_id": 711, "canonical_name": "Alex Morgan", "aliases": [], "type": "Person"},
+        {"entity_id": 712, "canonical_name": "Alex Morgan", "aliases": [], "type": "Person"}
+      ],
+      "proposed_choice": "insufficient_evidence",
+      "reason": "A matching name alone cannot distinguish two stored people."
+    },
+    {
+      "id": "abbreviation",
+      "mention": "IBM",
+      "context": "IBM, short for International Business Machines, supplies the servers.",
+      "candidates": [
+        {"entity_id": 721, "canonical_name": "International Business Machines", "aliases": ["IBM"], "type": "Company"},
+        {"entity_id": 722, "canonical_name": "International Business Marketing", "aliases": [], "type": "Company"}
+      ],
+      "proposed_choice": 721,
+      "reason": "The expansion in the block identifies the first company."
+    },
+    {
+      "id": "ordinary_word",
+      "mention": "delta",
+      "context": "The delta between the two estimates is small.",
+      "candidates": [
+        {"entity_id": 731, "canonical_name": "Project Delta", "aliases": ["Delta"], "type": "Project"}
+      ],
+      "proposed_choice": "none_of_these",
+      "reason": "Here delta is a common noun, not the project name."
+    },
+    {
+      "id": "renamed_project",
+      "mention": "Nova",
+      "context": "Nova, formerly called Project Orion, is now in production.",
+      "candidates": [
+        {"entity_id": 741, "canonical_name": "Project Orion", "aliases": ["Nova"], "type": "Project"},
+        {"entity_id": 742, "canonical_name": "Nova Labs", "aliases": ["Nova"], "type": "Company"}
+      ],
+      "proposed_choice": 741,
+      "reason": "The sentence explicitly links Nova to the old project name."
+    },
+    {
+      "id": "foreign_classification",
+      "mention": "Sarah Johnson",
+      "context": "Sarah Johnson is the reviewer for our work project.",
+      "candidates": [
+        {"entity_id": 751, "canonical_name": "Sarah Johnson", "aliases": [], "foreign_type": "Friend"}
+      ],
+      "proposed_choice": 751,
+      "reason": "A foreign project's type must not determine this project's type."
+    },
+    {
+      "id": "repeated_surface_first",
+      "mention": "Bob",
+      "context": "Bob Chen signed the agreement.",
+      "candidates": [
+        {"entity_id": 761, "canonical_name": "Bob Chen", "aliases": ["Bob"], "type": "Person"},
+        {"entity_id": 762, "canonical_name": "Bob Smith", "aliases": ["Bob"], "type": "Person"}
+      ],
+      "proposed_choice": 761,
+      "reason": "This occurrence has Chen support."
+    },
+    {
+      "id": "repeated_surface_second",
+      "mention": "Bob",
+      "context": "Bob Smith reviewed the agreement.",
+      "candidates": [
+        {"entity_id": 761, "canonical_name": "Bob Chen", "aliases": ["Bob"], "type": "Person"},
+        {"entity_id": 762, "canonical_name": "Bob Smith", "aliases": ["Bob"], "type": "Person"}
+      ],
+      "proposed_choice": 762,
+      "reason": "The same surface has different evidence in this occurrence."
+    },
+    {
+      "id": "candidate_discovery_miss",
+      "mention": "PG",
+      "context": "PG (PostgreSQL) is the database used by the service.",
+      "stored_identity": {"entity_id": 771, "canonical_name": "PostgreSQL", "aliases": [], "type": "Database"},
+      "candidates": [],
+      "proposed_choice": "candidate_recall_failure",
+      "reason": "The block expands PG, but name search has no PG alias to find the stored identity."
+    }
+  ]
+}

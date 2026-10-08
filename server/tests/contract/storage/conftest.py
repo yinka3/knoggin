@@ -1,4 +1,6 @@
+import asyncio
 import os
+import sys
 from pathlib import Path
 from uuid import uuid4
 
@@ -11,8 +13,17 @@ from infrastructure.postgres_client import PostgresClient
 
 DB_URL = os.environ.get(
     "KNOGGIN_TEST_DATABASE_URL",
-    "postgresql://knoggin:knoggin@localhost:5432/knoggin_db",
+    "postgresql://knoggin:knoggin@127.0.0.1:5432/knoggin_db",
 )
+
+
+@pytest.fixture(scope="session")
+def event_loop_policy():
+    """Psycopg async connections require the selector loop on Windows."""
+
+    if sys.platform == "win32":
+        return asyncio.WindowsSelectorEventLoopPolicy()
+    return asyncio.DefaultEventLoopPolicy()
 
 
 def _database_url(database: str) -> str:

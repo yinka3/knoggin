@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import re
+
+from loguru import logger
 
 from common.schema.ingestion.contracts import (
     ContextEntityResult,
@@ -12,6 +15,33 @@ from common.schema.ingestion.contracts import (
 from core.ingestion.batch import SemanticWindowBuild
 from core.ingestion.text_processor import TextProcessor
 from core.knowledge.entity.resolver import ContextEntityResolution, EntityResolver
+from infrastructure.jev_client import JevWorkBudget
+
+
+def _log_jev_identity_observations(identity_decisions) -> None:
+    """Emit bounded, evidence-free pilot records to the configured log sinks."""
+
+    for decision in identity_decisions:
+        observation = decision.get("jev")
+        if observation is not None and "reused_for_pass" not in observation:
+            # This excludes raw evidence and remains bounded by the admitted
+            # candidate and call limits. JSON remains usable in plain log sinks.
+            logger.bind(jev_identity_observation=True).info(
+                "jev_identity_observation {}",
+                json.dumps(observation, sort_keys=True, separators=(",", ":")),
+            )
+
+
+def _log_jev_classification_observations(classification_decisions) -> None:
+    """Emit bounded, evidence-free topic proposals for pilot review."""
+
+    for observation in classification_decisions:
+        if "reused_from_pass" in observation:
+            continue
+        logger.bind(jev_classification_observation=True).info(
+            "jev_classification_observation {}",
+            json.dumps(observation, sort_keys=True, separators=(",", ":")),
+        )
 
 
 def _literal_mention_is_present(mention: str, text: str) -> bool:
@@ -97,7 +127,14 @@ class ContextEntityBuildService:
     async def build(self, semantic_build: SemanticWindowBuild) -> ContextEntityResult:
         """Extract and resolve one Context impact closure in memory only."""
 
+        if semantic_build.jev_work_budget is None:
+            semantic_build.jev_work_budget = JevWorkBudget(
+                semantic_build.policy.jev.max_calls_per_window,
+                semantic_build.policy.jev.max_elapsed_seconds_per_window,
+            )
+        semantic_build.identity_pass_number += 1
         mentions = await self.processor.extract_context_mentions(semantic_build)
+        timing = {}
         resolution = await self.resolver.resolve_context_block_mentions(
             mentions,
             block_text_by_id={
@@ -106,8 +143,45 @@ class ContextEntityBuildService:
             },
             policy=semantic_build.policy,
             allocate_entity_id=self._allocate_entity_id,
+            window_id=semantic_build.window_id,
+            pass_number=semantic_build.identity_pass_number,
+            work_budget=semantic_build.jev_work_budget,
+            timing=timing,
+            previous_identity_decisions=tuple(semantic_build.trace.identity_decisions),
+            previous_classification_decisions=tuple(semantic_build.trace.classification_decisions),
         )
-        semantic_build.trace.identity_decisions.extend(
-            resolution.identity_decisions
+        semantic_build.trace.resolver_timings.append(
+            {
+                "pass_number": semantic_build.identity_pass_number,
+                **timing,
+                "jev_calls_consumed": semantic_build.jev_work_budget.calls,
+                "jev_remaining_seconds": semantic_build.jev_work_budget.remaining_seconds(),
+            }
         )
+        reused_keys = {
+            (item["jev"]["record"]["pass_number"], item["jev"]["record"]["occurrence_key"])
+            for item in resolution.identity_decisions
+            if "reused_for_pass" in item.get("jev", {})
+        }
+        retained = []
+        for decision in semantic_build.trace.identity_decisions:
+            observation = decision.get("jev", {})
+            record = observation.get("record", {})
+            if (record.get("pass_number"), record.get("occurrence_key")) in reused_keys:
+                continue
+            if observation.get("accepted_entity_id") is not None:
+                # An earlier in-memory application that no longer survives the
+                # final rebuild must not claim durable acceptance.
+                observation["accepted_entity_id"] = None
+                record["acceptance_status"] = "rejected"
+                observation["superseded_by_pass"] = semantic_build.identity_pass_number
+            retained.append(decision)
+        semantic_build.trace.identity_decisions[:] = retained
+        semantic_build.trace.identity_decisions.extend(resolution.identity_decisions)
+        # Topic proposals belong to the final resolved IDs, including IDs that
+        # were privately reallocated by this rebuild. Recompute one aggregate.
+        semantic_build.trace.classification_decisions[:] = resolution.classification_decisions
+        semantic_build.trace.classification_aggregates[:] = resolution.classification_aggregates
+        _log_jev_identity_observations(resolution.identity_decisions)
+        _log_jev_classification_observations(resolution.classification_decisions)
         return assemble_context_entity_result(semantic_build, resolution)

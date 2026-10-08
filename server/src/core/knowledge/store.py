@@ -703,6 +703,63 @@ class KnowledgeStore:
 
         return await self._semantic_commit_writer.commit(build)
 
+    async def list_jev_identity_decisions(
+        self,
+        window_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict]:
+        """Return private observe records for one owned semantic window."""
+
+        return await self._semantic_window_reader.list_jev_identity_decisions(
+            window_id,
+            user_name=user_name,
+            project_id=project_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    async def list_jev_extraction_decisions(
+        self,
+        window_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict]:
+        """Return private bounded-extraction records for one owned window."""
+
+        return await self._semantic_window_reader.list_jev_extraction_decisions(
+            window_id,
+            user_name=user_name,
+            project_id=project_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    async def list_jev_classification_decisions(
+        self,
+        window_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict]:
+        """Return private topic proposals for one owned semantic window."""
+
+        return await self._semantic_window_reader.list_jev_classification_decisions(
+            window_id,
+            user_name=user_name,
+            project_id=project_id,
+            limit=limit,
+            offset=offset,
+        )
+
     async def get_semantic_window_health(
         self,
         *,

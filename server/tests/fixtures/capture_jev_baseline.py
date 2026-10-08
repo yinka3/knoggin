@@ -8,6 +8,7 @@ import asyncio
 import json
 from pathlib import Path
 
+from common.conf.domain_config import DomainConfig
 from common.schema.ingestion.contracts import (
     ContextBlockMention,
     UnknownEndpointDiagnostic,
@@ -76,6 +77,81 @@ async def capture():
                 "entity_ids": result.entity_ids,
                 "new_entity_ids": sorted(result.new_entity_ids),
                 "identity_outcome": result.identity_decisions[0]["outcome"],
+            }
+        )
+
+    review_cases = json.loads(
+        Path(__file__).with_name("jev_identity_review_cases.json").read_text(
+            encoding="utf-8"
+        )
+    )["cases"]
+    review_domain = DomainConfig.from_mapping(
+        {
+            "version": 1,
+            "topics": {"Work": {"active": True}},
+            "entity_types": {
+                entity_type: {"topic": "Work", "labels": [entity_type.lower()]}
+                for entity_type in ("Person", "Company", "Project", "Database")
+            },
+        }
+    ).compile()
+    for case in review_cases:
+        candidates = [*case.get("candidates", [])]
+        if case.get("stored_identity") is not None:
+            candidates.append(case["stored_identity"])
+        rows = [
+            {
+                "id": candidate["entity_id"],
+                "user_name": "ada",
+                "canonical_name": candidate["canonical_name"],
+                "aliases": candidate.get("aliases", []),
+                "contexts": [
+                    {
+                        "project_id": "project-2"
+                        if "foreign_type" in candidate
+                        else "project-1",
+                        "entity_type": candidate.get(
+                            "type", candidate.get("foreign_type", "Person")
+                        ),
+                        "topic": "Work",
+                    }
+                ],
+            }
+            for candidate in candidates
+        ]
+        mention_type = (
+            "Person"
+            if "foreign_type" in candidates[0]
+            else candidates[0].get("type", "Person")
+        )
+        current = block(case["context"])
+        result = await resolver(
+            knowledge_store=FakeKnowledgeStore(rows),
+            readable_project_ids=["project-1", "project-2"],
+        ).resolve_context_block_mentions(
+            [
+                ContextBlockMention(
+                    block_ids=(current.block_id,),
+                    name=case["mention"],
+                    entity_type=mention_type,
+                    topic="Work",
+                    origin="vp01",
+                )
+            ],
+            block_text_by_id={current.block_id: case["context"]},
+            policy=policy(review_domain),
+            allocate_entity_id=lambda: _async_value(900),
+        )
+        records.append(
+            {
+                "case_id": case["id"],
+                "entity_ids": result.entity_ids,
+                "new_entity_ids": sorted(result.new_entity_ids),
+                "identity_outcome": (
+                    result.identity_decisions[0]["outcome"]
+                    if result.identity_decisions
+                    else "new_id_no_candidates"
+                ),
             }
         )
 

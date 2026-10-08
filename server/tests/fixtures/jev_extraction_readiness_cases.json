@@ -1,0 +1,569 @@
+{
+  "version": 1,
+  "review_status": "reviewed",
+  "evaluation_role": "synthetic_stress",
+  "purpose": "New synthetic stress cases for frozen JEV policies. Template variants are correlated and do not replace representative project evidence.",
+  "review_instructions": "Review every label and reason before marking reviewed. Do not tune policy after observing this packet's model results.",
+  "cases": [
+    {
+      "id": "positive_0_0",
+      "family": "unknown_Person",
+      "candidate": "Lena Ortiz",
+      "context": "Lena Ortiz is the engineer responsible for the review.",
+      "proposed_type": null,
+      "expected_type": "Person",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "positive_0_1",
+      "family": "known_Person",
+      "candidate": "Lena Ortiz",
+      "context": "Lena Ortiz is the engineer responsible for the review.",
+      "proposed_type": "Person",
+      "expected_type": "Person",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "ambiguous_0",
+      "family": "ambiguous_type",
+      "candidate": "Lena",
+      "context": "Lena appears in the report.",
+      "proposed_type": null,
+      "expected_type": null,
+      "expected_choice": "insufficient_evidence",
+      "reason": "The generic occurrence does not establish any one configured type."
+    },
+    {
+      "id": "positive_1_0",
+      "family": "unknown_Person",
+      "candidate": "Owen Reed",
+      "context": "Owen Reed is the engineer responsible for the review.",
+      "proposed_type": null,
+      "expected_type": "Person",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "positive_1_1",
+      "family": "known_Person",
+      "candidate": "Owen Reed",
+      "context": "Owen Reed is the engineer responsible for the review.",
+      "proposed_type": "Person",
+      "expected_type": "Person",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "ambiguous_1",
+      "family": "ambiguous_type",
+      "candidate": "Owen",
+      "context": "Owen appears in the report.",
+      "proposed_type": null,
+      "expected_type": null,
+      "expected_choice": "insufficient_evidence",
+      "reason": "The generic occurrence does not establish any one configured type."
+    },
+    {
+      "id": "positive_2_0",
+      "family": "unknown_Person",
+      "candidate": "Nadia Shah",
+      "context": "Nadia Shah is the engineer responsible for the review.",
+      "proposed_type": null,
+      "expected_type": "Person",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "positive_2_1",
+      "family": "known_Person",
+      "candidate": "Nadia Shah",
+      "context": "Nadia Shah is the engineer responsible for the review.",
+      "proposed_type": "Person",
+      "expected_type": "Person",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "ambiguous_2",
+      "family": "ambiguous_type",
+      "candidate": "Nadia",
+      "context": "Nadia appears in the report.",
+      "proposed_type": null,
+      "expected_type": null,
+      "expected_choice": "insufficient_evidence",
+      "reason": "The generic occurrence does not establish any one configured type."
+    },
+    {
+      "id": "positive_3_0",
+      "family": "unknown_Person",
+      "candidate": "Evan Brooks",
+      "context": "Evan Brooks is the engineer responsible for the review.",
+      "proposed_type": null,
+      "expected_type": "Person",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "positive_3_1",
+      "family": "known_Person",
+      "candidate": "Evan Brooks",
+      "context": "Evan Brooks is the engineer responsible for the review.",
+      "proposed_type": "Person",
+      "expected_type": "Person",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "ambiguous_3",
+      "family": "ambiguous_type",
+      "candidate": "Evan",
+      "context": "Evan appears in the report.",
+      "proposed_type": null,
+      "expected_type": null,
+      "expected_choice": "insufficient_evidence",
+      "reason": "The generic occurrence does not establish any one configured type."
+    },
+    {
+      "id": "positive_4_0",
+      "family": "unknown_Person",
+      "candidate": "Tessa Wu",
+      "context": "Tessa Wu is the engineer responsible for the review.",
+      "proposed_type": null,
+      "expected_type": "Person",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "positive_4_1",
+      "family": "known_Person",
+      "candidate": "Tessa Wu",
+      "context": "Tessa Wu is the engineer responsible for the review.",
+      "proposed_type": "Person",
+      "expected_type": "Person",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "ambiguous_4",
+      "family": "ambiguous_type",
+      "candidate": "Tessa",
+      "context": "Tessa appears in the report.",
+      "proposed_type": null,
+      "expected_type": null,
+      "expected_choice": "insufficient_evidence",
+      "reason": "The generic occurrence does not establish any one configured type."
+    },
+    {
+      "id": "positive_5_0",
+      "family": "unknown_Person",
+      "candidate": "Iris Cole",
+      "context": "Iris Cole is the engineer responsible for the review.",
+      "proposed_type": null,
+      "expected_type": "Person",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "positive_5_1",
+      "family": "known_Person",
+      "candidate": "Iris Cole",
+      "context": "Iris Cole is the engineer responsible for the review.",
+      "proposed_type": "Person",
+      "expected_type": "Person",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "ambiguous_5",
+      "family": "ambiguous_type",
+      "candidate": "Iris",
+      "context": "Iris appears in the report.",
+      "proposed_type": null,
+      "expected_type": null,
+      "expected_choice": "insufficient_evidence",
+      "reason": "The generic occurrence does not establish any one configured type."
+    },
+    {
+      "id": "positive_6_0",
+      "family": "unknown_Person",
+      "candidate": "Felix Grant",
+      "context": "Felix Grant is the engineer responsible for the review.",
+      "proposed_type": null,
+      "expected_type": "Person",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "positive_6_1",
+      "family": "known_Person",
+      "candidate": "Felix Grant",
+      "context": "Felix Grant is the engineer responsible for the review.",
+      "proposed_type": "Person",
+      "expected_type": "Person",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "ambiguous_6",
+      "family": "ambiguous_type",
+      "candidate": "Felix",
+      "context": "Felix appears in the report.",
+      "proposed_type": null,
+      "expected_type": null,
+      "expected_choice": "insufficient_evidence",
+      "reason": "The generic occurrence does not establish any one configured type."
+    },
+    {
+      "id": "positive_7_0",
+      "family": "unknown_Person",
+      "candidate": "Zara Bell",
+      "context": "Zara Bell is the engineer responsible for the review.",
+      "proposed_type": null,
+      "expected_type": "Person",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "positive_7_1",
+      "family": "known_Person",
+      "candidate": "Zara Bell",
+      "context": "Zara Bell is the engineer responsible for the review.",
+      "proposed_type": "Person",
+      "expected_type": "Person",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "ambiguous_7",
+      "family": "ambiguous_type",
+      "candidate": "Zara",
+      "context": "Zara appears in the report.",
+      "proposed_type": null,
+      "expected_type": null,
+      "expected_choice": "insufficient_evidence",
+      "reason": "The generic occurrence does not establish any one configured type."
+    },
+    {
+      "id": "positive_8_0",
+      "family": "unknown_Company",
+      "candidate": "Aster Systems",
+      "context": "Aster Systems is the company supplying the service.",
+      "proposed_type": null,
+      "expected_type": "Company",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "positive_8_1",
+      "family": "known_Company",
+      "candidate": "Aster Systems",
+      "context": "Aster Systems is the company supplying the service.",
+      "proposed_type": "Company",
+      "expected_type": "Company",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "ambiguous_8",
+      "family": "ambiguous_type",
+      "candidate": "Aster",
+      "context": "Aster appears in the report.",
+      "proposed_type": null,
+      "expected_type": null,
+      "expected_choice": "insufficient_evidence",
+      "reason": "The generic occurrence does not establish any one configured type."
+    },
+    {
+      "id": "positive_9_0",
+      "family": "unknown_Company",
+      "candidate": "Birch Dynamics",
+      "context": "Birch Dynamics is the company supplying the service.",
+      "proposed_type": null,
+      "expected_type": "Company",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "positive_9_1",
+      "family": "known_Company",
+      "candidate": "Birch Dynamics",
+      "context": "Birch Dynamics is the company supplying the service.",
+      "proposed_type": "Company",
+      "expected_type": "Company",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "ambiguous_9",
+      "family": "ambiguous_type",
+      "candidate": "Birch",
+      "context": "Birch appears in the report.",
+      "proposed_type": null,
+      "expected_type": null,
+      "expected_choice": "insufficient_evidence",
+      "reason": "The generic occurrence does not establish any one configured type."
+    },
+    {
+      "id": "positive_10_0",
+      "family": "unknown_Company",
+      "candidate": "Cypress Labs",
+      "context": "Cypress Labs is the company supplying the service.",
+      "proposed_type": null,
+      "expected_type": "Company",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "positive_10_1",
+      "family": "known_Company",
+      "candidate": "Cypress Labs",
+      "context": "Cypress Labs is the company supplying the service.",
+      "proposed_type": "Company",
+      "expected_type": "Company",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "ambiguous_10",
+      "family": "ambiguous_type",
+      "candidate": "Cypress",
+      "context": "Cypress appears in the report.",
+      "proposed_type": null,
+      "expected_type": null,
+      "expected_choice": "insufficient_evidence",
+      "reason": "The generic occurrence does not establish any one configured type."
+    },
+    {
+      "id": "positive_11_0",
+      "family": "unknown_Company",
+      "candidate": "Dune Networks",
+      "context": "Dune Networks is the company supplying the service.",
+      "proposed_type": null,
+      "expected_type": "Company",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "positive_11_1",
+      "family": "known_Company",
+      "candidate": "Dune Networks",
+      "context": "Dune Networks is the company supplying the service.",
+      "proposed_type": "Company",
+      "expected_type": "Company",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "ambiguous_11",
+      "family": "ambiguous_type",
+      "candidate": "Dune",
+      "context": "Dune appears in the report.",
+      "proposed_type": null,
+      "expected_type": null,
+      "expected_choice": "insufficient_evidence",
+      "reason": "The generic occurrence does not establish any one configured type."
+    },
+    {
+      "id": "positive_12_0",
+      "family": "unknown_Company",
+      "candidate": "Echo Analytics",
+      "context": "Echo Analytics is the company supplying the service.",
+      "proposed_type": null,
+      "expected_type": "Company",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "positive_12_1",
+      "family": "known_Company",
+      "candidate": "Echo Analytics",
+      "context": "Echo Analytics is the company supplying the service.",
+      "proposed_type": "Company",
+      "expected_type": "Company",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "ambiguous_12",
+      "family": "ambiguous_type",
+      "candidate": "Echo",
+      "context": "Echo appears in the report.",
+      "proposed_type": null,
+      "expected_type": null,
+      "expected_choice": "insufficient_evidence",
+      "reason": "The generic occurrence does not establish any one configured type."
+    },
+    {
+      "id": "positive_13_0",
+      "family": "unknown_Company",
+      "candidate": "Flint Software",
+      "context": "Flint Software is the company supplying the service.",
+      "proposed_type": null,
+      "expected_type": "Company",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "positive_13_1",
+      "family": "known_Company",
+      "candidate": "Flint Software",
+      "context": "Flint Software is the company supplying the service.",
+      "proposed_type": "Company",
+      "expected_type": "Company",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "ambiguous_13",
+      "family": "ambiguous_type",
+      "candidate": "Flint",
+      "context": "Flint appears in the report.",
+      "proposed_type": null,
+      "expected_type": null,
+      "expected_choice": "insufficient_evidence",
+      "reason": "The generic occurrence does not establish any one configured type."
+    },
+    {
+      "id": "positive_14_0",
+      "family": "unknown_Project",
+      "candidate": "Grove Platform",
+      "context": "Grove Platform is the project delivering the migration.",
+      "proposed_type": null,
+      "expected_type": "Project",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "positive_14_1",
+      "family": "known_Project",
+      "candidate": "Grove Platform",
+      "context": "Grove Platform is the project delivering the migration.",
+      "proposed_type": "Project",
+      "expected_type": "Project",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "ambiguous_14",
+      "family": "ambiguous_type",
+      "candidate": "Grove",
+      "context": "Grove appears in the report.",
+      "proposed_type": null,
+      "expected_type": null,
+      "expected_choice": "insufficient_evidence",
+      "reason": "The generic occurrence does not establish any one configured type."
+    },
+    {
+      "id": "positive_15_0",
+      "family": "unknown_Project",
+      "candidate": "Haven Migration",
+      "context": "Haven Migration is the project delivering the migration.",
+      "proposed_type": null,
+      "expected_type": "Project",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "positive_15_1",
+      "family": "known_Project",
+      "candidate": "Haven Migration",
+      "context": "Haven Migration is the project delivering the migration.",
+      "proposed_type": "Project",
+      "expected_type": "Project",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "ambiguous_15",
+      "family": "ambiguous_type",
+      "candidate": "Haven",
+      "context": "Haven appears in the report.",
+      "proposed_type": null,
+      "expected_type": null,
+      "expected_choice": "insufficient_evidence",
+      "reason": "The generic occurrence does not establish any one configured type."
+    },
+    {
+      "id": "positive_16_0",
+      "family": "unknown_Project",
+      "candidate": "Indigo Release",
+      "context": "Indigo Release is the project delivering the migration.",
+      "proposed_type": null,
+      "expected_type": "Project",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "positive_16_1",
+      "family": "known_Project",
+      "candidate": "Indigo Release",
+      "context": "Indigo Release is the project delivering the migration.",
+      "proposed_type": "Project",
+      "expected_type": "Project",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "ambiguous_16",
+      "family": "ambiguous_type",
+      "candidate": "Indigo",
+      "context": "Indigo appears in the report.",
+      "proposed_type": null,
+      "expected_type": null,
+      "expected_choice": "insufficient_evidence",
+      "reason": "The generic occurrence does not establish any one configured type."
+    },
+    {
+      "id": "positive_17_0",
+      "family": "unknown_Project",
+      "candidate": "Jade Upgrade",
+      "context": "Jade Upgrade is the project delivering the migration.",
+      "proposed_type": null,
+      "expected_type": "Project",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "positive_17_1",
+      "family": "known_Project",
+      "candidate": "Jade Upgrade",
+      "context": "Jade Upgrade is the project delivering the migration.",
+      "proposed_type": "Project",
+      "expected_type": "Project",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "ambiguous_17",
+      "family": "ambiguous_type",
+      "candidate": "Jade",
+      "context": "Jade appears in the report.",
+      "proposed_type": null,
+      "expected_type": null,
+      "expected_choice": "insufficient_evidence",
+      "reason": "The generic occurrence does not establish any one configured type."
+    },
+    {
+      "id": "positive_18_0",
+      "family": "unknown_Database",
+      "candidate": "Kestrel Store",
+      "context": "Kestrel Store is the database storing the application records.",
+      "proposed_type": null,
+      "expected_type": "Database",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "positive_18_1",
+      "family": "known_Database",
+      "candidate": "Kestrel Store",
+      "context": "Kestrel Store is the database storing the application records.",
+      "proposed_type": "Database",
+      "expected_type": "Database",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "ambiguous_18",
+      "family": "ambiguous_type",
+      "candidate": "Kestrel",
+      "context": "Kestrel appears in the report.",
+      "proposed_type": null,
+      "expected_type": null,
+      "expected_choice": "insufficient_evidence",
+      "reason": "The generic occurrence does not establish any one configured type."
+    },
+    {
+      "id": "positive_19_0",
+      "family": "unknown_Database",
+      "candidate": "Lotus Engine",
+      "context": "Lotus Engine is the database storing the application records.",
+      "proposed_type": null,
+      "expected_type": "Database",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "positive_19_1",
+      "family": "known_Database",
+      "candidate": "Lotus Engine",
+      "context": "Lotus Engine is the database storing the application records.",
+      "proposed_type": "Database",
+      "expected_type": "Database",
+      "reason": "The sentence explicitly establishes the configured entity type."
+    },
+    {
+      "id": "ambiguous_19",
+      "family": "ambiguous_type",
+      "candidate": "Lotus",
+      "context": "Lotus appears in the report.",
+      "proposed_type": null,
+      "expected_type": null,
+      "expected_choice": "insufficient_evidence",
+      "reason": "The generic occurrence does not establish any one configured type."
+    }
+  ]
+}

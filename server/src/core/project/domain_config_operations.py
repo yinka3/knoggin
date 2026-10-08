@@ -182,6 +182,8 @@ class DomainPreview:
 def _entity_changed(left, right) -> bool:
     return (
         left.topic.casefold() != right.topic.casefold()
+        or tuple(item.casefold() for item in left.allowed_topics)
+        != tuple(item.casefold() for item in right.allowed_topics)
         or left.description != right.description
         or tuple(label.casefold() for label in left.labels)
         != tuple(label.casefold() for label in right.labels)
@@ -302,7 +304,8 @@ def preview_domain_config(
     for name in entity_types_changed:
         effects.append(
             f"Future extraction for entity type {name!r} will use its updated "
-            "topic, labels, or description; existing entities remain unchanged."
+            "default/allowed topics, labels, or description; existing entities "
+            "remain unchanged."
         )
     for name in entity_types_removed:
         effects.append(

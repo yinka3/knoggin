@@ -167,6 +167,26 @@ def test_preview_describes_changes_to_existing_definitions():
         "stop assigning new entities" in effect for effect in preview.future_effects
     )
     assert any(
-        "updated topic, labels, or description" in effect
+        "updated default/allowed topics, labels, or description" in effect
+        for effect in preview.future_effects
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_preview_detects_allowed_topic_changes_without_reclassifying_history():
+    current = make_domain(version=2)
+    candidate = current.to_dict()
+    candidate["topics"]["Operations"]["active"] = True
+    candidate["entity_types"]["Project"]["allowed_topics"] = [
+        "Software Development",
+        "Operations",
+    ]
+
+    preview = preview_domain_config(current, candidate)
+
+    assert preview.entity_types_changed == ("Project",)
+    assert any(
+        "existing entities remain unchanged" in effect
         for effect in preview.future_effects
     )

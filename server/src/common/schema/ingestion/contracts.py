@@ -46,6 +46,20 @@ class ExtractionTrace(BaseModel):
     user_relationships_rejected: int = 0
     fallbacks: List[Dict[str, str]] = Field(default_factory=list)
     identity_decisions: List[Dict[str, Any]] = Field(default_factory=list)
+    extraction_decisions: List[Dict[str, Any]] = Field(default_factory=list)
+    classification_decisions: List[Dict[str, Any]] = Field(default_factory=list)
+    classification_aggregates: List[Dict[str, Any]] = Field(default_factory=list)
+    resolver_timings: List[Dict[str, Any]] = Field(default_factory=list)
+    jev_extraction_candidates: int = 0
+    jev_extraction_observed: int = 0
+    jev_extraction_accepted: int = 0
+    jev_extraction_rejected: int = 0
+    jev_extraction_avoided_fallback_calls: int = 0
+    jev_extraction_avoided_fallback_blocks: int = 0
+    jev_extraction_avoided_prompt_characters: int = 0
+    llm_ner_fallback_calls: int = 0
+    llm_ner_fallback_blocks: int = 0
+    llm_ner_prompt_characters: int = 0
 
 
 def normalize_relationship_type(value: object) -> str:
@@ -300,7 +314,7 @@ class ContextBlockMention:
     name: str
     entity_type: str
     topic: str
-    origin: Literal["known_alias", "vp01", "llm_fallback"]
+    origin: Literal["known_alias", "vp01", "llm_fallback", "jev_fallback"]
     literal_message_ids: tuple[int, ...] = ()
     source_start: int | None = None
     source_end: int | None = None
@@ -327,7 +341,12 @@ class ContextBlockMention:
             "topic",
             _require_nonblank_text(self.topic, "ContextBlockMention.topic"),
         )
-        if self.origin not in {"known_alias", "vp01", "llm_fallback"}:
+        if self.origin not in {
+            "known_alias",
+            "vp01",
+            "llm_fallback",
+            "jev_fallback",
+        }:
             raise ValueError("ContextBlockMention origin is unsupported")
         message_ids = tuple(
             _require_positive_id(

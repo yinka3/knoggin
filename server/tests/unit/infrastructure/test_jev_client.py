@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 from copy import deepcopy
 
 import httpx
@@ -201,6 +202,112 @@ async def test_work_budget_shared_across_requests_and_retries():
     assert (await evaluate(client, policy, budget)).attempts == 0
     assert (await ledger.snapshot())["request_count"] == 1
     await client.close()
+
+
+async def test_elapsed_work_budget_is_shared_across_requests():
+    calls = 0
+
+    async def handler(_):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.01 if calls == 1 else 0.3)
+        return httpx.Response(200, json=RESPONSE)
+
+    client, policy, _ = setup_client(
+        handler,
+        request_timeout_seconds=0.5,
+        total_timeout_seconds=0.5,
+        max_elapsed_seconds_per_window=1.0,
+        max_retries=0,
+    )
+    budget = JevWorkBudget(12, 1.0)
+
+    assert (await evaluate(client, policy, budget)).outcome == "available"
+    # Leave a short shared allowance without relying on the first call's
+    # scheduling time, which varies under CI load.
+    budget._started_at = time.monotonic() - 0.9
+    second = await evaluate(client, policy, budget)
+
+    assert second.reason == "work_budget_exhausted"
+    await client.close()
+
+
+async def test_reservation_storage_failure_returns_unavailable_without_http():
+    client, policy, ledger = setup_client(
+        lambda _: pytest.fail("Failed admission must not call the provider")
+    )
+    original_reserve = ledger.reserve
+
+    async def broken_reserve(**kwargs):
+        raise RuntimeError("database unavailable")
+
+    ledger.reserve = broken_reserve
+    result = await evaluate(client, policy)
+    assert result.outcome == "unavailable"
+    assert result.reason == "reservation_unavailable"
+    assert result.attempts == 0
+    assert not result.accounting_pending
+    ledger.reserve = original_reserve
+    await client.close()
+
+
+async def test_cancellation_during_reservation_propagates_without_http():
+    entered = asyncio.Event()
+    client, policy, ledger = setup_client(
+        lambda _: pytest.fail("Cancelled admission must not call the provider")
+    )
+
+    async def wait_for_reservation(**kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    ledger.reserve = wait_for_reservation
+    task = asyncio.create_task(evaluate(client, policy))
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await client.close()
+
+
+async def test_openrouter_decisions_response_and_dated_model_are_supported():
+    requests = []
+    response = deepcopy(RESPONSE)
+    response.update(
+        {
+            "model": "typesafe/jev-1.13-20260917",
+            "id": "gen-dec-test",
+            "provider": "TypeSafe",
+        }
+    )
+    response["usage"]["cost"] = 0.0000042
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json=response)
+
+    client, policy, _ = setup_client(
+        handler,
+        endpoint="https://openrouter.ai/api/alpha/decisions",
+        model="typesafe/jev-1.13",
+    )
+    result = await evaluate(client, policy)
+
+    assert result.outcome == "available"
+    assert result.reported_model == "typesafe/jev-1.13-20260917"
+    assert result.cost_usd == pytest.approx(0.0000042)
+    assert str(requests[0].url) == "https://openrouter.ai/api/alpha/decisions"
+    assert json.loads(requests[0].content)["model"] == "typesafe/jev-1.13"
+    await client.close()
+
+
+def test_observation_budget_is_independent_of_provider_calls():
+    budget = JevWorkBudget(1, max_observations=2)
+
+    assert budget.take_observation()
+    assert budget.take_observation()
+    assert not budget.take_observation()
+    assert budget.calls == 0
 
 
 async def test_spending_limit_is_shared_and_blocks_before_http():
