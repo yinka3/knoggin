@@ -238,7 +238,9 @@ class ContextRelationshipExtractor:
                 },
             )
         build.set_unknown_endpoint_diagnostics(diagnostics.values())
-        writes_by_identity: Dict[tuple[int, int, str], ContextRelationshipWrite] = {}
+        writes_by_identity: Dict[
+            tuple[int, int, str, str, tuple[UUID, ...]], ContextRelationshipWrite
+        ] = {}
         for mention in result.connections:
             endpoint_a = valid_handles.get(mention.entity_a)
             endpoint_b = valid_handles.get(mention.entity_b)
@@ -306,18 +308,15 @@ class ContextRelationshipExtractor:
                     item_ref=f"{mention.entity_a}->{mention.entity_b}",
                 )
                 continue
+            support_set = tuple(sorted(write.support_block_ids, key=str))
             identity = (
                 write.entity_a_id,
                 write.entity_b_id,
                 write.relationship_type,
+                write.observed_label or write.relationship_type,
+                support_set,
             )
-            existing = writes_by_identity.get(identity)
-            if existing is None or (
-                len(write.support_block_ids), tuple(map(str, write.support_block_ids))
-            ) < (
-                len(existing.support_block_ids), tuple(map(str, existing.support_block_ids))
-            ):
-                writes_by_identity[identity] = write
+            writes_by_identity.setdefault(identity, write)
 
         writes = tuple(writes_by_identity.values())
         build.trace.relationships_accepted = len(writes)

@@ -72,6 +72,7 @@ class RelationshipInterpretationWriter:
             await active_cur.execute(
                 """
                 SELECT observation.observation_id, observation.relationship_id,
+                       observation.retired_at,
                        observation.project_id, observation.source_entity_id,
                        observation.target_entity_id, observation.observed_relationship_label,
                        relationship.relationship_type,
@@ -102,7 +103,11 @@ class RelationshipInterpretationWriter:
             prepared_changes = []
             for change in plan.changes:
                 row = rows.get(change.observation_id)
-                if row is None or row.get("relationship_id") != change.expected_relationship_id:
+                if (
+                    row is None
+                    or row.get("retired_at") is not None
+                    or row.get("relationship_id") != change.expected_relationship_id
+                ):
                     conflicts += 1
                     continue
                 old_id = row.get("relationship_id")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from uuid import UUID, uuid4
@@ -26,6 +27,7 @@ from core.ingestion.jev_extraction import (
     prepare_extraction_request,
 )
 from core.knowledge.db.projection_rebuilder import GraphBuilder
+from core.knowledge.db.writers.maintenance_review_writer import MaintenanceReviewWriter
 from core.knowledge.entity.jev_classification import (
     accepted_classification_topic,
     proposed_topic,
@@ -33,6 +35,13 @@ from core.knowledge.entity.jev_classification import (
 from core.knowledge.entity.jev_identity import accepted_identity
 from infrastructure.jev_client import JevClient
 from infrastructure.postgres_client import PostgresClient
+
+
+def _relationship_support_key(block_ids: tuple[UUID, ...]) -> str:
+    """Build the same stable support-set identity used by the SQL upgrade."""
+
+    payload = ",".join(sorted(str(block_id) for block_id in block_ids)) or "[]"
+    return hashlib.md5(payload.encode("ascii"), usedforsecurity=False).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1333,8 +1342,8 @@ class SemanticCommitWriter:
             count += cur.rowcount
         return count
 
-    @staticmethod
     async def _retire_noncurrent_observations(
+        self,
         cur,
         *,
         user_name: str,
@@ -1344,9 +1353,9 @@ class SemanticCommitWriter:
         """Retire replaced Context evidence and preserve a deterministic audit.
 
         This is a reconciliation consequence of immutable Context membership,
-        not an ambiguity for a person to review.  The audit records exactly
-        which observations lost current support while deliberately avoiding a
-        maintenance-review row.
+        not an ambiguity that needs a new review. The audit records exactly
+        which observations lost current support and any existing review that
+        cites one of them is marked stale.
         """
 
         await cur.execute(
@@ -1379,6 +1388,13 @@ class SemanticCommitWriter:
             return 0
 
         observation_ids = sorted(int(row["observation_id"]) for row in retired)
+        await MaintenanceReviewWriter(self.client).mark_stale_for_observations(
+            user_name=user_name,
+            project_id=project_id,
+            observation_ids=observation_ids,
+            reason="Relationship Context support was retired",
+            cur=cur,
+        )
         changes = [
             {
                 "observation_id": int(row["observation_id"]),
@@ -1469,11 +1485,11 @@ class SemanticCommitWriter:
                 INSERT INTO public.relationship_observations (
                     relationship_id, project_id, user_name, semantic_window_id,
                     source_entity_id, target_entity_id, observed_relationship_label,
-                    interpretation_source, context, observed_at_ms
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    support_key, interpretation_source, context, observed_at_ms
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (
                     project_id, semantic_window_id, source_entity_id,
-                    target_entity_id, observed_relationship_label
+                    target_entity_id, observed_relationship_label, support_key
                 ) DO UPDATE
                 SET relationship_id = EXCLUDED.relationship_id,
                     interpretation_source = CASE
@@ -1497,6 +1513,7 @@ class SemanticCommitWriter:
                     write.entity_a_id,
                     write.entity_b_id,
                     write.observed_label,
+                    _relationship_support_key(write.support_block_ids),
                     write.interpretation_source,
                     write.context,
                     observed_at_ms,

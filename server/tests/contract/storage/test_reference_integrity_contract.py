@@ -56,10 +56,11 @@ async def test_relationship_observation_requires_a_scoped_semantic_window(
         INSERT INTO relationship_observations (
             relationship_id, project_id, user_name, semantic_window_id,
             source_entity_id, target_entity_id, observed_relationship_label,
-            observed_at_ms
+            support_key, observed_at_ms
         ) VALUES (
             'project-1:2:3:related', 'project-1', 'ada',
-            '11111111-1111-4111-8111-111111111111', 2, 3, 'related to', 1
+            '11111111-1111-4111-8111-111111111111', 2, 3, 'related to',
+            md5('[]'), 1
         )
         """
     )
@@ -74,10 +75,11 @@ async def test_relationship_observation_requires_a_scoped_semantic_window(
             INSERT INTO relationship_observations (
                 relationship_id, project_id, user_name, semantic_window_id,
                 source_entity_id, target_entity_id, observed_relationship_label,
-                observed_at_ms
+                support_key, observed_at_ms
             ) VALUES (
                 'project-1:2:3:related', 'project-1', 'ada',
-                '99999999-9999-4999-8999-999999999999', 2, 3, 'other evidence', 2
+                '99999999-9999-4999-8999-999999999999', 2, 3, 'other evidence',
+                md5('[]'), 2
             )
             """
         )

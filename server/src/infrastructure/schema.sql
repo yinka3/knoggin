@@ -960,6 +960,7 @@ CREATE TABLE public.relationship_observations (
     source_entity_id bigint NOT NULL,
     target_entity_id bigint NOT NULL,
     observed_relationship_label text NOT NULL,
+    support_key text NOT NULL,
     interpretation_source text DEFAULT 'observed'::text NOT NULL,
     context text,
     observed_at_ms bigint NOT NULL,
@@ -968,6 +969,7 @@ CREATE TABLE public.relationship_observations (
     CONSTRAINT relationship_observations_distinct_entities CHECK ((source_entity_id <> target_entity_id)),
     CONSTRAINT relationship_observations_interpretation_source_check CHECK ((interpretation_source = ANY (ARRAY['observed'::text, 'domain'::text, 'review'::text]))),
     CONSTRAINT relationship_observations_observed_relationship_label_check CHECK ((btrim(observed_relationship_label) <> ''::text)),
+    CONSTRAINT relationship_observations_support_key_check CHECK ((support_key ~ '^[0-9a-f]{32}$'::text)),
     CONSTRAINT relationship_observations_retirement_shape_check CHECK ((((retired_at IS NULL) AND (retired_reason IS NULL)) OR ((retired_at IS NOT NULL) AND (btrim(retired_reason) <> ''::text))))
 );
 CREATE SEQUENCE public.relationship_observations_observation_id_seq
@@ -1232,7 +1234,7 @@ ALTER TABLE ONLY public.relationship_observations
 ALTER TABLE ONLY public.relationship_observations
     ADD CONSTRAINT relationship_observations_id_project_key UNIQUE (observation_id, project_id);
 ALTER TABLE ONLY public.relationship_observations
-    ADD CONSTRAINT relationship_observations_unique_semantic_window_evidence UNIQUE (project_id, semantic_window_id, source_entity_id, target_entity_id, observed_relationship_label);
+    ADD CONSTRAINT relationship_observations_unique_semantic_window_evidence UNIQUE (project_id, semantic_window_id, source_entity_id, target_entity_id, observed_relationship_label, support_key);
 ALTER TABLE ONLY public.relationships
     ADD CONSTRAINT relationships_id_project_key UNIQUE (relationship_id, project_id);
 ALTER TABLE ONLY public.relationships

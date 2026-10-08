@@ -41,10 +41,21 @@ from core.knowledge.db.readers.entity_reader import EntityReader
 from core.knowledge.db.readers.project_context_reader import ProjectContextReader
 from core.knowledge.db.readers.semantic_window_reader import SemanticWindowReader
 from core.knowledge.db.writers.global_entity_merge_writer import GlobalEntityMergeWriter
+from core.knowledge.db.writers.maintenance_review_writer import MaintenanceReviewWriter
 from core.knowledge.db.writers.project_context_writer import ProjectContextWriter
+from core.knowledge.db.writers.relationship_interpretation_writer import (
+    RelationshipInterpretationWriter,
+)
+from core.knowledge.db.writers.relationship_reclassification_writer import (
+    RelationshipReclassificationWriter,
+)
 from core.knowledge.db.writers.semantic_commit_writer import SemanticCommitWriter
 from core.knowledge.db.writers.semantic_window_writer import SemanticWindowWriter
 from core.knowledge.entity.resolver import EntityResolver
+from core.knowledge.maintenance.maintenance_reviews import (
+    RelationshipInterpretationChange,
+    RelationshipInterpretationPlan,
+)
 from infrastructure.jev_client import JevWorkBudget
 
 
@@ -61,7 +72,7 @@ def _domain():
                 "OWNS": {
                     "source_types": ["Person"],
                     "target_types": ["Company"],
-                    "labels": ["owns"],
+                "labels": ["owns", "has ownership of"],
                 }
             },
         }
@@ -1377,6 +1388,246 @@ async def test_semantic_commit_is_atomic_idempotent_and_retracts_replaced_suppor
         max_span_days=60,
     )
     assert [row["source_entity_id"] for row in seeds] == [12]
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_semantic_commit_keeps_independent_relationship_support_sets(
+    real_postgres_client,
+):
+    await _seed_message(real_postgres_client)
+    window_writer = SemanticWindowWriter(real_postgres_client)
+    first_window = _window()
+    assert (await window_writer.claim_window(first_window, _membership())).claimed
+    first_block = _block("Sarah directly owns Delta.")
+    second_block = _block("Sarah still owns Delta through her company.")
+    first_context = await _commit_context(
+        real_postgres_client, first_window, (first_block, second_block)
+    )
+    assert await window_writer.advance_stage(
+        window_id=first_window.window_id,
+        user_name="ada",
+        project_id="project-1",
+        expected_stage=SemanticWindowStage.CLAIMED,
+        next_stage=SemanticWindowStage.CONTEXT_COMMITTED,
+        context_revision_id=first_context.revision_id,
+    )
+    entities = {
+        10: _entity(10, "Sarah", "Person"),
+        11: _entity(11, "Delta", "Company"),
+    }
+    associations = (
+        ContextBlockEntityAssociation(
+            block_id=first_block.block_id, entity_id=10, mention_text="Sarah"
+        ),
+        ContextBlockEntityAssociation(
+            block_id=first_block.block_id, entity_id=11, mention_text="Delta"
+        ),
+        ContextBlockEntityAssociation(
+            block_id=second_block.block_id, entity_id=10, mention_text="Sarah"
+        ),
+        ContextBlockEntityAssociation(
+            block_id=second_block.block_id, entity_id=11, mention_text="Delta"
+        ),
+    )
+    owns_first = ContextRelationshipWrite(
+        support_block_ids=(first_block.block_id,),
+        entity_a_id=10,
+        entity_b_id=11,
+        relationship_type="owns",
+        observed_label="owns",
+        canonical_type="OWNS",
+        source_type="Person",
+        target_type="Company",
+        domain_version=1,
+    )
+    owns_second = ContextRelationshipWrite(
+        support_block_ids=(second_block.block_id,),
+        entity_a_id=10,
+        entity_b_id=11,
+        relationship_type="owns",
+        observed_label="owns",
+        canonical_type="OWNS",
+        source_type="Person",
+        target_type="Company",
+        domain_version=1,
+    )
+    alias_label = ContextRelationshipWrite(
+        support_block_ids=(first_block.block_id,),
+        entity_a_id=10,
+        entity_b_id=11,
+        relationship_type="owns",
+        observed_label="has ownership of",
+        canonical_type="OWNS",
+        source_type="Person",
+        target_type="Company",
+        domain_version=1,
+    )
+    first_build = _build(
+        _WindowContext(first_window.window_id, first_context),
+        impact=(first_block.block_id, second_block.block_id),
+        entity_ids=(10, 11),
+        entities=entities,
+        associations=associations,
+        relationship_writes=(owns_first, owns_second, alias_label, owns_first),
+    )
+    writer = SemanticCommitWriter(real_postgres_client)
+    await writer.commit(first_build)
+
+    stored_groups = await real_postgres_client.fetch_all(
+        """
+        SELECT observation.observed_relationship_label,
+               observation.support_key,
+               support.block_id
+        FROM public.relationship_observations AS observation
+        JOIN public.relationship_observation_blocks AS support
+          ON support.observation_id = observation.observation_id
+         AND support.project_id = observation.project_id
+        ORDER BY observation.observed_relationship_label, observation.support_key
+        """
+    )
+    assert len(stored_groups) == 3
+    assert {row["observed_relationship_label"] for row in stored_groups} == {
+        "owns",
+        "has ownership of",
+    }
+    assert len(
+        {
+            (row["observed_relationship_label"], row["support_key"])
+            for row in stored_groups
+        }
+    ) == 3
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM public.relationships"
+    ) == {"count": 1}
+    first_owns_observation = await real_postgres_client.fetch_one(
+        """
+        SELECT observation_id, relationship_id
+        FROM public.relationship_observations observation
+        JOIN public.relationship_observation_blocks support
+          USING (observation_id, project_id)
+        WHERE support.block_id = %s
+          AND observation.observed_relationship_label = 'owns'
+        """,
+        (first_block.block_id,),
+    )
+    review = await MaintenanceReviewWriter(real_postgres_client).open(
+        user_name="ada",
+        scope="project",
+        project_id="project-1",
+        kind="relationship_interpretation",
+        reasoning="Review this independently supported relationship.",
+        proposed_plan=RelationshipInterpretationPlan(
+            changes=[
+                RelationshipInterpretationChange(
+                    observation_id=first_owns_observation["observation_id"],
+                    expected_relationship_id=first_owns_observation["relationship_id"],
+                    target_relationship_type="OWNS",
+                    interpretation_source="review",
+                )
+            ]
+        ),
+        evidence_refs=[first_owns_observation["observation_id"]],
+    )
+    second_window = _window()
+    assert (await window_writer.claim_window(second_window, _membership(102))).claimed
+    next_context = await _commit_context(
+        real_postgres_client,
+        second_window,
+        (second_block,),
+        parent=first_context,
+        impact=(first_block.block_id, second_block.block_id),
+        support_message_id=102,
+    )
+    assert await window_writer.advance_stage(
+        window_id=second_window.window_id,
+        user_name="ada",
+        project_id="project-1",
+        expected_stage=SemanticWindowStage.CLAIMED,
+        next_stage=SemanticWindowStage.CONTEXT_COMMITTED,
+        context_revision_id=next_context.revision_id,
+    )
+    second_build = _build(
+        _WindowContext(second_window.window_id, next_context),
+        impact=(first_block.block_id, second_block.block_id),
+        entity_ids=(10, 11),
+        entities={},
+        existing_classifications={10: "Person", 11: "Company"},
+        associations=(
+            ContextBlockEntityAssociation(
+                block_id=second_block.block_id, entity_id=10, mention_text="Sarah"
+            ),
+            ContextBlockEntityAssociation(
+                block_id=second_block.block_id, entity_id=11, mention_text="Delta"
+            ),
+        ),
+    )
+    summary = await writer.commit(second_build)
+
+    assert summary.observations_retired == 2
+    assert summary.relationships_removed == 0
+    assert await real_postgres_client.fetch_one(
+        "SELECT status FROM public.maintenance_reviews WHERE review_id = %s",
+        (review.review_id,),
+    ) == {"status": "stale"}
+    remaining_groups = await real_postgres_client.fetch_all(
+        """
+        SELECT observation.observed_relationship_label,
+               observation.retired_at IS NULL AS active,
+               support.block_id
+        FROM public.relationship_observations AS observation
+        JOIN public.relationship_observation_blocks AS support
+          ON support.observation_id = observation.observation_id
+         AND support.project_id = observation.project_id
+        """
+    )
+    assert {
+        (
+            row["observed_relationship_label"],
+            row["active"],
+            row["block_id"],
+        )
+        for row in remaining_groups
+    } == {
+        ("has ownership of", False, first_block.block_id),
+        ("owns", True, second_block.block_id),
+        ("owns", False, first_block.block_id),
+    }
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM public.relationships"
+    ) == {"count": 1}
+    stale_apply = await RelationshipInterpretationWriter(
+        real_postgres_client
+    ).apply_plan(
+        user_name="ada",
+        project_id="project-1",
+        plan=RelationshipInterpretationPlan(
+            changes=[
+                RelationshipInterpretationChange(
+                    observation_id=first_owns_observation["observation_id"],
+                    expected_relationship_id=first_owns_observation["relationship_id"],
+                    target_relationship_type="OWNERSHIP",
+                    interpretation_source="domain",
+                )
+            ]
+        ),
+    )
+    assert stale_apply.updated == 0
+    assert stale_apply.conflicts == 1
+    await real_postgres_client.execute(
+        """
+        UPDATE public.relationship_observations
+        SET interpretation_source = 'observed'
+        WHERE source_entity_id = 10
+        """
+    )
+    reclassifiable = await RelationshipReclassificationWriter(
+        real_postgres_client
+    ).fetch_observations(user_name="ada", project_id="project-1")
+    assert [row["observed_relationship_label"] for row in reclassifiable] == [
+        "owns"
+    ]
 
 
 @pytest.mark.storage

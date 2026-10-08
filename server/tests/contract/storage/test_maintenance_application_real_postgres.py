@@ -38,6 +38,63 @@ async def _seed_entities(client):
     )
 
 
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_duplicate_candidate_limit_keeps_the_strongest_pair(
+    real_postgres_client,
+):
+    await _seed_entities(real_postgres_client)
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.entities (entity_id, user_name, canonical_name)
+        VALUES (4, 'ada', 'Rae'), (5, 'ada', 'Rae')
+        """
+    )
+    await real_postgres_client.execute(
+        "INSERT INTO public.entity_aliases (entity_id, alias) VALUES (2, 'Augusta Ada King')"
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.sessions (session_id, user_name, project_id, status)
+        VALUES ('merge-ranking', 'ada', 'project-1', 'open')
+        """
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.messages (
+            user_name, session_id, message_id, project_id, role, content,
+            timestamp_ms, lifecycle_state, exchange_state, exchange_outcome,
+            exchange_closed_at_ms
+        ) VALUES
+            ('ada', 'merge-ranking', 801, 'project-1', 'user', 'Low evidence.',
+             801, 'sealed', 'closed', 'user_only', 801),
+            ('ada', 'merge-ranking', 802, 'project-1', 'user', 'High evidence 1.',
+             802, 'sealed', 'closed', 'user_only', 802),
+            ('ada', 'merge-ranking', 803, 'project-1', 'user', 'High evidence 2.',
+             803, 'sealed', 'closed', 'user_only', 803),
+            ('ada', 'merge-ranking', 804, 'project-1', 'user', 'High evidence 3.',
+             804, 'sealed', 'closed', 'user_only', 804),
+            ('ada', 'merge-ranking', 805, 'project-1', 'user', 'High evidence 4.',
+             805, 'sealed', 'closed', 'user_only', 805)
+        """
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.message_entity_refs (message_id, entity_id)
+        VALUES (801, 2), (802, 4), (803, 4), (804, 4), (805, 4)
+        """
+    )
+
+    candidates = await EntityMaintenanceService(
+        real_postgres_client, "ada"
+    ).discover_duplicate_candidates(limit=1)
+
+    assert len(candidates) == 1
+    assert (candidates[0]["entity_a_id"], candidates[0]["entity_b_id"]) == (4, 5)
+    assert candidates[0]["message_ref_count"] == 4
+
+
 async def _seed_context_block(client, associations, *, project_id="project-1"):
     block_id = uuid4()
     await client.execute(
@@ -975,11 +1032,11 @@ async def test_project_review_application_reinterprets_before_marking_applied(
         INSERT INTO public.relationship_observations (
             relationship_id, project_id, user_name, semantic_window_id,
             source_entity_id, target_entity_id, observed_relationship_label,
-            observed_at_ms
+            support_key, observed_at_ms
         )
         VALUES (
             %s, 'project-1', 'ada', '11111111-1111-4111-8111-111111111111',
-            2, 3, 'related to', 1000
+            2, 3, 'related to', md5('[]'), 1000
         )
         RETURNING observation_id
         """,

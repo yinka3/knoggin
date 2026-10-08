@@ -154,6 +154,7 @@ class RelationshipReclassificationWriter:
             WHERE observation.user_name = %s
               AND observation.project_id = %s
               AND observation.interpretation_source = 'observed'
+              AND observation.retired_at IS NULL
               AND observation.observation_id > %s
             ORDER BY observation.observation_id
         """

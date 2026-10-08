@@ -1,5 +1,6 @@
 import pytest
 
+from common.schema.evidence import EvidencePointer
 from core.knowledge.entity.maintenance_service import EntityMaintenanceService
 from core.knowledge.maintenance.maintenance_reviews import (
     EntityContextMergeChoice,
@@ -24,6 +25,73 @@ def _quiescence_row(
         "frontier_message_id": frontier_message_id,
         "frontier_timestamp_ms": frontier_timestamp_ms,
         "completed_window_boundary": completed_window_boundary,
+    }
+
+
+@pytest.mark.no_network
+async def test_duplicate_candidate_limit_is_applied_after_evidence_ordering():
+    client = RecordingPostgresClient(
+        fetch_all_results=[
+            [
+                {
+                    "entity_a_id": 4,
+                    "entity_b_id": 5,
+                    "name_a": "Rae",
+                    "name_b": "Rae",
+                    "signal": "canonical_name",
+                    "project_ids": [],
+                    "message_ref_count": 7,
+                }
+            ]
+        ]
+    )
+
+    candidates = await EntityMaintenanceService(client, "ada").discover_duplicate_candidates(
+        limit=1
+    )
+
+    assert candidates[0]["message_ref_count"] == 7
+    query = client.calls[0][1]
+    assert query.index("ORDER BY message_ref_count DESC") < query.index("LIMIT %s")
+    assert "p.entity_a_id, p.entity_b_id" in query
+
+
+@pytest.mark.no_network
+async def test_merge_review_rejects_evidence_kinds_without_candidate_membership():
+    class Reviews:
+        def __init__(self):
+            self.opened = []
+
+        async def open(self, **kwargs):
+            self.opened.append(kwargs)
+
+    service = EntityMaintenanceService(RecordingPostgresClient(), "ada")
+    service.review_writer = Reviews()
+
+    async def ready_preview(**_kwargs):
+        return _ready_merge_preview()
+
+    service.preview_merge = ready_preview
+
+    with pytest.raises(ValueError, match="candidate entities"):
+        await service.propose(
+            survivor_entity_id=2,
+            retired_entity_id=3,
+            reasoning="The cited evidence identifies one person.",
+            evidence_refs=[EvidencePointer.for_observation(91)],
+        )
+
+    assert service.review_writer.opened == []
+
+
+def _ready_merge_preview():
+    return {
+        "ready": True,
+        "state_hash": "stable-state",
+        "snapshot": {"message_refs": [], "episode_entities": []},
+        "plan": EntityMergePlan(survivor_entity_id=2, retired_entity_id=3),
+        "frontiers": {},
+        "definition_versions": {},
     }
 
 

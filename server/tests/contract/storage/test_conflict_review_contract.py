@@ -38,13 +38,14 @@ async def _seed_conflict_observations(client) -> tuple[int, int]:
         """
         INSERT INTO public.relationship_observations (
             project_id, user_name, semantic_window_id, source_entity_id,
-            target_entity_id, observed_relationship_label, observed_at_ms
+            target_entity_id, observed_relationship_label, support_key,
+            observed_at_ms
         )
         VALUES
             ('project-1', 'ada', '11111111-1111-4111-8111-111111111111',
-             2, 3, 'works at', 100),
+             2, 3, 'works at', md5('[]'), 100),
             ('project-1', 'ada', '22222222-2222-4222-8222-222222222222',
-             2, 3, 'does not work at', 200)
+             2, 3, 'does not work at', md5('[]'), 200)
         RETURNING observation_id
         """
     )

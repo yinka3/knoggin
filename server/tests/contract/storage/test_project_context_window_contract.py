@@ -985,6 +985,63 @@ async def test_semantic_window_stage_cas_and_failures_keep_the_last_successful_s
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
+async def test_retry_reopens_a_legacy_context_checkpoint_with_wrong_domain_version(
+    real_postgres_client,
+):
+    await _seed_messages(real_postgres_client)
+    context_writer = ProjectContextWriter(real_postgres_client)
+    window_writer = SemanticWindowWriter(real_postgres_client)
+    await context_writer.ensure_context(user_name="ada", project_id="project-1")
+    old_context = await context_writer.commit_revision(
+        user_name="ada",
+        project_id="project-1",
+        expected_parent_revision_id=None,
+        window_id=None,
+        origin=ContextRevisionOrigin.CONVERSATION,
+        domain_version=1,
+        edit_summary="Existing Context before domain activation",
+        materialization=_materialization(),
+    )
+    window = _window().model_copy(
+        update={"domain_version": 2, "episode_result_recorded": True}
+    )
+    assert (await window_writer.claim_window(window, _membership())).claimed
+    assert await window_writer.advance_stage(
+        window_id=window.window_id,
+        user_name="ada",
+        project_id="project-1",
+        expected_stage=SemanticWindowStage.CLAIMED,
+        next_stage=SemanticWindowStage.CONTEXT_COMMITTED,
+        context_revision_id=old_context.revision_id,
+    )
+    assert await window_writer.record_failure(
+        window_id=window.window_id,
+        user_name="ada",
+        project_id="project-1",
+        expected_stage=SemanticWindowStage.CONTEXT_COMMITTED,
+        failure_stage="knowledge_reconciliation",
+        failure_code="domain_version_mismatch",
+        error_summary="legacy Context checkpoint uses the previous domain version",
+        failed_at_ms=1_000,
+        next_retry_at_ms=None,
+    ) is not None
+
+    retried = await window_writer.retry_window(
+        window_id=window.window_id,
+        user_name="ada",
+        project_id="project-1",
+    )
+
+    assert retried is not None
+    assert retried.stage is SemanticWindowStage.CLAIMED
+    assert retried.context_revision_id is None
+    assert retried.episode_result_recorded is True
+    assert retried.attempt_count == 0
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
 async def test_context_scope_snapshot_and_project_deletion_cascade(real_postgres_client):
     await _seed_messages(real_postgres_client)
     context_writer = ProjectContextWriter(real_postgres_client)
@@ -1301,6 +1358,54 @@ async def test_stale_projection_checkpoint_keeps_the_newest_written_revision(
     assert state is not None
     assert state.projection_pending_revision_id == third.revision_id
     assert state.projection_pending_hash == "3" * 64
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_context_writer_creates_zero_impact_revision_for_domain_version_only_change(
+    real_postgres_client,
+):
+    writer = ProjectContextWriter(real_postgres_client)
+    reader = ProjectContextReader(real_postgres_client)
+    await writer.ensure_context(user_name="ada", project_id="project-1")
+    block = _context_block("Stable Context across domain revisions.")
+    first = await writer.commit_revision(
+        user_name="ada",
+        project_id="project-1",
+        expected_parent_revision_id=None,
+        window_id=None,
+        origin=ContextRevisionOrigin.CONVERSATION,
+        domain_version=1,
+        edit_summary="Initial Context",
+        materialization=_materialization(block),
+    )
+    next_domain = DomainConfig(version=2, topics=(), entity_types=()).compile()
+    bridge = await writer.commit_revision(
+        user_name="ada",
+        project_id="project-1",
+        expected_parent_revision_id=first.revision_id,
+        window_id=None,
+        origin=ContextRevisionOrigin.CONVERSATION,
+        domain_version=2,
+        edit_summary="Context rules updated; no block changes",
+        materialization=ContextMaterialization(
+            blocks=tuple(first.blocks),
+            content_hash=context_document_hash(first.blocks, next_domain),
+            new_block_ids=frozenset(),
+            impacted_block_ids=frozenset(),
+        ),
+    )
+
+    assert bridge.revision_id != first.revision_id
+    assert bridge.revision_number == first.revision_number + 1
+    assert bridge.domain_version == 2
+    assert bridge.blocks == first.blocks
+    assert await reader.get_revision_impact_block_ids(
+        bridge.revision_id,
+        user_name="ada",
+        project_id="project-1",
+    ) == frozenset()
 
 
 @pytest.mark.storage

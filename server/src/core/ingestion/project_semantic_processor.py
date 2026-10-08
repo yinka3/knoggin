@@ -541,6 +541,26 @@ class ProjectSemanticProcessor(BaseJob):
                         new_block_ids=frozenset(),
                     ),
                 )
+            elif snapshot.domain_version != domain.version:
+                # A domain activation changes the interpretation rules even
+                # when Context text stays the same. Give this window a
+                # revision at its frozen version with an empty impact closure;
+                # the Knowledge stage can then checkpoint the no-op safely.
+                committed = await self.knowledge_store.commit_project_context_revision(
+                    user_name=ctx.user_name,
+                    project_id=ctx.project_id,
+                    expected_parent_revision_id=str(snapshot.revision_id),
+                    window_id=str(window.window_id),
+                    origin=ContextRevisionOrigin.CONVERSATION,
+                    domain_version=domain.version,
+                    edit_summary="Context rules updated; no block changes",
+                    materialization=ContextMaterialization(
+                        blocks=tuple(snapshot.blocks),
+                        content_hash=context_document_hash(snapshot.blocks, domain),
+                        new_block_ids=frozenset(),
+                        impacted_block_ids=frozenset(),
+                    ),
+                )
             else:
                 committed = snapshot
 

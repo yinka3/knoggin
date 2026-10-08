@@ -163,7 +163,8 @@ class GlobalEntityMergeWriter:
                 """
                 SELECT observation_id, relationship_id, project_id, user_name,
                        semantic_window_id, source_entity_id, target_entity_id,
-                       observed_relationship_label, interpretation_source, context,
+                       observed_relationship_label, support_key,
+                       interpretation_source, context,
                        observed_at_ms
                 FROM public.relationship_observations
                 WHERE user_name = %s
@@ -762,6 +763,7 @@ class GlobalEntityMergeWriter:
                              AND source_entity_id = %s
                              AND target_entity_id = %s
                              AND observed_relationship_label = %s
+                             AND support_key = %s
                              AND observation_id <> %s""",
                         (
                             observation["project_id"],
@@ -769,6 +771,7 @@ class GlobalEntityMergeWriter:
                             new_source,
                             new_target,
                             observation["observed_relationship_label"],
+                            observation["support_key"],
                             observation["observation_id"],
                         ),
                     )
@@ -1097,7 +1100,8 @@ class GlobalEntityMergeWriter:
                 cur,
                 """SELECT observation_id, relationship_id, project_id, user_name,
                           semantic_window_id, source_entity_id, target_entity_id,
-                          observed_relationship_label, interpretation_source, context,
+                          observed_relationship_label, support_key,
+                          interpretation_source, context,
                           observed_at_ms
                    FROM public.relationship_observations WHERE observation_id = %s""",
                 (int(key),),

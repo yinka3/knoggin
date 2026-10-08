@@ -289,9 +289,10 @@ class SemanticWindowWriter:
     ) -> SemanticWindowRecord | None:
         """Reset one failed active window for an explicit operator retry.
 
-        Membership, policy, stage, and every successful checkpoint remain
-        untouched.  Resetting the bounded automatic-attempt counter is what
-        makes an exhausted window eligible for a new bounded retry cycle.
+        Membership and frozen policy remain untouched. Resetting the bounded
+        automatic-attempt counter makes an exhausted window eligible again.
+        A legacy Context checkpoint at the wrong domain version is reopened at
+        the Context stage so the frozen updater can publish a valid bridge.
         """
 
         user_name = require_scope_value(user_name, "user_name", "retry_window")
@@ -299,21 +300,61 @@ class SemanticWindowWriter:
         window_id = self._uuid(window_id, "window_id")
         try:
             async with self.client.transaction() as cur:
+                # Serialize retry with domain activation and window admission.
+                await cur.execute(
+                    """
+                    SELECT project_id
+                    FROM public.projects
+                    WHERE user_name = %s AND project_id = %s
+                    FOR UPDATE
+                    """,
+                    (user_name, project_id),
+                )
+                if await cur.fetchone() is None:
+                    return None
                 await cur.execute(
                     f"""
-                    UPDATE public.project_semantic_windows
+                    UPDATE public.project_semantic_windows AS window
                     SET attempt_count = 0,
+                        stage = CASE
+                            WHEN window.stage = 'context_committed'
+                             AND window.context_revision_id IS NOT NULL
+                             AND EXISTS (
+                                SELECT 1
+                                FROM public.project_context_revisions AS revision
+                                WHERE revision.revision_id = window.context_revision_id
+                                  AND revision.project_id = window.project_id
+                                  AND revision.domain_version <> window.domain_version
+                                  AND revision.window_id IS DISTINCT FROM window.window_id
+                             )
+                            THEN 'claimed'
+                            ELSE window.stage
+                        END,
+                        context_revision_id = CASE
+                            WHEN window.stage = 'context_committed'
+                             AND window.context_revision_id IS NOT NULL
+                             AND EXISTS (
+                                SELECT 1
+                                FROM public.project_context_revisions AS revision
+                                WHERE revision.revision_id = window.context_revision_id
+                                  AND revision.project_id = window.project_id
+                                  AND revision.domain_version <> window.domain_version
+                                  AND revision.window_id IS DISTINCT FROM window.window_id
+                             )
+                            THEN NULL
+                            ELSE window.context_revision_id
+                        END,
                         last_failure_stage = NULL,
                         last_failure_code = NULL,
                         last_failure_at_ms = NULL,
                         last_error_summary = NULL,
                         next_retry_at_ms = NULL,
                         updated_at = NOW()
-                    WHERE window_id = %s
-                      AND user_name = %s
-                      AND project_id = %s
-                      AND stage <> 'completed'
-                      AND last_failure_at_ms IS NOT NULL
+                    WHERE window.window_id = %s
+                      AND window.user_name = %s
+                      AND window.project_id = %s
+                      AND window.stage <> 'completed'
+                      AND window.last_failure_at_ms IS NOT NULL
                     RETURNING {_WINDOW_COLUMNS}
                     """,
                     (window_id, user_name, project_id),

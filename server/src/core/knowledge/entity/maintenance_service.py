@@ -101,13 +101,13 @@ class EntityMaintenanceService:
             SELECT p.entity_a_id, p.entity_b_id, p.name_a, p.name_b, p.signal,
                    COALESCE(array_agg(DISTINCT context.project_id)
                             FILTER (WHERE context.project_id IS NOT NULL), '{}') AS project_ids,
-                   (SELECT count(*) FROM public.message_entity_refs ref
+                   (SELECT count(DISTINCT ref.message_id) FROM public.message_entity_refs ref
                     WHERE ref.entity_id IN (p.entity_a_id, p.entity_b_id)) AS message_ref_count
             FROM pairs p
             LEFT JOIN public.project_entity_contexts context
               ON context.entity_id IN (p.entity_a_id, p.entity_b_id)
             GROUP BY p.entity_a_id, p.entity_b_id, p.name_a, p.name_b, p.signal
-            ORDER BY p.entity_a_id, p.entity_b_id
+            ORDER BY message_ref_count DESC, p.entity_a_id, p.entity_b_id
             LIMIT %s
             """,
             (actor.strip(), limit),
@@ -240,6 +240,7 @@ class EntityMaintenanceService:
         reasoning: str,
         evidence_refs: Iterable[EvidencePointer | dict[str, Any] | int] = (),
         context_choices: Iterable[EntityContextMergeChoice | dict[str, Any]] = (),
+        expected_state_hash: str | None = None,
     ):
         """Persist an explicit global merge review; no mutation occurs."""
 
@@ -252,6 +253,15 @@ class EntityMaintenanceService:
             retired_entity_id=retired_entity_id,
             context_choices=context_choices,
         )
+        if (
+            expected_state_hash is not None
+            and preview["state_hash"] != expected_state_hash
+        ):
+            raise ValueError("candidate state changed before the merge review was opened")
+        if not preview["ready"]:
+            raise ValueError(
+                "merge review requires a valid choice for every project context conflict"
+            )
         refs = [
             value
             if isinstance(value, EvidencePointer)
@@ -272,9 +282,8 @@ class EntityMaintenanceService:
         invalid_refs = [
             ref
             for ref in refs
-            if (
-                ref.kind == "message" and ref.identifier not in valid_message_ids
-            )
+            if ref.kind not in {"message", "episode"}
+            or (ref.kind == "message" and ref.identifier not in valid_message_ids)
             or (ref.kind == "episode" and ref.identifier not in valid_episode_ids)
         ]
         if invalid_refs:

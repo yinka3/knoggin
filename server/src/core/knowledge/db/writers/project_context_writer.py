@@ -130,6 +130,21 @@ class ProjectContextWriter:
 
         try:
             async with self.client.transaction() as cur:
+                # Match project deletion and domain activation lock ordering.
+                # Both paths then take the Context root, so a concurrent
+                # section-removal check cannot deadlock with this commit or
+                # observe a gap before a new Context revision is published.
+                await cur.execute(
+                    """
+                    SELECT project_id
+                    FROM public.projects
+                    WHERE project_id = %s AND user_name = %s
+                    FOR UPDATE
+                    """,
+                    (project_id, user_name),
+                )
+                if await cur.fetchone() is None:
+                    raise ValueError("Project is unavailable while committing Context")
                 await self._ensure_and_lock_root(
                     cur,
                     user_name=user_name,
@@ -193,8 +208,13 @@ class ProjectContextWriter:
                     ):
                         raise ValueError("Context replacement must supersede a block from the current snapshot")
 
-                if not new_ids and materialization.content_hash == (
-                    await self._current_content_hash(cur, current_revision_id, project_id)
+                if (
+                    not new_ids
+                    and root["domain_version"] == domain_version
+                    and materialization.content_hash
+                    == await self._current_content_hash(
+                        cur, current_revision_id, project_id
+                    )
                 ):
                     if current_revision_id is None:
                         raise ValueError("an empty initial Context revision must be explicit")
@@ -556,7 +576,8 @@ class ProjectContextWriter:
                 context.current_revision_id,
                 context.projection_hash,
                 context.projection_revision_id,
-                revision.revision_number
+                revision.revision_number,
+                revision.domain_version
             FROM public.project_contexts AS context
             LEFT JOIN public.project_context_revisions AS revision
               ON revision.revision_id = context.current_revision_id

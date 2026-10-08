@@ -35,20 +35,20 @@ from infrastructure.job.base import JobContext
 from infrastructure.job.scheduler import Scheduler
 
 
-def _domain():
-    return DomainConfig(version=1, topics=(), entity_types=()).compile()
+def _domain(version=1):
+    return DomainConfig(version=version, topics=(), entity_types=()).compile()
 
 
-def _policy():
+def _policy(domain=None):
     return IngestionPolicy.capture(
         text_processor=TextProcessorSettings(),
         entity_resolution=EntityResolutionSettings(),
-        compiled_domain=_domain(),
+        compiled_domain=domain or _domain(),
     )
 
 
-def _window():
-    domain = _domain()
+def _window(domain=None):
+    domain = domain or _domain()
     return SemanticWindowRecord(
         window_id=uuid4(),
         user_name="ada",
@@ -58,7 +58,7 @@ def _window():
         domain_version=domain.version,
         policy_snapshot={
             "compiled_domain": domain.to_dict(),
-            "ingestion_policy": _policy().semantic_window_snapshot(),
+            "ingestion_policy": _policy(domain).semantic_window_snapshot(),
         },
         source_token_count=1,
         token_estimator="test",
@@ -78,14 +78,18 @@ def _block(markdown: str) -> ContextBlockRecord:
     )
 
 
-def _snapshot(*blocks: ContextBlockRecord, window_id=None) -> ContextSnapshot:
+def _snapshot(
+    *blocks: ContextBlockRecord,
+    window_id=None,
+    domain_version=1,
+) -> ContextSnapshot:
     return ContextSnapshot(
         revision_id=uuid4(),
         project_id="project-1",
         revision_number=1,
         window_id=window_id,
         origin=ContextRevisionOrigin.CONVERSATION,
-        domain_version=1,
+        domain_version=domain_version,
         content_hash="a" * 64,
         blocks=list(blocks),
     )
@@ -163,7 +167,7 @@ class _ContextStore:
             parent_revision_id=None if parent is None else parent.revision_id,
             window_id=kwargs["window_id"],
             origin=ContextRevisionOrigin.CONVERSATION,
-            domain_version=1,
+            domain_version=kwargs["domain_version"],
             edit_summary=kwargs["edit_summary"],
             content_hash=materialization.content_hash,
             blocks=list(materialization.blocks),
@@ -347,9 +351,9 @@ async def _publish_nothing(_entity_ids):
     return None
 
 
-def _job(store, updater, *, now_ms=lambda: 1_000, projection=None):
+def _job(store, updater, *, now_ms=lambda: 1_000, projection=None, policy=None):
     async def capture_semantic_policy():
-        return _policy()
+        return policy or _policy()
 
     return ProjectSemanticProcessor(
         _Admission(),
@@ -719,6 +723,32 @@ async def test_context_noop_records_the_current_revision_without_creating_a_chil
     assert len(updater.calls) == 1
     assert store.commit_calls == []
     assert store.advance_calls[0]["context_revision_id"] == str(current.revision_id)
+    assert store.window.stage is SemanticWindowStage.COMPLETED
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_context_noop_rebases_revision_when_window_domain_version_changes():
+    current = _snapshot(
+        _block("Current Context is already sufficient."), window_id=uuid4()
+    )
+    new_domain = _domain(version=2)
+    store = _ContextStore(_window(new_domain), current_snapshot=current)
+    updater = _NoopUpdater()
+    job = _job(store, updater, policy=_policy(new_domain))
+
+    result = await job.execute(JobContext(user_name="ada", project_id="project-1"))
+
+    assert result.success
+    assert len(updater.calls) == 1
+    assert len(store.commit_calls) == 1
+    commit = store.commit_calls[0]
+    assert commit["expected_parent_revision_id"] == str(current.revision_id)
+    assert commit["domain_version"] == 2
+    assert commit["materialization"].blocks == tuple(current.blocks)
+    assert commit["materialization"].impacted_block_ids == frozenset()
+    assert store.current_snapshot.domain_version == 2
+    assert store.window.context_revision_id == store.current_snapshot.revision_id
     assert store.window.stage is SemanticWindowStage.COMPLETED
 
 

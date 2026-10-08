@@ -2,29 +2,34 @@ import json
 
 import pytest
 
-from common.conf.domain_config import DomainConfig
+from common.conf.domain_config import DEFAULT_CONTEXT_SECTIONS, DomainConfig
 from core.project.domain_config_store import (
     DomainActivation,
     DomainConfigConflict,
+    DomainConfigSectionRemovalConflict,
     DomainConfigStore,
 )
 from tests.fixtures.factories import make_project_state
 from tests.fixtures.fakes import RecordingPostgresClient
 
 
-def make_domain(version=0):
-    return DomainConfig.from_mapping(
-        {
-            "version": version,
-            "topics": {"Software Development": {"active": True}},
-            "entity_types": {
-                "Project": {
-                    "topic": "Software Development",
-                    "labels": ["project"],
-                }
-            },
-        }
-    )
+def make_domain(version=0, *, context_sections=None):
+    payload = {
+        "version": version,
+        "topics": {"Software Development": {"active": True}},
+        "entity_types": {
+            "Project": {
+                "topic": "Software Development",
+                "labels": ["project"],
+            }
+        },
+    }
+    if context_sections is not None:
+        payload["context_sections"] = [
+            {"key": section.key, "title": section.title}
+            for section in context_sections
+        ]
+    return DomainConfig.from_mapping(payload)
 
 
 @pytest.mark.unit
@@ -49,7 +54,10 @@ async def test_domain_config_store_activation_assigns_next_revision_transactiona
     current = make_domain(version=4)
     candidate = make_domain(version=0)
     postgres = RecordingPostgresClient(
-        fetch_one_results=[{"domain_config": current.to_dict()}]
+        fetch_one_results=[
+            {"domain_config": current.to_dict()},
+            {"current_revision_id": None},
+        ]
     )
 
     activation = await DomainConfigStore(postgres).activate(
@@ -69,6 +77,13 @@ async def test_domain_config_store_activation_assigns_next_revision_transactiona
     )
     assert update_call[0] == "execute"
     assert json.loads(update_call[2]["config"])["version"] == 5
+    lock_queries = [
+        call[1]
+        for call in postgres.calls
+        if call[0] == "execute" and "FOR UPDATE" in call[1]
+    ]
+    assert "public.projects" in lock_queries[0]
+    assert "project_contexts" in lock_queries[1]
     assert postgres.transaction_enters == 1
     assert postgres.transaction_exits == 1
 
@@ -78,7 +93,10 @@ async def test_domain_config_store_activation_assigns_next_revision_transactiona
 async def test_domain_config_store_rejects_stale_activation_without_writing():
     current = make_domain(version=4)
     postgres = RecordingPostgresClient(
-        fetch_one_results=[{"domain_config": current.to_dict()}]
+        fetch_one_results=[
+            {"domain_config": current.to_dict()},
+            {"current_revision_id": None},
+        ]
     )
 
     with pytest.raises(DomainConfigConflict) as error:
@@ -91,8 +109,129 @@ async def test_domain_config_store_rejects_stale_activation_without_writing():
 
     assert error.value.expected_version == 3
     assert error.value.actual_version == 4
-    assert len(postgres.calls) == 1
-    assert "FOR UPDATE" in postgres.calls[0][1]
+    lock_queries = [
+        call[1]
+        for call in postgres.calls
+        if call[0] == "execute" and "FOR UPDATE" in call[1]
+    ]
+    assert len(lock_queries) == 1
+    assert "public.projects" in lock_queries[0]
+    assert "project_contexts" not in lock_queries[0]
+    assert not any(
+        call[0] == "execute" and "SET domain_config" in call[1]
+        for call in postgres.calls
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_domain_config_store_rejects_removing_a_section_with_live_blocks():
+    current = make_domain(version=4)
+    candidate = make_domain(
+        context_sections=tuple(
+            section
+            for section in DEFAULT_CONTEXT_SECTIONS
+            if section.key != "active_work"
+        )
+    )
+    postgres = RecordingPostgresClient(
+        fetch_one_results=[
+            {"domain_config": current.to_dict()},
+            {"current_revision_id": "revision-1"},
+            {"section_key": "active_work"},
+        ]
+    )
+
+    with pytest.raises(
+        DomainConfigSectionRemovalConflict,
+        match="live blocks.*active_work",
+    ):
+        await DomainConfigStore(postgres).activate(
+            user_name="ada",
+            project_id="project-1",
+            candidate=candidate,
+            expected_version=4,
+        )
+
+    assert not any(
+        call[0] == "execute" and "SET domain_config" in call[1]
+        for call in postgres.calls
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_domain_config_store_rejects_section_removal_while_old_window_can_write_context():
+    current = make_domain(version=4)
+    candidate = make_domain(
+        context_sections=tuple(
+            section
+            for section in DEFAULT_CONTEXT_SECTIONS
+            if section.key != "active_work"
+        )
+    )
+    postgres = RecordingPostgresClient(
+        fetch_one_results=[
+            {"domain_config": current.to_dict()},
+            {"current_revision_id": None},
+            {"window_id": "window-1"},
+        ]
+    )
+
+    with pytest.raises(
+        DomainConfigSectionRemovalConflict,
+        match="semantic window is active.*active_work",
+    ):
+        await DomainConfigStore(postgres).activate(
+            user_name="ada",
+            project_id="project-1",
+            candidate=candidate,
+            expected_version=4,
+        )
+
+    assert any(
+        call[0] == "execute" and "stage <> 'completed'" in call[1]
+        for call in postgres.calls
+    )
+    assert not any(
+        call[0] == "execute" and "SET domain_config" in call[1]
+        for call in postgres.calls
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_domain_config_store_allows_removing_an_empty_section_after_window_drains():
+    current = make_domain(version=4)
+    candidate = make_domain(
+        context_sections=tuple(
+            section
+            for section in DEFAULT_CONTEXT_SECTIONS
+            if section.key != "active_work"
+        )
+    )
+    postgres = RecordingPostgresClient(
+        fetch_one_results=[
+            {"domain_config": current.to_dict()},
+            {"current_revision_id": "revision-1"},
+            None,
+            None,
+        ]
+    )
+
+    activation = await DomainConfigStore(postgres).activate(
+        user_name="ada",
+        project_id="project-1",
+        candidate=candidate,
+        expected_version=4,
+    )
+
+    assert activation.config.version == 5
+    assert activation.config.context_sections == candidate.context_sections
+    assert any(
+        call[0] == "execute" and "SET domain_config" in call[1]
+        for call in postgres.calls
+    )
 
 
 @pytest.mark.unit
