@@ -120,6 +120,7 @@ class ProjectManager:
         self.entity_maintenance_service = EntityMaintenanceService(
             resources.postgres,
             user_name=user_name,
+            llm=getattr(resources, "llm_service", None),
         )
         self.maintenance_scheduler = ApplicationMaintenanceScheduler(
             maintenance_service=self.entity_maintenance_service,

@@ -16,6 +16,7 @@ from core.knowledge.db.writers.global_entity_merge_writer import (
     GlobalEntityMergeWriter,
 )
 from core.knowledge.db.writers.maintenance_review_writer import MaintenanceReviewWriter
+from core.knowledge.entity.merge_advisor import EntityMergeAdvisor
 from core.knowledge.maintenance.maintenance_reviews import (
     EntityContextMergeChoice,
     EntityMergePlan,
@@ -36,6 +37,7 @@ class EntityMaintenanceService:
         self,
         postgres: PostgresClient,
         user_name: str,
+        llm=None,
     ) -> None:
         if postgres is None:
             raise ValueError("EntityMaintenanceService requires PostgreSQL")
@@ -47,6 +49,9 @@ class EntityMaintenanceService:
         self.review_writer = MaintenanceReviewWriter(postgres)
         self.projection_rebuilder = GraphBuilder(postgres)
         self.semantic_window_reader = SemanticWindowReader(postgres)
+        self.merge_advisor = (
+            EntityMergeAdvisor(postgres, llm, self.user_name) if llm is not None else None
+        )
 
     @asynccontextmanager
     async def _cursor(self, cur=None):
@@ -229,6 +234,34 @@ class EntityMaintenanceService:
             "state_hash": self.state_hash(snapshot),
             "frontiers": frontiers,
             "definition_versions": definition_versions,
+        }
+
+    async def advise_merge(
+        self,
+        *,
+        user_name: str | None = None,
+        survivor_entity_id: int,
+        retired_entity_id: int,
+    ) -> dict[str, Any]:
+        """Return bounded model advice without opening or applying a merge review."""
+
+        if self.merge_advisor is None:
+            raise RuntimeError("Entity merge advisor has no configured LLM")
+        actor = user_name or self.user_name
+        if actor != self.user_name:
+            raise ValueError("merge advisor cannot cross its user scope")
+        preview = await self.preview_merge(
+            user_name=actor,
+            survivor_entity_id=survivor_entity_id,
+            retired_entity_id=retired_entity_id,
+        )
+        advice = await self.merge_advisor.advise(preview)
+        return {
+            "candidate_entity_ids": [survivor_entity_id, retired_entity_id],
+            "state_hash": preview["state_hash"],
+            "context_conflicts": preview["context_conflicts"],
+            "context_plan_ready": preview["ready"],
+            **advice,
         }
 
     async def propose(

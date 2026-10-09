@@ -293,6 +293,7 @@ TOOL_DEFINITIONS = {
     ),
     "submit_answer": _definition("submit_answer", executor_protocol=True),
     "inspect_duplicate_entities": _definition("inspect_duplicate_entities"),
+    "advise_entity_merge": _definition("advise_entity_merge", default_limit=3),
     "propose_entity_merge": _definition("propose_entity_merge"),
     "report_relationship_conflict": _definition("report_relationship_conflict"),
     "list_project_files": _definition("list_project_files", default_limit=4),

@@ -75,6 +75,17 @@ def test_project_manager_composes_user_owned_expiry_without_loaded_projects():
 
 @pytest.mark.unit
 @pytest.mark.no_network
+def test_project_manager_wires_configured_llm_into_merge_advisor():
+    resources = FakeResources()
+    resources.llm_service = object()
+
+    manager = ProjectManager(resources, "ada")
+
+    assert manager.entity_maintenance_service.merge_advisor.llm is resources.llm_service
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 async def test_artifact_sweep_runs_directly_and_retries_with_honest_status():
     writer = SimpleNamespace(purge_expired_artifacts=AsyncMock(side_effect=[StorageWriteError("expiry"), 2, 0]))
     scheduler = ApplicationMaintenanceScheduler(

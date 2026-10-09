@@ -916,12 +916,42 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "advise_entity_merge",
+            "description": (
+                "Ask the configured merge model to assess two entity IDs using "
+                "bounded stored message and episode evidence. This only returns "
+                "cited advice; it does not open a review or merge entities."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "primary_id": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "One candidate entity ID, initially preferred to survive.",
+                    },
+                    "duplicate_id": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "The other candidate entity ID.",
+                    },
+                },
+                "required": ["primary_id", "duplicate_id"],
+                "additionalProperties": False,
+            },
+            "tags": ["graph:read", "core"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "propose_entity_merge",
             "description": (
                 "Propose that a duplicate entity be merged into a primary entity. "
                 "This never grants permission to execute the destructive merge. "
                 "Ground the proposal with message or episode IDs returned by "
-                "graph tools."
+                "graph tools or advise_entity_merge. Include the advisor's state "
+                "hash when using its recommendation."
             ),
             "parameters": {
                 "type": "object",
@@ -947,6 +977,14 @@ TOOL_SCHEMAS = [
                         "type": "array",
                         "items": {"type": "string", "minLength": 4},
                         "description": "Episode IDs (for example ep_a3f91c) that support the proposal."
+                    },
+                    "expected_state_hash": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{64}$",
+                        "description": (
+                            "State hash returned by advise_entity_merge; the proposal "
+                            "is rejected if candidate evidence changed."
+                        ),
                     }
                 },
                 "required": [
