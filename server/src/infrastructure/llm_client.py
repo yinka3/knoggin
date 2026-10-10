@@ -305,6 +305,15 @@ class LLMService:
             return len(text) // 4
         return len(self._tokenizer.encode(text))
 
+    def count_tokens_batch(self, texts: list[str]) -> list[int]:
+        """Count independent rendered prefixes with the same tokenizer rule."""
+        if not self._tokenizer:
+            return [len(value) // 4 for value in texts]
+        return [
+            len(tokens)
+            for tokens in self._tokenizer.encode_batch(texts, num_threads=4)
+        ]
+
     async def _reserve_external_attempt(
         self,
         *,

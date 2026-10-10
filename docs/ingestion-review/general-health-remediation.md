@@ -31,9 +31,11 @@ Working plan, 2026-10-10. Source and persisted outcomes take priority over test 
 
 The characters processed grow about fourfold when exchanges double. The selector renders and tokenizes every growing prefix until the first exact target crossing. An incremental count cannot simply add per-exchange token counts because tokens may merge at boundaries. Any optimization must preserve the first exact crossing and test adversarial boundaries against the original implementation.
 
+The first exact optimization groups eight full prefixes per tokenizer call and runs four tokenizer threads. The original scalar selector remains available when the LLM service lacks batch counting. With the same synthetic rows, 512 exchanges took **3.864 s scalar** versus **1.289 s batched**; both tokenized 38,427,671 characters and selected 22,528 source tokens. Four target-crossing cases with Unicode, whitespace, and header-like text matched the scalar memberships and counts. A failed batch is rechecked in order: a later disallowed token must not reject an earlier valid crossing. This lowers wall time at the cost of short CPU bursts and temporary prefix strings. It does not change quadratic total work, so a tokenizer-aware incremental design remains open for very large unclaimed backlogs. The affected semantic, LLM, and runtime suites passed 49 tests.
+
 ## Next implementation units
 
-1. Design a tokenizer-aware exact-prefix optimization and compare it against the original selector on boundary-heavy inputs. The measured growth makes a large unclaimed backlog costly; the SQL already excludes claimed history.
+1. Design a tokenizer-aware incremental exact-prefix optimization if large unclaimed backlogs remain a production bottleneck. The measured batch improvement leaves quadratic total work; the SQL already excludes claimed history.
 2. Run the storage-backed contracts when Postgres is available; model artifacts and explicit PDF recovery have been exercised locally.
 
 ## Coverage and limits

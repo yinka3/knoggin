@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+import tiktoken
 
 from common.schema.context import ContextRevisionOrigin, ContextSnapshot
 from common.schema.settings import (
@@ -16,6 +17,7 @@ from core.ingestion.project_semantic_processor import ProjectSemanticProcessor
 from core.ingestion.semantic_window_admission import SemanticWindowAdmission
 from infrastructure.job.base import JobContext
 from infrastructure.job.scheduler import Scheduler
+from infrastructure.llm_client import LLMService
 from tests.fixtures.factories import make_domain_config
 
 
@@ -82,6 +84,74 @@ def _policy(domain):
         entity_resolution=EntityResolutionSettings(),
         compiled_domain=domain,
     )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+@pytest.mark.parametrize("target", [1, 8, 30, 1000])
+async def test_batched_exact_prefixes_choose_the_same_first_crossing(target):
+    tokenizer = tiktoken.get_encoding("cl100k_base")
+    llm = object.__new__(LLMService)
+    llm._tokenizer = tokenizer
+    rows = [
+        _row(index, user_content=value, outcome="user_only", assistant_id=None)
+        for index, value in enumerate(
+            ["hello", " world", "🙂", "\n\nUSER:\n", "12345", "é", "a" * 80]
+            * 2,
+            start=1,
+        )
+    ]
+    scalar = SemanticWindowAdmission(
+        RecordingStore(rows),
+        IngestionSettings(semantic_window_tokens=target),
+        token_counter=llm.count_tokens,
+    )
+    batched = SemanticWindowAdmission(
+        RecordingStore(rows),
+        IngestionSettings(semantic_window_tokens=target),
+        token_counter=llm.count_tokens,
+        token_counter_batch=llm.count_tokens_batch,
+    )
+    domain = make_domain_config().compile()
+    original = await scalar.select(
+        user_name="ada", project_id="project-1", domain=domain, force_flush=True
+    )
+    optimized = await batched.select(
+        user_name="ada", project_id="project-1", domain=domain, force_flush=True
+    )
+
+    assert original is not None and optimized is not None
+    assert optimized.messages == original.messages
+    assert optimized.close_reason == original.close_reason
+    assert optimized.window.source_token_count == original.window.source_token_count
+    assert optimized.window.overfill_tokens == original.window.overfill_tokens
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_batch_failure_after_first_crossing_uses_scalar_boundary():
+    llm = object.__new__(LLMService)
+    llm._tokenizer = tiktoken.get_encoding("cl100k_base")
+    rows = [
+        _row(1, user_content="ordinary text", outcome="user_only"),
+        _row(2, user_content="<|endoftext|>", outcome="user_only"),
+    ]
+    admission = SemanticWindowAdmission(
+        RecordingStore(rows),
+        IngestionSettings(semantic_window_tokens=1),
+        token_counter=llm.count_tokens,
+        token_counter_batch=llm.count_tokens_batch,
+    )
+
+    selected = await admission.select(
+        user_name="ada",
+        project_id="project-1",
+        domain=make_domain_config().compile(),
+    )
+
+    assert selected is not None
+    assert [message.message_id for message in selected.messages] == [1]
+    assert selected.close_reason == "oversized_exchange"
 
 
 @pytest.mark.unit

@@ -275,6 +275,7 @@ class ProjectRuntimeFactory:
             resources.knowledge_store,
             developer_settings.ingestion,
             token_counter=token_counter,
+            token_counter_batch=getattr(resources.llm_service, "count_tokens_batch", None),
             episode_settings=developer_settings.jobs.episode,
         )
         episode_generator = EpisodeGenerator(

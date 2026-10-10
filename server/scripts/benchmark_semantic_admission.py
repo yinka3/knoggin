@@ -55,35 +55,46 @@ def exchange_rows(count: int) -> list[dict]:
 async def main() -> None:
     tokenizer = tiktoken.get_encoding("cl100k_base")
     domain = DomainConfig(version=1, topics=(), entity_types=()).compile()
-    print("exchanges,seconds,token_calls,characters_tokenized,source_tokens")
+    print("exchanges,mode,seconds,token_calls,characters_tokenized,source_tokens")
     for size in (64, 128, 256, 512):
-        calls = 0
-        characters = 0
+        for mode in ("scalar", "batch"):
+            calls = 0
+            characters = 0
 
-        def count_tokens(value: str) -> int:
-            nonlocal calls, characters
-            calls += 1
-            characters += len(value)
-            return len(tokenizer.encode(value))
+            def count_tokens(value: str) -> int:
+                nonlocal calls, characters
+                calls += 1
+                characters += len(value)
+                return len(tokenizer.encode(value))
 
-        admission = SemanticWindowAdmission(
-            Rows(exchange_rows(size)),
-            IngestionSettings(semantic_window_tokens=128_000),
-            token_counter=count_tokens,
-            now_ms=lambda: 1_000_000,
-        )
-        start = perf_counter()
-        selected = await admission.select(
-            user_name="ada", project_id="project-1", domain=domain,
-            force_flush=True,
-        )
-        elapsed = perf_counter() - start
-        assert selected is not None
-        assert len(selected.messages) == size
-        print(
-            f"{size},{elapsed:.3f},{calls},{characters},"
-            f"{selected.window.source_token_count}"
-        )
+            def count_tokens_batch(values: list[str]) -> list[int]:
+                nonlocal calls, characters
+                calls += 1
+                characters += sum(len(value) for value in values)
+                return [
+                    len(tokens)
+                    for tokens in tokenizer.encode_batch(values, num_threads=4)
+                ]
+
+            admission = SemanticWindowAdmission(
+                Rows(exchange_rows(size)),
+                IngestionSettings(semantic_window_tokens=128_000),
+                token_counter=count_tokens,
+                token_counter_batch=count_tokens_batch if mode == "batch" else None,
+                now_ms=lambda: 1_000_000,
+            )
+            start = perf_counter()
+            selected = await admission.select(
+                user_name="ada", project_id="project-1", domain=domain,
+                force_flush=True,
+            )
+            elapsed = perf_counter() - start
+            assert selected is not None
+            assert len(selected.messages) == size
+            print(
+                f"{size},{mode},{elapsed:.3f},{calls},{characters},"
+                f"{selected.window.source_token_count}"
+            )
 
 
 if __name__ == "__main__":
