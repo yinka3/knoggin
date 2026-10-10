@@ -670,6 +670,7 @@ class KnowledgeStore:
         error_summary: str,
         failed_at_ms: int,
         next_retry_at_ms: int | None,
+        expected_attempt_count: int | None = None,
     ) -> SemanticWindowRecord | None:
         return await self._semantic_window_writer.record_failure(
             window_id=window_id,
@@ -681,6 +682,7 @@ class KnowledgeStore:
             error_summary=error_summary,
             failed_at_ms=failed_at_ms,
             next_retry_at_ms=next_retry_at_ms,
+            expected_attempt_count=expected_attempt_count,
         )
 
     async def retry_project_semantic_window(

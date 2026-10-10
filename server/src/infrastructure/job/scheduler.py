@@ -316,9 +316,10 @@ class Scheduler:
     ) -> JobResult | None:
         logger.info("Executing job: {}", job.name)
         self._mark_job_running(job.name, policy)
+        deadline: asyncio.Timeout | None = None
         try:
             await self._safe_emit(ctx.project_id, "job", "started", {"name": job.name})
-            async with asyncio.timeout(policy.execution_timeout_seconds):
+            async with asyncio.timeout(policy.execution_timeout_seconds) as deadline:
                 result = await job.execute(ctx)
             if result.success:
                 self._record_cadence_success(job)
@@ -338,7 +339,21 @@ class Scheduler:
                 logger.info("Job {}: {}", job.name, result.summary)
             return result
         except TimeoutError:
+            if deadline is None or not deadline.expired():
+                self._finish_job_run(job.name, "failed")
+                logger.exception("Job {} raised a timeout before its scheduler deadline", job.name)
+                await self._safe_emit(
+                    ctx.project_id,
+                    "job",
+                    "failed",
+                    {"name": job.name, "error": "job_timeout"},
+                )
+                return None
             self._finish_job_run(job.name, "timed_out")
+            try:
+                await job.on_timeout(ctx)
+            except Exception:
+                logger.exception("Job {} timeout recovery failed", job.name)
             logger.error(
                 "Job {} timed out after {}s",
                 job.name,

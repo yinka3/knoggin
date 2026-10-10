@@ -903,6 +903,23 @@ async def test_semantic_window_stage_cas_and_failures_keep_the_last_successful_s
     )
     assert claimed_failure is not None
     assert claimed_failure.attempt_count == 1
+    assert await window_writer.record_failure(
+        window_id=window.window_id,
+        user_name="ada",
+        project_id="project-1",
+        expected_stage=SemanticWindowStage.CLAIMED,
+        expected_attempt_count=0,
+        failure_stage="episode",
+        failure_code="TimeoutError",
+        error_summary="stale scheduler timeout",
+        failed_at_ms=2_000,
+        next_retry_at_ms=32_000,
+    ) is None
+    assert (
+        await window_reader.get_window(
+            window.window_id, user_name="ada", project_id="project-1"
+        )
+    ).attempt_count == 1
     assert await window_writer.advance_stage(
         window_id=window.window_id,
         user_name="ada",

@@ -220,6 +220,29 @@ async def test_timeout_and_cancellation_are_reported_locally(monkeypatch):
 
 @pytest.mark.runtime
 @pytest.mark.no_network
+async def test_job_raised_timeout_is_a_failure_not_scheduler_deadline(monkeypatch):
+    events = capture_events(monkeypatch)
+    scheduler = Scheduler("ada", "project-1")
+    job = ControlledJob()
+    timeout_callbacks = []
+
+    async def raise_timeout(_ctx):
+        raise TimeoutError("provider timed out")
+
+    async def on_timeout(_ctx):
+        timeout_callbacks.append(True)
+
+    job.execute = raise_timeout
+    job.on_timeout = on_timeout
+
+    assert await scheduler._execute_job(job, context()) is None
+    assert [event[2] for event in events] == ["started", "failed"]
+    assert scheduler.snapshot_for_health()["recent_outcomes"][-1]["state"] == "failed"
+    assert timeout_callbacks == []
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
 async def test_local_admission_lock_prevents_duplicate_execution():
     scheduler = Scheduler("ada", "project-1")
     allow_check = asyncio.Event()

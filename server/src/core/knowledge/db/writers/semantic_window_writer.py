@@ -225,6 +225,7 @@ class SemanticWindowWriter:
         error_summary: str,
         failed_at_ms: int,
         next_retry_at_ms: int | None,
+        expected_attempt_count: int | None = None,
     ) -> SemanticWindowRecord | None:
         """Record a retryable failure without mutating the successful checkpoint."""
 
@@ -236,6 +237,12 @@ class SemanticWindowWriter:
         error_summary = self._text(error_summary, "error_summary")
         if not isinstance(failed_at_ms, int) or isinstance(failed_at_ms, bool) or failed_at_ms < 0:
             raise ValueError("failed_at_ms must be a non-negative integer")
+        if expected_attempt_count is not None and (
+            not isinstance(expected_attempt_count, int)
+            or isinstance(expected_attempt_count, bool)
+            or expected_attempt_count < 0
+        ):
+            raise ValueError("expected_attempt_count must be non-negative")
         if (
             next_retry_at_ms is not None
             and (
@@ -261,6 +268,7 @@ class SemanticWindowWriter:
                       AND user_name = %s
                       AND project_id = %s
                       AND stage = %s
+                      AND (%s::integer IS NULL OR attempt_count = %s::integer)
                     RETURNING {_WINDOW_COLUMNS}
                     """,
                     (
@@ -273,6 +281,8 @@ class SemanticWindowWriter:
                         user_name,
                         project_id,
                         expected_stage.value,
+                        expected_attempt_count,
+                        expected_attempt_count,
                     ),
                 )
                 row = await cur.fetchone()

@@ -132,6 +132,7 @@ class SemanticEpisodeStore(Protocol):
         error_summary: str,
         failed_at_ms: int,
         next_retry_at_ms: int | None,
+        expected_attempt_count: int | None = None,
     ) -> SemanticWindowRecord | None: ...
 
 
@@ -193,6 +194,7 @@ class ProjectSemanticProcessor(BaseJob):
         self._publish_committed_entity_ids = publish_committed_entity_ids
         self._capture_semantic_policy = capture_semantic_policy
         self._now_ms = now_ms or (lambda: int(time() * 1000))
+        self._timeout_stage: tuple[SemanticWindowRecord, str] | None = None
         self.update_settings(settings)
 
     @property
@@ -226,6 +228,7 @@ class ProjectSemanticProcessor(BaseJob):
         return False
 
     async def execute(self, ctx: JobContext) -> JobResult:
+        self._timeout_stage = None
         window = await self.knowledge_store.get_active_project_semantic_window(
             user_name=ctx.user_name,
             project_id=ctx.project_id,
@@ -293,7 +296,9 @@ class ProjectSemanticProcessor(BaseJob):
                 return JobResult(success=True, summary="No semantic window stage is due")
 
             stage_name, execute_stage = stage
+            self._timeout_stage = (window, stage_name)
             result = await execute_stage(window, ctx)
+            self._timeout_stage = None
             if not result.success:
                 return result
             completed_stages.append(stage_name)
@@ -330,6 +335,32 @@ class ProjectSemanticProcessor(BaseJob):
                     summary="Semantic processor stopped without durable progress",
                 )
             window = reloaded
+
+    async def on_timeout(self, ctx: JobContext) -> None:
+        """Charge a cancelled stage only if its durable checkpoint is unchanged."""
+        attempt = self._timeout_stage
+        self._timeout_stage = None
+        if attempt is None:
+            return
+        window, stage_name = attempt
+        current = await self.knowledge_store.get_active_project_semantic_window(
+            user_name=ctx.user_name,
+            project_id=ctx.project_id,
+        )
+        if (
+            current is None
+            or current.window_id != window.window_id
+            or current.stage is not window.stage
+            or current.attempt_count != window.attempt_count
+        ):
+            return
+        await self._record_failure(
+            window,
+            ctx,
+            TimeoutError("Semantic stage exceeded scheduler execution timeout"),
+            failure_stage=stage_name.lower(),
+            expected_attempt_count=window.attempt_count,
+        )
 
     def _next_due_stage(
         self,
@@ -804,6 +835,7 @@ class ProjectSemanticProcessor(BaseJob):
         exc: Exception,
         *,
         failure_stage: str,
+        expected_attempt_count: int | None = None,
     ) -> None:
         failed_at_ms = self._now_ms()
         retry = self._settings.semantic_window_retry
@@ -817,6 +849,11 @@ class ProjectSemanticProcessor(BaseJob):
             if attempt < retry.max_attempts
             else None
         )
+        attempt_guard = (
+            {"expected_attempt_count": expected_attempt_count}
+            if expected_attempt_count is not None
+            else {}
+        )
         await self.knowledge_store.record_project_semantic_window_failure(
             window_id=str(window.window_id),
             user_name=ctx.user_name,
@@ -827,4 +864,5 @@ class ProjectSemanticProcessor(BaseJob):
             error_summary=str(exc)[:2_000] or type(exc).__name__,
             failed_at_ms=failed_at_ms,
             next_retry_at_ms=next_retry_at_ms,
+            **attempt_guard,
         )
