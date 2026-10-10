@@ -74,6 +74,8 @@ class RuntimeHealthService:
             warnings.append("PostgreSQL probe failed")
         if projection_repair.get("pending_count", 0):
             warnings.append("Maintenance projection repair is pending")
+        if projection_repair.get("available") is not True:
+            warnings.append("Maintenance projection repair health is unavailable")
         warnings.extend(
             f"{name.replace('_', ' ')} is unavailable"
             for name in unavailable_subsystems
@@ -88,6 +90,7 @@ class RuntimeHealthService:
         elif (
             self._closing
             or projection_repair.get("pending_count", 0)
+            or projection_repair.get("available") is not True
         ):
             status = HealthStatus.DEGRADED
             summary = "Runtime is operating with degraded health"

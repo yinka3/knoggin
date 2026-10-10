@@ -171,10 +171,15 @@ class FakeConflictDiscoveryJob:
 @pytest.mark.no_network
 async def test_engine_health_is_healthy_and_does_not_mutate_dependencies():
     postgres = FakePostgres()
+    class Maintenance:
+        async def projection_repair_health(self):
+            return {"pending_count": 0, "truncated": False}
+
     service = RuntimeHealthService(
         resources=resources(postgres=postgres),
         projects=SimpleNamespace(
-            active_projects={"project-a": object(), "project-b": object()}
+            active_projects={"project-a": object(), "project-b": object()},
+            entity_maintenance_service=Maintenance(),
         ),
         sessions=SessionRuntimeReader({"session-a": object()}),
     )
@@ -189,6 +194,29 @@ async def test_engine_health_is_healthy_and_does_not_mutate_dependencies():
     assert payload["details"]["active_runtime_session_count"] == 1
     assert postgres.fetch_calls == 1
     assert "secret" not in json.dumps(payload)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_engine_health_degrades_when_maintenance_repair_read_fails():
+    class Maintenance:
+        async def projection_repair_health(self):
+            raise RuntimeError("private database detail")
+
+    service = RuntimeHealthService(
+        resources=resources(),
+        projects=SimpleNamespace(
+            active_projects={}, entity_maintenance_service=Maintenance()
+        ),
+        sessions=SessionRuntimeReader({}),
+    )
+
+    payload = (await service.get_engine_health()).model_dump(mode="json")
+
+    assert payload["status"] == "degraded"
+    assert payload["details"]["maintenance_projection_repair"]["available"] is False
+    assert "Maintenance projection repair health is unavailable" in payload["warnings"]
+    assert "private database detail" not in json.dumps(payload)
 
 
 @pytest.mark.unit
