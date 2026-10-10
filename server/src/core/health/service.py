@@ -335,12 +335,18 @@ class RuntimeHealthService:
         scheduler_state = scheduler_snapshot.get("state")
         if semantic_processor is None:
             scheduler_state = "not_registered"
+        enabled_jobs = scheduler_snapshot.get("enabled_jobs")
+        semantic_job_disabled = (
+            isinstance(enabled_jobs, list)
+            and "project_semantic" not in enabled_jobs
+        )
         if (
             scheduler_state == "stopped"
             or self._nonnegative_int(scheduler_snapshot.get("stalled_jobs"))
             or overdue_without_job
             or unclaimed_stalled
             or fifo_blocked
+            or (semantic_job_disabled and (pending_count or ready_exchange_count))
         ):
             delay_state = "stalled"
         elif pending_count:
@@ -366,6 +372,8 @@ class RuntimeHealthService:
             warnings.append("Context projection has a recorded synchronization failure")
         if scheduler_state in {"not_registered", "stopped"}:
             warnings.append("project semantic job is not running")
+        if semantic_job_disabled:
+            warnings.append("project semantic job is disabled")
 
         if not project_runtime_loaded:
             status = HealthStatus.DEGRADED
@@ -376,6 +384,7 @@ class RuntimeHealthService:
         elif (
             not queue_available
             or scheduler_state != "running"
+            or semantic_job_disabled
             or delay_state == "stalled"
             or failed_count
             or exhausted_count

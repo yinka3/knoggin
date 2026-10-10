@@ -531,6 +531,46 @@ async def test_ingestion_health_reports_unclaimed_and_fifo_delays(
 
 @pytest.mark.unit
 @pytest.mark.no_network
+async def test_ingestion_health_degrades_when_semantic_job_is_disabled():
+    class Store:
+        async def get_semantic_window_health(self, **_kwargs):
+            return {
+                "pending_count": 1,
+                "claimed_count": 1,
+                "failed_count": 0,
+                "exhausted_count": 0,
+                "oldest_pending_ms": 1,
+                "last_processed_ms": None,
+            }
+
+    resource_set = resources()
+    resource_set.knowledge_store = Store()
+    service = RuntimeHealthService(
+        resources=resource_set,
+        projects=SimpleNamespace(
+            active_projects={
+                "project-a": SimpleNamespace(
+                    project_semantic_processor=object(),
+                    scheduler=FakeScheduler(
+                        {"state": "running", "enabled_jobs": ["document-index"]}
+                    ),
+                )
+            }
+        ),
+        sessions=SessionRuntimeReader({}),
+    )
+
+    payload = (
+        await service.get_ingestion_health(user_name="ada", project_id="project-a")
+    ).model_dump(mode="json")
+
+    assert payload["status"] == "degraded"
+    assert payload["activity"] == "delayed"
+    assert "project semantic job is disabled" in payload["warnings"]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 async def test_ingestion_health_reports_stopped_semantic_processor_and_failed_work():
     class Store:
         async def get_semantic_window_health(self, **_kwargs):

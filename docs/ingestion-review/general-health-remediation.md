@@ -16,10 +16,24 @@ Working plan, 2026-10-10. Source and persisted outcomes take priority over test 
 10. **Due semantic window without a running job:** the scoped aggregate now counts runnable windows and measures time since their last durable stage change or retry due time. Ingestion health marks one delayed after two scheduler cadences (at least 60 seconds) without a queued/running semantic job. Exhausted retries and future backoff are excluded; a long active model call is not marked delayed by age alone. Four cases exercise those boundaries; all 23 unit health tests pass. The storage contract now checks exhausted and manual-retry aggregates but remains unrun without Postgres.
 11. **Unclaimed exchange and FIFO health:** the reader now aggregates ready exchanges and closed exchanges behind an earlier incomplete exchange without returning message content or IDs. Ingestion health allows the five-minute idle flush plus scheduler grace before degrading an old ready backlog, and reports an old closed exchange behind a FIFO barrier even if other sessions are processing. Five health cases distinguish recent backlog, active work, and old barriers; all 28 unit health tests pass. The storage contract checks the actual admission scope and ordering but still needs Postgres execution. This aggregate scans the scoped unclaimed exchange set on each health read; production latency should be measured before adding an index or caching policy.
 12. **PDF dependency recovery and model smoke:** an exhausted missing-model failure is verified as terminal (`failed`, no retry), then an explicit reindex after the dependency becomes available clears the failure and publishes readable content. The release model lane now provisions Docling layout, table, and OCR artifacts and runs an actual generated PDF through the local converter. That smoke passed locally with cached models (67 seconds); it is a model test, so ordinary fast pytest runs do not exercise it.
+13. **Disabled semantic job:** a running scheduler with a registered but disabled `project_semantic` job now degrades ingestion health. Pending semantic work is marked delayed. A unit test checks the disabled-job state explicitly.
+
+## Admission performance measurement
+
+`server/scripts/benchmark_semantic_admission.py` uses the production selector and `cl100k_base` tokenizer with in-memory ready exchanges, a 128,000-token target, and forced flush. On this Windows machine:
+
+| Exchanges | Exact token calls | Characters tokenized | Elapsed |
+| ---: | ---: | ---: | ---: |
+| 64 | 64 | 606,692 | 0.075 s |
+| 128 | 128 | 2,409,815 | 0.234 s |
+| 256 | 256 | 9,615,255 | 0.887 s |
+| 512 | 512 | 38,427,671 | 3.649 s |
+
+The characters processed grow about fourfold when exchanges double. The selector renders and tokenizes every growing prefix until the first exact target crossing. An incremental count cannot simply add per-exchange token counts because tokens may merge at boundaries. Any optimization must preserve the first exact crossing and test adversarial boundaries against the original implementation.
 
 ## Next implementation units
 
-1. Benchmark repeated prefix tokenization before changing its exact target-crossing behavior. The SQL now excludes claimed history, but a large unclaimed backlog still requires reading its FIFO heads.
+1. Design a tokenizer-aware exact-prefix optimization and compare it against the original selector on boundary-heavy inputs. The measured growth makes a large unclaimed backlog costly; the SQL already excludes claimed history.
 2. Run the storage-backed contracts when Postgres is available; model artifacts and explicit PDF recovery have been exercised locally.
 
 ## Coverage and limits
