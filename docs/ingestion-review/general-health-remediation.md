@@ -9,15 +9,15 @@ Working plan, 2026-10-10. Source and persisted outcomes take priority over test 
 3. **Terminal document-index health:** a scoped SQL count of failed documents with no retry flows through `DocumentIndexer` and `DocumentService` into background health. Health degrades and shows only the count, not the parser error. The parser-failure test now checks this producer-to-health boundary. The affected unit/integration suite passed 121 tests.
 4. **Unavailable maintenance repair read:** engine health now degrades when the expected maintenance repair metric cannot be read, rather than treating an unavailable count as zero. The health suite passed 17 tests; the failure detail stays out of the public payload.
 5. **Scheduler preflight failures:** consecutive job-check errors are recorded by job name with a fixed count cap and no exception text. Ingestion health degrades for a failing `project_semantic` check; a later successful check clears the signal. A real scheduler-to-health test and the affected scheduler/health suites passed 39 tests.
+6. **Document upload cancellation and inline indexing failure:** file and catalog operations are shielded and settled before cancelled callers return; a completed insert is tombstoned before its owned file is removed. If the catalog rollback fails, bytes remain to preserve a live row's source. Once admission has saved a row, an inline indexing error is logged and the API returns that row's ID and current indexing status. Tests cancel both a delayed file worker and an in-flight catalog insert, assert no live orphan after reconciliation, and drive an invalid PDF through both single-upload and batch public ports. The affected document/API/filesystem suites passed 122 tests.
 
 ## Next implementation units
 
-1. Make upload file/catalog admission cancellation-safe, including cancellation while a worker thread is writing, and make inline index failure return a durable document identity and status. Check later reconciliation and same-path retry behavior.
-2. Make scheduler-imposed semantic timeouts consume a stage-scoped durable attempt after cancellation unwinds. Distinguish shutdown cancellation; test retry/backoff/exhaustion through scheduler and persisted health.
-3. Add health signals for unclaimed exchange backlog/FIFO barriers and due windows with no progress. Keep legitimate model work and retry backoff distinct from stalls.
-4. Bound admission SQL to unclaimed work and eliminate repeated prefix tokenization; test membership and work scaling.
-5. Check pending document indexing against actual indexing activity rather than unrelated scheduler/background jobs. Keep terminal failures and future retries separate.
-6. Verify Docling artifacts and the exhausted-dependency recovery path in an environment with model artifacts. Run the storage-backed contracts when Postgres is available.
+1. Make scheduler-imposed semantic timeouts consume a stage-scoped durable attempt after cancellation unwinds. Distinguish shutdown cancellation; test retry/backoff/exhaustion through scheduler and persisted health.
+2. Add health signals for unclaimed exchange backlog/FIFO barriers and due windows with no progress. Keep legitimate model work and retry backoff distinct from stalls.
+3. Bound admission SQL to unclaimed work and eliminate repeated prefix tokenization; test membership and work scaling.
+4. Check pending document indexing against actual indexing activity rather than unrelated scheduler/background jobs. Keep terminal failures and future retries separate.
+5. Verify Docling artifacts and the exhausted-dependency recovery path in an environment with model artifacts. Run the storage-backed contracts when Postgres is available.
 
 ## Coverage and limits
 

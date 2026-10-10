@@ -25,6 +25,7 @@ from common.schema.source.locators import (
     LayoutRegionLocator,
     TextLineLocator,
 )
+from common.utils.lifecycle import settle_owned_task
 from common.utils.time_utils import get_now_iso
 from core.knowledge.db.readers.document_reader import DocumentReader
 from core.knowledge.db.writers.document_writer import DocumentWriter
@@ -1088,13 +1089,25 @@ class DocumentService:
         filesystem = self._filesystem
         if filesystem is None:
             raise RuntimeError("Document source filesystem is not configured")
-        await self._run_blocking(
-            filesystem.write_bytes,
-            normalized_path,
-            content,
+        write_task = asyncio.create_task(
+            self._run_blocking(filesystem.write_bytes, normalized_path, content)
         )
         try:
-            await self._writer.insert_document(
+            await asyncio.shield(write_task)
+        except asyncio.CancelledError:
+            try:
+                await settle_owned_task(write_task)
+            except Exception:
+                pass  # The write failed before publishing owned bytes.
+            else:
+                await self._rollback_document_admission(
+                    filesystem=filesystem,
+                    relative_path=normalized_path,
+                    content_hash=content_hash,
+                )
+            raise
+        insert_task = asyncio.create_task(
+            self._writer.insert_document(
                 document_id=document_id,
                 original_name=original_name,
                 relative_path=normalized_path,
@@ -1103,17 +1116,30 @@ class DocumentService:
                 content_hash=content_hash,
                 created_at=created_at,
             )
-        except Exception:
+        )
+        try:
+            await asyncio.shield(insert_task)
+        except asyncio.CancelledError:
+            inserted = False
             try:
-                await self._run_blocking(
-                    filesystem.delete_file,
-                    normalized_path,
-                    expected_content_hash=content_hash,
-                )
+                await settle_owned_task(insert_task)
             except Exception:
-                logger.exception(
-                    "Could not roll back local document file after catalog failure"
-                )
+                pass
+            else:
+                inserted = True
+            await self._rollback_document_admission(
+                filesystem=filesystem,
+                relative_path=normalized_path,
+                content_hash=content_hash,
+                document_id=document_id if inserted else None,
+            )
+            raise
+        except Exception:
+            await self._rollback_document_admission(
+                filesystem=filesystem,
+                relative_path=normalized_path,
+                content_hash=content_hash,
+            )
             raise
         return {
             "document_id": document_id,
@@ -1131,6 +1157,40 @@ class DocumentService:
             "updated_at": created_at,
             "chunk_count": 0,
         }
+
+    async def _rollback_document_admission(
+        self,
+        *,
+        filesystem: ProjectFilesystem,
+        relative_path: str,
+        content_hash: str,
+        document_id: str | None = None,
+    ) -> None:
+        """Settle compensating work even if the caller is cancelled again."""
+
+        async def cleanup() -> None:
+            if document_id is not None:
+                try:
+                    await self._writer.delete_document(document_id=document_id)
+                except Exception:
+                    logger.exception(
+                        "Could not tombstone cancelled document admission"
+                    )
+                    return  # Keep source bytes while a live catalog row may exist.
+            try:
+                await self._run_blocking(
+                    filesystem.delete_file,
+                    relative_path,
+                    expected_content_hash=content_hash,
+                )
+            except FileNotFoundError:
+                pass
+            except Exception:
+                logger.exception(
+                    "Could not roll back local document file after catalog failure"
+                )
+
+        await settle_owned_task(asyncio.create_task(cleanup()))
 
     @staticmethod
     def _require_unreserved_context_path(path: str) -> None:
@@ -1185,9 +1245,18 @@ class DocumentService:
             original_name=original_name,
             relative_path=relative_path,
         )
-        return await self.schedule_document_index(
-            document_id=document["document_id"],
-        )
+        try:
+            return await self.schedule_document_index(
+                document_id=document["document_id"],
+            )
+        except Exception:
+            # Source admission already committed. Return that durable identity
+            # with its current indexing state, even when inline derivation fails.
+            logger.exception(
+                "Document indexing failed after durable source admission {}",
+                document["document_id"],
+            )
+            return await self.get_document_info(document_id=document["document_id"])
 
     async def admit_user_source(
         self,

@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import hashlib
 import json
 import tempfile
@@ -8,6 +9,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
@@ -18,6 +20,7 @@ from common.schema.document import (
     FolderScanSettings,
     FolderUploadEntry,
 )
+from common.schema.public import BatchSourceRequest, UploadDocumentRequest
 from common.utils.time_utils import frozen_time
 from core.health.service import RuntimeHealthService
 from core.knowledge.documents import (
@@ -31,6 +34,7 @@ from core.knowledge.documents import (
 from core.knowledge.documents.constants import document_extension
 from core.project.project_files import CONTEXT_FILE_PATH
 from infrastructure.background_work import BackgroundWorkRejected
+from runtime.api_port import ApplicationRuntimePort
 
 
 async def run_inline(function, *args, **kwargs):
@@ -1178,6 +1182,75 @@ async def test_concurrent_same_path_upload_keeps_winning_catalog_and_file(
     assert hashlib.sha256(content).hexdigest() == accepted[0]["content_hash"]
     assert content in {b"first version", b"second version"}
     assert not list(service._filesystem.root.rglob(".knoggin-*.tmp"))
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_cancelled_upload_waits_for_file_worker_then_removes_orphan(
+    document_harness
+):
+    service, postgres = document_harness
+    started = threading.Event()
+    release = threading.Event()
+
+    async def delayed_file_worker(function, *args, **kwargs):
+        def run():
+            if function.__name__ == "write_bytes":
+                started.set()
+                assert release.wait(timeout=5)
+            return function(*args, **kwargs)
+
+        return await asyncio.to_thread(run)
+
+    service._run_blocking = delayed_file_worker
+    upload = asyncio.create_task(
+        service.add_document(content=b"cancelled bytes", original_name="cancel.md")
+    )
+    assert await asyncio.to_thread(started.wait, 5)
+    upload.cancel()
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await upload
+
+    assert postgres.rows == []
+    assert list(service._filesystem.iter_files()) == []
+    await service.reconcile_project_files()
+    assert postgres.rows == []
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_cancelled_upload_tombstones_completed_catalog_insert(
+    document_harness, monkeypatch
+):
+    service, postgres = document_harness
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    insert_document = service._writer.insert_document
+
+    async def delayed_insert(**kwargs):
+        entered.set()
+        await release.wait()
+        return await insert_document(**kwargs)
+
+    monkeypatch.setattr(service._writer, "insert_document", delayed_insert)
+    upload = asyncio.create_task(
+        service.add_document(content=b"cancelled bytes", original_name="cancel.md")
+    )
+    await asyncio.wait_for(entered.wait(), 5)
+    upload.cancel()
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await upload
+
+    assert len(postgres.rows) == 1
+    assert postgres.rows[0]["status"] == "deleted"
+    assert list(service._filesystem.iter_files()) == []
+    await service.reconcile_project_files()
+    assert len(postgres.rows) == 1
+    assert postgres.rows[0]["status"] == "deleted"
 
 
 @pytest.mark.storage
@@ -2694,6 +2767,59 @@ async def test_index_document_records_document_parser_errors(
     assert (
         await service.schedule_document_index(document_id=uploaded["document_id"])
     )["status"] == "failed"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_upload_api_returns_saved_identity_after_inline_index_failure(
+    monkeypatch, document_harness
+):
+    service, postgres = document_harness
+
+    def fail_pdf_parse(*_args):
+        raise ValueError("private damaged PDF detail")
+
+    monkeypatch.setattr(extraction_module, "_extract_docling_snapshot", fail_pdf_parse)
+    projects = SimpleNamespace(
+        acquire_project_for_session=AsyncMock(
+            return_value=SimpleNamespace(document_service=service)
+        ),
+        release_project_for_session=AsyncMock(),
+    )
+    port = ApplicationRuntimePort(
+        SimpleNamespace(sessions=SimpleNamespace(user_name="ada"), projects=projects)
+    )
+
+    uploaded = await port.upload_document(
+        user_name="ada",
+        project_id="project-1",
+        request=UploadDocumentRequest(
+            original_name="invalid.pdf",
+            content_base64=base64.b64encode(b"invalid PDF").decode(),
+        ),
+    )
+    batch = await port.admit_sources_batch(
+        user_name="ada",
+        project_id="project-1",
+        request=BatchSourceRequest(
+            items=[
+                {
+                    "source_type": "document",
+                    "original_name": "invalid-batch.pdf",
+                    "content_base64": base64.b64encode(b"another invalid PDF").decode(),
+                }
+            ]
+        ),
+    )
+
+    assert uploaded.status == "failed"
+    assert uploaded.document_id == postgres.rows[0]["document_id"]
+    assert service._filesystem.read_bytes("invalid.pdf") == b"invalid PDF"
+    assert batch.results[0].status == "accepted_document"
+    assert batch.results[0].document.status == "failed"
+    assert batch.results[0].document.document_id == postgres.rows[1]["document_id"]
+    assert "private damaged PDF detail" not in uploaded.model_dump_json()
+    assert "private damaged PDF detail" not in batch.model_dump_json()
 
 
 @pytest.mark.storage
