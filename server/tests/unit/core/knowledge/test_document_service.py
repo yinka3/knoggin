@@ -14,7 +14,7 @@ from uuid import UUID
 
 import pytest
 
-from common.exceptions import ToolExecutionError
+from common.exceptions import DependencyError, ToolExecutionError
 from common.schema.document import (
     DocumentSelection,
     FolderScanSettings,
@@ -2899,6 +2899,50 @@ async def test_transient_embedding_failure_retries_from_durable_due_state(
     assert recovered["last_index_failure_kind"] is None
     assert len(postgres.chunks) == 1
     assert attempts == 2
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_exhausted_pdf_dependency_recovers_by_explicit_reindex(
+    monkeypatch, document_harness
+):
+    service, postgres = document_harness
+    uploaded = await service.add_document(
+        content=b"captured PDF source", original_name="notes.pdf"
+    )
+    policy = DocumentIndexPolicy.capture(max_attempts=1, retry_backoff_seconds=1)
+
+    def missing_models(*_args):
+        raise DependencyError("Docling PDF models are not installed")
+
+    monkeypatch.setattr(extraction_module, "_extract_docling_snapshot", missing_models)
+    with pytest.raises(RuntimeError, match="Docling PDF models are not installed"):
+        await service.index_document(document_id=uploaded["document_id"], policy=policy)
+
+    failed = postgres.rows[0]
+    assert failed["status"] == "failed"
+    assert failed["index_attempt_count"] == 1
+    assert failed["last_index_failure_kind"] == "transient_dependency"
+    assert failed["next_index_retry_at"] is None
+    assert await service.terminal_index_failure_count() == 1
+    assert await service.indexer.recover_pending_indexes() == 0
+
+    monkeypatch.setattr(
+        extraction_module,
+        "_extract_docling_snapshot",
+        lambda *_args: docling_snapshot(
+            "Recovered PDF text", pages=("Recovered PDF text",)
+        ),
+    )
+    recovered = await service.reindex_document(
+        document_id=uploaded["document_id"], policy=policy
+    )
+
+    assert recovered["status"] == "indexed"
+    assert postgres.rows[0]["index_attempt_count"] == 0
+    assert postgres.rows[0]["last_index_failure_kind"] is None
+    assert await service.terminal_index_failure_count() == 0
+    assert await service.read_document(document_id=uploaded["document_id"])
 
 
 @pytest.mark.storage

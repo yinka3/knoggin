@@ -306,6 +306,10 @@ jobs:
               )
           PY
 
+      - name: Provision Docling PDF artifacts
+        working-directory: server
+        run: uv run docling-tools models download layout tableformer rapidocr --quiet
+
       - name: Start PostgreSQL for runtime composition
         run: docker compose up -d --build --wait postgres
 

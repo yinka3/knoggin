@@ -7,7 +7,10 @@ import os
 import numpy as np
 import pytest
 
+from common.exceptions import DependencyError
+from core.knowledge.documents.extraction import extract_and_split_document
 from core.knowledge.services.embedding_service import EmbeddingService
+from tests.fixtures.documents import build_pdf_bytes
 from tests.unit.core.knowledge.test_retrieval_embedding_smoke import (
     load_local_embedding_service,
 )
@@ -77,3 +80,24 @@ async def test_cached_model_stack_concurrency_chunking_and_reload():
             assert service.onnx_provider == provider
     finally:
         service.cleanup()
+
+
+@pytest.mark.slow
+@pytest.mark.model
+@pytest.mark.no_network
+def test_cached_docling_pdf_conversion(monkeypatch):
+    """Parse a real PDF with cached Docling artifacts, not a mocked snapshot."""
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    try:
+        extraction = extract_and_split_document(
+            build_pdf_bytes("Cached PDF model smoke text."), ".pdf"
+        )
+    except DependencyError as exc:
+        if os.environ.get("KNOGGIN_REQUIRE_LOCAL_MODELS") == "1":
+            pytest.fail(f"Required Docling PDF models are unavailable: {exc}")
+        pytest.skip(f"Docling PDF models are unavailable: {exc}")
+
+    assert extraction.snapshot.parser_name == "docling"
+    assert extraction.snapshot.pages
+    assert "Cached PDF model smoke text" in extraction.snapshot.text
+    assert any("Cached PDF model smoke text" in chunk.content for chunk in extraction.chunks)
