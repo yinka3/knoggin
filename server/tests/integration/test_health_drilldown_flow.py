@@ -99,7 +99,15 @@ async def test_health_drilldown_is_bounded_scoped_and_read_only():
     )
     service = RuntimeHealthService(
         resources=resources,
-        projects=SimpleNamespace(active_projects={"project-a": project}),
+        projects=SimpleNamespace(
+            active_projects={"project-a": project},
+            entity_maintenance_service=SimpleNamespace(
+                projection_repair_health=lambda: {
+                    "pending_count": 0,
+                    "truncated": False,
+                }
+            ),
+        ),
         sessions=SimpleNamespace(
             get_runtime_session=lambda session_id: (
                 SimpleNamespace(project_id="project-a")

@@ -649,6 +649,45 @@ async def test_background_health_combines_scheduler_queue_and_document_indexing(
 
 @pytest.mark.unit
 @pytest.mark.no_network
+async def test_unrelated_scheduler_work_does_not_hide_stopped_document_admission():
+    project = SimpleNamespace(
+        scheduler=FakeScheduler(
+            {
+                "state": "running",
+                "running_jobs": 1,
+                "queued_jobs": 0,
+                "stalled_jobs": 0,
+                "recent_failed_jobs": 0,
+                "active_jobs": [{"name": "project_semantic", "state": "running"}],
+            }
+        ),
+        document_service=FakeDocumentService(pending=1),
+    )
+    resource_set = resources()
+    resource_set.background_work = FakeCoordinator(
+        {
+            "queued_for_project": 1,
+            "active_for_project": True,
+            "queued_operation_categories": ["conflict-discovery"],
+            "active_operation_categories": ["episode-generation"],
+        }
+    )
+    health = RuntimeHealthService(
+        resources=resource_set,
+        projects=SimpleNamespace(active_projects={"project-a": project}),
+        sessions=SessionRuntimeReader({}),
+    )
+
+    payload = (await health.get_background_health(project_id="project-a")).model_dump(
+        mode="json"
+    )
+    assert payload["status"] == "degraded"
+    assert payload["activity"] == "delayed"
+    assert payload["details"]["document_indexing"]["pending_document_count"] == 1
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 async def test_background_health_does_not_claim_a_stopped_scheduler_is_healthy():
     project = SimpleNamespace(
         project_id="project-a",

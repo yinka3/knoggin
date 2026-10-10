@@ -1141,6 +1141,44 @@ async def test_add_document_writes_project_file_and_persists_metadata(document_h
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_saved_queued_document_is_unhealthy_when_only_unrelated_work_runs(
+    document_harness,
+):
+    service, _postgres = document_harness
+    await service.add_document(content=b"waiting for index", original_name="waiting.md")
+    health = RuntimeHealthService(
+        resources=SimpleNamespace(
+            background_work=SimpleNamespace(
+                snapshot_for_health=lambda **_kwargs: {
+                    "active_for_project": True,
+                    "active_operation_categories": ["episode-generation"],
+                }
+            )
+        ),
+        projects=SimpleNamespace(
+            active_projects={
+                "project-1": SimpleNamespace(
+                    document_service=service,
+                    scheduler=SimpleNamespace(
+                        snapshot_for_health=lambda: {
+                            "state": "running",
+                            "running_jobs": 1,
+                        }
+                    ),
+                )
+            }
+        ),
+        sessions=SimpleNamespace(),
+    )
+
+    background = await health.get_background_health(project_id="project-1")
+    assert background.status.value == "degraded"
+    assert background.activity.value == "delayed"
+    assert background.details["document_indexing"]["pending_document_count"] == 1
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_database_failure_leaves_no_content_or_metadata(document_harness):
     service, postgres = document_harness
     postgres.write_error = RuntimeError("insert failed")

@@ -467,6 +467,18 @@ class RuntimeHealthService:
         local_indexing_tasks = self._nonnegative_int(
             indexing_snapshot.get("local_submission_tasks")
         )
+        index_operations = [
+            name
+            for key in ("queued_operation_categories", "active_operation_categories")
+            for categories in [background_snapshot.get(key)]
+            if isinstance(categories, (list, tuple))
+            for name in categories
+        ]
+        indexing_active = bool(
+            local_indexing_tasks
+            or indexing_snapshot.get("admission_loop_active") is True
+            or "document-index" in index_operations
+        )
         pending_documents = pending_count if pending_count is not None else 0
         terminal_failures = (
             terminal_failure_count if terminal_failure_count is not None else 0
@@ -518,10 +530,7 @@ class RuntimeHealthService:
             summary = "Assisted conflict discovery is unavailable"
         elif (
             pending_documents
-            and not running_jobs
-            and not queued_jobs
-            and not queued_background
-            and not active_background
+            and not indexing_active
         ):
             status = HealthStatus.DEGRADED
             summary = "Durable document indexing is not progressing"
@@ -532,7 +541,7 @@ class RuntimeHealthService:
         if (
             stalled_jobs
             or (scheduler_state != "running" and work_present)
-            or (pending_documents and not running_jobs and not active_background)
+            or (pending_documents and not indexing_active)
             or terminal_failures
         ):
             activity = HealthActivity.DELAYED
