@@ -276,6 +276,21 @@ class SemanticWindowReader:
                 ) AS exhausted_count,
                 min((EXTRACT(EPOCH FROM claimed_at) * 1000)::BIGINT)
                     FILTER (WHERE stage <> 'completed') AS oldest_pending_ms,
+                count(*) FILTER (
+                    WHERE stage <> 'completed'
+                      AND (last_failure_at_ms IS NULL OR next_retry_at_ms IS NOT NULL)
+                      AND (next_retry_at_ms IS NULL OR next_retry_at_ms <=
+                           (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT)
+                ) AS due_count,
+                min(GREATEST(
+                    (EXTRACT(EPOCH FROM updated_at) * 1000)::BIGINT,
+                    COALESCE(next_retry_at_ms, 0)
+                )) FILTER (
+                    WHERE stage <> 'completed'
+                      AND (last_failure_at_ms IS NULL OR next_retry_at_ms IS NOT NULL)
+                      AND (next_retry_at_ms IS NULL OR next_retry_at_ms <=
+                           (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT)
+                ) AS oldest_due_progress_ms,
                 max((EXTRACT(EPOCH FROM completed_at) * 1000)::BIGINT)
                     AS last_processed_ms
             FROM public.project_semantic_windows
@@ -291,6 +306,8 @@ class SemanticWindowReader:
                 "failed_count",
                 "exhausted_count",
                 "oldest_pending_ms",
+                "due_count",
+                "oldest_due_progress_ms",
                 "last_processed_ms",
             )
         }

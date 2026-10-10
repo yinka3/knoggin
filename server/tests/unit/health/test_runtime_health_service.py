@@ -410,6 +410,63 @@ async def test_ingestion_health_reports_pending_semantic_windows():
 
 @pytest.mark.unit
 @pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("due_count", "due_age_seconds", "active_jobs", "expected_status"),
+    [
+        (1, 120, [], "degraded"),
+        (1, 120, [{"name": "project_semantic", "state": "running"}], "healthy"),
+        (0, 120, [], "healthy"),
+        (1, 30, [], "healthy"),
+    ],
+)
+async def test_ingestion_health_distinguishes_due_stall_from_active_work_and_backoff(
+    due_count, due_age_seconds, active_jobs, expected_status
+):
+    class Store:
+        async def get_semantic_window_health(self, **_kwargs):
+            return {
+                "pending_count": 1,
+                "claimed_count": 1,
+                "failed_count": 0,
+                "exhausted_count": 0,
+                "due_count": due_count,
+                "oldest_pending_ms": 1,
+                "oldest_due_progress_ms": int(
+                    (get_now() - timedelta(seconds=due_age_seconds)).timestamp() * 1000
+                ),
+                "last_processed_ms": None,
+            }
+
+    resource_set = resources()
+    resource_set.knowledge_store = Store()
+    service = RuntimeHealthService(
+        resources=resource_set,
+        projects=SimpleNamespace(
+            active_projects={
+                "project-a": SimpleNamespace(
+                    project_semantic_processor=object(),
+                    scheduler=FakeScheduler(
+                        {"state": "running", "active_jobs": active_jobs}
+                    ),
+                )
+            }
+        ),
+        sessions=SessionRuntimeReader({}),
+    )
+
+    payload = (
+        await service.get_ingestion_health(user_name="ada", project_id="project-a")
+    ).model_dump(mode="json")
+
+    assert payload["status"] == expected_status
+    assert payload["activity"] == (
+        "delayed" if expected_status == "degraded" else "busy"
+    )
+    assert payload["details"]["semantic_windows"]["due_count"] == due_count
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 async def test_ingestion_health_reports_stopped_semantic_processor_and_failed_work():
     class Store:
         async def get_semantic_window_health(self, **_kwargs):

@@ -275,6 +275,7 @@ class RuntimeHealthService:
         claimed_count = self._nonnegative_int(queue_details.get("claimed_count"))
         failed_count = self._nonnegative_int(queue_details.get("failed_count"))
         exhausted_count = self._nonnegative_int(queue_details.get("exhausted_count"))
+        due_count = self._nonnegative_int(queue_details.get("due_count"))
         consecutive_failures = self._nonnegative_int(
             scheduler_snapshot.get("recent_failed_jobs")
         )
@@ -287,11 +288,33 @@ class RuntimeHealthService:
         projection_failed = projection_details.get("failed") is True
 
         oldest_age = queue_details.get("oldest_pending_age_seconds")
+        oldest_due_age = queue_details.get("oldest_due_progress_age_seconds")
+        active_jobs = scheduler_snapshot.get("active_jobs")
+        semantic_job_active = isinstance(active_jobs, list) and any(
+            isinstance(job, Mapping)
+            and job.get("name") == "project_semantic"
+            and job.get("state") in {"queued", "running"}
+            for job in active_jobs
+        )
+        cadence = getattr(semantic_processor, "cadence_seconds", 30)
+        delay_grace = (
+            max(60, 2 * cadence)
+            if isinstance(cadence, (int, float)) and cadence > 0
+            else 60
+        )
+        overdue_without_job = (
+            due_count > 0
+            and oldest_due_age is not None
+            and oldest_due_age > delay_grace
+            and not semantic_job_active
+        )
         scheduler_state = scheduler_snapshot.get("state")
         if semantic_processor is None:
             scheduler_state = "not_registered"
-        if scheduler_state == "stopped" or self._nonnegative_int(
-            scheduler_snapshot.get("stalled_jobs")
+        if (
+            scheduler_state == "stopped"
+            or self._nonnegative_int(scheduler_snapshot.get("stalled_jobs"))
+            or overdue_without_job
         ):
             delay_state = "stalled"
         elif pending_count:
@@ -379,11 +402,13 @@ class RuntimeHealthService:
                     "claimed_count": claimed_count,
                     "failed_count": failed_count,
                     "exhausted_count": exhausted_count,
+                    "due_count": due_count,
                     "manual_retry_required": exhausted_count > 0,
                     "oldest_pending_available": (
                         queue_details.get("oldest_pending_available") is True
                     ),
                     "oldest_pending_age_seconds": oldest_age,
+                    "oldest_due_progress_age_seconds": oldest_due_age,
                     "delay_state": delay_state,
                 },
                 "context_projection": {
@@ -640,8 +665,10 @@ class RuntimeHealthService:
                 "claimed_count": 0,
                 "failed_count": 0,
                 "exhausted_count": 0,
+                "due_count": 0,
                 "oldest_pending_available": False,
                 "oldest_pending_age_seconds": None,
+                "oldest_due_progress_age_seconds": None,
                 "last_processed_available": False,
             }
 
@@ -659,8 +686,10 @@ class RuntimeHealthService:
                 "claimed_count": 0,
                 "failed_count": 0,
                 "exhausted_count": 0,
+                "due_count": 0,
                 "oldest_pending_available": False,
                 "oldest_pending_age_seconds": None,
+                "oldest_due_progress_age_seconds": None,
                 "last_processed_available": False,
             }
 
@@ -670,6 +699,14 @@ class RuntimeHealthService:
             if oldest_ms is not None
             else None
         )
+        oldest_due_ms = self._nonnegative_int_or_none(
+            queue.get("oldest_due_progress_ms")
+        )
+        oldest_due_age = (
+            max(get_now().timestamp() - oldest_due_ms / 1000, 0.0)
+            if oldest_due_ms is not None
+            else None
+        )
         return {
             "queue_available": True,
             "warnings": [],
@@ -677,8 +714,10 @@ class RuntimeHealthService:
             "claimed_count": self._nonnegative_int(queue.get("claimed_count")),
             "failed_count": self._nonnegative_int(queue.get("failed_count")),
             "exhausted_count": self._nonnegative_int(queue.get("exhausted_count")),
+            "due_count": self._nonnegative_int(queue.get("due_count")),
             "oldest_pending_available": oldest_ms is not None,
             "oldest_pending_age_seconds": oldest_age,
+            "oldest_due_progress_age_seconds": oldest_due_age,
             "last_processed_available": queue.get("last_processed_ms") is not None,
         }
 

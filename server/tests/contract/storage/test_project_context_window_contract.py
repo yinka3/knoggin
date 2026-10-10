@@ -973,6 +973,8 @@ async def test_semantic_window_stage_cas_and_failures_keep_the_last_successful_s
     )
     assert exhausted_health["failed_count"] == 1
     assert exhausted_health["exhausted_count"] == 1
+    assert exhausted_health["due_count"] == 0
+    assert exhausted_health["oldest_due_progress_ms"] is None
 
     retried = await window_writer.retry_window(
         window_id=window.window_id,
@@ -995,6 +997,8 @@ async def test_semantic_window_stage_cas_and_failures_keep_the_last_successful_s
     assert retried_health["claimed_count"] == 0
     assert retried_health["failed_count"] == 0
     assert retried_health["exhausted_count"] == 0
+    assert retried_health["due_count"] == 1
+    assert retried_health["oldest_due_progress_ms"] is not None
     assert retried_health["oldest_pending_ms"] is not None
     assert retried_health["last_processed_ms"] is None
 
