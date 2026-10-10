@@ -1,4 +1,5 @@
 import os
+import subprocess
 
 import pytest
 
@@ -128,6 +129,40 @@ def test_project_filesystem_factory_removes_only_the_owned_project_tree(tmp_path
     assert factory.remove_project_directory("linked-project") is True
     assert not os.path.lexists(linked_project)
     assert outside_child.read_text() == "keep me too"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction behavior")
+def test_project_removal_does_not_follow_windows_junctions(tmp_path):
+    factory = ProjectFilesystemFactory(tmp_path / "projects")
+    filesystem = factory.for_project("project-1")
+    filesystem.write_bytes("notes.md", b"owned")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.md").write_text("keep")
+
+    nested_junction = filesystem.root / "linked-directory"
+    subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(nested_junction), str(outside)],
+        check=True,
+        capture_output=True,
+    )
+    assert nested_junction.is_junction()
+
+    assert factory.remove_project_directory("project-1") is True
+    assert not filesystem.root.exists()
+    assert (outside / "keep.md").read_text() == "keep"
+
+    project_junction = factory.library_root / "linked-project"
+    subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(project_junction), str(outside)],
+        check=True,
+        capture_output=True,
+    )
+    assert project_junction.is_junction()
+
+    assert factory.remove_project_directory("linked-project") is True
+    assert not project_junction.exists()
+    assert (outside / "keep.md").read_text() == "keep"
 
 
 @pytest.mark.parametrize("project_id", [".", ".."])

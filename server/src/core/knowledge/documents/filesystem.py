@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -327,6 +328,35 @@ class ProjectFilesystemFactory:
     def for_project(self, project_id: str) -> ProjectFilesystem:
         return ProjectFilesystem(self._project_root(project_id))
 
+    @staticmethod
+    def _is_windows_reparse_point(metadata: os.stat_result) -> bool:
+        return bool(
+            getattr(metadata, "st_file_attributes", 0)
+            & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        )
+
+    @classmethod
+    def _remove_windows_directory(cls, directory: Path) -> None:
+        """Remove a tree without descending into Windows links or junctions."""
+        metadata = directory.lstat()
+        if cls._is_windows_reparse_point(metadata) or not stat.S_ISDIR(metadata.st_mode):
+            raise RuntimeError("project directory changed during file cleanup")
+        with os.scandir(directory) as scan:
+            entries = list(scan)
+        for entry in entries:
+            child = Path(entry.path)
+            metadata = entry.stat(follow_symlinks=False)
+            if cls._is_windows_reparse_point(metadata):
+                if child.is_junction():
+                    child.rmdir()
+                else:
+                    child.unlink()
+            elif stat.S_ISDIR(metadata.st_mode):
+                cls._remove_windows_directory(child)
+            else:
+                child.unlink()
+        directory.rmdir()
+
     def remove_project_directory(self, project_id: str) -> bool:
         """Remove one direct project child without traversing symlinks.
 
@@ -338,17 +368,27 @@ class ProjectFilesystemFactory:
 
         root = self._project_root(project_id)
         try:
-            root.lstat()
+            metadata = root.lstat()
         except FileNotFoundError:
             return False
 
-        if root.is_symlink() or not root.is_dir():
+        if os.name == "nt" and self._is_windows_reparse_point(metadata):
+            if root.is_junction():
+                root.rmdir()
+            else:
+                root.unlink()
+            return True
+
+        if root.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
             try:
                 root.unlink()
             except FileNotFoundError:
                 return False
             return True
 
+        if os.name == "nt":
+            self._remove_windows_directory(root)
+            return True
         if not shutil.rmtree.avoids_symlink_attacks:
             raise RuntimeError("safe project-directory removal is unavailable")
         shutil.rmtree(root)
