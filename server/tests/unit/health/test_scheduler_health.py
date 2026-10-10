@@ -66,3 +66,30 @@ def test_scheduler_health_keeps_recent_outcomes_bounded_and_safe():
     assert len(snapshot["recent_outcomes"]) == 20
     assert all(outcome["state"] == "failed" for outcome in snapshot["recent_outcomes"])
     assert "project-a" not in str(snapshot)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_scheduler_check_failure_is_bounded_and_clears_after_good_check():
+    class FlakyJob(_Job):
+        fail_check = True
+
+        async def should_run(self, _ctx):
+            if self.fail_check:
+                raise RuntimeError("private admission failure")
+            return False
+
+    job = FlakyJob(name="project_semantic")
+    scheduler = Scheduler("ada", "project-a")
+    scheduler.register(job)
+    scheduler._is_running = True
+
+    await scheduler._check_jobs()
+    assert scheduler.snapshot_for_health()["check_failures_by_job"] == {
+        "project_semantic": 1
+    }
+    assert "private admission failure" not in str(scheduler.snapshot_for_health())
+
+    job.fail_check = False
+    await scheduler._check_jobs()
+    assert scheduler.snapshot_for_health()["check_failures_by_job"] == {}

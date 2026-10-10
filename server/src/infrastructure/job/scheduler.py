@@ -51,6 +51,7 @@ class Scheduler:
         self._last_successful_runs: dict[str, float] = {}
         self._job_runs: dict[str, dict[str, object]] = {}
         self._recent_outcomes: deque[dict[str, object]] = deque(maxlen=20)
+        self._check_failures: dict[str, int] = {}
         self._wake_event = asyncio.Event()
         self._requested_jobs: set[str] = set()
 
@@ -200,7 +201,11 @@ class Scheduler:
         for job_name, job in self._jobs.items():
             try:
                 await self._schedule_if_due(job_name, job, ctx)
+                self._check_failures.pop(job_name, None)
             except Exception as exc:
+                self._check_failures[job_name] = min(
+                    self._check_failures.get(job_name, 0) + 1, 100
+                )
                 logger.exception("Job {} check failed: {}", job_name, exc)
 
     async def _monitor_loop(self) -> None:
@@ -477,6 +482,10 @@ class Scheduler:
                 outcome.get("state") in {"failed", "timed_out"}
                 for outcome in self._recent_outcomes
             ),
+            "check_failures_by_job": {
+                name[:100]: count
+                for name, count in sorted(self._check_failures.items())[:100]
+            },
             "last_successful_job_at": max(successful) if successful else None,
         }
 

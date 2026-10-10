@@ -278,6 +278,12 @@ class RuntimeHealthService:
         consecutive_failures = self._nonnegative_int(
             scheduler_snapshot.get("recent_failed_jobs")
         )
+        check_failures_by_job = scheduler_snapshot.get("check_failures_by_job")
+        semantic_check_failures = self._nonnegative_int(
+            check_failures_by_job.get("project_semantic")
+            if isinstance(check_failures_by_job, Mapping)
+            else None
+        )
         projection_failed = projection_details.get("failed") is True
 
         oldest_age = queue_details.get("oldest_pending_age_seconds")
@@ -303,6 +309,8 @@ class RuntimeHealthService:
             )
         if consecutive_failures:
             warnings.append("semantic scheduler has recent failures")
+        if semantic_check_failures:
+            warnings.append("semantic scheduler admission checks are failing")
         if projection_failed:
             warnings.append("Context projection has a recorded synchronization failure")
         if scheduler_state in {"not_registered", "stopped"}:
@@ -321,6 +329,7 @@ class RuntimeHealthService:
             or failed_count
             or exhausted_count
             or consecutive_failures
+            or semantic_check_failures
             or projection_failed
             or projection_details.get("read_failed") is True
         ):

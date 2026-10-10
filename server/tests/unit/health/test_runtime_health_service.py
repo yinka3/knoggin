@@ -6,6 +6,8 @@ import pytest
 
 from common.utils.time_utils import get_now
 from core.health.service import RuntimeHealthService
+from infrastructure.job.base import BaseJob, JobContext, JobResult
+from infrastructure.job.scheduler import Scheduler
 
 
 class SessionRuntimeReader:
@@ -116,6 +118,56 @@ async def test_ingestion_health_prefers_durable_semantic_window_state():
     assert payload["details"]["semantic_windows"]["claimed_count"] == 1
     assert payload["details"]["semantic_windows"]["available"] is True
     assert "postgres" not in payload["details"]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_ingestion_health_degrades_on_real_scheduler_admission_failure():
+    class Store:
+        async def get_semantic_window_health(self, **_kwargs):
+            return {
+                "pending_count": 0,
+                "claimed_count": 0,
+                "failed_count": 0,
+                "oldest_pending_ms": None,
+                "last_processed_ms": None,
+            }
+
+    class FailingJob(BaseJob):
+        @property
+        def name(self):
+            return "project_semantic"
+
+        async def should_run(self, _ctx: JobContext) -> bool:
+            raise RuntimeError("private admission failure")
+
+        async def execute(self, _ctx: JobContext) -> JobResult:
+            raise AssertionError("admission must not start execution")
+
+    scheduler = Scheduler("ada", "project-a")
+    scheduler.register(FailingJob())
+    scheduler._is_running = True
+    await scheduler._check_jobs()
+    resource_set = resources()
+    resource_set.knowledge_store = Store()
+    health = RuntimeHealthService(
+        resources=resource_set,
+        projects=SimpleNamespace(
+            active_projects={
+                "project-a": SimpleNamespace(
+                    project_semantic_processor=object(), scheduler=scheduler
+                )
+            }
+        ),
+        sessions=SessionRuntimeReader({}),
+    )
+
+    payload = (
+        await health.get_ingestion_health(user_name="ada", project_id="project-a")
+    ).model_dump(mode="json")
+    assert payload["status"] == "degraded"
+    assert "semantic scheduler admission checks are failing" in payload["warnings"]
+    assert "private admission failure" not in json.dumps(payload)
 
 
 class FakeScheduler:
