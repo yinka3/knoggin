@@ -492,16 +492,17 @@ class SemanticWindowReader:
                 eligible.assistant_content,
                 eligible.assistant_timestamp_ms,
                 eligible.assistant_lifecycle_state,
-                EXISTS (
-                    SELECT 1
-                    FROM public.project_semantic_window_messages AS membership
-                    WHERE membership.project_id = eligible.project_id
-                      AND membership.message_id IN (
-                          eligible.user_message_id,
-                          COALESCE(eligible.assistant_message_id, -1)
-                      )
-                ) AS already_claimed
+                FALSE AS already_claimed
             FROM eligible_conversation_exchanges AS eligible
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM public.project_semantic_window_messages AS membership
+                WHERE membership.project_id = eligible.project_id
+                  AND membership.message_id IN (
+                      eligible.user_message_id,
+                      COALESCE(eligible.assistant_message_id, -1)
+                  )
+            )
             ORDER BY eligible.session_id,
                      eligible.user_timestamp_ms ASC NULLS LAST,
                      eligible.user_message_id

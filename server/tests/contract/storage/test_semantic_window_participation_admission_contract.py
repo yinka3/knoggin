@@ -1,3 +1,5 @@
+from uuid import uuid4
+
 import pytest
 
 from common.conf.domain_config import DomainConfig
@@ -72,6 +74,34 @@ async def test_semantic_admission_filters_participation_before_session_fifo(
 
     assert selected is not None
     assert [member.message_id for member in selected.messages] == [202, 205]
+
+    claimed_window_id = uuid4()
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.project_semantic_windows (
+            window_id, user_name, project_id, origin, stage, domain_version,
+            policy_snapshot, source_token_count, token_estimator,
+            token_estimator_version, completed_at
+        ) VALUES (
+            %s, 'ada', 'project-1', 'conversation', 'completed', 1,
+            '{}'::jsonb, 0, 'test', 'v1', NOW()
+        )
+        """,
+        (claimed_window_id,),
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.project_semantic_window_messages (
+            window_id, project_id, message_id, session_id,
+            exchange_user_message_id, role, ordinal
+        ) VALUES (%s, 'project-1', 205, 'session-ready', 205, 'user', 0)
+        """,
+        (claimed_window_id,),
+    )
+    remaining = await SemanticWindowReader(
+        real_postgres_client
+    ).get_unclaimed_project_exchange_rows(user_name="ada", project_id="project-1")
+    assert {row["user_message_id"] for row in remaining} == {202, 206, 207}
 
 
 @pytest.mark.storage
