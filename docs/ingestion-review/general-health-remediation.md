@@ -38,6 +38,6 @@ The characters processed grow about fourfold when exchanges double. The selector
 
 ## Coverage and limits
 
-- Focused affected suites: **121 passed** using system Python and the repo environment's installed packages, with the async pytest plugin loaded explicitly. Ruff passed on changed files.
-- The storage contract for maintenance eligibility is unrun because Docker's Postgres daemon is unavailable. The concurrent upload test uses a real local filesystem but a fake catalog writer; a real Postgres uniqueness/concurrency contract remains outstanding.
+- The latest affected suites passed **33 health tests** and **101 document-service tests** using system Python and the repo environment's installed packages, with the async pytest plugin loaded explicitly. The cached Docling PDF conversion passed separately. Ruff passed on changed files. Earlier focused suites passed as recorded above.
+- The storage contracts for maintenance eligibility, window due/backlog aggregates, and admission scope remain unrun because Docker's Postgres daemon is unavailable. The concurrent upload test uses a real local filesystem but a fake catalog writer; a real Postgres uniqueness/concurrency contract remains outstanding.
 - Passing tests verify the stated paths only. The Windows project deletion suite separately passed 37 tests after Developer Mode was enabled; its concurrent hostile mutation limit remains recorded in the intersection notes.
