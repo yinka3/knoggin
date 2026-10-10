@@ -131,8 +131,9 @@ class FakeScheduler:
 
 
 class FakeDocumentService:
-    def __init__(self, *, pending=0):
+    def __init__(self, *, pending=0, terminal_failures=0):
         self.pending = pending
+        self.terminal_failures = terminal_failures
         self.calls = 0
 
     def indexing_snapshot_for_health(self):
@@ -141,6 +142,9 @@ class FakeDocumentService:
     async def pending_index_count(self):
         self.calls += 1
         return self.pending
+
+    async def terminal_index_failure_count(self):
+        return self.terminal_failures
 
 
 class FakeConflictDiscoveryJob:

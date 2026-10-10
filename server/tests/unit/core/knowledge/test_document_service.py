@@ -1,10 +1,13 @@
 import asyncio
 import hashlib
 import json
+import tempfile
+import threading
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -16,6 +19,7 @@ from common.schema.document import (
     FolderUploadEntry,
 )
 from common.utils.time_utils import frozen_time
+from core.health.service import RuntimeHealthService
 from core.knowledge.documents import (
     DocumentIndexPolicy,
     DocumentService,
@@ -200,6 +204,15 @@ class MemoryPostgres:
                     row["updated_at"] = updated_at
                     updated.append({"document_id": row["document_id"]})
             return updated
+
+        if "COUNT(*)::INTEGER AS count" in query and "status = 'failed'" in query and "next_index_retry_at IS NULL" in query:
+            project_id = params[0]
+            return [{"count": sum(
+                row["project_id"] == project_id
+                and row["status"] == "failed"
+                and row.get("next_index_retry_at") is None
+                for row in self.rows
+            )}]
 
         if "COUNT(*)::INTEGER AS count" in query and "status = 'queued'" in query:
             project_id = params[0]
@@ -1133,6 +1146,38 @@ async def test_database_failure_leaves_no_content_or_metadata(document_harness):
 
     assert postgres.rows == []
     assert list(service._filesystem.iter_files()) == []
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_concurrent_same_path_upload_keeps_winning_catalog_and_file(
+    document_harness, monkeypatch
+):
+    service, postgres = document_harness
+    service._run_blocking = asyncio.to_thread
+    both_checked_absence = threading.Barrier(2)
+    make_temporary = tempfile.mkstemp
+
+    def synchronize_publication(*args, **kwargs):
+        both_checked_absence.wait(timeout=5)
+        return make_temporary(*args, **kwargs)
+
+    monkeypatch.setattr(tempfile, "mkstemp", synchronize_publication)
+    results = await asyncio.gather(
+        service.add_document(content=b"first version", original_name="same.md"),
+        service.add_document(content=b"second version", original_name="same.md"),
+        return_exceptions=True,
+    )
+
+    accepted = [result for result in results if isinstance(result, dict)]
+    rejected = [result for result in results if isinstance(result, FileExistsError)]
+    assert len(accepted) == len(rejected) == 1
+    assert len(postgres.rows) == 1
+    assert postgres.rows[0]["document_id"] == accepted[0]["document_id"]
+    content = service._filesystem.read_bytes("same.md")
+    assert hashlib.sha256(content).hexdigest() == accepted[0]["content_hash"]
+    assert content in {b"first version", b"second version"}
+    assert not list(service._filesystem.root.rglob(".knoggin-*.tmp"))
 
 
 @pytest.mark.storage
@@ -2626,6 +2671,25 @@ async def test_index_document_records_document_parser_errors(
     assert postgres.rows[0]["index_attempt_count"] == 1
     assert postgres.rows[0]["last_index_failure_kind"] == "invalid_content"
     assert postgres.rows[0]["next_index_retry_at"] is None
+    assert await service.terminal_index_failure_count() == 1
+    health = RuntimeHealthService(
+        resources=SimpleNamespace(),
+        projects=SimpleNamespace(
+            active_projects={
+                "project-1": SimpleNamespace(
+                    document_service=service,
+                    scheduler=SimpleNamespace(
+                        snapshot_for_health=lambda: {"state": "running"}
+                    ),
+                )
+            }
+        ),
+        sessions=SimpleNamespace(),
+    )
+    background = await health.get_background_health(project_id="project-1")
+    assert background.status.value == "degraded"
+    assert background.details["document_indexing"]["terminal_failure_count"] == 1
+    assert "damaged PDF" not in str(background.model_dump())
     assert await service.indexer.recover_pending_indexes() == 0
     assert (
         await service.schedule_document_index(document_id=uploaded["document_id"])

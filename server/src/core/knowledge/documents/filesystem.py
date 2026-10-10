@@ -145,7 +145,14 @@ class ProjectFilesystem:
                 temporary_file.write(content)
                 temporary_file.flush()
                 os.fsync(temporary_file.fileno())
-            os.replace(temporary_name, path)
+            if overwrite:
+                os.replace(temporary_name, path)
+            else:
+                # A hard link publishes the complete temp file only if the
+                # destination is still absent. Unlike os.replace, this cannot
+                # overwrite a concurrent create of the same project path.
+                os.link(temporary_name, path)
+                os.unlink(temporary_name)
         except BaseException:
             try:
                 os.unlink(temporary_name)

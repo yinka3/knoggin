@@ -94,6 +94,7 @@ async def test_health_drilldown_is_bounded_scoped_and_read_only():
         document_service=SimpleNamespace(
             indexing_snapshot_for_health=lambda: {"local_submission_tasks": 0},
             pending_index_count=lambda: 0,
+            terminal_index_failure_count=lambda: 0,
         ),
     )
     service = RuntimeHealthService(

@@ -119,6 +119,7 @@ async def test_completed_semantic_windows_define_the_stable_frontier():
     assert "eligible_conversation_exchanges" in query
     assert "session.semantic_participation_enabled" in query
     assert "session.semantic_participation_after_message_id" in query
+    assert "eligible.user_exchange_outcome NOT IN ('failed', 'cancelled')" in query
     assert "semantic_window.stage <> 'completed'" in query
     assert "completed_window_boundary" in query
 

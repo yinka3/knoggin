@@ -533,6 +533,7 @@ class SemanticWindowReader:
                 SELECT count(*) AS pending_exchange_count
                 FROM eligible_conversation_exchanges AS eligible
                 WHERE eligible.user_exchange_state = 'closed'
+                  AND eligible.user_exchange_outcome NOT IN ('failed', 'cancelled')
                   AND NOT EXISTS (
                       SELECT 1
                       FROM public.project_semantic_window_messages AS membership

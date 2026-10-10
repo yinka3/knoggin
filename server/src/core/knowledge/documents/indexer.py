@@ -555,6 +555,9 @@ class DocumentIndexer:
     async def pending_index_count(self) -> int:
         return await self._reader.count_documents_for_index_recovery()
 
+    async def terminal_index_failure_count(self) -> int:
+        return await self._reader.count_terminal_index_failures()
+
     def indexing_snapshot(self) -> Dict:
         return {
             "inline_index_max_bytes": self._policy.inline_index_max_bytes,

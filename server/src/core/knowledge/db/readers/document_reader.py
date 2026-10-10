@@ -359,6 +359,20 @@ class DocumentReader:
         )
         return int(rows[0]["count"]) if rows else 0
 
+    async def count_terminal_index_failures(self) -> int:
+        """Count failed project documents that have no automatic retry."""
+        rows = await self._client.fetch_all(
+            """
+            SELECT COUNT(*)::INTEGER AS count
+            FROM public.project_documents
+            WHERE project_id = %s
+              AND status = 'failed'
+              AND next_index_retry_at IS NULL
+            """,
+            (self._project_id,),
+        )
+        return int(rows[0]["count"]) if rows else 0
+
     async def next_index_retry_at(self) -> str | None:
         """Return the next delayed retry for this project, if one exists."""
         rows = await self._client.fetch_all(

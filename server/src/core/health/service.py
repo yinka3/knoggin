@@ -435,6 +435,11 @@ class RuntimeHealthService:
         )
         if pending_error is not None:
             warnings.append("durable document-index count is unavailable")
+        terminal_failure_count, terminal_error = await self._read_terminal_index_failure_count(
+            document_service
+        )
+        if terminal_error is not None:
+            warnings.append("terminal document-index failure count is unavailable")
 
         scheduler_state = scheduler_snapshot.get("state")
         queued_jobs = self._nonnegative_int(scheduler_snapshot.get("queued_jobs"))
@@ -451,6 +456,9 @@ class RuntimeHealthService:
             indexing_snapshot.get("local_submission_tasks")
         )
         pending_documents = pending_count if pending_count is not None else 0
+        terminal_failures = (
+            terminal_failure_count if terminal_failure_count is not None else 0
+        )
         work_present = bool(
             queued_jobs
             or running_jobs
@@ -487,6 +495,12 @@ class RuntimeHealthService:
         elif pending_error is not None:
             status = HealthStatus.DEGRADED
             summary = "Document-indexing health is unavailable"
+        elif terminal_error is not None:
+            status = HealthStatus.DEGRADED
+            summary = "Document-indexing failure health is unavailable"
+        elif terminal_failures:
+            status = HealthStatus.DEGRADED
+            summary = "Documents have terminal indexing failures"
         elif conflict_discovery_unavailable:
             status = HealthStatus.DEGRADED
             summary = "Assisted conflict discovery is unavailable"
@@ -507,6 +521,7 @@ class RuntimeHealthService:
             stalled_jobs
             or (scheduler_state != "running" and work_present)
             or (pending_documents and not running_jobs and not active_background)
+            or terminal_failures
         ):
             activity = HealthActivity.DELAYED
         elif work_present:
@@ -524,6 +539,8 @@ class RuntimeHealthService:
             warnings.append("project background work is queued")
         if pending_documents:
             warnings.append("durable document indexing is pending")
+        if terminal_failures:
+            warnings.append("documents have terminal indexing failures")
         if conflict_discovery_unavailable:
             warnings.append("assisted conflict discovery is unavailable")
 
@@ -539,6 +556,7 @@ class RuntimeHealthService:
                 "document_indexing": {
                     **indexing_snapshot,
                     "pending_document_count": pending_count,
+                    "terminal_failure_count": terminal_failure_count,
                 },
             },
             warnings=warnings,
@@ -557,6 +575,22 @@ class RuntimeHealthService:
     ) -> tuple[int | None, str | None]:
         method = (
             getattr(document_service, "pending_index_count", None)
+            if document_service is not None
+            else None
+        )
+        if not callable(method):
+            return None, "unavailable"
+        value, error = await self._bounded_read(method)
+        if error is not None:
+            return None, error
+        return self._nonnegative_int_or_none(value), None
+
+    async def _read_terminal_index_failure_count(
+        self,
+        document_service: Any,
+    ) -> tuple[int | None, str | None]:
+        method = (
+            getattr(document_service, "terminal_index_failure_count", None)
             if document_service is not None
             else None
         )

@@ -1254,6 +1254,9 @@ class DocumentService:
     async def pending_index_count(self) -> int:
         return await self._indexer.pending_index_count()
 
+    async def terminal_index_failure_count(self) -> int:
+        return await self._indexer.terminal_index_failure_count()
+
     def indexing_snapshot_for_health(self) -> dict[str, object]:
         """Return a bounded public projection of indexing metrics."""
         return self._indexer.indexing_snapshot_for_health()

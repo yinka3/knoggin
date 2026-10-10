@@ -804,6 +804,66 @@ async def test_maintenance_frontier_blocks_all_active_window_origins_and_tracks_
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
+async def test_failed_and_cancelled_exchanges_do_not_block_merge_frontier(
+    real_postgres_client,
+):
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.sessions (session_id, user_name, project_id)
+        VALUES ('maintenance-skipped', 'ada', 'project-1')
+        """
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.messages (
+            user_name, session_id, message_id, project_id, role, content,
+            timestamp_ms, lifecycle_state, exchange_state, exchange_outcome,
+            exchange_closed_at_ms
+        ) VALUES
+            ('ada', 'maintenance-skipped', 901, 'project-1', 'user',
+             'Failed run.', 901, 'sealed', 'closed', 'failed', 901),
+            ('ada', 'maintenance-skipped', 902, 'project-1', 'user',
+             'Cancelled run.', 902, 'sealed', 'closed', 'cancelled', 902)
+        """
+    )
+    service = EntityMaintenanceService(real_postgres_client, "ada")
+    skipped_frontier = await service.capture_frontier(["project-1"])
+    assert skipped_frontier["project-1"]["message_id"] == 902
+
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.messages (
+            user_name, session_id, message_id, project_id, role, content,
+            timestamp_ms, lifecycle_state, exchange_state, exchange_outcome,
+            exchange_closed_at_ms
+        ) VALUES (
+            'ada', 'maintenance-skipped', 903, 'project-1', 'user',
+            'Valid pending work.', 903, 'sealed', 'closed', 'user_only', 903
+        )
+        """
+    )
+    with pytest.raises(RuntimeError, match="pending semantic completion"):
+        await service.capture_frontier(["project-1"])
+
+    window_id = await _seed_semantic_window(
+        real_postgres_client, origin="conversation", stage="completed"
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.project_semantic_window_messages (
+            window_id, project_id, message_id, session_id,
+            exchange_user_message_id, role, ordinal
+        ) VALUES (%s, 'project-1', 903, 'maintenance-skipped', 903, 'user', 0)
+        """,
+        (window_id,),
+    )
+    completed_frontier = await service.capture_frontier(["project-1"])
+    assert completed_frontier["project-1"]["message_id"] == 903
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
 async def test_project_cleanup_removes_context_associations_without_reintroducing_episode_links(
     real_postgres_client,
 ):
