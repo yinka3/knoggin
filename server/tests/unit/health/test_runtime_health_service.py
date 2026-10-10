@@ -467,6 +467,70 @@ async def test_ingestion_health_distinguishes_due_stall_from_active_work_and_bac
 
 @pytest.mark.unit
 @pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("ready_count", "blocked_count", "age_seconds", "active_jobs", "expected_status"),
+    [
+        (1, 0, 420, [], "degraded"),
+        (1, 0, 320, [], "healthy"),
+        (1, 0, 420, [{"name": "project_semantic", "state": "running"}], "healthy"),
+        (0, 1, 420, [], "degraded"),
+        (0, 1, 320, [], "healthy"),
+    ],
+)
+async def test_ingestion_health_reports_unclaimed_and_fifo_delays(
+    ready_count, blocked_count, age_seconds, active_jobs, expected_status
+):
+    class Store:
+        async def get_semantic_window_health(self, **_kwargs):
+            closed_at = int(
+                (get_now() - timedelta(seconds=age_seconds)).timestamp() * 1000
+            )
+            return {
+                "pending_count": 0,
+                "claimed_count": 0,
+                "failed_count": 0,
+                "exhausted_count": 0,
+                "due_count": 0,
+                "ready_exchange_count": ready_count,
+                "latest_ready_close_ms": closed_at if ready_count else None,
+                "blocked_session_count": int(bool(blocked_count)),
+                "blocked_closed_count": blocked_count,
+                "latest_blocked_close_ms": closed_at if blocked_count else None,
+                "oldest_pending_ms": None,
+                "last_processed_ms": None,
+            }
+
+    resource_set = resources()
+    resource_set.knowledge_store = Store()
+    service = RuntimeHealthService(
+        resources=resource_set,
+        projects=SimpleNamespace(
+            active_projects={
+                "project-a": SimpleNamespace(
+                    project_semantic_processor=object(),
+                    scheduler=FakeScheduler(
+                        {"state": "running", "active_jobs": active_jobs}
+                    ),
+                )
+            }
+        ),
+        sessions=SessionRuntimeReader({}),
+    )
+
+    payload = (
+        await service.get_ingestion_health(user_name="ada", project_id="project-a")
+    ).model_dump(mode="json")
+
+    assert payload["status"] == expected_status
+    assert payload["details"]["semantic_windows"]["ready_exchange_count"] == ready_count
+    assert payload["details"]["semantic_windows"]["blocked_closed_count"] == blocked_count
+    assert payload["activity"] == (
+        "delayed" if expected_status == "degraded" else "busy" if ready_count else "idle"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 async def test_ingestion_health_reports_stopped_semantic_processor_and_failed_work():
     class Store:
         async def get_semantic_window_health(self, **_kwargs):

@@ -276,6 +276,15 @@ class RuntimeHealthService:
         failed_count = self._nonnegative_int(queue_details.get("failed_count"))
         exhausted_count = self._nonnegative_int(queue_details.get("exhausted_count"))
         due_count = self._nonnegative_int(queue_details.get("due_count"))
+        ready_exchange_count = self._nonnegative_int(
+            queue_details.get("ready_exchange_count")
+        )
+        blocked_session_count = self._nonnegative_int(
+            queue_details.get("blocked_session_count")
+        )
+        blocked_closed_count = self._nonnegative_int(
+            queue_details.get("blocked_closed_count")
+        )
         consecutive_failures = self._nonnegative_int(
             scheduler_snapshot.get("recent_failed_jobs")
         )
@@ -289,6 +298,8 @@ class RuntimeHealthService:
 
         oldest_age = queue_details.get("oldest_pending_age_seconds")
         oldest_due_age = queue_details.get("oldest_due_progress_age_seconds")
+        latest_ready_close_age = queue_details.get("latest_ready_close_age_seconds")
+        latest_blocked_close_age = queue_details.get("latest_blocked_close_age_seconds")
         active_jobs = scheduler_snapshot.get("active_jobs")
         semantic_job_active = isinstance(active_jobs, list) and any(
             isinstance(job, Mapping)
@@ -308,6 +319,19 @@ class RuntimeHealthService:
             and oldest_due_age > delay_grace
             and not semantic_job_active
         )
+        idle_flush_grace = 300 + delay_grace
+        unclaimed_stalled = (
+            pending_count == 0
+            and ready_exchange_count > 0
+            and latest_ready_close_age is not None
+            and latest_ready_close_age > idle_flush_grace
+            and not semantic_job_active
+        )
+        fifo_blocked = (
+            blocked_closed_count > 0
+            and latest_blocked_close_age is not None
+            and latest_blocked_close_age > idle_flush_grace
+        )
         scheduler_state = scheduler_snapshot.get("state")
         if semantic_processor is None:
             scheduler_state = "not_registered"
@@ -315,6 +339,8 @@ class RuntimeHealthService:
             scheduler_state == "stopped"
             or self._nonnegative_int(scheduler_snapshot.get("stalled_jobs"))
             or overdue_without_job
+            or unclaimed_stalled
+            or fifo_blocked
         ):
             delay_state = "stalled"
         elif pending_count:
@@ -324,6 +350,8 @@ class RuntimeHealthService:
 
         if delay_state == "stalled":
             warnings.append("pending semantic work is stalled")
+        if fifo_blocked:
+            warnings.append("closed semantic exchanges are blocked by earlier session work")
         if failed_count:
             warnings.append("semantic windows have recorded failures")
         if exhausted_count:
@@ -366,6 +394,7 @@ class RuntimeHealthService:
             activity = HealthActivity.DELAYED
         elif (
             pending_count
+            or ready_exchange_count
             or claimed_count
             or self._nonnegative_int(scheduler_snapshot.get("running_jobs"))
         ):
@@ -403,6 +432,11 @@ class RuntimeHealthService:
                     "failed_count": failed_count,
                     "exhausted_count": exhausted_count,
                     "due_count": due_count,
+                    "ready_exchange_count": ready_exchange_count,
+                    "blocked_session_count": blocked_session_count,
+                    "blocked_closed_count": blocked_closed_count,
+                    "latest_ready_close_age_seconds": latest_ready_close_age,
+                    "latest_blocked_close_age_seconds": latest_blocked_close_age,
                     "manual_retry_required": exhausted_count > 0,
                     "oldest_pending_available": (
                         queue_details.get("oldest_pending_available") is True
@@ -666,6 +700,11 @@ class RuntimeHealthService:
                 "failed_count": 0,
                 "exhausted_count": 0,
                 "due_count": 0,
+                "ready_exchange_count": 0,
+                "blocked_session_count": 0,
+                "blocked_closed_count": 0,
+                "latest_ready_close_age_seconds": None,
+                "latest_blocked_close_age_seconds": None,
                 "oldest_pending_available": False,
                 "oldest_pending_age_seconds": None,
                 "oldest_due_progress_age_seconds": None,
@@ -687,6 +726,11 @@ class RuntimeHealthService:
                 "failed_count": 0,
                 "exhausted_count": 0,
                 "due_count": 0,
+                "ready_exchange_count": 0,
+                "blocked_session_count": 0,
+                "blocked_closed_count": 0,
+                "latest_ready_close_age_seconds": None,
+                "latest_blocked_close_age_seconds": None,
                 "oldest_pending_available": False,
                 "oldest_pending_age_seconds": None,
                 "oldest_due_progress_age_seconds": None,
@@ -707,6 +751,13 @@ class RuntimeHealthService:
             if oldest_due_ms is not None
             else None
         )
+        latest_ready_close_ms = self._nonnegative_int_or_none(
+            queue.get("latest_ready_close_ms")
+        )
+        latest_blocked_close_ms = self._nonnegative_int_or_none(
+            queue.get("latest_blocked_close_ms")
+        )
+        now_seconds = get_now().timestamp()
         return {
             "queue_available": True,
             "warnings": [],
@@ -715,6 +766,25 @@ class RuntimeHealthService:
             "failed_count": self._nonnegative_int(queue.get("failed_count")),
             "exhausted_count": self._nonnegative_int(queue.get("exhausted_count")),
             "due_count": self._nonnegative_int(queue.get("due_count")),
+            "ready_exchange_count": self._nonnegative_int(
+                queue.get("ready_exchange_count")
+            ),
+            "blocked_session_count": self._nonnegative_int(
+                queue.get("blocked_session_count")
+            ),
+            "blocked_closed_count": self._nonnegative_int(
+                queue.get("blocked_closed_count")
+            ),
+            "latest_ready_close_age_seconds": (
+                max(now_seconds - latest_ready_close_ms / 1000, 0.0)
+                if latest_ready_close_ms is not None
+                else None
+            ),
+            "latest_blocked_close_age_seconds": (
+                max(now_seconds - latest_blocked_close_ms / 1000, 0.0)
+                if latest_blocked_close_ms is not None
+                else None
+            ),
             "oldest_pending_available": oldest_ms is not None,
             "oldest_pending_age_seconds": oldest_age,
             "oldest_due_progress_age_seconds": oldest_due_age,

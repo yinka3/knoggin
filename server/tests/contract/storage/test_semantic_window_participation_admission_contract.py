@@ -102,6 +102,14 @@ async def test_semantic_admission_filters_participation_before_session_fifo(
         real_postgres_client
     ).get_unclaimed_project_exchange_rows(user_name="ada", project_id="project-1")
     assert {row["user_message_id"] for row in remaining} == {202, 206, 207}
+    health = await SemanticWindowReader(real_postgres_client).get_health_summary(
+        user_name="ada", project_id="project-1"
+    )
+    assert health["ready_exchange_count"] == 1
+    assert health["blocked_session_count"] == 1
+    assert health["blocked_closed_count"] == 1
+    assert health["latest_ready_close_ms"] == 202
+    assert health["latest_blocked_close_ms"] == 207
 
 
 @pytest.mark.storage
