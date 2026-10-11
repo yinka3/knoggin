@@ -1,6 +1,6 @@
 # Ingestion remediation completion audit
 
-Reviewed 2026-10-10 against current code, the original extraction, Knowledge, general ingestion, health, and intersection notes, and the assertions in affected tests. Earlier notebooks describe the code at scan time; this page records what is complete now. Passing fake-backed tests do not establish PostgreSQL behavior.
+Reviewed 2026-10-10, with the project-file follow-up completed 2026-10-11. This audit compares current code with the original extraction, Knowledge, general ingestion, health, and intersection notes and the assertions in affected tests. Earlier notebooks describe the code at scan time; this page records what is complete now. Passing fake-backed tests do not establish PostgreSQL behavior.
 
 ## Defect checklist
 
@@ -25,7 +25,9 @@ Reviewed 2026-10-10 against current code, the original extraction, Knowledge, ge
 ## Additional findings from this audit
 
 1. **Fixed here: fresh blocked work could hide older FIFO blockage.** The backlog aggregate used the *latest* close time among ready exchanges behind a blocked session head. Adding a new closed exchange reset the health grace period even though an earlier exchange was still blocked. It now returns the oldest blocked close time; a reader-to-health unit test and an extended Postgres contract check the boundary. The Postgres contract remains unrun locally.
-2. **Open: expected-hash project-file edits are not atomic.** `ProjectFilesystem.write_bytes(overwrite=True, expected_content_hash=...)` checks the hash before preparing a temporary file, then calls `os.replace` without rechecking under a lock. A synchronized local run forced two edits past the same check; both returned success and one edit was lost. `DocumentService.update_project_file` and `append_project_file` call this path. `delete_file` and `move_file` also check a hash before their final mutation. This requires a per-path concurrency protocol and a persisted-state test; the create-only upload fix does not cover it.
+2. **Fixed: expected-hash project-file edits could both succeed.** The hash is now rechecked while holding a project mutation lock before replacement. Delete and move use the same lock. A forced race across separate filesystem instances and a second process leaves one winner and a stale-hash conflict for the other operation. The lock is project-wide, so independent edits in one project wait for each other.
+3. **Fixed: a later catalog update could restore an older file hash.** A chained edit could write newer bytes while an earlier edit was still reconciling its catalog row. Upload admission and document deletion had similar file/catalog gaps. These service operations now hold the project lock through their catalog write, and a cancelled caller waits for its owned operation to settle. A periodic full-tree scan records the persistent file-mutation generation and skips its catalog write if a Knoggin file mutation occurred before commit. Controlled interleavings reproduced the stale catalog before the fix and now verify the final file and catalog hash agree.
+4. **Fixed: deleting a readable foreign document could remove its source file.** The reader can return documents from another readable project, while the deletion writer is scoped to the active project. Deletion now checks ownership before touching the filesystem. The ownership test includes a foreign document that is readable but must remain intact.
 
 ## Evaluation decisions still open
 
@@ -37,4 +39,10 @@ Reviewed 2026-10-10 against current code, the original extraction, Knowledge, ge
 
 The FIFO follow-up passed 31 health unit/integration tests and Ruff. Its two storage-contract cases collected, but Docker's Postgres daemon is unavailable in this workspace, so their SQL assertions were not executed locally. The linked real-PDF model smoke passed earlier with cached artifacts. Do not treat the remaining storage and model-evaluation gaps as completed simply because unit tests pass.
 
+The project-file follow-up passed 121 document, Context projection, and workspace-flow tests plus 17 filesystem tests; Ruff passed. The process test uses a real second Windows process, while catalog assertions use an in-memory Postgres stand-in. A real Postgres concurrency run remains open.
+
 The composed Postgres ingestion tests replace Episode generation with a zero-Episode generator. They cover persisted stage movement, but do not prove a rich Episode → Context → Knowledge flow. A green health snapshot also reports available runtime objects and queue state; it does not test live model inference or extraction quality.
+
+The project-file lock and process test ran on Windows. The POSIX `flock` branch has not run locally. External editors do not take Knoggin's lock; periodic reconciliation will observe their changes, but an expected-hash edit cannot claim an atomic compare-and-swap against an uncooperative external writer. The lock files live outside project folders in the library's `.knoggin-file-locks` directory so reconciliation does not ingest them.
+
+The project-wide lock also serializes unrelated file mutations while their catalog writes finish. A cancelled project-file request may still complete its edit before reporting cancellation; this keeps the file and catalog together, and the caller can read the current file hash before retrying.

@@ -1,5 +1,9 @@
 import os
 import subprocess
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 
@@ -53,6 +57,129 @@ def test_project_filesystem_uses_atomic_replace_and_hash_preconditions(tmp_path)
     assert filesystem.read_bytes("notes.md") == b"second"
     assert replaced.content_hash != first.content_hash
     assert not list((tmp_path / "project").rglob(".knoggin-*.tmp"))
+
+
+@pytest.mark.parametrize("competing_operation", ["write", "delete", "move"])
+def test_expected_hash_mutations_recheck_after_a_concurrent_write(
+    tmp_path, monkeypatch, competing_operation
+):
+    first = ProjectFilesystem(tmp_path / "project")
+    second = ProjectFilesystem(tmp_path / "project")
+    original = first.write_bytes("notes.md", b"original")
+    entered_replace = threading.Event()
+    release_replace = threading.Event()
+    real_replace = os.replace
+
+    def pause_first_replace(source, destination):
+        if Path(destination) == first.root / "notes.md" and not entered_replace.is_set():
+            entered_replace.set()
+            assert release_replace.wait(10)
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", pause_first_replace)
+
+    def compete():
+        if competing_operation == "write":
+            return second.write_bytes(
+                "notes.md", b"other", overwrite=True,
+                expected_content_hash=original.content_hash,
+            )
+        if competing_operation == "delete":
+            return second.delete_file(
+                "notes.md", expected_content_hash=original.content_hash
+            )
+        return second.move_file(
+            "notes.md", "moved.md", expected_content_hash=original.content_hash
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        winner = pool.submit(
+            first.write_bytes, "notes.md", b"winner", overwrite=True,
+            expected_content_hash=original.content_hash,
+        )
+        try:
+            assert entered_replace.wait(10)
+            loser = pool.submit(compete)
+            with pytest.raises(TimeoutError):
+                loser.result(timeout=0.2)
+        finally:
+            release_replace.set()
+        assert winner.result(timeout=10).content_hash == first.read_file("notes.md").content_hash
+        with pytest.raises(ProjectFilesystemConflictError):
+            loser.result(timeout=10)
+
+    assert first.read_bytes("notes.md") == b"winner"
+    assert not (first.root / "moved.md").exists()
+    assert not list(first.root.rglob(".knoggin-*.tmp"))
+
+
+def test_expected_hash_write_conflicts_across_processes(tmp_path, monkeypatch):
+    filesystem = ProjectFilesystem(tmp_path / "project")
+    original = filesystem.write_bytes("notes.md", b"original")
+    entered_replace = threading.Event()
+    release_replace = threading.Event()
+    real_replace = os.replace
+
+    def pause_replace(source, destination):
+        if Path(destination) == filesystem.root / "notes.md":
+            entered_replace.set()
+            assert release_replace.wait(10)
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", pause_replace)
+    script = """
+import sys
+sys.path.insert(0, sys.argv[3])
+from core.knowledge.documents.filesystem import (
+    ProjectFilesystem, ProjectFilesystemConflictError,
+)
+filesystem = ProjectFilesystem(sys.argv[1])
+print('ready', flush=True)
+sys.stdin.readline()
+try:
+    filesystem.write_bytes(
+        'notes.md', b'other', overwrite=True, expected_content_hash=sys.argv[2]
+    )
+except ProjectFilesystemConflictError:
+    print('conflict', flush=True)
+else:
+    print('unexpected success', flush=True)
+"""
+
+    process = subprocess.Popen(
+        [
+            sys.executable, "-c", script, str(filesystem.root),
+            original.content_hash,
+            str(Path(__file__).resolve().parents[4] / "src"),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert process.stdout is not None
+    assert process.stdout.readline().strip() == "ready"
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        winner = pool.submit(
+            filesystem.write_bytes, "notes.md", b"winner", overwrite=True,
+            expected_content_hash=original.content_hash,
+        )
+        try:
+            assert entered_replace.wait(10)
+            assert process.stdin is not None
+            process.stdin.write("go\n")
+            process.stdin.flush()
+            with pytest.raises(subprocess.TimeoutExpired):
+                process.wait(timeout=0.2)
+        finally:
+            release_replace.set()
+        winner.result(timeout=10)
+        output, errors = process.communicate(timeout=10)
+        assert process.returncode == 0, errors
+        assert output.strip() == "conflict"
+
+    assert filesystem.read_bytes("notes.md") == b"winner"
 
 
 def test_project_filesystem_bounds_reads_and_lists_regular_files_in_path_order(tmp_path):

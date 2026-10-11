@@ -2,7 +2,7 @@ import asyncio
 import base64
 import hashlib
 import json
-import tempfile
+import os
 import threading
 from contextlib import asynccontextmanager
 from copy import deepcopy
@@ -32,6 +32,7 @@ from core.knowledge.documents import (
     extraction as extraction_module,
 )
 from core.knowledge.documents.constants import document_extension
+from core.knowledge.documents.filesystem import ProjectFilesystemConflictError
 from core.project.project_files import CONTEXT_FILE_PATH
 from infrastructure.background_work import BackgroundWorkRejected
 from runtime.api_port import ApplicationRuntimePort
@@ -1197,29 +1198,78 @@ async def test_concurrent_same_path_upload_keeps_winning_catalog_and_file(
 ):
     service, postgres = document_harness
     service._run_blocking = asyncio.to_thread
-    both_checked_absence = threading.Barrier(2)
-    make_temporary = tempfile.mkstemp
+    insert_started = asyncio.Event()
+    release_insert = asyncio.Event()
+    real_insert = service._writer.insert_document
 
-    def synchronize_publication(*args, **kwargs):
-        both_checked_absence.wait(timeout=5)
-        return make_temporary(*args, **kwargs)
+    async def delayed_insert(**kwargs):
+        insert_started.set()
+        await release_insert.wait()
+        return await real_insert(**kwargs)
 
-    monkeypatch.setattr(tempfile, "mkstemp", synchronize_publication)
-    results = await asyncio.gather(
-        service.add_document(content=b"first version", original_name="same.md"),
-        service.add_document(content=b"second version", original_name="same.md"),
-        return_exceptions=True,
+    monkeypatch.setattr(service._writer, "insert_document", delayed_insert)
+    first_upload = asyncio.create_task(
+        service.add_document(content=b"first version", original_name="same.md")
     )
+    await asyncio.wait_for(insert_started.wait(), 10)
+    second_upload = asyncio.create_task(
+        service.add_document(content=b"second version", original_name="same.md")
+    )
+    await asyncio.sleep(0.1)
+    assert not second_upload.done()
+    release_insert.set()
+    accepted = await first_upload
+    with pytest.raises(FileExistsError):
+        await second_upload
 
-    accepted = [result for result in results if isinstance(result, dict)]
-    rejected = [result for result in results if isinstance(result, FileExistsError)]
-    assert len(accepted) == len(rejected) == 1
     assert len(postgres.rows) == 1
-    assert postgres.rows[0]["document_id"] == accepted[0]["document_id"]
+    assert postgres.rows[0]["document_id"] == accepted["document_id"]
     content = service._filesystem.read_bytes("same.md")
-    assert hashlib.sha256(content).hexdigest() == accepted[0]["content_hash"]
-    assert content in {b"first version", b"second version"}
+    assert hashlib.sha256(content).hexdigest() == accepted["content_hash"]
+    assert content == b"first version"
     assert not list(service._filesystem.root.rglob(".knoggin-*.tmp"))
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_project_file_edit_waits_for_upload_catalog_insert(
+    document_harness, monkeypatch
+):
+    service, postgres = document_harness
+    insert_started = asyncio.Event()
+    release_insert = asyncio.Event()
+    real_insert = service._writer.insert_document
+
+    async def delayed_insert(**kwargs):
+        insert_started.set()
+        await release_insert.wait()
+        return await real_insert(**kwargs)
+
+    monkeypatch.setattr(service._writer, "insert_document", delayed_insert)
+    uploading = asyncio.create_task(
+        service.add_document(content=b"original", original_name="notes.md")
+    )
+    await asyncio.wait_for(insert_started.wait(), 10)
+    editing = asyncio.create_task(
+        service.update_project_file(
+            "notes.md", "edited",
+            expected_content_hash=hashlib.sha256(b"original").hexdigest(),
+        )
+    )
+    await asyncio.sleep(0.1)
+    assert not editing.done()
+    release_insert.set()
+    uploaded = await uploading
+    edited = await editing
+
+    active = [
+        row for row in postgres.rows
+        if row["relative_path"] == "notes.md" and row["status"] != "deleted"
+    ]
+    assert len(active) == 1
+    assert active[0]["document_id"] == uploaded["document_id"]
+    assert active[0]["content_hash"] == edited["content_hash"]
+    assert service._filesystem.read_bytes("notes.md") == b"edited"
 
 
 @pytest.mark.storage
@@ -1369,6 +1419,45 @@ async def test_reconciliation_rolls_back_all_catalog_changes_when_commit_fails(
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_periodic_reconciliation_does_not_revert_newer_owned_edit(
+    document_harness, monkeypatch
+):
+    service, postgres = document_harness
+    created = await service.create_project_file("notes.md", "original")
+    filesystem = service._filesystem
+    assert filesystem is not None
+    filesystem.write_bytes("notes.md", b"external", overwrite=True)
+    external_hash = hashlib.sha256(b"external").hexdigest()
+    reconcile_started = asyncio.Event()
+    release_reconcile = asyncio.Event()
+    real_preview = service.preview_folder
+
+    async def delayed_preview(**kwargs):
+        result = await real_preview(**kwargs)
+        if any(entry.content == b"external" for entry in kwargs["entries"]):
+            reconcile_started.set()
+            await release_reconcile.wait()
+        return result
+
+    monkeypatch.setattr(service, "preview_folder", delayed_preview)
+    reconciling = asyncio.create_task(service.reconcile_project_files())
+    await asyncio.wait_for(reconcile_started.wait(), 10)
+    edited = await service.update_project_file(
+        "notes.md", "owned", expected_content_hash=external_hash
+    )
+    release_reconcile.set()
+    await reconciling
+
+    catalog = next(
+        row for row in postgres.rows
+        if row["relative_path"] == "notes.md" and row["status"] != "deleted"
+    )
+    assert created["content_hash"] != edited["content_hash"]
+    assert catalog["content_hash"] == edited["content_hash"]
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_reconciliation_skips_unchanged_bytes_but_keeps_a_full_hash_sweep(
     document_harness,
     monkeypatch,
@@ -1437,6 +1526,187 @@ async def test_native_project_file_operations_reconcile_the_document_catalog(
         row["relative_path"] == "notes/draft.md" and row["status"] == "deleted"
         for row in postgres.rows
     )
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_concurrent_project_file_edits_reject_stale_hash_and_preserve_catalog(
+    document_harness, monkeypatch
+):
+    service, postgres = document_harness
+    created = await service.create_project_file("notes.md", "original")
+    filesystem = service._filesystem
+    assert filesystem is not None
+    service._run_blocking = asyncio.to_thread
+    entered_replace = threading.Event()
+    release_replace = threading.Event()
+    real_replace = os.replace
+
+    def pause_first_replace(source, destination):
+        if destination == filesystem.root / "notes.md" and not entered_replace.is_set():
+            entered_replace.set()
+            assert release_replace.wait(10)
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", pause_first_replace)
+    winner = asyncio.create_task(
+        service.update_project_file(
+            "notes.md", "winner", expected_content_hash=created["content_hash"]
+        )
+    )
+    try:
+        assert await asyncio.to_thread(entered_replace.wait, 10)
+        loser = asyncio.create_task(
+            service.update_project_file(
+                "notes.md", "other", expected_content_hash=created["content_hash"]
+            )
+        )
+        await asyncio.sleep(0.1)
+    finally:
+        release_replace.set()
+
+    accepted = await winner
+    with pytest.raises(ProjectFilesystemConflictError):
+        await loser
+    catalog = next(
+        row for row in postgres.rows
+        if row["relative_path"] == "notes.md" and row["status"] != "deleted"
+    )
+    assert accepted["content"] == "winner"
+    assert catalog["content_hash"] == accepted["content_hash"]
+    assert filesystem.read_bytes("notes.md") == b"winner"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_chained_project_file_edits_do_not_regress_catalog_hash(
+    document_harness, monkeypatch
+):
+    service, postgres = document_harness
+    created = await service.create_project_file("notes.md", "original")
+    filesystem = service._filesystem
+    assert filesystem is not None
+    first_reconcile_started = asyncio.Event()
+    release_first_reconcile = asyncio.Event()
+    real_reconcile = service._reconcile_owned_file_changes
+
+    async def delayed_reconcile(*, upserts, removed_paths=()):
+        if upserts.get("notes.md") == b"first edit":
+            first_reconcile_started.set()
+            await release_first_reconcile.wait()
+        await real_reconcile(upserts=upserts, removed_paths=removed_paths)
+
+    monkeypatch.setattr(service, "_reconcile_owned_file_changes", delayed_reconcile)
+    first_edit = asyncio.create_task(
+        service.update_project_file(
+            "notes.md", "first edit", expected_content_hash=created["content_hash"]
+        )
+    )
+    await asyncio.wait_for(first_reconcile_started.wait(), 10)
+    second_task = asyncio.create_task(
+        service.update_project_file(
+            "notes.md", "second edit",
+            expected_content_hash=hashlib.sha256(b"first edit").hexdigest(),
+        )
+    )
+    await asyncio.sleep(0.1)
+    assert not second_task.done()
+    release_first_reconcile.set()
+    await first_edit
+    second_edit = await second_task
+
+    catalog = next(
+        row for row in postgres.rows
+        if row["relative_path"] == "notes.md" and row["status"] != "deleted"
+    )
+    assert second_edit["content_hash"] == catalog["content_hash"]
+    assert filesystem.read_bytes("notes.md") == b"second edit"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_cancelled_project_file_edit_finishes_file_and_catalog(
+    document_harness, monkeypatch
+):
+    service, postgres = document_harness
+    created = await service.create_project_file("notes.md", "original")
+    filesystem = service._filesystem
+    assert filesystem is not None
+    service._run_blocking = asyncio.to_thread
+    entered_replace = threading.Event()
+    release_replace = threading.Event()
+    real_replace = os.replace
+
+    def pause_replace(source, destination):
+        if destination == filesystem.root / "notes.md":
+            entered_replace.set()
+            assert release_replace.wait(10)
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", pause_replace)
+    operation = asyncio.create_task(
+        service.update_project_file(
+            "notes.md", "edited", expected_content_hash=created["content_hash"]
+        )
+    )
+    try:
+        assert await asyncio.to_thread(entered_replace.wait, 10)
+        operation.cancel()
+        await asyncio.sleep(0.1)
+        assert not operation.done()
+    finally:
+        release_replace.set()
+    with pytest.raises(asyncio.CancelledError):
+        await operation
+
+    catalog = next(
+        row for row in postgres.rows
+        if row["relative_path"] == "notes.md" and row["status"] != "deleted"
+    )
+    expected_hash = hashlib.sha256(b"edited").hexdigest()
+    assert filesystem.read_bytes("notes.md") == b"edited"
+    assert catalog["content_hash"] == expected_hash
+    followup = await service.update_project_file(
+        "notes.md", "next", expected_content_hash=expected_hash
+    )
+    assert followup["content"] == "next"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_document_delete_and_same_path_create_preserve_new_catalog_row(
+    document_harness, monkeypatch
+):
+    service, postgres = document_harness
+    original = await service.add_document(content=b"original", original_name="notes.md")
+    delete_started = asyncio.Event()
+    release_delete = asyncio.Event()
+    real_delete = service._writer.delete_document
+
+    async def delayed_delete(*, document_id):
+        delete_started.set()
+        await release_delete.wait()
+        return await real_delete(document_id=document_id)
+
+    monkeypatch.setattr(service._writer, "delete_document", delayed_delete)
+    deleting = asyncio.create_task(
+        service.delete_document(document_id=original["document_id"])
+    )
+    await asyncio.wait_for(delete_started.wait(), 10)
+    creating = asyncio.create_task(service.create_project_file("notes.md", "replacement"))
+    await asyncio.sleep(0.1)
+    assert not creating.done()
+    release_delete.set()
+    await deleting
+    created = await creating
+
+    active = [
+        row for row in postgres.rows
+        if row["relative_path"] == "notes.md" and row["status"] != "deleted"
+    ]
+    assert created["content"] == "replacement"
+    assert len(active) == 1
+    assert active[0]["content_hash"] == created["content_hash"]
 
 
 @pytest.mark.storage
@@ -1571,6 +1841,7 @@ async def test_document_listing_is_scoped_to_the_active_project(tmp_path):
         "project-2",
         postgres,
         embedding,
+        readable_project_ids=["project-1", "project-2"],
         filesystem_factory=filesystem_factory,
         blocking_runner=run_inline,
     )
@@ -2028,6 +2299,8 @@ async def test_delete_document_enforces_project_ownership(tmp_path):
         )
 
     assert len(postgres.rows) == 1
+    assert project_one._filesystem.read_bytes("private.txt") == b"private"
+    assert postgres.rows[0]["status"] != "deleted"
     deleted = await project_one.delete_document(
         document_id=uploaded["document_id"],
     )

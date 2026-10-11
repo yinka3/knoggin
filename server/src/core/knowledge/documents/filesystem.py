@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
 import shutil
 import stat
 import tempfile
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Iterator
@@ -38,6 +41,13 @@ class ProjectFilePath:
     modified_ns: int
 
 
+@dataclass(slots=True)
+class _MutationLease:
+    root_key: str
+    descriptor: int
+    active: bool = True
+
+
 class ProjectFilesystem:
     """Read and write one project's local directory without escaping its root.
 
@@ -66,6 +76,113 @@ class ProjectFilesystem:
         self._root.mkdir(parents=True, exist_ok=True)
         if self._root.is_symlink() or not self._root.is_dir():
             raise ValueError("project_root must be a real directory")
+
+    def _lock_key(self) -> str:
+        return os.path.normcase(os.path.realpath(self._root))
+
+    def acquire_mutation_lease(self) -> _MutationLease:
+        """Hold the project mutation lock across filesystem and catalog work."""
+        # Keep coordination files outside the project tree scanned for documents.
+        lock_directory = self._root.parent / ".knoggin-file-locks"
+        lock_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if lock_directory.is_symlink() or not lock_directory.is_dir():
+            raise ValueError("project file lock directory must be a real directory")
+        root_key = self._lock_key()
+        lock_name = hashlib.sha256(os.fsencode(root_key)).hexdigest() + ".lock"
+        lock_path = lock_directory / lock_name
+        if lock_path.is_symlink():
+            raise ValueError("project file lock must not be a symlink")
+        flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(lock_path, flags, 0o600)
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise ValueError("project file lock must be a regular file")
+            self._acquire_file_lock(descriptor)
+        except BaseException:
+            os.close(descriptor)
+            raise
+        return _MutationLease(root_key=root_key, descriptor=descriptor)
+
+    def release_mutation_lease(self, lease: _MutationLease) -> None:
+        if not isinstance(lease, _MutationLease) or not lease.active:
+            raise ValueError("project mutation lease is not active")
+        lease.active = False
+        try:
+            self._release_file_lock(lease.descriptor)
+        finally:
+            os.close(lease.descriptor)
+
+    def _require_mutation_lease(self, lease: _MutationLease) -> None:
+        if not isinstance(lease, _MutationLease) or not lease.active:
+            raise ValueError("project mutation lease is not active")
+        if lease.root_key != self._lock_key():
+            raise ValueError("project mutation lease belongs to another root")
+
+    @contextmanager
+    def _mutation_lock(
+        self, lease: _MutationLease | None = None
+    ) -> Iterator[_MutationLease]:
+        """Serialize project mutations unless a caller already owns the lease."""
+        if lease is not None:
+            self._require_mutation_lease(lease)
+            yield lease
+            return
+        owned = self.acquire_mutation_lease()
+        try:
+            yield owned
+        finally:
+            self.release_mutation_lease(owned)
+
+    @staticmethod
+    def _read_mutation_generation(descriptor: int) -> int:
+        os.lseek(descriptor, 1, os.SEEK_SET)
+        return int.from_bytes(os.read(descriptor, 8).ljust(8, b"\0"), "big")
+
+    @classmethod
+    def _bump_mutation_generation(cls, lease: _MutationLease) -> None:
+        next_generation = (cls._read_mutation_generation(lease.descriptor) + 1) % (1 << 64)
+        os.lseek(lease.descriptor, 1, os.SEEK_SET)
+        if os.write(lease.descriptor, next_generation.to_bytes(8, "big")) != 8:
+            raise OSError("could not record project file mutation")
+
+    def get_mutation_generation(self, *, _lease: _MutationLease | None = None) -> int:
+        """Return the persistent generation of Knoggin-managed file changes."""
+        with self._mutation_lock(_lease) as lease:
+            return self._read_mutation_generation(lease.descriptor)
+
+    @staticmethod
+    def _acquire_file_lock(descriptor: int) -> None:
+        deadline = time.monotonic() + 30
+        while True:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return
+            except OSError as exc:
+                if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("timed out waiting for project file mutation") from exc
+                time.sleep(0.01)
+
+    @staticmethod
+    def _release_file_lock(descriptor: int) -> None:
+        if os.name == "nt":
+            import msvcrt
+
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
 
     def read_bytes(self, relative_path: str, *, max_bytes: int = MAX_DOCUMENT_SIZE) -> bytes:
         """Return one regular project file, enforcing the requested read bound."""
@@ -101,6 +218,7 @@ class ProjectFilesystem:
         *,
         overwrite: bool = False,
         expected_content_hash: str | None = None,
+        _lease: _MutationLease | None = None,
     ) -> ProjectFile:
         """Atomically create or replace one project file.
 
@@ -121,6 +239,60 @@ class ProjectFilesystem:
 
         normalized = self.normalize_path(relative_path)
         path = self._path_for_write(normalized)
+        self._check_write_precondition(
+            path,
+            normalized,
+            overwrite=overwrite,
+            expected_content_hash=expected_content_hash,
+        )
+
+        file_descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".knoggin-",
+            suffix=".tmp",
+            dir=path.parent,
+        )
+        try:
+            with os.fdopen(file_descriptor, "wb") as temporary_file:
+                temporary_file.write(content)
+                temporary_file.flush()
+                os.fsync(temporary_file.fileno())
+            with self._mutation_lock(_lease) as lease:
+                path = self._path_for_write(normalized)
+                self._check_write_precondition(
+                    path,
+                    normalized,
+                    overwrite=overwrite,
+                    expected_content_hash=expected_content_hash,
+                )
+                if overwrite:
+                    os.replace(temporary_name, path)
+                    self._bump_mutation_generation(lease)
+                else:
+                    # Publish complete bytes only if the destination is absent.
+                    os.link(temporary_name, path)
+                    self._bump_mutation_generation(lease)
+                    os.unlink(temporary_name)
+        except BaseException:
+            try:
+                os.unlink(temporary_name)
+            except FileNotFoundError:
+                pass
+            raise
+
+        return ProjectFile(
+            relative_path=normalized,
+            size_bytes=len(content),
+            content_hash=self._content_hash(content),
+        )
+
+    def _check_write_precondition(
+        self,
+        path: Path,
+        normalized: str,
+        *,
+        overwrite: bool,
+        expected_content_hash: str | None,
+    ) -> None:
         exists = path.exists() or path.is_symlink()
         if path.is_symlink():
             raise ValueError("project file path must not be a symlink")
@@ -135,50 +307,22 @@ class ProjectFilesystem:
             if current_hash != expected_content_hash:
                 raise ProjectFilesystemConflictError("project file changed")
 
-        file_descriptor, temporary_name = tempfile.mkstemp(
-            prefix=".knoggin-",
-            suffix=".tmp",
-            dir=path.parent,
-        )
-        try:
-            with os.fdopen(file_descriptor, "wb") as temporary_file:
-                temporary_file.write(content)
-                temporary_file.flush()
-                os.fsync(temporary_file.fileno())
-            if overwrite:
-                os.replace(temporary_name, path)
-            else:
-                # A hard link publishes the complete temp file only if the
-                # destination is still absent. Unlike os.replace, this cannot
-                # overwrite a concurrent create of the same project path.
-                os.link(temporary_name, path)
-                os.unlink(temporary_name)
-        except BaseException:
-            try:
-                os.unlink(temporary_name)
-            except FileNotFoundError:
-                pass
-            raise
-
-        return ProjectFile(
-            relative_path=normalized,
-            size_bytes=len(content),
-            content_hash=self._content_hash(content),
-        )
-
     def delete_file(
         self,
         relative_path: str,
         *,
         expected_content_hash: str | None = None,
+        _lease: _MutationLease | None = None,
     ) -> ProjectFile:
         """Remove one regular file, optionally only when its hash is current."""
-        path = self._path_for_read(relative_path)
-        content = path.read_bytes()
-        content_hash = self._content_hash(content)
-        if expected_content_hash is not None and content_hash != expected_content_hash:
-            raise ProjectFilesystemConflictError("project file changed")
-        path.unlink()
+        with self._mutation_lock(_lease) as lease:
+            path = self._path_for_read(relative_path)
+            content = path.read_bytes()
+            content_hash = self._content_hash(content)
+            if expected_content_hash is not None and content_hash != expected_content_hash:
+                raise ProjectFilesystemConflictError("project file changed")
+            path.unlink()
+            self._bump_mutation_generation(lease)
         return ProjectFile(
             relative_path=self.normalize_path(relative_path),
             size_bytes=len(content),
@@ -191,20 +335,23 @@ class ProjectFilesystem:
         destination_path: str,
         *,
         expected_content_hash: str | None = None,
+        _lease: _MutationLease | None = None,
     ) -> ProjectFile:
         """Atomically move a regular project file to an unused relative path."""
-        source = self._path_for_read(source_path)
-        content = source.read_bytes()
-        content_hash = self._content_hash(content)
-        if expected_content_hash is not None and content_hash != expected_content_hash:
-            raise ProjectFilesystemConflictError("project file changed")
         destination_normalized = self.normalize_path(destination_path)
-        destination = self._path_for_write(destination_normalized)
-        if destination.exists() or destination.is_symlink():
-            raise FileExistsError(
-                f"project file already exists: {destination_normalized}"
-            )
-        os.replace(source, destination)
+        with self._mutation_lock(_lease) as lease:
+            source = self._path_for_read(source_path)
+            content = source.read_bytes()
+            content_hash = self._content_hash(content)
+            if expected_content_hash is not None and content_hash != expected_content_hash:
+                raise ProjectFilesystemConflictError("project file changed")
+            destination = self._path_for_write(destination_normalized)
+            if destination.exists() or destination.is_symlink():
+                raise FileExistsError(
+                    f"project file already exists: {destination_normalized}"
+                )
+            os.replace(source, destination)
+            self._bump_mutation_generation(lease)
         return ProjectFile(
             relative_path=destination_normalized,
             size_bytes=len(content),
