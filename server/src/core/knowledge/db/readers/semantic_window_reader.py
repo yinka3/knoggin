@@ -377,9 +377,9 @@ class SemanticWindowReader:
                 count(*) FILTER (
                     WHERE admission_state = 'ready' AND blockers_through > 0
                 ) AS blocked_closed_count,
-                max(exchange_closed_at_ms) FILTER (
+                min(exchange_closed_at_ms) FILTER (
                     WHERE admission_state = 'ready' AND blockers_through > 0
-                ) AS latest_blocked_close_ms
+                ) AS oldest_blocked_close_ms
             FROM ordered
             """,
             (user_name, project_id),
@@ -392,7 +392,7 @@ class SemanticWindowReader:
                     "latest_ready_close_ms",
                     "blocked_session_count",
                     "blocked_closed_count",
-                    "latest_blocked_close_ms",
+                    "oldest_blocked_close_ms",
                 )
             }
         )

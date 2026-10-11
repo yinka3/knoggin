@@ -6,6 +6,7 @@ import pytest
 
 from common.utils.time_utils import get_now
 from core.health.service import RuntimeHealthService
+from core.knowledge.db.readers.semantic_window_reader import SemanticWindowReader
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.job.scheduler import Scheduler
 
@@ -495,7 +496,7 @@ async def test_ingestion_health_reports_unclaimed_and_fifo_delays(
                 "latest_ready_close_ms": closed_at if ready_count else None,
                 "blocked_session_count": int(bool(blocked_count)),
                 "blocked_closed_count": blocked_count,
-                "latest_blocked_close_ms": closed_at if blocked_count else None,
+                "oldest_blocked_close_ms": closed_at if blocked_count else None,
                 "oldest_pending_ms": None,
                 "last_processed_ms": None,
             }
@@ -526,6 +527,71 @@ async def test_ingestion_health_reports_unclaimed_and_fifo_delays(
     assert payload["details"]["semantic_windows"]["blocked_closed_count"] == blocked_count
     assert payload["activity"] == (
         "delayed" if expected_status == "degraded" else "busy" if ready_count else "idle"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_reader_blocked_age_reaches_ingestion_health():
+    old_close_ms = int((get_now() - timedelta(minutes=10)).timestamp() * 1000)
+
+    class Client:
+        calls = 0
+
+        async def fetch_one(self, _query, _params):
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "pending_count": 0,
+                    "claimed_count": 0,
+                    "failed_count": 0,
+                    "exhausted_count": 0,
+                    "due_count": 0,
+                    "oldest_pending_ms": None,
+                    "oldest_due_progress_ms": None,
+                    "last_processed_ms": None,
+                }
+            return {
+                "ready_exchange_count": 0,
+                "latest_ready_close_ms": None,
+                "blocked_session_count": 1,
+                "blocked_closed_count": 2,
+                "oldest_blocked_close_ms": old_close_ms,
+            }
+
+    client = Client()
+    reader = SemanticWindowReader(client)
+
+    class Store:
+        async def get_semantic_window_health(self, **kwargs):
+            return await reader.get_health_summary(**kwargs)
+
+    resource_set = resources()
+    resource_set.knowledge_store = Store()
+    service = RuntimeHealthService(
+        resources=resource_set,
+        projects=SimpleNamespace(
+            active_projects={
+                "project-a": SimpleNamespace(
+                    project_semantic_processor=object(),
+                    scheduler=FakeScheduler({"state": "running"}),
+                )
+            }
+        ),
+        sessions=SessionRuntimeReader({}),
+    )
+
+    payload = (
+        await service.get_ingestion_health(user_name="ada", project_id="project-a")
+    ).model_dump(mode="json")
+
+    assert client.calls == 2
+    assert payload["status"] == "degraded"
+    assert payload["activity"] == "delayed"
+    assert payload["details"]["semantic_windows"]["blocked_closed_count"] == 2
+    assert (
+        payload["details"]["semantic_windows"]["oldest_blocked_close_age_seconds"]
+        > 360
     )
 
 

@@ -299,7 +299,7 @@ class RuntimeHealthService:
         oldest_age = queue_details.get("oldest_pending_age_seconds")
         oldest_due_age = queue_details.get("oldest_due_progress_age_seconds")
         latest_ready_close_age = queue_details.get("latest_ready_close_age_seconds")
-        latest_blocked_close_age = queue_details.get("latest_blocked_close_age_seconds")
+        oldest_blocked_close_age = queue_details.get("oldest_blocked_close_age_seconds")
         active_jobs = scheduler_snapshot.get("active_jobs")
         semantic_job_active = isinstance(active_jobs, list) and any(
             isinstance(job, Mapping)
@@ -329,8 +329,8 @@ class RuntimeHealthService:
         )
         fifo_blocked = (
             blocked_closed_count > 0
-            and latest_blocked_close_age is not None
-            and latest_blocked_close_age > idle_flush_grace
+            and oldest_blocked_close_age is not None
+            and oldest_blocked_close_age > idle_flush_grace
         )
         scheduler_state = scheduler_snapshot.get("state")
         if semantic_processor is None:
@@ -445,7 +445,7 @@ class RuntimeHealthService:
                     "blocked_session_count": blocked_session_count,
                     "blocked_closed_count": blocked_closed_count,
                     "latest_ready_close_age_seconds": latest_ready_close_age,
-                    "latest_blocked_close_age_seconds": latest_blocked_close_age,
+                    "oldest_blocked_close_age_seconds": oldest_blocked_close_age,
                     "manual_retry_required": exhausted_count > 0,
                     "oldest_pending_available": (
                         queue_details.get("oldest_pending_available") is True
@@ -713,7 +713,7 @@ class RuntimeHealthService:
                 "blocked_session_count": 0,
                 "blocked_closed_count": 0,
                 "latest_ready_close_age_seconds": None,
-                "latest_blocked_close_age_seconds": None,
+                "oldest_blocked_close_age_seconds": None,
                 "oldest_pending_available": False,
                 "oldest_pending_age_seconds": None,
                 "oldest_due_progress_age_seconds": None,
@@ -739,7 +739,7 @@ class RuntimeHealthService:
                 "blocked_session_count": 0,
                 "blocked_closed_count": 0,
                 "latest_ready_close_age_seconds": None,
-                "latest_blocked_close_age_seconds": None,
+                "oldest_blocked_close_age_seconds": None,
                 "oldest_pending_available": False,
                 "oldest_pending_age_seconds": None,
                 "oldest_due_progress_age_seconds": None,
@@ -763,8 +763,8 @@ class RuntimeHealthService:
         latest_ready_close_ms = self._nonnegative_int_or_none(
             queue.get("latest_ready_close_ms")
         )
-        latest_blocked_close_ms = self._nonnegative_int_or_none(
-            queue.get("latest_blocked_close_ms")
+        oldest_blocked_close_ms = self._nonnegative_int_or_none(
+            queue.get("oldest_blocked_close_ms")
         )
         now_seconds = get_now().timestamp()
         return {
@@ -789,9 +789,9 @@ class RuntimeHealthService:
                 if latest_ready_close_ms is not None
                 else None
             ),
-            "latest_blocked_close_age_seconds": (
-                max(now_seconds - latest_blocked_close_ms / 1000, 0.0)
-                if latest_blocked_close_ms is not None
+            "oldest_blocked_close_age_seconds": (
+                max(now_seconds - oldest_blocked_close_ms / 1000, 0.0)
+                if oldest_blocked_close_ms is not None
                 else None
             ),
             "oldest_pending_available": oldest_ms is not None,

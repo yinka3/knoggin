@@ -49,7 +49,9 @@ async def test_semantic_admission_filters_participation_before_session_fifo(
             ('ada', 'session-blocked', 206, 'project-1', 'user', 'Editable.',
              'editable', 'open', NULL, NULL),
             ('ada', 'session-blocked', 207, 'project-1', 'user', 'Later.',
-             'sealed', 'closed', 'user_only', 207)
+             'sealed', 'closed', 'user_only', 207),
+            ('ada', 'session-blocked', 208, 'project-1', 'user', 'Still later.',
+             'sealed', 'closed', 'user_only', 208)
         """
     )
 
@@ -57,7 +59,7 @@ async def test_semantic_admission_filters_participation_before_session_fifo(
         real_postgres_client
     ).get_unclaimed_project_exchange_rows(user_name="ada", project_id="project-1")
 
-    assert {row["user_message_id"] for row in rows} == {202, 205, 206, 207}
+    assert {row["user_message_id"] for row in rows} == {202, 205, 206, 207, 208}
     assert all("session_status" not in row for row in rows)
 
     admission = SemanticWindowAdmission(
@@ -101,15 +103,15 @@ async def test_semantic_admission_filters_participation_before_session_fifo(
     remaining = await SemanticWindowReader(
         real_postgres_client
     ).get_unclaimed_project_exchange_rows(user_name="ada", project_id="project-1")
-    assert {row["user_message_id"] for row in remaining} == {202, 206, 207}
+    assert {row["user_message_id"] for row in remaining} == {202, 206, 207, 208}
     health = await SemanticWindowReader(real_postgres_client).get_health_summary(
         user_name="ada", project_id="project-1"
     )
     assert health["ready_exchange_count"] == 1
     assert health["blocked_session_count"] == 1
-    assert health["blocked_closed_count"] == 1
+    assert health["blocked_closed_count"] == 2
     assert health["latest_ready_close_ms"] == 202
-    assert health["latest_blocked_close_ms"] == 207
+    assert health["oldest_blocked_close_ms"] == 207
 
 
 @pytest.mark.storage

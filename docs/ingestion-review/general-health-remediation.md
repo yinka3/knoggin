@@ -2,6 +2,8 @@
 
 Working plan, 2026-10-10. Source and persisted outcomes take priority over test names or old README text. The [general ingestion](general-ingestion.md), [health](health.md), and [intersection](general-health-intersections.md) scans hold the original evidence.
 
+The [completion audit](remediation-completion-audit.md) records current status across all four reviewed layers, including later findings and verification limits.
+
 ## Implemented in this pass
 
 1. **Concurrent same-path upload:** create-only publication uses a hard link from the completed temporary file, so the destination is created atomically and cannot replace a concurrent winner. A synchronized two-upload test checks that exactly one catalog row wins, its hash matches the surviving file, and no temporary file remains. Filesystems that do not support hard links will reject create-only upload; this needs deployment compatibility review.
