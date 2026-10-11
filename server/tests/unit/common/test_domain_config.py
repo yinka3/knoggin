@@ -145,6 +145,75 @@ def test_domain_config_rejects_ambiguous_labels_and_invalid_relationships():
 
 @pytest.mark.unit
 @pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("first_name", "first_label", "second_name", "second_label", "label_field"),
+    [
+        ("USES", None, "DEPLOYS", "uses", "labels"),
+        ("DEPLOYS_TO", None, "USES", "deploys-to", "aliases"),
+        ("USES", "works with", "DEPLOYS", "WORKS-WITH", "labels"),
+    ],
+)
+def test_relationship_wording_cannot_belong_to_two_rules(
+    first_name, first_label, second_name, second_label, label_field
+):
+    payload = domain_payload()
+    payload["relationships"] = {
+        first_name: {
+            "source_types": ["Project"],
+            "target_types": ["Technology"],
+            "labels": [first_label] if first_label else [],
+        },
+        second_name: {
+            "source_types": ["Technology"],
+            "target_types": ["Project"],
+            label_field: [second_label] if second_label else [],
+        },
+    }
+
+    with pytest.raises(DomainConfigError, match="Relationship label .*claimed by both"):
+        DomainConfig.from_mapping(payload)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_relationship_lookup_survives_config_and_compiled_snapshot_round_trips():
+    payload = domain_payload()
+    payload["relationships"]["USES"]["labels"] = ["deploys to"]
+    config = DomainConfig.from_mapping(payload)
+
+    for compiled in (
+        config.compile(),
+        DomainConfig.from_mapping(config.to_dict()).compile(),
+        type(config.compile()).from_dict(config.compile().to_dict()),
+    ):
+        assert compiled.relationship_by_key("DEPLOYS-TO").name == "USES"
+        assert compiled.relationship_by_key("deploys   to").name == "USES"
+        assert compiled.relationship_allows("deploys-to", "Project", "Technology")
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_legacy_ambiguous_compiled_snapshot_prefers_canonical_name():
+    compiled = DomainConfig.from_mapping(domain_payload()).compile()
+    snapshot = compiled.to_dict()
+    deploys = {
+        "name": "DEPLOYS",
+        "source_types": ["Technology"],
+        "target_types": ["Project"],
+        "symmetric": False,
+        "labels": ["uses"],
+    }
+    snapshot["relationships"] = {"deploys": deploys, **snapshot["relationships"]}
+
+    restored = type(compiled).from_dict(snapshot)
+
+    assert restored.relationship_by_key("uses").name == "USES"
+    assert restored.relationship_allows("USES", "Project", "Technology")
+    assert not restored.relationship_allows("USES", "Technology", "Project")
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 def test_domain_context_configuration_is_ordered_and_separate_from_extraction_guidance():
     payload = domain_payload()
     payload["context_sections"] = [

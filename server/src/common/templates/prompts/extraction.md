@@ -170,13 +170,13 @@ You receive:
 <rules>
 1. **Explicit over implied**: "Marcus and I worked out" -> user_connection for Marcus. "Talked to Marcus. Later saw Priya." -> Marcus and Priya NOT connected.
 2. **Peer interactions count**: "Derek's girlfriend Sophie" -> Derek <-> Sophie.
-3. **Same event = connected**: "Des, Ty, and I did a workout" -> return Des <-> Ty in connections, and Des + Ty in user_connections.
+3. **Shared action = connected**: "Des, Ty, and I did a workout together" -> return Des <-> Ty in connections, and Des + Ty in user_connections. Merely attending the same event is not enough.
 4. **Different events = not connected**: "Had coffee with Cal, then went to IronWorks" -> Cal and IronWorks NOT connected.
 5. **Use canonical names** from Candidate Entities. Use source_msgs to disambiguate.
 6. **Temporal Cohesion**:
    - Interactions require temporal proximity.
    - "I saw Mike yesterday. Today I'm meeting Sarah." -> NO connection between Mike and Sarah.
-   - "I saw Mike and Sarah at lunch." -> YES connection between Mike and Sarah.
+   - "I spoke with Mike and Sarah together at lunch." -> YES connection between Mike and Sarah.
 7. **Candidate Boundaries**:
    - entity_a and entity_b MUST exactly match canonical names from Candidate Entities.
    - entity_name in user_connections MUST exactly match a canonical name from Candidate Entities.
@@ -195,8 +195,14 @@ You receive:
 <example>
 Input: [USER] "Alice and Bob were there."
 Output: {
+  "connections": [],
+  "user_connections": []
+}
+
+Input: [USER] "Alice and Bob worked out together."
+Output: {
   "connections": [
-    {"msg_id": "m1", "entity_a": "Alice", "entity_b": "Bob", "relationship": "social_interaction", "context": "Mentioned together as being in the same place."}
+    {"msg_id": "m1", "entity_a": "Alice", "entity_b": "Bob", "relationship": "social_interaction", "context": "Alice and Bob worked out together."}
   ],
   "user_connections": []
 }

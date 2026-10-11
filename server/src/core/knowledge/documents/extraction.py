@@ -4,6 +4,7 @@ import csv
 import hashlib
 import io
 import json
+import math
 import re
 import threading
 import warnings
@@ -458,6 +459,12 @@ def _native_pdf_cells(
                 if not cell.text.strip():
                     continue
                 rect = cell.rect
+                coordinates = (
+                    rect.r_x0, rect.r_x1, rect.r_x2, rect.r_x3,
+                    rect.r_y0, rect.r_y1, rect.r_y2, rect.r_y3,
+                )
+                if not all(math.isfinite(value) for value in coordinates):
+                    continue
                 boxes.append(
                     NativePdfTextCell(
                         text=cell.text.strip(),
@@ -494,9 +501,23 @@ def _region_bbox(value: object) -> tuple[float, float, float, float] | None:
     if not all(isinstance(item, (int, float)) for item in values):
         return None
     left, bottom, right, top = (float(item) for item in values)
+    if not all(math.isfinite(item) for item in (left, bottom, right, top)):
+        return None
     if right <= left or top <= bottom:
         return None
     return left, bottom, right, top
+
+
+def _sanitize_parser_structure(value: Any) -> Any:
+    """Keep parser data JSON-compatible without inventing coordinates."""
+
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _sanitize_parser_structure(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_parser_structure(item) for item in value]
+    return value
 
 
 def _regions_from_docling_structure(
@@ -619,7 +640,7 @@ def _boxes_overlap(
 
 def _extract_docling_snapshot(content: bytes, extension: str) -> DocumentParseSnapshot:
     document = _parse_with_docling(content, extension)
-    structure = document.export_to_dict(coord_precision=3)
+    structure = _sanitize_parser_structure(document.export_to_dict(coord_precision=3))
     text = document.export_to_markdown().strip()
     if not text:
         raise ValueError("Document contains no extractable text")

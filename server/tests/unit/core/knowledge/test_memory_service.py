@@ -1,6 +1,7 @@
 import pytest
 
 from common.exceptions import ToolExecutionError, WorkspaceConflictError
+from common.utils.agent_identity import MAX_BRAIN_CHARS
 from core.agent.tools.memory import MemoryTools
 
 
@@ -69,6 +70,39 @@ async def test_read_agent_brain_returns_durable_content_and_revision():
         "user_name": "ada",
         "agent_id": "agent-1",
     }
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    "legacy_brain",
+    [
+        brain_row()["brain"] + "x" * MAX_BRAIN_CHARS,
+        brain_row()["brain"] + "\n# Behavioral Directives\nDuplicate directive",
+    ],
+)
+async def test_legacy_invalid_brain_remains_readable_for_repair(legacy_brain):
+    row = {**brain_row(), "brain": legacy_brain}
+    postgres = RecordingPostgres([[row]])
+
+    result = await BrainHarness(postgres).read_agent_brain()
+
+    assert result["revision"] == row["brain_revision"]
+    assert result["content"] == legacy_brain.strip()
+    assert not any(call[0] == "execute" for call in postgres.calls)
+
+
+@pytest.mark.no_network
+async def test_legacy_invalid_brain_still_rejects_a_section_write():
+    row = brain_row()
+    row["brain"] += "x" * MAX_BRAIN_CHARS
+    postgres = RecordingPostgres([[row]])
+
+    with pytest.raises(ToolExecutionError, match="Brain exceeds"):
+        await BrainHarness(postgres).edit_agent_brain(
+            "Project Context", "Replacement context", expected_revision=3,
+        )
+
+    assert not any(call[0] == "execute" for call in postgres.calls)
 
 
 @pytest.mark.no_network
@@ -241,6 +275,17 @@ async def test_read_agent_brain_snapshot_returns_owned_snapshot_content():
     assert result["revision"] == 5
     assert "Old context" in result["content"]
     assert postgres.calls[0][2]["revision"] == 5
+
+
+@pytest.mark.no_network
+async def test_legacy_oversized_brain_snapshot_remains_readable():
+    legacy_brain = brain_row()["brain"] + "x" * MAX_BRAIN_CHARS
+    postgres = RecordingPostgres([[{"revision": 1, "content": legacy_brain}]])
+
+    result = await BrainHarness(postgres).read_agent_brain_snapshot(1)
+
+    assert result["revision"] == 1
+    assert result["content"] == legacy_brain.strip()
 
 
 @pytest.mark.no_network

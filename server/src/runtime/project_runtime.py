@@ -159,15 +159,6 @@ class ProjectRuntime:
                 jev=self._config_manager.config.jev.capture_policy(),
             )
 
-    async def _select_vp01(self, compiled_domain: CompiledDomain) -> None:
-        """Align the live adapter with an explicitly switched domain language."""
-
-        if self._get_vp01 is None:
-            return
-        self.text_processor.set_vp01(
-            await self._get_vp01(compiled_domain.vp01_language)
-        )
-
     async def activate_domain_config(
         self,
         candidate: DomainConfig,
@@ -184,6 +175,17 @@ class ProjectRuntime:
 
         candidate = parse_candidate(candidate)
         async with self._domain_config_lock:
+            # Resolve the selected model before the durable activation. No
+            # fallible model load should occur after the store commits.
+            selected_vp01 = (
+                await self._get_vp01(candidate.vp01_language)
+                if self._get_vp01 is not None
+                else None
+            )
+            if self._get_vp01 is not None and not callable(
+                getattr(selected_vp01, "extract_entities", None)
+            ):
+                raise TypeError("VP-01 adapter must expose extract_entities")
             activation = await self.domain_config_store.activate(
                 user_name=self.user_name,
                 project_id=self.project_id,
@@ -192,5 +194,6 @@ class ProjectRuntime:
             )
             self.domain_config = activation.config
             self.compiled_domain = activation.compiled
-            await self._select_vp01(activation.compiled)
+            if selected_vp01 is not None:
+                self.text_processor.set_vp01(selected_vp01)
             return activation

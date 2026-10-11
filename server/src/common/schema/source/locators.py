@@ -1,5 +1,6 @@
 """Validated coordinates for document, message, and search-result sources."""
 
+import math
 from typing import Annotated, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -26,6 +27,11 @@ class LayoutBoundingBox(_StrictLocator):
 
     @model_validator(mode="after")
     def _validate_bounds(self):
+        if not all(
+            math.isfinite(value)
+            for value in (self.left, self.bottom, self.right, self.top)
+        ):
+            raise ValueError("layout bounding boxes must use finite coordinates")
         if self.right <= self.left or self.top <= self.bottom:
             raise ValueError("layout bounding boxes must have positive area")
         return self

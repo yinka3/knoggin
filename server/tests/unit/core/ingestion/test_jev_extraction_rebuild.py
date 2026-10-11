@@ -26,9 +26,7 @@ from tests.unit.core.ingestion.test_context_entity_build import (
 
 @pytest.mark.parametrize("mode", ["active", "observe", "disabled"])
 @pytest.mark.parametrize("call_limit", [1, 2])
-async def test_supporting_occurrences_and_residual_gaps_stay_block_scoped(
-    mode, call_limit
-):
+async def test_support_only_names_stay_unresolved_and_block_scoped(mode, call_limit):
     first = block("Orion manages the rollout.")
     second = block("Vega manages the budget.")
     current = build(
@@ -47,7 +45,25 @@ async def test_supporting_occurrences_and_residual_gaps_stay_block_scoped(
         domain(), jev=JevPolicy(extraction_mode=mode, max_calls_per_window=call_limit)
     )
     offset = len(first.markdown) + 2
-    llm = FakeEntityLLM([])
+    llm = FakeEntityLLM(
+        [
+            {
+                "block_id": "b1",
+                "name": "Delta",
+                "type": "Company",
+                "supporting_message_id": "m1",
+                "evidence_quote": "Delta manages the rollout.",
+            },
+            {
+                "block_id": "b2",
+                "name": "Delta",
+                "type": "Company",
+                "supporting_message_id": "m2",
+                "evidence_quote": "Delta manages the budget.",
+            },
+        ]
+    )
+    jev = BudgetedExtractionJev()
     proc = processor(
         FakeVP01(
             [
@@ -58,41 +74,74 @@ async def test_supporting_occurrences_and_residual_gaps_stay_block_scoped(
             ]
         ),
         llm=llm,
-        jev_client=BudgetedExtractionJev(),
+        jev_client=jev,
     )
     proc.get_known_aliases = lambda: {"Delta": 701}
-    if mode != "active":
-        llm.mentions = [
-            {"block_id": "b1", "name": "Delta", "type": "Company"},
-            {"block_id": "b2", "name": "Delta", "type": "Company"},
-        ]
     mentions = await proc.extract_context_mentions(current)
-    recovered = [mention for mention in mentions if mention.name == "Delta"]
-    if mode == "active" and call_limit == 1:
-        assert [mention.block_ids for mention in recovered] == [(first.block_id,)]
-        assert len(llm.calls) == 1
-        residual = json.loads(llm.calls[0]["user"])["context_blocks"]
-        assert [item["markdown"] for item in residual] == [second.markdown]
-        assert current.trace.jev_extraction_avoided_fallback_blocks == 1
-        assert current.trace.jev_extraction_avoided_fallback_calls == 0
-    else:
-        assert {mention.block_ids for mention in recovered} == {
-            (first.block_id,),
-            (second.block_id,),
-        }
-        assert all(
-            mention.source_start is None and mention.source_end is None
-            for mention in recovered
-        )
-        assert len(llm.calls) == (0 if mode == "active" else 1)
-    if mode == "active" and call_limit == 2:
-        assert (
-            sum(
-                item["accepted_entity_type"] is not None
-                for item in current.trace.extraction_decisions
-            )
-            == 2
-        )
+    assert [mention.name for mention in mentions] == ["Orion", "Vega"]
+    assert jev.calls == []
+    assert current.trace.jev_extraction_candidates == 0
+    assert current.trace.extraction_decisions == []
+    assert len(llm.calls) == 1
+    residual = json.loads(llm.calls[0]["user"])["context_blocks"]
+    assert [item["markdown"] for item in residual] == [
+        first.markdown,
+        second.markdown,
+    ]
+    unresolved = [
+        issue
+        for issue in current.issues
+        if issue.metadata.get("reason") == "supporting_message_name_unresolved"
+    ]
+    assert [
+        (issue.metadata["block_id"], issue.metadata["supporting_message_id"])
+        for issue in unresolved
+    ] == [
+        (str(first.block_id), "m1"),
+        (str(second.block_id), "m2"),
+    ]
+
+
+async def test_exhausted_budget_reuses_prior_acceptance_behind_new_gap():
+    current_block = block("Orion works with Zephyr Dynamics and Nova Systems.")
+    current = build(blocks=(current_block,), compiled_domain=domain())
+    current.policy = policy(
+        domain(),
+        llm_ner_mode="disabled",
+        jev=JevPolicy(extraction_mode="active", max_calls_per_window=1),
+    )
+    zephyr = UnknownEndpointDiagnostic(
+        block_id=current_block.block_id,
+        name="Zephyr Dynamics",
+        entity_type="Company",
+    )
+    nova = UnknownEndpointDiagnostic(
+        block_id=current_block.block_id,
+        name="Nova Systems",
+        entity_type="Company",
+    )
+    current.set_unknown_endpoint_diagnostics((zephyr,))
+    jev = BudgetedExtractionJev()
+    proc = processor(
+        FakeVP01([VP01EntitySpan(text="Orion", label="company", start=0, end=5)]),
+        llm_ner_mode="disabled",
+        jev_client=jev,
+    )
+
+    first = await proc.extract_context_mentions(current)
+    assert [mention.name for mention in first] == ["Orion", "Zephyr Dynamics"]
+    budget = current.jev_work_budget
+    budget.max_observations = 1
+    current.set_unknown_endpoint_diagnostics((nova, zephyr))
+
+    replayed = await proc.extract_context_mentions(current)
+
+    assert [mention.name for mention in replayed] == ["Orion", "Zephyr Dynamics"]
+    assert budget.observations == budget.calls == 1
+    assert len(jev.calls) == 1
+    assert len(current.trace.extraction_decisions) == 1
+    assert current.trace.extraction_decisions[0]["accepted_entity_type"] == "Company"
+    assert "reused_for_pass" in current.trace.extraction_decisions[0]
 
 
 @pytest.mark.parametrize("changed", [None, "evidence", "policy", "removed_gap"])

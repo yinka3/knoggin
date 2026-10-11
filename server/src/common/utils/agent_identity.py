@@ -73,7 +73,12 @@ def parse_persona_profile(persona: str) -> Dict[str, str]:
 
 
 def normalize_agent_brain(markdown: str, persona: str = "") -> str:
-    """Return a sectioned Brain while preserving already-structured Markdown."""
+    """Return a valid sectioned Brain for a new durable write."""
+    return _validate_brain_structure(normalize_agent_brain_for_read(markdown, persona))
+
+
+def normalize_agent_brain_for_read(markdown: str, persona: str = "") -> str:
+    """Keep older stored Brains readable even if they exceed current write limits."""
     body = (markdown or "").strip()
     body = re.sub(
         r"(?m)^# Core Identity\s*$",
@@ -81,7 +86,7 @@ def normalize_agent_brain(markdown: str, persona: str = "") -> str:
         body,
         count=1,
     )
-    headings = set(re.findall(r"(?m)^#\s+(.+?)\s*$", body))
+    headings = re.findall(r"(?m)^#\s+(.+?)\s*$", body)
     if all(section in headings for section in REQUIRED_BRAIN_SECTIONS):
         return body
 
@@ -94,6 +99,22 @@ def normalize_agent_brain(markdown: str, persona: str = "") -> str:
         "# Project Context\n- [Empty]\n\n"
         "# User Preferences & Lessons Learned\n- [Empty]"
     )
+
+
+def _validate_brain_structure(markdown: str) -> str:
+    if len(markdown) > MAX_BRAIN_CHARS:
+        raise ValueError(f"Brain exceeds {MAX_BRAIN_CHARS} characters")
+    headings = re.findall(r"(?m)^#\s+(.+?)\s*$", markdown)
+    for section in REQUIRED_BRAIN_SECTIONS:
+        if headings.count(section) != 1:
+            raise ValueError(f"Brain must contain exactly one section: {section}")
+    for section in EDITABLE_BRAIN_SECTIONS:
+        content = extract_brain_section(markdown, section)
+        if len(content) > MAX_BRAIN_SECTION_CHARS:
+            raise ValueError(
+                f"Brain section exceeds {MAX_BRAIN_SECTION_CHARS} characters: {section}"
+            )
+    return markdown
 
 
 def replace_brain_section(markdown: str, section: str, content: str) -> str:

@@ -10,6 +10,7 @@ from common.utils.agent_identity import (
     build_brain_snapshot_summary,
     extract_brain_section,
     normalize_agent_brain,
+    normalize_agent_brain_for_read,
     replace_brain_section,
     should_snapshot_brain_revision,
 )
@@ -46,7 +47,7 @@ class MemoryTools:
                 )
             row = rows[0]
             return {
-                "content": normalize_agent_brain(
+                "content": normalize_agent_brain_for_read(
                     row.get("brain") or "",
                     row.get("persona") or "",
                 ),
@@ -144,7 +145,7 @@ class MemoryTools:
                     "read_agent_brain_snapshot", "Brain snapshot was not found"
                 )
             row = rows[0]
-            row["content"] = normalize_agent_brain(row.get("content") or "")
+            row["content"] = normalize_agent_brain_for_read(row.get("content") or "")
             return row
         except ToolExecutionError:
             raise

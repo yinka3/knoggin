@@ -129,7 +129,7 @@ class EntityResolutionSettings(ConfigModel):
     candidate_fuzzy_threshold: int = Field(85, ge=50, le=100)
     resolution_threshold: float = Field(0.85, ge=0.0, le=1.0)
     resolution_margin: float = Field(0.10, ge=0.0, le=1.0)
-    common_word_frequency_threshold: float = Field(1e-5, ge=0.0)
+    common_word_frequency_threshold: float = Field(1e-5, ge=0.0, allow_inf_nan=False)
     sparse_context_verbs: List[str] = Field(
         default_factory=lambda: list(DEFAULT_SPARSE_CONTEXT_VERBS)
     )
@@ -138,14 +138,14 @@ class EntityResolutionSettings(ConfigModel):
 class LLMModelPricing(ConfigModel):
     """User-supplied provider pricing for one model, in USD per million tokens."""
 
-    input_usd_per_million_tokens: float = Field(ge=0.0)
-    output_usd_per_million_tokens: float = Field(ge=0.0)
+    input_usd_per_million_tokens: float = Field(ge=0.0, allow_inf_nan=False)
+    output_usd_per_million_tokens: float = Field(ge=0.0, allow_inf_nan=False)
 
 
 class LLMSpendingBudgetSettings(ConfigModel):
     """One server-wide external-model spending ceiling, not per subsystem."""
 
-    limit_usd: Optional[float] = Field(None, ge=0.0)
+    limit_usd: Optional[float] = Field(None, ge=0.0, allow_inf_nan=False)
     model_pricing: Dict[str, LLMModelPricing] = Field(default_factory=dict)
     fallback_pricing: Optional[LLMModelPricing] = None
     reservation_output_tokens: int = Field(1_024, ge=0, le=32_768)

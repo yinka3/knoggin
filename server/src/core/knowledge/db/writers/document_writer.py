@@ -29,6 +29,10 @@ class DocumentWriter:
             raise ValueError(
                 f"{operation}: chunks and embeddings must have the same length"
             )
+        for chunk, embedding in zip(chunks, embeddings):
+            json.dumps(embedding, allow_nan=False)
+            if not isinstance(chunk, str) and chunk.layout_region is not None:
+                json.dumps(chunk.layout_region, allow_nan=False)
 
     @staticmethod
     async def _copy_chunk_rows(cur, rows: List[tuple]) -> None:
@@ -84,7 +88,7 @@ class DocumentWriter:
             chunk_index,
             chunk.content,
             relative_path,
-            json.dumps(embedding),
+            json.dumps(embedding, allow_nan=False),
             chunk.language,
             chunk.chunk_kind,
             chunk.symbol_name,
@@ -96,7 +100,9 @@ class DocumentWriter:
             list(chunk.section_path) if chunk.section_path is not None else None,
             chunk.start_paragraph,
             chunk.end_paragraph,
-            json.dumps(chunk.layout_region) if chunk.layout_region is not None else None,
+            json.dumps(chunk.layout_region, allow_nan=False)
+            if chunk.layout_region is not None
+            else None,
         )
 
     async def insert_document(
@@ -443,7 +449,7 @@ class DocumentWriter:
             "persist_indexed_chunks",
         )
         snapshot_id = str(uuid.uuid4())
-        snapshot_payload = json.dumps(parse_snapshot.to_storage_payload())
+        snapshot_payload = json.dumps(parse_snapshot.to_storage_payload(), allow_nan=False)
         async with self._client.transaction() as cur:
             await cur.execute(
                 """

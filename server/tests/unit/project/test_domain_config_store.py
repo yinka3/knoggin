@@ -2,7 +2,11 @@ import json
 
 import pytest
 
-from common.conf.domain_config import DEFAULT_CONTEXT_SECTIONS, DomainConfig
+from common.conf.domain_config import (
+    DEFAULT_CONTEXT_SECTIONS,
+    DomainConfig,
+    DomainConfigError,
+)
 from core.project.domain_config_store import (
     DomainActivation,
     DomainConfigConflict,
@@ -32,6 +36,22 @@ def make_domain(version=0, *, context_sections=None):
     return DomainConfig.from_mapping(payload)
 
 
+def legacy_ambiguous_domain(version=4):
+    payload = make_domain(version=version).to_dict()
+    payload["relationships"] = {
+        "USES": {
+            "source_types": ["Project"],
+            "target_types": ["Project"],
+        },
+        "DEPLOYS": {
+            "source_types": ["Project"],
+            "target_types": ["Project"],
+            "labels": ["uses"],
+        },
+    }
+    return payload
+
+
 @pytest.mark.unit
 @pytest.mark.no_network
 async def test_domain_config_store_loads_and_decodes_persisted_config():
@@ -46,6 +66,73 @@ async def test_domain_config_store_loads_and_decodes_persisted_config():
     assert postgres.calls[0][0] == "fetch_one"
     assert "SELECT domain_config" in postgres.calls[0][1]
     assert postgres.transaction_enters == 0
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_legacy_ambiguous_relationships_load_with_canonical_precedence():
+    persisted = legacy_ambiguous_domain()
+    postgres = RecordingPostgresClient(
+        fetch_one_results=[{"domain_config": json.dumps(persisted)}]
+    )
+
+    loaded = await DomainConfigStore(postgres).load("ada", "project-1")
+
+    assert loaded.version == 4
+    assert loaded.compile().relationship_by_key("uses").name == "USES"
+    with pytest.raises(DomainConfigError, match="claimed by both"):
+        DomainConfig.from_mapping(loaded.to_dict())
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_legacy_relationship_collision_can_be_repaired_but_not_reactivated():
+    persisted = legacy_ambiguous_domain()
+    postgres = RecordingPostgresClient(
+        fetch_one_results=[
+            {"domain_config": persisted},
+            {"domain_config": persisted},
+            {"current_revision_id": None},
+        ]
+    )
+    store = DomainConfigStore(postgres)
+    loaded = await store.load("ada", "project-1")
+
+    with pytest.raises(DomainConfigError, match="claimed by both"):
+        await store.activate(
+            user_name="ada",
+            project_id="project-1",
+            candidate=loaded,
+            expected_version=4,
+        )
+    assert postgres.transaction_enters == 0
+
+    corrected = loaded.to_dict()
+    corrected["relationships"]["DEPLOYS"]["labels"] = ["deploys"]
+    activation = await store.activate(
+        user_name="ada",
+        project_id="project-1",
+        candidate=DomainConfig.from_mapping(corrected),
+        expected_version=4,
+    )
+
+    assert activation.config.version == 5
+    assert activation.compiled.relationship_by_key("uses").name == "USES"
+    assert activation.compiled.relationship_by_key("deploys").name == "DEPLOYS"
+    assert postgres.transaction_enters == 1
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_legacy_read_still_rejects_other_invalid_domain_fields():
+    persisted = legacy_ambiguous_domain()
+    persisted["relationships"]["DEPLOYS"]["source_types"] = ["Unknown"]
+    postgres = RecordingPostgresClient(
+        fetch_one_results=[{"domain_config": persisted}]
+    )
+
+    with pytest.raises(DomainConfigError, match="unknown entity types"):
+        await DomainConfigStore(postgres).load("ada", "project-1")
 
 
 @pytest.mark.unit

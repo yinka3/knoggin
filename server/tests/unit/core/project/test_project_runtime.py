@@ -3,7 +3,8 @@ import asyncio
 import pytest
 
 from common.conf.domain_config import DomainConfig
-from tests.fixtures.factories import make_project_state
+from core.project.domain_config_store import DomainActivation
+from tests.fixtures.factories import make_domain_config, make_project_state
 from tests.fixtures.fakes import FakeScheduler
 
 
@@ -256,32 +257,94 @@ def test_project_runtime_exposes_one_semantic_wake_edge_only_when_registered():
 
 @pytest.mark.unit
 @pytest.mark.no_network
-async def test_project_runtime_selects_the_vp01_adapter_for_a_new_domain_language():
-    selected_languages = []
-    installed = []
+async def test_project_runtime_preloads_vp01_before_domain_commit():
+    calls = []
 
     class RecordingProcessor:
         def set_vp01(self, adapter):
-            installed.append(adapter)
+            calls.append(("installed", adapter))
+
+    class Adapter:
+        def extract_entities(self, *_args, **_kwargs):
+            return []
+
+    adapter = Adapter()
 
     async def get_vp01(language):
-        selected_languages.append(language)
-        return f"adapter:{language}"
+        calls.append(("loaded", language))
+        return adapter
+
+    class Store:
+        async def activate(self, *, candidate, expected_version, **_kwargs):
+            calls.append(("committed", candidate.vp01_language))
+            assert expected_version == 1
+            config = candidate.with_version(2)
+            return DomainActivation(
+                config=config, compiled=config.compile(), previous_version=1
+            )
 
     runtime = make_project_state(text_processor=RecordingProcessor())
     runtime._get_vp01 = get_vp01
-    multilingual = DomainConfig.from_mapping(
-        {
-            "version": 2,
-            "topics": {"Work": {"active": True}},
-            "entity_types": {
-                "Company": {"topic": "Work", "labels": ["company"]}
-            },
-            "vp01_language": "multilingual",
-        }
-    ).compile()
+    runtime.domain_config_store = Store()
+    candidate = make_domain_config(version=0).to_dict()
+    candidate["vp01_language"] = "multilingual"
 
-    await runtime._select_vp01(multilingual)
+    activation = await runtime.activate_domain_config(
+        DomainConfig.from_mapping(candidate), expected_version=1
+    )
 
-    assert selected_languages == ["multilingual"]
-    assert installed == ["adapter:multilingual"]
+    assert calls == [
+        ("loaded", "multilingual"),
+        ("committed", "multilingual"),
+        ("installed", adapter),
+    ]
+    assert activation.config.version == runtime.domain_config.version == 2
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+@pytest.mark.parametrize("invalid_adapter", [False, True])
+async def test_project_runtime_does_not_commit_when_vp01_is_unavailable_or_invalid(
+    invalid_adapter,
+):
+    class RecordingProcessor:
+        def __init__(self):
+            self.installed = []
+
+        def set_vp01(self, adapter):
+            self.installed.append(adapter)
+
+    class Store:
+        def __init__(self):
+            self.commits = 0
+
+        async def activate(self, **_kwargs):
+            self.commits += 1
+            raise AssertionError("model preparation must finish before commit")
+
+    processor = RecordingProcessor()
+    runtime = make_project_state(text_processor=processor)
+    store = Store()
+    runtime.domain_config_store = store
+
+    async def get_vp01(_language):
+        if invalid_adapter:
+            return object()
+        raise RuntimeError("model unavailable")
+
+    runtime._get_vp01 = get_vp01
+    candidate = make_domain_config(version=0).to_dict()
+    candidate["vp01_language"] = "multilingual"
+
+    with pytest.raises(
+        TypeError if invalid_adapter else RuntimeError,
+        match="VP-01 adapter" if invalid_adapter else "model unavailable",
+    ):
+        await runtime.activate_domain_config(
+            DomainConfig.from_mapping(candidate), expected_version=1
+        )
+
+    assert store.commits == 0
+    assert runtime.domain_config.version == 1
+    assert runtime.compiled_domain.vp01_language == "en"
+    assert processor.installed == []

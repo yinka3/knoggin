@@ -1,3 +1,6 @@
+import json
+from types import SimpleNamespace
+
 import pytest
 
 from common.exceptions import DependencyError
@@ -163,6 +166,84 @@ def test_docling_region_projection_ignores_malformed_provenance():
     assert regions[1][0].bbox is None
     assert regions[1][0].text_start is None
     assert regions[1][0].text_end is None
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+@pytest.mark.parametrize("invalid_coordinate", [float("nan"), float("inf"), -float("inf")])
+def test_docling_snapshot_sanitizes_nonfinite_structure_and_drops_invalid_bounds(
+    monkeypatch, invalid_coordinate
+):
+    structure = {
+        "pages": {"1": {}},
+        "texts": [
+            {
+                "label": "text",
+                "prov": [
+                    {
+                        "page_no": 1,
+                        "bbox": {"l": invalid_coordinate, "b": 0, "r": 10, "t": 20},
+                    }
+                ],
+            }
+        ],
+        "nested": {"scores": [float("inf"), -float("inf"), float("nan")]},
+    }
+
+    class ParsedDocument:
+        def export_to_dict(self, **_kwargs):
+            return structure
+
+        def export_to_markdown(self, page_no=None):
+            return "Readable text"
+
+    monkeypatch.setattr(extraction_module, "_parse_with_docling", lambda *_: ParsedDocument())
+    monkeypatch.setattr(
+        extraction_module,
+        "_native_pdf_cells",
+        lambda _content: {1: (NativePdfTextCell("Readable text", (0, 0, 10, 20)),)},
+    )
+    monkeypatch.setattr(extraction_module, "_docling_version", lambda: "test")
+
+    snapshot = extraction_module._extract_docling_snapshot(b"pdf", ".pdf")
+    payload = json.loads(json.dumps(snapshot.to_storage_payload(), allow_nan=False))
+
+    assert payload["structure"]["texts"][0]["prov"][0]["bbox"]["l"] is None
+    assert payload["structure"]["nested"]["scores"] == [None, None, None]
+    assert payload["pages"][0]["regions"][0]["extraction_method"] == "unknown"
+    assert "bbox" not in payload["pages"][0]["regions"][0]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_native_pdf_cells_skip_nonfinite_coordinates(monkeypatch):
+    from docling_parse import pdf_parser
+
+    def cell(text, left):
+        return SimpleNamespace(
+            text=text,
+            rect=SimpleNamespace(
+                r_x0=left, r_x1=left + 1, r_x2=left + 1, r_x3=left,
+                r_y0=0, r_y1=0, r_y2=2, r_y3=2,
+            ),
+        )
+
+    class ParsedPdf:
+        unloaded = False
+
+        def iterate_pages(self):
+            yield 1, SimpleNamespace(textline_cells=[cell("bad", float("nan")), cell("good", 2)])
+
+        def unload(self):
+            self.unloaded = True
+
+    parsed = ParsedPdf()
+    monkeypatch.setattr(pdf_parser, "DoclingPdfParser", lambda: SimpleNamespace(load=lambda _: parsed))
+
+    cells = extraction_module._native_pdf_cells(b"pdf")
+
+    assert cells == {1: (NativePdfTextCell("good", (2, 0, 3, 2)),)}
+    assert parsed.unloaded
 
 
 @pytest.mark.unit

@@ -1,3 +1,4 @@
+import json
 from contextlib import asynccontextmanager
 
 import pytest
@@ -137,6 +138,95 @@ async def test_document_writer_rejects_mismatched_chunk_embedding_lists():
         )
 
     assert client.transaction_count == 0
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+@pytest.mark.parametrize("invalid_part", ["snapshot", "layout", "embedding"])
+async def test_document_writer_rejects_nonfinite_json_before_transaction(invalid_part):
+    client = TransactionOnlyClient()
+    writer = DocumentWriter(client, "project-1")
+    structure = {"position": float("nan")} if invalid_part == "snapshot" else {}
+    layout = {"bbox": {"left": float("inf")}} if invalid_part == "layout" else None
+    embedding = [float("nan")] if invalid_part == "embedding" else [0.1]
+
+    with pytest.raises(ValueError, match="Out of range float values"):
+        await writer.persist_indexed_chunks(
+            document_id="document-1",
+            chunks=[DocumentChunk(content="notes", layout_region=layout)],
+            embeddings=[embedding],
+            parse_snapshot=DocumentParseSnapshot(
+                text="notes",
+                structure=structure,
+                parser_name="test-parser",
+                parser_version="test",
+                parser_fingerprint="a" * 64,
+            ),
+            indexed_at="2026-07-23T00:00:00+00:00",
+            read_content_hash="hash",
+        )
+
+    assert client.transaction_count == 0
+
+
+class PublishingCursor(RecordingCursor):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fetch_count = 0
+        self.copied_rows = []
+
+    async def fetchone(self):
+        self.fetch_count += 1
+        if self.fetch_count == 1:
+            return {
+                "content_hash": "hash",
+                "status": "indexing",
+                "relative_path": "docs/report.pdf",
+            }
+        return {"status": "indexed"}
+
+    @asynccontextmanager
+    async def copy(self, _query):
+        yield self
+
+    async def write_row(self, row):
+        self.copied_rows.append(row)
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_document_writer_serializes_clean_snapshot_and_layout_as_strict_json():
+    client = TransactionOnlyClient()
+    client.cursor = PublishingCursor()
+    writer = DocumentWriter(client, "project-1")
+
+    result = await writer.persist_indexed_chunks(
+        document_id="document-1",
+        chunks=[DocumentChunk(content="notes", layout_region={"bbox": None})],
+        embeddings=[[0.1]],
+        parse_snapshot=DocumentParseSnapshot(
+            text="notes",
+            structure={"pages": [{"bbox": {"l": None}}]},
+            parser_name="test-parser",
+            parser_version="test",
+            parser_fingerprint="a" * 64,
+        ),
+        indexed_at="2026-07-23T00:00:00+00:00",
+        read_content_hash="hash",
+    )
+
+    assert client.transaction_count == 1
+    assert result == {"status": "indexed", "chunk_count": 1}
+    snapshot_insert = next(
+        params
+        for query, params in client.cursor.calls
+        if "INSERT INTO public.document_parse_snapshots" in query
+    )
+    assert json.loads(snapshot_insert[-1])["structure"] == {
+        "pages": [{"bbox": {"l": None}}]
+    }
+    assert json.loads(client.cursor.copied_rows[0][6]) == [0.1]
+    assert json.loads(client.cursor.copied_rows[0][18]) == {"bbox": None}
 
 
 @pytest.mark.storage

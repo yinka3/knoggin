@@ -11,5 +11,11 @@ def safe_json_loads(data: str, default: Any = None) -> Any:
     try:
         return json.loads(data)
     except json.JSONDecodeError as e:
-        logger.warning(f"Failed to parse JSON: {e}. Raw data: {data[:100]}...")
+        logger.warning(
+            "Failed to parse JSON: {} at line {}, column {} ({} characters)",
+            e.msg,
+            e.lineno,
+            e.colno,
+            len(data),
+        )
         return default

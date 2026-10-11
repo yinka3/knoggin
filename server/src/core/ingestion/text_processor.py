@@ -389,7 +389,11 @@ class TextProcessor:
         resolved_endpoints: set[tuple[UUID, str]] = set()
         if extraction_mode != "disabled" and self._jev_client is not None:
             candidates = await self._prepare_jev_extraction_candidates(
-                build, assembled=assembled, gaps=gaps, mentions=mentions
+                build,
+                assembled=assembled,
+                gaps=gaps,
+                mentions=mentions,
+                previous_acceptances=previous_acceptances,
             )
             build.trace.jev_extraction_candidates += len(candidates)
             for index, candidate in enumerate(candidates, start=1):
@@ -702,6 +706,7 @@ class TextProcessor:
         assembled: _ContextBlockText,
         gaps: list[_FallbackGap],
         mentions: list[ContextBlockMention],
+        previous_acceptances: list[dict] | None = None,
     ) -> list[ExtractionCandidate]:
         """Create bounded literal candidates from existing diagnostics and aliases."""
 
@@ -711,8 +716,15 @@ class TextProcessor:
                 build.policy.jev.max_elapsed_seconds_per_window,
             )
         budget = build.jev_work_budget
-        candidate_limit = budget.max_observations - budget.observations
-        if candidate_limit <= 0:
+        fresh_limit = max(0, budget.max_observations - budget.observations)
+        replay_keys = {
+            (block_id, name.casefold())
+            for previous in previous_acceptances or ()
+            if isinstance(name := previous.get("candidate_name"), str)
+            for block_id in previous.get("record", {}).get("evidence_block_ids", ())
+            if isinstance(block_id, str)
+        }
+        if fresh_limit == 0 and not replay_keys:
             return []
         gaps_by_id = {gap.block.block_id: gap for gap in gaps}
         block_offsets = {
@@ -724,8 +736,15 @@ class TextProcessor:
             for block_id in mention.block_ids
         }
         candidates: list[ExtractionCandidate] = []
+        replay_candidates: list[ExtractionCandidate] = []
         seen: set[tuple[UUID, str]] = set()
         checks = 0
+
+        def capacity_reached() -> bool:
+            return (
+                len(candidates) >= fresh_limit
+                and len(replay_candidates) >= len(replay_keys)
+            )
 
         def append_candidate(
             *,
@@ -740,13 +759,17 @@ class TextProcessor:
             key = (gap.block.block_id, normalized.casefold())
             if key in seen:
                 return
+            replay = (str(gap.block.block_id), key[1]) in replay_keys
+            if not replay and len(candidates) >= fresh_limit:
+                return
             expression = self._literal_expression(normalized)
             literal = re.search(expression, gap.block.markdown, re.IGNORECASE)
             if literal is None:
                 return
             seen.add(key)
             block_start = block_offsets[gap.block.block_id]
-            candidates.append(
+            target = replay_candidates if replay else candidates
+            target.append(
                 ExtractionCandidate(
                     block_id=gap.block.block_id,
                     name=normalized,
@@ -764,7 +787,7 @@ class TextProcessor:
         for diagnostic in build.unknown_endpoint_diagnostics:
             if (
                 checks >= _JEV_EXTRACTION_PREPARATION_CHECK_LIMIT
-                or len(candidates) >= candidate_limit
+                or capacity_reached()
             ):
                 break
             checks += 1
@@ -787,7 +810,7 @@ class TextProcessor:
         ):
             if (
                 checks >= _JEV_EXTRACTION_PREPARATION_CHECK_LIMIT
-                or len(candidates) >= candidate_limit
+                or capacity_reached()
             ):
                 break
             if not alias.strip():
@@ -797,11 +820,16 @@ class TextProcessor:
             for gap in gaps:
                 if (
                     checks >= _JEV_EXTRACTION_PREPARATION_CHECK_LIMIT
-                    or len(candidates) + len(matching_gaps) >= candidate_limit
+                    or capacity_reached()
                 ):
                     break
                 checks += 1
                 if (gap.block.block_id, alias.casefold()) in represented:
+                    continue
+                if (
+                    (str(gap.block.block_id), alias.casefold()) not in replay_keys
+                    and len(candidates) >= fresh_limit
+                ):
                     continue
                 if re.search(expression, gap.block.markdown, re.IGNORECASE):
                     matching_gaps.append(gap)
@@ -820,7 +848,7 @@ class TextProcessor:
                     origin="known_alias_gap",
                     proposed_type=proposed_type,
                 )
-        return candidates
+        return replay_candidates + candidates
 
     async def _observe_or_accept_jev_extraction(
         self,

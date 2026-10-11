@@ -2816,6 +2816,44 @@ async def test_index_document_uses_its_captured_embedding_batch_policy(
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_malformed_later_embedding_batch_does_not_publish_partial_index(
+    document_harness,
+):
+    service, postgres = document_harness
+    uploaded = await service.add_document(
+        content=(
+            b"import os\n\n"
+            b"def build_index(path):\n"
+            b"    return path\n\n"
+            b"class Searcher:\n"
+            b"    pass\n"
+        ),
+        original_name="indexer.py",
+    )
+    policy = DocumentIndexPolicy.capture(
+        embedding_chunk_batch_size=1, max_attempts=1
+    )
+    calls = 0
+
+    async def encode(values):
+        nonlocal calls
+        calls += 1
+        return [[0.1] * 1024] if calls == 1 else None
+
+    service._embedding.encode = encode
+
+    with pytest.raises(RuntimeError, match="malformed batch"):
+        await service.index_document(document_id=uploaded["document_id"], policy=policy)
+
+    assert calls == 2
+    assert postgres.rows[0]["last_index_failure_kind"] == "transient_dependency"
+    assert postgres.rows[0]["next_index_retry_at"] is None
+    assert postgres.parse_snapshots == {}
+    assert postgres.chunks == []
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_cancelled_document_index_releases_its_durable_claim(document_harness):
     service, postgres = document_harness
     uploaded = await service.add_document(content=b"alpha", original_name="notes.md")
@@ -3350,21 +3388,55 @@ async def test_index_document_does_not_publish_after_catalog_changes_during_deri
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_index_document_validates_embedding_count_and_dimension(document_harness):
+@pytest.mark.parametrize(
+    ("embeddings", "detail"),
+    [
+        ([], "Embedding count"),
+        ([[0.1] * 3], "exactly 1024 dimensions"),
+        ([[float("nan")] + [0.1] * 1023], "non-finite"),
+        ([[Decimal("0.1")] + [0.1] * 1023], "non-JSON-native"),
+        (None, "malformed batch"),
+        ("not-vectors", "malformed batch"),
+        ([None], "malformed vector"),
+        ([3], "malformed vector"),
+    ],
+)
+async def test_malformed_embedding_response_exhausts_bounded_dependency_retry(
+    document_harness, embeddings, detail
+):
     service, postgres = document_harness
     uploaded = await service.add_document(content=b"alpha", original_name="notes.txt")
-    service._embedding.embeddings = []
+    if embeddings is None:
+        async def malformed_batch(_values):
+            return None
 
-    with pytest.raises(RuntimeError, match="Embedding count"):
-        await service.index_document(document_id=uploaded["document_id"])
+        service._embedding.encode = malformed_batch
+    else:
+        service._embedding.embeddings = embeddings
+    policy = DocumentIndexPolicy.capture(max_attempts=2, retry_backoff_seconds=1)
 
-    assert postgres.rows[0]["status"] == "failed"
-    service._embedding.embeddings = [[0.1] * 3]
+    with pytest.raises(RuntimeError, match=detail):
+        await service.index_document(document_id=uploaded["document_id"], policy=policy)
 
-    with pytest.raises(RuntimeError, match="exactly 1024 dimensions"):
-        await service.index_document(document_id=uploaded["document_id"])
+    pending = postgres.rows[0]
+    assert pending["status"] == "queued"
+    assert pending["index_attempt_count"] == 1
+    assert pending["last_index_failure_kind"] == "transient_dependency"
+    assert pending["next_index_retry_at"] is not None
+    assert postgres.parse_snapshots == {}
+    assert postgres.chunks == []
 
-    assert postgres.rows[0]["status"] == "failed"
+    with pytest.raises(RuntimeError, match=detail):
+        await service.index_document(document_id=uploaded["document_id"], policy=policy)
+
+    terminal = postgres.rows[0]
+    assert terminal["status"] == "failed"
+    assert terminal["index_attempt_count"] == 2
+    assert terminal["last_index_failure_kind"] == "transient_dependency"
+    assert terminal["next_index_retry_at"] is None
+    assert await service.terminal_index_failure_count() == 1
+    assert postgres.parse_snapshots == {}
+    assert postgres.chunks == []
 
 
 @pytest.mark.storage

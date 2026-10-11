@@ -1,5 +1,8 @@
 """Tool-call JSON schemas and argument validation."""
 
+import math
+import re
+
 TOOL_SCHEMAS = [
     {
         "type": "function",
@@ -1371,12 +1374,17 @@ def _validate_schema_value(value, schema: dict, path: str) -> list[str]:
         errors.append(f"{path} must be one of {schema['enum']}")
 
     if expected_type in {"integer", "number"}:
+        if isinstance(value, float) and not math.isfinite(value):
+            errors.append(f"{path} must be a finite number")
+            return errors
         if "minimum" in schema and value < schema["minimum"]:
             errors.append(f"{path} must be at least {schema['minimum']}")
         if "maximum" in schema and value > schema["maximum"]:
             errors.append(f"{path} must be at most {schema['maximum']}")
 
     if expected_type == "string":
+        if "pattern" in schema and re.search(schema["pattern"], value) is None:
+            errors.append(f"{path} has an invalid format")
         if "minLength" in schema and len(value) < schema["minLength"]:
             errors.append(f"{path} is too short")
         if "maxLength" in schema and len(value) > schema["maxLength"]:

@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Literal
 
-from common.conf.domain_config import CompiledDomain
+from common.conf.domain_config import CompiledDomain, _relationship_lookup_key
 
 RelationshipDomainStatus = Literal["recognized", "unrecognized"]
 
@@ -26,7 +25,7 @@ def relationship_name_key(value: object) -> str:
     """Normalize a configured name and model wording for exact matching."""
 
     normalized = normalize_observed_relationship(value)
-    return re.sub(r"[-\s]+", "_", normalized)
+    return _relationship_lookup_key(normalized)
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,6 +1,7 @@
 import asyncio
 
 import pytest
+from loguru import logger
 
 from infrastructure.background_work import (
     BackgroundWorkCoordinator,
@@ -277,3 +278,84 @@ async def test_scheduler_submits_stable_project_owned_coalesce_key(monkeypatch):
     assert background_work.calls == [
         ("project-a", "profile_refinement", "job:profile_refinement")
     ]
+
+
+@pytest.mark.no_network
+async def test_scheduler_failure_does_not_emit_or_log_exception_content(monkeypatch):
+    private_text = "private stored source passage"
+    emitted = []
+    logged = []
+
+    async def capture_event(_scope, _component, _event, data):
+        emitted.append(data)
+
+    class FailingJob:
+        name = "project_semantic"
+
+        async def execute(self, _ctx):
+            raise RuntimeError(private_text)
+
+    monkeypatch.setattr("infrastructure.job.scheduler.emit", capture_event)
+    sink = logger.add(lambda message: logged.append(str(message)))
+    try:
+        scheduler = Scheduler("ada", "project-a")
+        result = await scheduler._execute_job(
+            FailingJob(), JobContext(user_name="ada", project_id="project-a")
+        )
+    finally:
+        logger.remove(sink)
+
+    assert result is None
+    assert emitted[-1] == {"name": "project_semantic", "error_type": "RuntimeError"}
+    assert all(private_text not in str(record) for record in (*emitted, *logged))
+
+
+@pytest.mark.no_network
+async def test_scheduler_preflight_failure_does_not_log_exception_content():
+    private_text = "private admission source passage"
+    logged = []
+
+    class FailingCheck:
+        name = "project_semantic"
+        enabled = True
+
+        async def should_run(self, _ctx):
+            raise RuntimeError(private_text)
+
+    scheduler = Scheduler("ada", "project-a")
+    scheduler.register(FailingCheck())
+    scheduler._is_running = True
+    sink = logger.add(lambda message: logged.append(str(message)))
+    try:
+        await scheduler._check_jobs()
+    finally:
+        logger.remove(sink)
+
+    assert scheduler.snapshot_for_health()["check_failures_by_job"] == {
+        "project_semantic": 1
+    }
+    assert any("RuntimeError" in record for record in logged)
+    assert all(private_text not in record for record in logged)
+
+
+@pytest.mark.no_network
+async def test_scheduler_task_cleanup_does_not_log_exception_content():
+    private_text = "private task source passage"
+    logged = []
+
+    async def fail():
+        raise RuntimeError(private_text)
+
+    scheduler = Scheduler("ada", "project-a")
+    task = asyncio.create_task(fail())
+    scheduler._running_tasks["project_semantic"] = task
+    sink = logger.add(lambda message: logged.append(str(message)))
+    try:
+        await asyncio.sleep(0)
+        scheduler._cleanup_task("project_semantic", task)
+    finally:
+        logger.remove(sink)
+
+    assert scheduler.snapshot_for_health()["recent_outcomes"][-1]["state"] == "failed"
+    assert any("RuntimeError" in record for record in logged)
+    assert all(private_text not in record for record in logged)

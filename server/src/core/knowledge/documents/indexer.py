@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import math
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
 
@@ -239,20 +240,43 @@ class DocumentIndexer:
         }
 
     @staticmethod
+    def _validate_embedding_shape(embeddings: object, expected_count: int) -> None:
+        if not isinstance(embeddings, (list, tuple)):
+            raise DependencyError("Document embedding service returned a malformed batch")
+        if len(embeddings) != expected_count:
+            raise DependencyError("Embedding count does not match chunk count")
+        if any(not isinstance(embedding, (list, tuple)) for embedding in embeddings):
+            raise DependencyError("Document embedding service returned a malformed vector")
+
+    @staticmethod
     def _validate_embeddings(
         embeddings: List[List[float]],
         chunks: List[DocumentChunk],
     ) -> None:
-        if len(embeddings) != len(chunks):
-            raise ValueError("Embedding count does not match chunk count")
+        DocumentIndexer._validate_embedding_shape(embeddings, len(chunks))
         if any(
             len(embedding) != EXPECTED_EMBEDDING_DIMENSION
             for embedding in embeddings
         ):
-            raise ValueError(
+            raise DependencyError(
                 "Document chunk embeddings must have exactly "
                 f"{EXPECTED_EMBEDDING_DIMENSION} dimensions"
             )
+        for embedding in embeddings:
+            for value in embedding:
+                try:
+                    valid = (
+                        isinstance(value, (int, float))
+                        and not isinstance(value, bool)
+                        and math.isfinite(value)
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    valid = False
+                if not valid:
+                    raise DependencyError(
+                        "Document embedding service returned a non-finite or "
+                        "non-JSON-native value"
+                    )
 
     @staticmethod
     def _classify_index_failure(exc: Exception) -> tuple[str, bool]:
@@ -277,11 +301,10 @@ class DocumentIndexer:
     ) -> List[List[float]]:
         embeddings: List[List[float]] = []
         for start in range(0, len(values), policy.embedding_chunk_batch_size):
-            embeddings.extend(
-                await self._embedding.encode(
-                    values[start : start + policy.embedding_chunk_batch_size]
-                )
-            )
+            batch_values = values[start : start + policy.embedding_chunk_batch_size]
+            batch = await self._embedding.encode(batch_values)
+            self._validate_embedding_shape(batch, len(batch_values))
+            embeddings.extend(batch)
         return embeddings
 
     @asynccontextmanager

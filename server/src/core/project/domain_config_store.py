@@ -46,7 +46,7 @@ def _decode_config(raw: Any) -> DomainConfig:
         raw = safe_json_loads(raw, None)
     if not isinstance(raw, Mapping):
         raise ValueError("Persisted domain configuration must be an object")
-    return DomainConfig.from_mapping(raw)
+    return DomainConfig.from_persisted_mapping(raw)
 
 
 class DomainConfigStore:
