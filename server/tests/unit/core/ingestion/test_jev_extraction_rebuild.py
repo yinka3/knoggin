@@ -8,6 +8,8 @@ import pytest
 from common.schema.ingestion.contracts import UnknownEndpointDiagnostic
 from common.schema.jev import JevPolicy
 from core.ingestion.context_entity_build import ContextEntityBuildService
+from core.ingestion.text_processor import _ContextBlockText, _FallbackGap
+from infrastructure.jev_client import JevWorkBudget
 from tests.unit.core.ingestion.test_context_entity_build import (
     BudgetedExtractionJev,
     FakeEntityLLM,
@@ -142,6 +144,105 @@ async def test_exhausted_budget_reuses_prior_acceptance_behind_new_gap():
     assert len(current.trace.extraction_decisions) == 1
     assert current.trace.extraction_decisions[0]["accepted_entity_type"] == "Company"
     assert "reused_for_pass" in current.trace.extraction_decisions[0]
+
+
+async def test_exhausted_budget_replays_acceptance_after_preparation_limit():
+    current_block = block("Orion works with Zephyr Dynamics.")
+    current = build(blocks=(current_block,), compiled_domain=domain())
+    current.policy = policy(
+        domain(),
+        llm_ner_mode="disabled",
+        jev=JevPolicy(extraction_mode="active", max_calls_per_window=1),
+    )
+    zephyr = UnknownEndpointDiagnostic(
+        block_id=current_block.block_id,
+        name="Zephyr Dynamics",
+        entity_type="Company",
+    )
+    current.set_unknown_endpoint_diagnostics((zephyr,))
+    jev = BudgetedExtractionJev()
+    proc = processor(
+        FakeVP01([VP01EntitySpan(text="Orion", label="company", start=0, end=5)]),
+        llm_ner_mode="disabled",
+        jev_client=jev,
+    )
+
+    first = await proc.extract_context_mentions(current)
+    assert [mention.name for mention in first] == ["Orion", "Zephyr Dynamics"]
+    budget = current.jev_work_budget
+    budget.max_observations = 1
+    earlier_diagnostics = tuple(
+        UnknownEndpointDiagnostic(
+            block_id=current_block.block_id,
+            name=f"Absent Endpoint {index}",
+            entity_type="Company",
+        )
+        for index in range(512)
+    )
+    current.set_unknown_endpoint_diagnostics((*earlier_diagnostics, zephyr))
+
+    replayed = await proc.extract_context_mentions(current)
+
+    assert [mention.name for mention in replayed] == ["Orion", "Zephyr Dynamics"]
+    assert budget.observations == budget.calls == 1
+    assert len(jev.calls) == 1
+    assert current.trace.extraction_decisions[0]["reused_for_pass"] == 2
+
+
+@pytest.mark.parametrize("alias", ["Zephyr Dynamics", "Zephyr   Dynamics"])
+async def test_exhausted_budget_replays_alias_after_earlier_diagnostics(alias):
+    current_block = block("Orion works with Zephyr Dynamics.")
+    current = build(blocks=(current_block,), compiled_domain=domain())
+    current.policy = policy(domain())
+    current.jev_work_budget = JevWorkBudget(
+        max_calls=1, max_observations=1, observations=1
+    )
+    earlier_diagnostics = tuple(
+        UnknownEndpointDiagnostic(
+            block_id=current_block.block_id,
+            name=f"Absent Endpoint {index}",
+            entity_type="Company",
+        )
+        for index in range(512)
+    )
+    current.set_unknown_endpoint_diagnostics(
+        (
+            *earlier_diagnostics,
+            UnknownEndpointDiagnostic(
+                block_id=current_block.block_id,
+                name="Zephyr Dynamics",
+                entity_type="Company",
+            ),
+        )
+    )
+    proc = processor(FakeVP01([]))
+    proc.get_known_aliases = lambda: {alias: 701}
+    proc.get_profile = lambda _entity_id: _async_value(None)
+
+    candidates = await proc._prepare_jev_extraction_candidates(
+        current,
+        assembled=_ContextBlockText.from_blocks((current_block,)),
+        gaps=[
+            _FallbackGap(
+                block=current_block,
+                reasons=("known_alias_missing_from_extraction",),
+                support_text="",
+            )
+        ],
+        mentions=[],
+        previous_acceptances=[
+            {
+                "candidate_name": "Zephyr Dynamics",
+                "evidence_origin": "known_alias_gap",
+                "record": {"evidence_block_ids": [str(current_block.block_id)]},
+            }
+        ],
+    )
+
+    assert [(item.name, item.evidence_origin) for item in candidates] == [
+        ("Zephyr Dynamics", "known_alias_gap")
+    ]
+    assert current.jev_work_budget.observations == 1
 
 
 @pytest.mark.parametrize("changed", [None, "evidence", "policy", "removed_gap"])

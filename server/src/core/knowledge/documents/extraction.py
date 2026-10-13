@@ -112,10 +112,10 @@ class LayoutRegion:
 
 @dataclass(frozen=True)
 class NativePdfTextCell:
-    """One native PDF text cell used for provenance and index recovery."""
+    """One native PDF text cell; invalid bounds do not discard its text."""
 
     text: str
-    bbox: tuple[float, float, float, float]
+    bbox: tuple[float, float, float, float] | None
 
 
 @dataclass(frozen=True)
@@ -464,6 +464,7 @@ def _native_pdf_cells(
                     rect.r_y0, rect.r_y1, rect.r_y2, rect.r_y3,
                 )
                 if not all(math.isfinite(value) for value in coordinates):
+                    boxes.append(NativePdfTextCell(text=cell.text.strip(), bbox=None))
                     continue
                 boxes.append(
                     NativePdfTextCell(
@@ -602,7 +603,9 @@ def _native_page_text(cells: tuple[NativePdfTextCell, ...]) -> str:
     """Reconstruct readable lines from native cells in PDF coordinates."""
 
     lines: list[dict[str, Any]] = []
-    for cell in sorted(cells, key=lambda item: (-item.bbox[3], item.bbox[0])):
+    positioned = [cell for cell in cells if cell.bbox is not None]
+    unpositioned = [cell.text for cell in cells if cell.bbox is None]
+    for cell in sorted(positioned, key=lambda item: (-item.bbox[3], item.bbox[0])):
         bottom, top = cell.bbox[1], cell.bbox[3]
         center = (bottom + top) / 2
         height = top - bottom
@@ -623,7 +626,8 @@ def _native_page_text(cells: tuple[NativePdfTextCell, ...]) -> str:
     for line in sorted(lines, key=lambda value: -value["center"]):
         ordered = sorted(line["cells"], key=lambda item: item.bbox[0])
         rendered.append(" ".join(cell.text for cell in ordered))
-    return "\n".join(value for value in rendered if value.strip()).strip()
+    # Invalid bounds prevent placement, but the cell's text still belongs in the index.
+    return "\n".join(value for value in (*rendered, *unpositioned) if value.strip()).strip()
 
 
 def _boxes_overlap(
@@ -642,7 +646,7 @@ def _extract_docling_snapshot(content: bytes, extension: str) -> DocumentParseSn
     document = _parse_with_docling(content, extension)
     structure = _sanitize_parser_structure(document.export_to_dict(coord_precision=3))
     text = document.export_to_markdown().strip()
-    if not text:
+    if not text and extension != ".pdf":
         raise ValueError("Document contains no extractable text")
 
     pages: tuple[DocumentSnapshotPage, ...] = ()
@@ -651,7 +655,7 @@ def _extract_docling_snapshot(content: bytes, extension: str) -> DocumentParseSn
         regions = _regions_from_docling_structure(
             structure,
             native_regions={
-                page: tuple(cell.bbox for cell in cells)
+                page: tuple(cell.bbox for cell in cells if cell.bbox is not None)
                 for page, cells in native_cells.items()
             },
         )
@@ -661,7 +665,7 @@ def _extract_docling_snapshot(content: bytes, extension: str) -> DocumentParseSn
             DocumentSnapshotPage(
                 page_number=page_number,
                 text=(
-                    _native_page_text(native_cells.get(page_number, ()))
+                    _native_page_text(native_cells[page_number])
                     if page_number in document_index_pages
                     and native_cells.get(page_number)
                     else document.export_to_markdown(page_no=page_number).strip()
@@ -672,8 +676,10 @@ def _extract_docling_snapshot(content: bytes, extension: str) -> DocumentParseSn
         )
         if not any(page.text for page in pages):
             raise ValueError("Document contains no extractable text")
-        if document_index_pages:
+        if document_index_pages or not text:
             text = "\n\n".join(page.text for page in pages if page.text)
+            # Docling charspans refer to its original document-wide markdown.
+            # Rebuilt page text has no proven alignment with those offsets.
             pages = tuple(
                 replace(
                     page,

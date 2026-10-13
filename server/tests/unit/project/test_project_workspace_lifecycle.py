@@ -60,9 +60,17 @@ class RecordingCursor:
             raise RuntimeError("project insert failed")
 
 
+class Resources:
+    def __init__(self, postgres):
+        self.postgres = postgres
+
+    async def get_vp01(self, _language):
+        return type("VP01", (), {"extract_entities": lambda *_args, **_kwargs: []})()
+
+
 def _manager_without_filesystem() -> ProjectManager:
     return ProjectManager(
-        resources=type("Resources", (), {"postgres": RecordingPostgres()})(),
+        resources=Resources(RecordingPostgres()),
         user_name="ada",
     )
 
@@ -87,7 +95,7 @@ async def test_project_creation_seeds_native_project_file(tmp_path):
     postgres = RecordingPostgres()
     filesystem_factory = ProjectFilesystemFactory(tmp_path / "projects")
     manager = ProjectManager(
-        resources=type("Resources", (), {"postgres": postgres})(),
+        resources=Resources(postgres),
         user_name="ada",
         filesystem_factory=filesystem_factory,
     )
@@ -117,7 +125,7 @@ async def test_project_creation_removes_native_project_file_when_database_insert
     postgres = RecordingPostgres(fail_on_project_insert=True)
     filesystem_factory = ProjectFilesystemFactory(tmp_path / "projects")
     manager = ProjectManager(
-        resources=type("Resources", (), {"postgres": postgres})(),
+        resources=Resources(postgres),
         user_name="ada",
         filesystem_factory=filesystem_factory,
     )

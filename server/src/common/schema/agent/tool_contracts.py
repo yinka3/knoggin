@@ -1410,9 +1410,9 @@ def _validate_schema_value(value, schema: dict, path: str) -> list[str]:
         for key in required:
             if key not in value:
                 errors.append(f"{path}.{key} is required")
-        unknown = sorted(set(value) - set(properties))
+        unknown = set(value) - set(properties)
         if unknown and schema.get("additionalProperties") is False:
-            errors.append(f"{path} contains unknown fields: {', '.join(unknown)}")
+            errors.append(f"{path} contains {len(unknown)} unknown field(s)")
         for key, item in value.items():
             if key in properties:
                 errors.extend(

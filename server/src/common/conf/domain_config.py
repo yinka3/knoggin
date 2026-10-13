@@ -101,6 +101,18 @@ def _relationship_lookup(
     return lookup
 
 
+def _relationship_exact_lookup(
+    relationships: Mapping[str, RelationshipDefinition],
+) -> dict[str, RelationshipDefinition]:
+    """Retain exact label ownership in older ambiguous domain snapshots."""
+
+    lookup: dict[str, RelationshipDefinition] = {}
+    for relationship in relationships.values():
+        for label in relationship.labels:
+            lookup.setdefault(" ".join(label.split()).casefold(), relationship)
+    return lookup
+
+
 @dataclass(frozen=True, slots=True)
 class ContextSectionDefinition:
     """One ordered, model-visible section in the project Context document."""
@@ -570,6 +582,9 @@ class DomainConfig:
             ),
             relationships=_frozen_mapping(relationship_map),
             relationship_labels=_frozen_mapping(_relationship_lookup(relationship_map)),
+            relationship_exact_labels=_frozen_mapping(
+                _relationship_exact_lookup(relationship_map)
+            ),
             topic_aliases=_frozen_mapping(
                 {topic.name.casefold(): topic.name for topic in self.topics}
             ),
@@ -606,6 +621,9 @@ class CompiledDomain:
     relationship_labels: Mapping[str, RelationshipDefinition] = field(
         default_factory=lambda: MappingProxyType({})
     )
+    relationship_exact_labels: Mapping[str, RelationshipDefinition] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
     topic_descriptions: Mapping[str, str] = field(
         default_factory=lambda: MappingProxyType({})
     )
@@ -634,6 +652,7 @@ class CompiledDomain:
             entity_type_to_allowed_topics=_frozen_mapping({}),
             relationships=_frozen_mapping({}),
             relationship_labels=_frozen_mapping({}),
+            relationship_exact_labels=_frozen_mapping({}),
             topic_aliases=_frozen_mapping({}),
             descriptions=_frozen_mapping({}),
             topic_descriptions=_frozen_mapping({}),
@@ -791,6 +810,9 @@ class CompiledDomain:
             ),
             relationships=_frozen_mapping(relationships),
             relationship_labels=_frozen_mapping(_relationship_lookup(relationships)),
+            relationship_exact_labels=_frozen_mapping(
+                _relationship_exact_lookup(relationships)
+            ),
             topic_aliases=_frozen_mapping(topic_aliases),
             descriptions=_frozen_mapping(descriptions),
             topic_descriptions=_frozen_mapping(topic_descriptions),
@@ -874,6 +896,15 @@ class CompiledDomain:
             return None
         normalized = _relationship_lookup_key(name)
         direct = self.relationship_labels.get(normalized)
+        if direct is not None and _relationship_lookup_key(direct.name) == normalized:
+            return direct
+        canonical = self.relationships.get(normalized)
+        if canonical is not None:
+            return canonical
+        exact_label = " ".join(name.split()).casefold()
+        exact_match = self.relationship_exact_labels.get(exact_label)
+        if exact_match is not None:
+            return exact_match
         if direct is not None:
             return direct
         for relationship in self.relationships.values():

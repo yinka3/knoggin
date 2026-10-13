@@ -39,8 +39,11 @@ async def _remove_scope_insert_failure(client):
 
 
 def _manager(client, *, filesystem_factory=None) -> ProjectManager:
+    async def get_vp01(_language):
+        return SimpleNamespace(extract_entities=lambda *_args, **_kwargs: ())
+
     return ProjectManager(
-        SimpleNamespace(postgres=client),
+        SimpleNamespace(postgres=client, get_vp01=get_vp01),
         user_name="ada",
         filesystem_factory=filesystem_factory,
     )

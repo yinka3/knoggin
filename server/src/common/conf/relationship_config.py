@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from common.conf.domain_config import CompiledDomain, _relationship_lookup_key
+from common.conf.domain_config import CompiledDomain
 
 RelationshipDomainStatus = Literal["recognized", "unrecognized"]
 
@@ -19,13 +19,6 @@ def normalize_observed_relationship(value: object) -> str:
     if not normalized:
         raise ValueError("observed relationship label must not be blank")
     return normalized
-
-
-def relationship_name_key(value: object) -> str:
-    """Normalize a configured name and model wording for exact matching."""
-
-    normalized = normalize_observed_relationship(value)
-    return _relationship_lookup_key(normalized)
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,7 +71,7 @@ def normalize_relationship(
         or domain.resolve_entity_type(target_type or "")
         or (target_type if isinstance(target_type, str) else None)
     )
-    definition = domain.relationship_by_key(relationship_name_key(observed))
+    definition = domain.relationship_by_key(observed)
     if definition is None:
         return RelationshipNormalization(
             observed_label=observed,

@@ -197,7 +197,9 @@ def test_docling_snapshot_sanitizes_nonfinite_structure_and_drops_invalid_bounds
         def export_to_markdown(self, page_no=None):
             return "Readable text"
 
-    monkeypatch.setattr(extraction_module, "_parse_with_docling", lambda *_: ParsedDocument())
+    monkeypatch.setattr(
+        extraction_module, "_parse_with_docling", lambda *_: ParsedDocument()
+    )
     monkeypatch.setattr(
         extraction_module,
         "_native_pdf_cells",
@@ -216,7 +218,7 @@ def test_docling_snapshot_sanitizes_nonfinite_structure_and_drops_invalid_bounds
 
 @pytest.mark.unit
 @pytest.mark.no_network
-def test_native_pdf_cells_skip_nonfinite_coordinates(monkeypatch):
+def test_native_pdf_cells_keep_text_without_nonfinite_coordinates(monkeypatch):
     from docling_parse import pdf_parser
 
     def cell(text, left):
@@ -242,8 +244,125 @@ def test_native_pdf_cells_skip_nonfinite_coordinates(monkeypatch):
 
     cells = extraction_module._native_pdf_cells(b"pdf")
 
-    assert cells == {1: (NativePdfTextCell("good", (2, 0, 3, 2)),)}
+    assert cells == {
+        1: (
+            NativePdfTextCell("bad", None),
+            NativePdfTextCell("good", (2, 0, 3, 2)),
+        )
+    }
     assert parsed.unloaded
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("page_markdown", "unpositioned_text", "expected_text"),
+    [
+        ("Index\nMissing bounds", "Missing bounds", "Index\nMissing bounds"),
+        ("| malformed index |", "Missing bounds", "Index\nMissing bounds"),
+        ("", "Missing bounds", "Index\nMissing bounds"),
+        ("Index", "Index", "Index\nIndex"),
+    ],
+)
+def test_document_index_preserves_text_from_native_cell_with_invalid_bounds(
+    monkeypatch, page_markdown, unpositioned_text, expected_text
+):
+    from docling_parse import pdf_parser
+
+    class ParsedDocument:
+        def export_to_dict(self, **_kwargs):
+            return {
+                "pages": {"1": {}},
+                "tables": [
+                    {
+                        "label": "document_index",
+                        "prov": [
+                            {
+                                "page_no": 1,
+                                "bbox": {"l": 0, "b": 0, "r": 100, "t": 100},
+                            }
+                        ],
+                    }
+                ],
+            }
+
+        def export_to_markdown(self, page_no=None):
+            return page_markdown
+
+    def native_cell(text, left):
+        return SimpleNamespace(
+            text=text,
+            rect=SimpleNamespace(
+                r_x0=left, r_x1=left + 10, r_x2=left + 10, r_x3=left,
+                r_y0=0, r_y1=0, r_y2=10, r_y3=10,
+            ),
+        )
+
+    class ParsedPdf:
+        def iterate_pages(self):
+            yield 1, SimpleNamespace(
+                textline_cells=[
+                    native_cell("Index", 0),
+                    native_cell(unpositioned_text, float("nan")),
+                ]
+            )
+
+        def unload(self):
+            pass
+
+    monkeypatch.setattr(
+        extraction_module, "_parse_with_docling", lambda *_: ParsedDocument()
+    )
+    monkeypatch.setattr(
+        pdf_parser,
+        "DoclingPdfParser",
+        lambda: SimpleNamespace(load=lambda _: ParsedPdf()),
+    )
+    monkeypatch.setattr(extraction_module, "_docling_version", lambda: "test")
+
+    extraction = extraction_module.extract_and_split_document(b"pdf", ".pdf")
+
+    assert extraction.snapshot.pages[0].text == expected_text
+    assert extraction.snapshot.text == expected_text
+    assert unpositioned_text in " ".join(
+        chunk.content for chunk in extraction.chunks
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_pdf_uses_page_text_when_document_markdown_is_blank(monkeypatch):
+    class ParsedDocument:
+        def export_to_dict(self, **_kwargs):
+            return {
+                "pages": {"1": {}},
+                "texts": [
+                    {
+                        "label": "text",
+                        "charspan": [0, 8],
+                        "prov": [{"page_no": 1}],
+                    }
+                ],
+            }
+
+        def export_to_markdown(self, page_no=None):
+            return "" if page_no is None else "Ordinary PDF page text"
+
+    monkeypatch.setattr(
+        extraction_module, "_parse_with_docling", lambda *_: ParsedDocument()
+    )
+    monkeypatch.setattr(extraction_module, "_native_pdf_cells", lambda _content: {})
+    monkeypatch.setattr(extraction_module, "_docling_version", lambda: "test")
+
+    extraction = extraction_module.extract_and_split_document(b"pdf", ".pdf")
+
+    assert extraction.text == "Ordinary PDF page text"
+    assert extraction.snapshot.text == extraction.snapshot.pages[0].text
+    assert extraction.snapshot.pages[0].regions[0].text_start is None
+    assert extraction.snapshot.pages[0].regions[0].text_end is None
+    assert "Ordinary PDF page text" in " ".join(
+        chunk.content for chunk in extraction.chunks
+    )
 
 
 @pytest.mark.unit

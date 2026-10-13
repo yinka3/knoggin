@@ -1,6 +1,7 @@
 import pytest
 
 from common.conf.domain_config import DomainConfig, DomainConfigError
+from common.conf.relationship_config import normalize_relationship
 
 
 def domain_payload():
@@ -210,6 +211,104 @@ def test_legacy_ambiguous_compiled_snapshot_prefers_canonical_name():
     assert restored.relationship_by_key("uses").name == "USES"
     assert restored.relationship_allows("USES", "Project", "Technology")
     assert not restored.relationship_allows("USES", "Technology", "Project")
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_legacy_snapshot_canonical_wording_wins_over_exact_colliding_label():
+    compiled = DomainConfig.from_mapping(domain_payload()).compile()
+    snapshot = compiled.to_dict()
+    snapshot["relationships"] = {
+        "works-with": {
+            "name": "WORKS-WITH",
+            "source_types": ["Project"],
+            "target_types": ["Technology"],
+            "symmetric": False,
+            "labels": [],
+        },
+        "deploys": {
+            "name": "DEPLOYS",
+            "source_types": ["Technology"],
+            "target_types": ["Project"],
+            "symmetric": False,
+            "labels": ["works--with"],
+        },
+    }
+
+    restored = type(compiled).from_dict(snapshot)
+
+    assert restored.relationship_by_key("works--with").name == "WORKS-WITH"
+    assert normalize_relationship(
+        restored,
+        "works--with",
+        source_type="Project",
+        target_type="Technology",
+    ).canonical_type == "WORKS-WITH"
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_legacy_snapshot_duplicate_exact_label_keeps_first_owner():
+    compiled = DomainConfig.from_mapping(domain_payload()).compile()
+    snapshot = compiled.to_dict()
+    snapshot["relationships"] = {
+        "uses": {
+            "name": "USES",
+            "source_types": ["Project"],
+            "target_types": ["Technology"],
+            "symmetric": False,
+            "labels": ["works-with"],
+        },
+        "deploys": {
+            "name": "DEPLOYS",
+            "source_types": ["Technology"],
+            "target_types": ["Project"],
+            "symmetric": False,
+            "labels": ["works-with"],
+        },
+    }
+
+    restored = type(compiled).from_dict(snapshot)
+
+    assert restored.relationship_by_key("works-with").name == "USES"
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_legacy_colliding_labels_keep_exact_observed_meanings():
+    payload = domain_payload()
+    payload["relationships"] = {
+        "USES": {
+            "source_types": ["Project"],
+            "target_types": ["Technology"],
+            "labels": ["works--with"],
+        },
+        "DEPLOYS": {
+            "source_types": ["Technology"],
+            "target_types": ["Project"],
+            "labels": ["works-with"],
+        },
+    }
+    legacy = DomainConfig.from_persisted_mapping(payload)
+    with pytest.raises(DomainConfigError, match="claimed by both"):
+        DomainConfig.from_mapping(payload)
+
+    compiled = legacy.compile()
+    for replayed in (compiled, type(compiled).from_dict(compiled.to_dict())):
+        assert replayed.relationship_by_key("works--with").name == "USES"
+        assert replayed.relationship_by_key("works-with").name == "DEPLOYS"
+        assert normalize_relationship(
+            replayed,
+            "works--with",
+            source_type="Project",
+            target_type="Technology",
+        ).canonical_type == "USES"
+        assert normalize_relationship(
+            replayed,
+            "works-with",
+            source_type="Technology",
+            target_type="Project",
+        ).canonical_type == "DEPLOYS"
 
 
 @pytest.mark.unit
