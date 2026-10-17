@@ -212,6 +212,107 @@ async def test_embedding_service_runs_pooled_onnx_sentence_export_directly(
 
 
 @pytest.mark.no_network
+async def test_torch_embedding_rejects_overlong_inputs_before_encoding(
+    inline_fake_model_work,
+):
+    class FakeTokenizer:
+        def num_special_tokens_to_add(self, *, pair):
+            assert pair is False
+            return 1
+
+        def encode(self, value, *, add_special_tokens, truncation):
+            assert add_special_tokens is True
+            assert truncation is False
+            return list(range(len(value.split()) + 1))
+
+    class FakeEmbedder:
+        tokenizer = FakeTokenizer()
+        max_seq_length = 4
+
+        def __init__(self):
+            self.calls = []
+
+        def encode(self, texts):
+            self.calls.append(texts)
+            return np.asarray([[0.1, 0.2, 0.3] for _ in texts], dtype=np.float32)
+
+    service = EmbeddingService(embedding_backend="torch")
+    embedder = FakeEmbedder()
+    service._embedder = embedder
+
+    with pytest.raises(ValueError, match=r"Embedding input 1.*5 > 4 tokens"):
+        await service.encode(["one two three four"])
+    with pytest.raises(ValueError, match=r"Embedding input 2.*5 > 4 tokens"):
+        await service.encode(["short", "one two three four"])
+    with pytest.raises(ValueError, match=r"Embedding input 1.*5 > 4 tokens"):
+        await service.encode_single("one two three four")
+    assert embedder.calls == []
+    vectors = await service.encode(["short"])
+    np.testing.assert_allclose(vectors, [[0.1, 0.2, 0.3]])
+    assert embedder.calls == [["short"]]
+
+
+@pytest.mark.no_network
+async def test_direct_onnx_uses_sentence_transformer_limit_before_encoding(
+    monkeypatch, tmp_path
+):
+    model_path = tmp_path / "embedding-model"
+    onnx_path = model_path / "onnx" / "model.onnx"
+    onnx_path.parent.mkdir(parents=True)
+    onnx_path.write_bytes(b"fake")
+    (model_path / "sentence_bert_config.json").write_text(
+        '{"max_seq_length": 4}', encoding="utf-8"
+    )
+
+    class FakeTokenizer:
+        model_max_length = 32_768
+
+        @classmethod
+        def from_pretrained(cls, *_args, **_kwargs):
+            return cls()
+
+        def num_special_tokens_to_add(self, *, pair):
+            assert pair is False
+            return 1
+
+        def encode(self, value, *, add_special_tokens, truncation):
+            assert add_special_tokens is True
+            assert truncation is False
+            return list(range(len(value.split()) + 1))
+
+        def __call__(self, *_args, **_kwargs):
+            raise AssertionError("Overlong text reached the ONNX tokenizer")
+
+    class FakeSession:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def get_inputs(self):
+            return []
+
+        def get_outputs(self):
+            return [
+                type("Output", (), {"name": "sentence_embedding", "shape": ["batch", 3]})()
+            ]
+
+        def run(self, *_args, **_kwargs):
+            raise AssertionError("Overlong text reached the ONNX model")
+
+    monkeypatch.setattr(embedding_module, "AutoTokenizer", FakeTokenizer)
+    monkeypatch.setattr(embedding_module.ort, "InferenceSession", FakeSession)
+    service = EmbeddingService(
+        embedding_model=str(model_path),
+        embedding_backend="onnx",
+        device="cpu",
+    )
+    await service.load_models()
+
+    assert service._embedder.max_seq_length == 4
+    with pytest.raises(ValueError, match=r"Embedding input 1.*5 > 4 tokens"):
+        await service.encode(["one two three four"])
+
+
+@pytest.mark.no_network
 async def test_stella_retrieval_query_uses_document_search_instruction(monkeypatch):
     service = EmbeddingService(
         embedding_model="dunzhang/stella_en_1.5B_v5",

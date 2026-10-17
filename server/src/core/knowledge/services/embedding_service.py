@@ -41,6 +41,16 @@ class _DirectOnnxSentenceEmbedder:
             str(model_path),
             trust_remote_code=True,
         )
+        self.max_seq_length = getattr(self._tokenizer, "model_max_length", None)
+        config_path = model_path / "sentence_bert_config.json"
+        if config_path.is_file():
+            configured_limit = json.loads(config_path.read_text(encoding="utf-8")).get(
+                "max_seq_length"
+            )
+            if isinstance(configured_limit, int) and configured_limit > 0:
+                self.max_seq_length = min(
+                    self.max_seq_length or configured_limit, configured_limit
+                )
         self._session = session or ort.InferenceSession(
             str(model_path / "onnx" / "model.onnx"),
             providers=[provider],
@@ -413,6 +423,7 @@ class EmbeddingService:
     def _encode_sync(self, texts: List[str]) -> List[List[float]]:
         if not self._embedder:
             raise RuntimeError("Embedder not loaded. Call load_models() first.")
+        self._validate_embedding_inputs(texts)
         if len(texts) <= self.batch_size:
             with self._lock:
                 return self._embedder.encode(texts).astype(np.float32).tolist()
@@ -475,9 +486,40 @@ class EmbeddingService:
     def _encode_single_sync(self, text: str) -> List[float]:
         if not self._embedder:
             raise RuntimeError("Embedder not loaded. Call load_models() first.")
+        self._validate_embedding_inputs([text])
         with self._lock:
             embedding = self._embedder.encode([text])[0]
         return embedding.astype(np.float32).tolist()
+
+    def _validate_embedding_inputs(self, texts: List[str]) -> None:
+        """Reject inputs the loaded model would silently truncate."""
+
+        if isinstance(self._embedder, _DirectOnnxSentenceEmbedder):
+            tokenizer = self._embedder._tokenizer
+        else:
+            tokenizer = getattr(self._embedder, "tokenizer", None)
+        limit = getattr(self._embedder, "max_seq_length", None)
+        if tokenizer is None or not isinstance(limit, int) or limit <= 0:
+            return
+        special_tokens = getattr(tokenizer, "num_special_tokens_to_add", None)
+        special_count = special_tokens(pair=False) if callable(special_tokens) else None
+        for index, value in enumerate(texts, start=1):
+            # For ASCII, the tokenizer cannot produce more text tokens than
+            # characters. Most short queries and chunks avoid a second tokenize.
+            if (
+                isinstance(special_count, int)
+                and value.isascii()
+                and len(value) + special_count <= limit
+            ):
+                continue
+            token_count = len(
+                tokenizer.encode(value, add_special_tokens=True, truncation=False)
+            )
+            if token_count > limit:
+                raise ValueError(
+                    f"Embedding input {index} exceeds the model limit "
+                    f"({token_count} > {limit} tokens)"
+                )
 
     async def rerank(
         self, query: str, candidates: List[str], batch_size: int = None

@@ -702,6 +702,7 @@ CREATE TABLE public.project_documents (
     extension text DEFAULT ''::text NOT NULL,
     size_bytes bigint NOT NULL,
     content_hash text NOT NULL,
+    scan_managed boolean DEFAULT false NOT NULL,
     current_snapshot_id uuid,
     status text DEFAULT 'queued'::text NOT NULL,
     index_attempt_count integer DEFAULT 0 NOT NULL,

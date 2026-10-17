@@ -77,6 +77,62 @@ async def _insert_snapshot(
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
+@pytest.mark.no_network
+async def test_document_catalog_records_direct_and_scan_admission(real_postgres_client):
+    direct_id = str(uuid.uuid4())
+    scanned_id = str(uuid.uuid4())
+    legacy_id = str(uuid.uuid4())
+    writer = DocumentWriter(real_postgres_client, "project-1")
+    reader = DocumentReader(real_postgres_client, "project-1")
+
+    await writer.insert_document(
+        document_id=direct_id,
+        original_name="upload.png",
+        relative_path="upload.png",
+        extension=".png",
+        size_bytes=5,
+        content_hash="a" * 64,
+        created_at="2026-10-16T00:00:00+00:00",
+    )
+    await writer.apply_filesystem_reconciliation(
+        created=[
+            {
+                "document_id": scanned_id,
+                "original_name": "scanned.md",
+                "relative_path": "scanned.md",
+                "extension": ".md",
+                "size_bytes": 5,
+                "content_hash": "b" * 64,
+            }
+        ],
+        changed=[],
+        deleted_document_ids=[],
+        updated_at="2026-10-16T00:00:00+00:00",
+    )
+    await _insert_document(
+        real_postgres_client,
+        document_id=legacy_id,
+        content_hash="c" * 64,
+    )
+
+    rows = await reader.list_documents_for_reconciliation(limit=10)
+    assert {str(row["document_id"]): row["scan_managed"] for row in rows} == {
+        direct_id: False,
+        scanned_id: True,
+        legacy_id: False,
+    }
+    path_rows = await reader.fetch_project_documents_for_paths(
+        relative_paths=["upload.png", "scanned.md"]
+    )
+    assert {row["relative_path"]: row["scan_managed"] for row in path_rows} == {
+        "upload.png": False,
+        "scanned.md": True,
+    }
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.requires_pgvector
 async def test_parse_snapshot_is_deleted_with_a_hard_deleted_parent_document(
     real_postgres_client,
 ):

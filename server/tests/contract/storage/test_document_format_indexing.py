@@ -99,16 +99,16 @@ def _document_samples():
                     "language": "notebook",
                     "chunk_kind": "notebook_markdown",
                     "symbol_name": "cell 1",
-                    "start_line": 1,
-                    "end_line": 2,
+                    "start_line": 2,
+                    "end_line": 3,
                 },
                 {
                     "content": "def launch():\n    return 'ready'",
                     "language": "notebook",
                     "chunk_kind": "notebook_code",
                     "symbol_name": "cell 2",
-                    "start_line": 1,
-                    "end_line": 2,
+                    "start_line": 6,
+                    "end_line": 7,
                 },
             ],
         ),
@@ -293,11 +293,12 @@ async def test_failed_extraction_publishes_no_partial_derived_document_state(
         filesystem_factory=ProjectFilesystemFactory(tmp_path / "projects"),
     )
 
-    with pytest.raises(RuntimeError, match="Notebook is not valid JSON"):
-        await service.submit_document(
-            content=b"not-json",
-            original_name="broken.ipynb",
-        )
+    result = await service.submit_document(
+        content=b"not-json",
+        original_name="broken.ipynb",
+    )
+    assert result["status"] == "failed"
+    assert result["error_message"] == "Notebook is not valid JSON"
 
     document = await real_postgres_client.fetch_one(
         """
@@ -308,6 +309,7 @@ async def test_failed_extraction_publishes_no_partial_derived_document_state(
     )
     assert document["status"] == "failed"
     assert document["error_message"] == "Notebook is not valid JSON"
+    assert result["document_id"] == str(document["document_id"])
     assert (
         await real_postgres_client.fetch_all(
             "SELECT chunk_id FROM public.document_chunks WHERE document_id = %s",

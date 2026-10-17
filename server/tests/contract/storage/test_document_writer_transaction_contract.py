@@ -74,7 +74,10 @@ async def test_insert_document_uses_public_transaction_contract():
 
     assert client.transaction_count == 1
     assert len(client.cursor.calls) == 1
-    assert "INSERT INTO public.project_documents" in client.cursor.calls[0][0]
+    insert_sql = client.cursor.calls[0][0]
+    assert "INSERT INTO public.project_documents" in insert_sql
+    assert "scan_managed" in insert_sql
+    assert "false, 'queued'" in insert_sql
 
 
 @pytest.mark.storage
@@ -110,7 +113,11 @@ async def test_filesystem_reconciliation_uses_one_transaction_for_all_changes():
     assert client.transaction_count == 1
     queries = [query for query, _params in client.cursor.calls]
     assert any("SET original_name" in query for query in queries)
-    assert any("INSERT INTO public.project_documents" in query for query in queries)
+    scan_insert = next(
+        query for query in queries if "INSERT INTO public.project_documents" in query
+    )
+    assert "scan_managed" in scan_insert
+    assert "true, 'queued'" in scan_insert
     assert any("document_id = ANY" in query for query in queries)
     assert any("DELETE FROM public.document_chunks" in query for query in queries)
 

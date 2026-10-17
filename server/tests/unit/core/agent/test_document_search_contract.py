@@ -21,6 +21,7 @@ class SearchableDocumentService:
         self.files = files
         self.search_results = search_results
         self.search_calls = []
+        self.name_lookup_calls = []
 
     async def list_documents(
         self,
@@ -28,7 +29,33 @@ class SearchableDocumentService:
         path_prefix=None,
         limit=50,
     ):
-        return self.files
+        return [
+            item for item in self.files
+            if path_prefix is None
+            or item["relative_path"] == path_prefix
+            or item["relative_path"].startswith(path_prefix.rstrip("/") + "/")
+        ][:limit]
+
+    async def find_indexed_documents_by_name(self, document_name, *, path_prefix=None):
+        self.name_lookup_calls.append((document_name, path_prefix))
+        requested = document_name.lower()
+        candidates = [
+            item for item in self.files
+            if item["status"] == "indexed"
+            and (
+                item["relative_path"].lower() == requested
+                or item["original_name"].lower() == requested
+            )
+            and (
+                path_prefix is None
+                or item["relative_path"] == path_prefix
+                or item["relative_path"].startswith(path_prefix.rstrip("/") + "/")
+            )
+        ]
+        return sorted(
+            candidates,
+            key=lambda item: item["relative_path"].lower() != requested,
+        )[:2]
 
     async def get_document_info(
         self,
@@ -109,6 +136,7 @@ class ReadOnlyDocumentService:
         relative_path=None,
         start_line=1,
         end_line=None,
+        page_number=None,
     ):
         self.calls.append(
             ("read_project_document", document_id, relative_path, start_line, end_line)
@@ -337,6 +365,88 @@ async def test_search_project_documents_rejects_ambiguous_document_names():
         await tools.search_project_documents("alpha", document_name="notes.md")
 
     assert document_service.search_calls == []
+
+
+@pytest.mark.no_network
+async def test_document_name_lookup_reaches_older_indexed_rows_and_detects_old_collisions():
+    recent = [
+        {
+            "document_id": f"recent-{index}",
+            "original_name": f"recent-{index}.md",
+            "relative_path": f"recent/recent-{index}.md",
+            "status": "queued",
+        }
+        for index in range(1000)
+    ]
+    old = {
+        "document_id": "old-1",
+        "original_name": "history.md",
+        "relative_path": "archive/history.md",
+        "status": "indexed",
+    }
+    document_service = SearchableDocumentService(recent + [old])
+    tools = SearchTools()
+    tools.document_service = document_service
+    tools.session_id = "session-1"
+
+    await tools.search_project_documents("history", document_name="history.md")
+    assert document_service.search_calls[-1]["document_filter"] == "old-1"
+
+    await tools.search_project_documents("history")
+    assert document_service.search_calls[-1]["document_filter"] is None
+
+    document_service.files.append(
+        {
+            "document_id": "old-2",
+            "original_name": "history.md",
+            "relative_path": "backup/history.md",
+            "status": "indexed",
+        }
+    )
+    with pytest.raises(ToolExecutionError, match="ambiguous"):
+        await tools.search_project_documents("history", document_name="history.md")
+
+
+@pytest.mark.no_network
+async def test_required_subtree_limits_name_search_and_cannot_be_disabled():
+    document_service = SearchableDocumentService(
+        [
+            {
+                "document_id": "inside",
+                "original_name": "inside.md",
+                "relative_path": "docs/inside.md",
+                "status": "indexed",
+            },
+            {
+                "document_id": "outside",
+                "original_name": "outside.md",
+                "relative_path": "private/outside.md",
+                "status": "indexed",
+            },
+        ]
+    )
+    tools = SearchTools()
+    tools.document_service = document_service
+    tools.session_id = "session-1"
+    tools.document_focus = {
+        "mode": "request",
+        "behavior": "restrict",
+        "target_type": "subtree",
+        "path_prefix": "docs",
+    }
+
+    with pytest.raises(ToolExecutionError, match="not found"):
+        await tools.search_project_documents(
+            "secret", document_name="outside.md", use_focus=False
+        )
+    assert document_service.name_lookup_calls[-1] == ("outside.md", "docs")
+    assert document_service.search_calls == []
+
+    await tools.search_project_documents("inside", document_name="inside.md", use_focus=False)
+    assert document_service.search_calls[-1]["document_filter"] == "inside"
+
+    await tools.search_project_documents("inside", use_focus=False)
+    assert document_service.search_calls[-1]["path_prefix"] == "docs"
 
 
 @pytest.mark.no_network
@@ -580,6 +690,85 @@ async def test_request_document_focus_forces_search_to_the_selected_document():
 
 
 @pytest.mark.no_network
+async def test_preferred_request_document_focus_allows_other_read_selectors():
+    document_service = ReadOnlyDocumentService()
+    tools = SearchTools()
+    tools.document_service = document_service
+    tools.session_id = "session-1"
+    tools.document_focus = {
+        "mode": "request",
+        "behavior": "prefer",
+        "target_type": "document",
+        "document_id": "file-1",
+        "relative_path": "docs/notes.md",
+        "selection": {
+            "locator": {"kind": "text_lines", "start_line": 3, "end_line": 4}
+        },
+    }
+
+    await tools.read_project_document()
+    await tools.read_project_document(document_id="file-2")
+    await tools.read_project_document(relative_path="docs/other.md", use_focus=False)
+    await tools.read_project_document(document_id="file-1", use_focus=False)
+    await tools.read_project_document(relative_path="docs/notes.md", use_focus=False)
+
+    assert document_service.calls == [
+        ("read_project_document", "file-1", None, 3, 4),
+        ("read_project_document", "file-2", None, 1, None),
+        ("read_project_document", None, "docs/other.md", 1, None),
+        ("read_project_document", "file-1", None, 3, 4),
+        ("read_project_document", None, "docs/notes.md", 3, 4),
+    ]
+
+
+@pytest.mark.no_network
+async def test_preferred_request_document_focus_allows_other_search_selectors():
+    document_service = SearchableDocumentService(
+        [
+            {
+                "document_id": "file-1",
+                "original_name": "notes.md",
+                "relative_path": "docs/notes.md",
+                "status": "indexed",
+            },
+            {
+                "document_id": "file-2",
+                "original_name": "other.md",
+                "relative_path": "docs/other.md",
+                "status": "indexed",
+            },
+        ]
+    )
+    tools = SearchTools()
+    tools.document_service = document_service
+    tools.session_id = "session-1"
+    tools.document_focus = {
+        "mode": "request",
+        "behavior": "prefer",
+        "target_type": "document",
+        "document_id": "file-1",
+        "relative_path": "docs/notes.md",
+    }
+
+    await tools.search_project_documents("alpha")
+    await tools.search_project_documents("alpha", use_focus=False)
+    await tools.search_project_documents("alpha", relative_path="docs/other.md")
+    await tools.search_project_documents("alpha", document_name="other.md")
+    all_documents = await tools.list_project_documents(use_focus=False)
+    other_documents = await tools.list_project_documents(path_prefix="docs/other.md")
+    other_info = await tools.get_project_document_info(document_id="file-2")
+
+    assert [call["document_filter"] for call in document_service.search_calls] == [
+        "file-1", None, None, "file-2"
+    ]
+    assert document_service.search_calls[2]["relative_path"] == "docs/other.md"
+    assert document_service.name_lookup_calls == [("other.md", None)]
+    assert {item["document_id"] for item in all_documents} == {"file-1", "file-2"}
+    assert [item["document_id"] for item in other_documents] == ["file-2"]
+    assert other_info["document_id"] == "file-2"
+
+
+@pytest.mark.no_network
 async def test_search_project_documents_adds_source_context_from_the_stored_chunk():
     content_hash = "a" * 64
     stored_chunk = {
@@ -696,6 +885,52 @@ async def test_read_project_document_adds_source_context_from_the_returned_read_
             "chunk_index": "lines:3-4",
         },
     }
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize("extraction_method", ["mixed", "unknown"])
+async def test_pdf_page_read_keeps_source_context_for_uncertain_extraction(
+    extraction_method,
+):
+    locator = {
+        "kind": "layout_region",
+        "page": 2,
+        "element_type": "page",
+        "extraction_method": extraction_method,
+        "coordinate_unit": "pdf_points",
+        "coordinate_origin": "bottom_left",
+    }
+    read_result = {
+        "document_id": "file-1",
+        "project_id": "project-1",
+        "document_name": "report.pdf",
+        "relative_path": "docs/report.pdf",
+        "extension": ".pdf",
+        "content_hash": "b" * 64,
+        "parse_snapshot_id": "snapshot-1",
+        "content": "Page 2 text",
+        "locator": locator,
+    }
+    tools = SearchTools()
+    tools.document_service = ReadOnlyDocumentService(read_result=read_result)
+    tools.session_id = "session-1"
+
+    result = (await tools.read_project_document(document_id="file-1", page_number=2))[0]
+    context = result["source_context"]
+    candidate = SourceReferenceCandidate.model_validate(
+        {
+            **context,
+            "project_id": "project-1",
+            "session_id": "session-1",
+            "encounter_kind": "document_read",
+            "agent_run_id": "run-1",
+            "tool_call_id": "call-1",
+            "result_position": 0,
+        }
+    )
+
+    assert candidate.locator.extraction_method == extraction_method
+    assert candidate.excerpt == "Page 2 text"
 
 
 @pytest.mark.no_network

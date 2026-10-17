@@ -196,6 +196,31 @@ def test_project_filesystem_bounds_reads_and_lists_regular_files_in_path_order(t
     ]
 
 
+def test_project_filesystem_limited_walk_stops_before_later_directories(
+    tmp_path, monkeypatch
+):
+    filesystem = ProjectFilesystem(tmp_path / "project")
+    filesystem.write_bytes("a.txt", b"one")
+    filesystem.write_bytes("a/b.md", b"two")
+    filesystem.write_bytes("z/late.md", b"three")
+
+    assert [item.relative_path for item in filesystem.iter_paths()] == [
+        "a.txt", "a/b.md", "z/late.md",
+    ]
+
+    real_scandir = os.scandir
+
+    def reject_late_directory(directory):
+        if Path(directory) == filesystem.root / "z":
+            raise AssertionError("limited walk entered a directory after its bound")
+        return real_scandir(directory)
+
+    monkeypatch.setattr(os, "scandir", reject_late_directory)
+    assert [item.relative_path for item in filesystem.iter_paths(limit=2)] == [
+        "a.txt", "a/b.md",
+    ]
+
+
 def test_project_filesystem_does_not_follow_symlinks_inside_the_project_root(tmp_path):
     project_root = tmp_path / "project"
     outside = tmp_path / "outside.txt"
@@ -214,6 +239,132 @@ def test_project_filesystem_does_not_follow_symlinks_inside_the_project_root(tmp
 
     assert outside.read_text() == "private"
     assert list(filesystem.iter_files()) == []
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction behavior")
+def test_project_filesystem_rejects_windows_junctions_during_access_and_scan(tmp_path):
+    filesystem = ProjectFilesystem(tmp_path / "project")
+    filesystem.write_bytes("owned.md", b"owned")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.md").write_text("private")
+    junction = filesystem.root / "linked"
+    subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(outside)],
+        check=True,
+        capture_output=True,
+    )
+    assert junction.is_junction() and not junction.is_symlink()
+
+    with pytest.raises(ValueError, match="reparse point"):
+        filesystem.read_bytes("linked/keep.md")
+    with pytest.raises(ValueError, match="reparse point"):
+        filesystem.write_bytes("linked/new.md", b"external")
+    with pytest.raises(ValueError, match="reparse point"):
+        filesystem.delete_file("linked/keep.md")
+    with pytest.raises(ValueError, match="reparse point"):
+        filesystem.move_file("owned.md", "linked/moved.md")
+    with pytest.raises(ValueError, match="reparse point"):
+        filesystem.create_folder("linked/folder")
+
+    assert [item.relative_path for item in filesystem.iter_paths()] == ["owned.md"]
+    assert (outside / "keep.md").read_text() == "private"
+    assert not (outside / "new.md").exists()
+    assert filesystem.read_bytes("owned.md") == b"owned"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction behavior")
+def test_project_filesystem_rejects_windows_junction_roots_and_lock_directory(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    project_root = tmp_path / "project"
+    filesystem = ProjectFilesystem(project_root)
+    subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(project_root), str(outside)],
+        check=True,
+        capture_output=True,
+    )
+    with pytest.raises(ValueError, match="reparse point"):
+        ProjectFilesystem(project_root)
+    with pytest.raises(ValueError, match="real directory"):
+        filesystem.ensure_root()
+    project_root.rmdir()
+
+    library_root = tmp_path / "projects"
+    existing_filesystem = ProjectFilesystem(library_root / "project-1")
+    subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(library_root), str(outside)],
+        check=True,
+        capture_output=True,
+    )
+    with pytest.raises(ValueError, match="reparse point"):
+        ProjectFilesystemFactory(library_root).for_project("project-1")
+    with pytest.raises(ValueError, match="parent must be a real directory"):
+        existing_filesystem.ensure_root()
+    library_root.rmdir()
+
+    filesystem.ensure_root()
+    lock_directory = tmp_path / ".knoggin-file-locks"
+    subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(lock_directory), str(outside)],
+        check=True,
+        capture_output=True,
+    )
+    with pytest.raises(ValueError, match="real directory"):
+        filesystem.acquire_mutation_lease()
+    assert not list(outside.glob("*.lock"))
+
+
+def test_project_filesystem_rejects_a_link_above_the_library_root(tmp_path):
+    outside = tmp_path / "outside"
+    library_root = outside / "projects"
+    library_root.mkdir(parents=True)
+    linked_ancestor = tmp_path / "linked-ancestor"
+    os.symlink(outside, linked_ancestor, target_is_directory=True)
+    redirected_library = linked_ancestor / "projects"
+
+    with pytest.raises(ValueError, match="ancestor must be a real directory"):
+        ProjectFilesystemFactory(redirected_library).for_project("project-1")
+    with pytest.raises(ValueError, match="ancestor must be a real directory"):
+        ProjectFilesystem(redirected_library / "project-1")
+    assert not (library_root / "project-1").exists()
+
+
+def test_existing_project_filesystem_rechecks_ancestor_before_access(tmp_path):
+    ancestor = tmp_path / "ancestor"
+    project_root = ancestor / "projects" / "project-1"
+    filesystem = ProjectFilesystem(project_root)
+    filesystem.ensure_root()
+    ancestor.rename(tmp_path / "original-ancestor")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    os.symlink(outside, ancestor, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="ancestor must be a real directory"):
+        filesystem.ensure_root()
+    with pytest.raises(ValueError, match="ancestor must be a real directory"):
+        filesystem.acquire_mutation_lease()
+    assert not list(outside.rglob("*.lock"))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction behavior")
+def test_project_filesystem_rejects_a_junction_above_the_library_root(tmp_path):
+    outside = tmp_path / "outside"
+    library_root = outside / "projects"
+    library_root.mkdir(parents=True)
+    junction = tmp_path / "junction-ancestor"
+    subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(outside)],
+        check=True,
+        capture_output=True,
+    )
+    redirected_library = junction / "projects"
+
+    with pytest.raises(ValueError, match="ancestor must be a real directory"):
+        ProjectFilesystemFactory(redirected_library).for_project("project-1")
+    with pytest.raises(ValueError, match="ancestor must be a real directory"):
+        ProjectFilesystem(redirected_library / "project-1")
+    assert not (library_root / "project-1").exists()
 
 
 def test_project_filesystem_factory_creates_isolated_project_roots(tmp_path):

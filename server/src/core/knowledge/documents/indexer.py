@@ -41,6 +41,7 @@ BlockingRunner = Callable[..., Awaitable[Any]]
 
 _DRAIN_BATCH_SIZE = 16
 _DRAIN_RETRY_SECONDS = 0.1
+_DRAIN_FAILURE_RETRY_SECONDS = 1.0
 
 
 class DocumentIndexer:
@@ -117,7 +118,7 @@ class DocumentIndexer:
             relative_path=None,
         )
         metadata = rows[0] if rows else None
-        if metadata is None:
+        if metadata is None or metadata["project_id"] != self.project_id:
             raise FileNotFoundError("Document not found")
         if metadata["status"] == "indexed" and not force:
             return metadata
@@ -352,6 +353,8 @@ class DocumentIndexer:
         if not rows:
             raise FileNotFoundError("Document not found")
         document = rows[0]
+        if document["project_id"] != self.project_id:
+            raise FileNotFoundError("Document not found")
         if document["status"] != "queued":
             return document
         queued = document
@@ -448,20 +451,21 @@ class DocumentIndexer:
                 self._drain_wakeup.clear()
 
                 while not self._stopping:
-                    await self._admit_durable_work(_DRAIN_BATCH_SIZE)
-                    if await self.pending_index_count() == 0:
-                        break
-                    retry_at = await self._reader.next_index_retry_at()
-                    retry_time = parse_iso_time(retry_at) if retry_at is not None else None
-                    if retry_time is not None and not self._document_tasks:
-                        timeout = max(0.01, (retry_time - get_now()).total_seconds())
-                    else:
-                        timeout = _DRAIN_RETRY_SECONDS
                     try:
-                        await asyncio.wait_for(
-                            self._drain_wakeup.wait(),
-                            timeout=timeout,
-                        )
+                        await self._admit_durable_work(_DRAIN_BATCH_SIZE)
+                        if await self.pending_index_count() == 0:
+                            break
+                        retry_at = await self._reader.next_index_retry_at()
+                        retry_time = parse_iso_time(retry_at) if retry_at is not None else None
+                        if retry_time is not None and not self._document_tasks:
+                            timeout = max(0.01, (retry_time - get_now()).total_seconds())
+                        else:
+                            timeout = _DRAIN_RETRY_SECONDS
+                    except Exception as exc:
+                        logger.error("Document index admission loop failed: {}", exc)
+                        timeout = _DRAIN_FAILURE_RETRY_SECONDS
+                    try:
+                        await asyncio.wait_for(self._drain_wakeup.wait(), timeout=timeout)
                     except TimeoutError:
                         pass
                     self._drain_wakeup.clear()

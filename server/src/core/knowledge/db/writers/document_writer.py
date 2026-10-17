@@ -130,13 +130,14 @@ class DocumentWriter:
                     extension,
                     size_bytes,
                     content_hash,
+                    scan_managed,
                     status,
                     created_at,
                     updated_at
                 )
                 VALUES (
                     %s, %s,
-                    %s, %s, %s, %s, %s, 'queued', %s, %s
+                    %s, %s, %s, %s, %s, false, 'queued', %s, %s
                 )
                 """,
                 (
@@ -212,11 +213,12 @@ class DocumentWriter:
                         extension,
                         size_bytes,
                         content_hash,
+                        scan_managed,
                         status,
                         created_at,
                         updated_at
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, 'queued', %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, true, 'queued', %s, %s)
                     """,
                     (
                         item["document_id"],
@@ -759,16 +761,18 @@ class DocumentWriter:
         link_id: str,
         title: str | None,
         summary: str | None,
+        update_title: bool,
+        update_summary: bool,
         updated_at: str,
     ) -> Optional[Dict]:
-        """Replace bookmark presentation fields within the active project."""
+        """Update supplied bookmark fields without overwriting concurrent edits."""
         async with self._client.transaction() as cur:
             await cur.execute(
                 """
                 UPDATE public.saved_web_links
                 SET
-                    title = %s,
-                    summary = %s,
+                    title = CASE WHEN %s THEN %s ELSE title END,
+                    summary = CASE WHEN %s THEN %s ELSE summary END,
                     updated_at = %s
                 WHERE link_id = %s
                   AND project_id = %s
@@ -781,7 +785,15 @@ class DocumentWriter:
                     created_at,
                     updated_at
                 """,
-                (title, summary, updated_at, link_id, self._project_id),
+                (
+                    update_title,
+                    title,
+                    update_summary,
+                    summary,
+                    updated_at,
+                    link_id,
+                    self._project_id,
+                ),
             )
             row = await cur.fetchone()
         return dict(row) if row is not None else None

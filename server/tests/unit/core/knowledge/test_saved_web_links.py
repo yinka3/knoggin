@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from uuid import UUID
@@ -43,7 +44,7 @@ class BookmarkCursor:
             self._result = deepcopy(row)
             return
         if normalized.startswith("UPDATE public.saved_web_links"):
-            title, summary, updated_at, link_id, project_id = params
+            update_title, title, update_summary, summary, updated_at, link_id, project_id = params
             row = next(
                 (
                     row
@@ -53,7 +54,11 @@ class BookmarkCursor:
                 None,
             )
             if row is not None:
-                row.update(title=title, summary=summary, updated_at=updated_at)
+                if update_title:
+                    row["title"] = title
+                if update_summary:
+                    row["summary"] = summary
+                row["updated_at"] = updated_at
             self._result = deepcopy(row) if row is not None else None
             return
         if normalized.startswith("DELETE FROM public.saved_web_links"):
@@ -204,6 +209,36 @@ async def test_saved_web_link_partial_update_preserves_omitted_fields():
     assert cleared["summary"] == "A concise evolving note."
     with pytest.raises(ValueError, match="provide title or summary"):
         await service.update_saved_web_link(link_id=saved["link_id"])
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_concurrent_partial_saved_web_link_updates_keep_both_changes(monkeypatch):
+    store = BookmarkStore()
+    service = make_service(store)
+    saved = await service.save_web_link(url="https://example.com/article")
+    original_fetch_all = store.fetch_all
+    both_reading = asyncio.Event()
+    reads = 0
+
+    async def simultaneous_reads(query, params=None):
+        nonlocal reads
+        result = await original_fetch_all(query, params)
+        if "WHERE link_id = %s" in query:
+            reads += 1
+            if reads == 2:
+                both_reading.set()
+            await asyncio.wait_for(both_reading.wait(), timeout=2)
+        return result
+
+    monkeypatch.setattr(store, "fetch_all", simultaneous_reads)
+    await asyncio.gather(
+        service.update_saved_web_link(link_id=saved["link_id"], title="New title"),
+        service.update_saved_web_link(link_id=saved["link_id"], summary="New summary"),
+    )
+
+    assert store.rows[0]["title"] == "New title"
+    assert store.rows[0]["summary"] == "New summary"
 
 
 @pytest.mark.unit

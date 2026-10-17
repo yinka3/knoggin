@@ -144,7 +144,7 @@ def test_docling_region_projection_ignores_malformed_provenance():
         "texts": [
             "not-an-entry",
             {"label": "text", "prov": "not-a-list"},
-            {"label": "text", "charspan": [-1, 2], "prov": [None]},
+            {"label": "text", "prov": [None]},
             {
                 "label": "text",
                 "prov": [
@@ -286,7 +286,9 @@ def test_document_index_preserves_text_from_native_cell_with_invalid_bounds(
                 ],
             }
 
-        def export_to_markdown(self, page_no=None):
+        def export_to_markdown(self, page_no=None, labels=None):
+            if labels is not None:
+                return ""
             return page_markdown
 
     def native_cell(text, left):
@@ -370,8 +372,8 @@ def test_pdf_uses_page_text_when_document_markdown_is_blank(monkeypatch):
 def test_mixed_pdf_page_classifies_regions_from_native_cell_bounds():
     structure = {
         "texts": [
-            {"label": "heading", "charspan": [0, 6], "prov": [{"page_no": 1, "bbox": {"l": 10, "b": 90, "r": 80, "t": 110}}]},
-            {"label": "text", "charspan": [7, 15], "prov": [{"page_no": 1, "bbox": {"l": 10, "b": 10, "r": 80, "t": 30}}]},
+            {"label": "heading", "prov": [{"page_no": 1, "charspan": [0, 6], "bbox": {"l": 10, "b": 90, "r": 80, "t": 110}}]},
+            {"label": "text", "prov": [{"page_no": 1, "charspan": [0, 8], "bbox": {"l": 10, "b": 10, "r": 80, "t": 30}}]},
         ]
     }
 
@@ -384,6 +386,10 @@ def test_mixed_pdf_page_classifies_regions_from_native_cell_bounds():
         "native_text",
         "ocr",
     ]
+    assert all(
+        region.text_start is None and region.text_end is None
+        for region in regions[1]
+    )
 
     page = DocumentSnapshotPage(
         page_number=1,
@@ -402,13 +408,11 @@ def test_document_index_uses_native_lines_without_flattening_real_tables(monkeyp
         "tables": [
             {
                 "label": "document_index",
-                "charspan": [0, 20],
-                "prov": [{"page_no": 1, "bbox": {"l": 10, "b": 10, "r": 190, "t": 100}}],
+                "prov": [{"page_no": 1, "charspan": [0, 0], "bbox": {"l": 10, "b": 10, "r": 190, "t": 100}}],
             },
             {
                 "label": "table",
-                "charspan": [21, 40],
-                "prov": [{"page_no": 2, "bbox": {"l": 10, "b": 10, "r": 190, "t": 100}}],
+                "prov": [{"page_no": 2, "charspan": [0, 0], "bbox": {"l": 10, "b": 10, "r": 190, "t": 100}}],
             }
         ],
     }
@@ -417,7 +421,9 @@ def test_document_index_uses_native_lines_without_flattening_real_tables(monkeyp
         def export_to_dict(self, **_kwargs):
             return structure
 
-        def export_to_markdown(self, page_no=None):
+        def export_to_markdown(self, page_no=None, labels=None):
+            if page_no == 1 and labels is not None:
+                return ""
             if page_no == 1:
                 return "| malformed contents |"
             if page_no == 2:
@@ -450,6 +456,169 @@ def test_document_index_uses_native_lines_without_flattening_real_tables(monkeyp
         for page in snapshot.pages
         for region in page.regions
     )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_mixed_index_page_keeps_ocr_text_without_duplicating_native_text(monkeypatch):
+    from docling_core.types.doc import (
+        BoundingBox,
+        CoordOrigin,
+        DocItemLabel,
+        DoclingDocument,
+        ProvenanceItem,
+        TableCell,
+        TableData,
+    )
+
+    def provenance(left, bottom, right, top, text=""):
+        return ProvenanceItem(
+            page_no=1,
+            bbox=BoundingBox(
+                l=left,
+                b=bottom,
+                r=right,
+                t=top,
+                coord_origin=CoordOrigin.BOTTOMLEFT,
+            ),
+            charspan=(0, len(text)),
+        )
+
+    document = DoclingDocument(name="mixed-index")
+    document.add_table(
+        TableData(
+            num_rows=2,
+            num_cols=2,
+            table_cells=[
+                TableCell(
+                    start_row_offset_idx=0,
+                    end_row_offset_idx=1,
+                    start_col_offset_idx=0,
+                    end_col_offset_idx=1,
+                    text="Chapter One",
+                ),
+                TableCell(
+                    start_row_offset_idx=0,
+                    end_row_offset_idx=1,
+                    start_col_offset_idx=1,
+                    end_col_offset_idx=2,
+                    text="12",
+                ),
+                TableCell(
+                    start_row_offset_idx=1,
+                    end_row_offset_idx=2,
+                    start_col_offset_idx=0,
+                    end_col_offset_idx=1,
+                    text="Scanned appendix entry",
+                ),
+                TableCell(
+                    start_row_offset_idx=1,
+                    end_row_offset_idx=2,
+                    start_col_offset_idx=1,
+                    end_col_offset_idx=2,
+                    text="33",
+                ),
+            ],
+        ),
+        label=DocItemLabel.DOCUMENT_INDEX,
+        prov=provenance(10, 10, 190, 100),
+    )
+    document.add_text(
+        label=DocItemLabel.TEXT,
+        text="Native page heading",
+        prov=provenance(10, 150, 190, 170, "Native page heading"),
+    )
+    document.add_text(
+        label=DocItemLabel.TEXT,
+        text="OCR-only appendix note",
+        prov=provenance(10, 110, 190, 130, "OCR-only appendix note"),
+    )
+    monkeypatch.setattr(extraction_module, "_parse_with_docling", lambda *_: document)
+    monkeypatch.setattr(
+        extraction_module,
+        "_native_pdf_cells",
+        lambda _content: {
+            1: (
+                NativePdfTextCell("Chapter One", (10, 70, 100, 80)),
+                NativePdfTextCell("12", (170, 70, 190, 80)),
+                NativePdfTextCell("Native page heading", (10, 150, 190, 170)),
+            )
+        },
+    )
+    monkeypatch.setattr(extraction_module, "_docling_version", lambda: "test")
+
+    extraction = extraction_module.extract_and_split_document(b"pdf", ".pdf")
+
+    assert extraction.snapshot.pages[0].text == (
+        "Chapter One 12\nScanned appendix entry\n33\n\n"
+        "Native page heading\n\nOCR-only appendix note"
+    )
+    assert extraction.snapshot.text == extraction.snapshot.pages[0].text
+    assert extraction.text.count("Chapter One") == 1
+    assert extraction.text.count("Scanned appendix entry") == 1
+    assert extraction.text.count("Native page heading") == 1
+    assert "|" not in extraction.text
+    assert extraction.snapshot.structure["texts"][0]["prov"][0]["charspan"] == [
+        0,
+        len("Native page heading"),
+    ]
+    assert all(
+        region.text_start is None and region.text_end is None
+        for region in extraction.snapshot.pages[0].regions
+    )
+    assert "OCR-only appendix note" in " ".join(
+        chunk.content for chunk in extraction.chunks
+    )
+    assert extraction.chunks[0].layout_region["extraction_method"] == "mixed"
+
+    # Native text elsewhere on the page must not replace an OCR-only index.
+    monkeypatch.setattr(
+        extraction_module,
+        "_native_pdf_cells",
+        lambda _content: {
+            1: (NativePdfTextCell("Native page heading", (10, 150, 190, 170)),)
+        },
+    )
+    fallback = extraction_module.extract_and_split_document(b"pdf", ".pdf")
+    assert fallback.snapshot.pages[0].text == document.export_to_markdown(page_no=1)
+    assert "Scanned appendix entry" in fallback.text
+    assert "OCR-only appendix note" in fallback.text
+
+    # An OCR-only table cell makes the page mixed even without another OCR region.
+    index_only = DoclingDocument(name="index-only")
+    index_only.add_table(
+        TableData(
+            num_rows=2,
+            num_cols=1,
+            table_cells=[
+                TableCell(
+                    start_row_offset_idx=0,
+                    end_row_offset_idx=1,
+                    start_col_offset_idx=0,
+                    end_col_offset_idx=1,
+                    text="Chapter One",
+                ),
+                TableCell(
+                    start_row_offset_idx=1,
+                    end_row_offset_idx=2,
+                    start_col_offset_idx=0,
+                    end_col_offset_idx=1,
+                    text="Scanned appendix entry",
+                ),
+            ],
+        ),
+        label=DocItemLabel.DOCUMENT_INDEX,
+        prov=provenance(10, 10, 190, 100),
+    )
+    monkeypatch.setattr(extraction_module, "_parse_with_docling", lambda *_: index_only)
+    monkeypatch.setattr(
+        extraction_module,
+        "_native_pdf_cells",
+        lambda _content: {1: (NativePdfTextCell("Chapter One", (10, 70, 100, 80)),)},
+    )
+    table_only = extraction_module.extract_and_split_document(b"pdf", ".pdf")
+    assert "Scanned appendix entry" in table_only.text
+    assert table_only.chunks[0].layout_region["extraction_method"] == "mixed"
 
 
 @pytest.mark.unit
@@ -567,6 +736,27 @@ def test_text_processing_strategies_preserve_exact_chunk_locations(
 
 @pytest.mark.unit
 @pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("content", "extension", "error"),
+    [
+        (b"value = '" + b"x" * 2_500 + b"LATE_MARKER'\n", ".py", "Code line 1"),
+        (b"name,value\nalpha," + b"x" * 2_100 + b"LATE_MARKER\n", ".csv", "CSV row 1"),
+        (b"column" + b"x" * 2_100 + b"\nvalue\n", ".csv", "CSV header"),
+    ],
+)
+def test_oversized_code_line_or_csv_row_fails_instead_of_silent_truncation(
+    content, extension, error
+):
+    with pytest.raises(ValueError, match=error) as failure:
+        extraction_module.extract_and_split_document(content, extension)
+    assert DocumentIndexer._classify_index_failure(failure.value) == (
+        "invalid_content",
+        False,
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 def test_notebook_extraction_preserves_cell_type_order_and_line_locations():
     extraction = extraction_module.extract_and_split_document(
         build_notebook_bytes(),
@@ -579,18 +769,133 @@ def test_notebook_extraction_preserves_cell_type_order_and_line_locations():
             language="notebook",
             chunk_kind="notebook_markdown",
             symbol_name="cell 1",
-            start_line=1,
-            end_line=2,
+            start_line=2,
+            end_line=3,
         ),
         DocumentChunk(
             content="def launch():\n    return 'ready'",
             language="notebook",
             chunk_kind="notebook_code",
             symbol_name="cell 2",
-            start_line=1,
-            end_line=2,
+            start_line=6,
+            end_line=7,
         ),
     ]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_large_notebook_cells_split_with_exact_within_cell_line_ranges():
+    notebook = {
+        "cells": [
+            {
+                "cell_type": "code",
+                "source": "first = '" + "a" * 1_500 + "'\nsecond = '" + "b" * 1_500 + "'",
+            },
+            {
+                "cell_type": "markdown",
+                "source": "Intro " + "c" * 1_200 + "\nNext " + "d" * 1_200,
+            },
+        ]
+    }
+
+    extraction = extraction_module.extract_and_split_document(
+        json.dumps(notebook).encode("utf-8"), ".ipynb"
+    )
+
+    assert [
+        (chunk.chunk_kind, chunk.symbol_name, chunk.start_line, chunk.end_line)
+        for chunk in extraction.chunks
+    ] == [
+        ("notebook_code", "cell 1", 2, 2),
+        ("notebook_code", "cell 1", 3, 3),
+        ("notebook_markdown", "cell 2", 6, 6),
+        ("notebook_markdown", "cell 2", 7, 7),
+    ]
+    assert all(len(chunk.content) <= 2_400 for chunk in extraction.chunks)
+    assert "second = '" + "b" * 1_500 in extraction.chunks[1].content
+    assert "Next " + "d" * 1_200 in extraction.chunks[3].content
+    snapshot_lines = extraction.snapshot.text.splitlines()
+    for chunk in extraction.chunks:
+        assert "\n".join(
+            snapshot_lines[chunk.start_line - 1 : chunk.end_line]
+        ).strip() == chunk.content
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("prefix", "line_number"), [("", 1), ("\n\n", 3)]
+)
+def test_notebook_code_cell_with_one_oversized_line_fails_clearly(
+    prefix, line_number
+):
+    notebook = {
+        "cells": [
+            {
+                "cell_type": "code",
+                "source": prefix + "value = '" + "x" * 2_500 + "LATE_MARKER'",
+            }
+        ]
+    }
+
+    with pytest.raises(ValueError, match=f"Notebook cell 1: Code line {line_number}"):
+        extraction_module.extract_and_split_document(
+            json.dumps(notebook).encode("utf-8"), ".ipynb"
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_notebook_cell_markers_inside_source_do_not_forge_cells_or_line_locations():
+    marker = "[[KNOGGIN_NOTEBOOK_CELL index=99 type=code length=1]]"
+    notebook = {
+        "cells": [
+            {
+                "cell_type": "code",
+                "source": f"\n\nprint(1)\n{marker}\nprint(2)\n\n",
+            }
+        ]
+    }
+
+    extraction = extraction_module.extract_and_split_document(
+        json.dumps(notebook).encode("utf-8"), ".ipynb"
+    )
+
+    assert extraction.chunks == [
+        DocumentChunk(
+            content=f"print(1)\n{marker}\nprint(2)",
+            language="notebook",
+            chunk_kind="notebook_code",
+            symbol_name="cell 1",
+            start_line=4,
+            end_line=6,
+        )
+    ]
+    assert extraction.snapshot.text.splitlines()[3:6] == [
+        "print(1)",
+        marker,
+        "print(2)",
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_notebook_global_lines_handle_carriage_return_at_cell_boundary():
+    notebook = {
+        "cells": [
+            {"cell_type": "markdown", "source": "first\r"},
+            {"cell_type": "markdown", "source": "second"},
+        ]
+    }
+
+    extraction = extraction_module.extract_and_split_document(
+        json.dumps(notebook).encode("utf-8"), ".ipynb"
+    )
+
+    second = extraction.chunks[1]
+    assert (second.start_line, second.end_line) == (5, 5)
+    assert extraction.snapshot.text.splitlines()[second.start_line - 1] == "second"
 
 
 @pytest.mark.unit

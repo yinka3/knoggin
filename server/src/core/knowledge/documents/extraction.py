@@ -191,7 +191,7 @@ _SYMBOL_PATTERN = re.compile(
 )
 _CODE_CHUNK_TARGET_CHARS = 2_400
 _NOTEBOOK_CELL_HEADER = re.compile(
-    r"^\[\[KNOGGIN_NOTEBOOK_CELL index=(\d+) type=(code|markdown)\]\]$",
+    r"^\[\[KNOGGIN_NOTEBOOK_CELL index=(\d+) type=(code|markdown) length=(\d+)\]\]\n",
     re.MULTILINE,
 )
 _DOCKERFILE_INSTRUCTION_PATTERN = re.compile(r"^([A-Za-z]+)(?:\s|$)")
@@ -537,14 +537,6 @@ def _regions_from_docling_structure(
             if not isinstance(entry, dict):
                 continue
             element_type = str(entry.get("label") or collection.rstrip("s"))
-            charspan = entry.get("charspan")
-            if not (
-                isinstance(charspan, list)
-                and len(charspan) == 2
-                and all(isinstance(item, int) and item >= 0 for item in charspan)
-                and charspan[1] >= charspan[0]
-            ):
-                charspan = None
             provenance = entry.get("prov")
             if not isinstance(provenance, list):
                 continue
@@ -566,14 +558,14 @@ def _regions_from_docling_structure(
                     extraction_method = "native_text"
                 else:
                     extraction_method = "ocr"
+                # Docling's provenance charspan indexes this item, not our
+                # canonical page text, so no page text offsets can be asserted.
                 regions.setdefault(page_number, []).append(
                     LayoutRegion(
                         page_number=page_number,
                         element_type=element_type,
                         extraction_method=extraction_method,
                         bbox=bbox,
-                        text_start=charspan[0] if charspan is not None else None,
-                        text_end=charspan[1] if charspan is not None else None,
                     )
                 )
     return {page: tuple(items) for page, items in regions.items()}
@@ -597,6 +589,67 @@ def _document_index_page_numbers(structure: Dict[str, Any]) -> set[int]:
                 if isinstance(item, dict) and isinstance(item.get("page_no"), int):
                     pages.add(item["page_no"])
     return pages
+
+
+def _document_index_boxes(
+    structure: Dict[str, Any],
+) -> Dict[int, tuple[tuple[float, float, float, float], ...]]:
+    """Locate index regions so adjacent native text is not indexed twice."""
+
+    boxes: Dict[int, list[tuple[float, float, float, float]]] = {}
+    for collection in ("texts", "tables", "pictures", "key_value_items"):
+        entries = structure.get(collection)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("label") != "document_index":
+                continue
+            provenance_items = entry.get("prov")
+            if not isinstance(provenance_items, list):
+                continue
+            for provenance in provenance_items:
+                if not isinstance(provenance, dict):
+                    continue
+                page_number = provenance.get("page_no")
+                bbox = _region_bbox(provenance.get("bbox"))
+                if isinstance(page_number, int) and page_number >= 1 and bbox is not None:
+                    boxes.setdefault(page_number, []).append(bbox)
+    return {page: tuple(page_boxes) for page, page_boxes in boxes.items()}
+
+
+def _missing_index_cell_text(
+    structure: Dict[str, Any], page_number: int, native_text: str
+) -> str:
+    """Keep OCR-only index cells without copying Docling's whole table rendering."""
+
+    entries = structure.get("tables")
+    if not isinstance(entries, list):
+        return ""
+    known_text = " ".join(native_text.split()).casefold()
+    missing: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("label") != "document_index":
+            continue
+        provenance = entry.get("prov")
+        if not isinstance(provenance, list) or not any(
+            isinstance(item, dict) and item.get("page_no") == page_number
+            for item in provenance
+        ):
+            continue
+        data = entry.get("data")
+        cells = data.get("table_cells") if isinstance(data, dict) else None
+        if not isinstance(cells, list):
+            continue
+        for cell in cells:
+            value = cell.get("text") if isinstance(cell, dict) else None
+            if not isinstance(value, str) or not value.strip():
+                continue
+            value = value.strip()
+            normalized = " ".join(value.split()).casefold()
+            if f" {normalized} " not in f" {known_text} ":
+                missing.append(value)
+                known_text = f"{known_text} {normalized}"
+    return "\n".join(missing)
 
 
 def _native_page_text(cells: tuple[NativePdfTextCell, ...]) -> str:
@@ -660,26 +713,56 @@ def _extract_docling_snapshot(content: bytes, extension: str) -> DocumentParseSn
             },
         )
         document_index_pages = _document_index_page_numbers(structure)
+        index_boxes = _document_index_boxes(structure)
         page_numbers = _page_numbers(structure) or sorted(regions)
-        pages = tuple(
-            DocumentSnapshotPage(
-                page_number=page_number,
-                text=(
-                    _native_page_text(native_cells[page_number])
-                    if page_number in document_index_pages
-                    and native_cells.get(page_number)
-                    else document.export_to_markdown(page_no=page_number).strip()
-                ),
-                regions=regions.get(page_number, ()),
+        native_index_pages: set[int] = set()
+        mixed_index_pages: set[int] = set()
+        page_results = []
+        for page_number in page_numbers:
+            page_text = document.export_to_markdown(page_no=page_number).strip()
+            if page_number in document_index_pages and native_cells.get(page_number):
+                boxes = index_boxes.get(page_number, ())
+                index_cells = tuple(
+                    cell
+                    for cell in native_cells[page_number]
+                    if cell.bbox is None
+                    or not boxes
+                    or any(_boxes_overlap(cell.bbox, box) for box in boxes)
+                )
+                native_text = _native_page_text(index_cells)
+                if native_text:
+                    from docling_core.types.doc import DocItemLabel
+
+                    recovered_cells = _missing_index_cell_text(
+                        structure, page_number, native_text
+                    )
+                    if recovered_cells:
+                        mixed_index_pages.add(page_number)
+                    other_text = document.export_to_markdown(
+                        page_no=page_number,
+                        labels=set(DocItemLabel) - {DocItemLabel.DOCUMENT_INDEX},
+                    ).strip()
+                    page_text = "\n\n".join(
+                        part
+                        for part in (
+                            "\n".join(part for part in (native_text, recovered_cells) if part),
+                            other_text,
+                        )
+                        if part
+                    )
+                    native_index_pages.add(page_number)
+            page_results.append(
+                DocumentSnapshotPage(
+                    page_number=page_number,
+                    text=page_text,
+                    regions=regions.get(page_number, ()),
+                )
             )
-            for page_number in page_numbers
-        )
+        pages = tuple(page_results)
         if not any(page.text for page in pages):
             raise ValueError("Document contains no extractable text")
-        if document_index_pages or not text:
+        if native_index_pages or not text:
             text = "\n\n".join(page.text for page in pages if page.text)
-            # Docling charspans refer to its original document-wide markdown.
-            # Rebuilt page text has no proven alignment with those offsets.
             pages = tuple(
                 replace(
                     page,
@@ -687,13 +770,15 @@ def _extract_docling_snapshot(content: bytes, extension: str) -> DocumentParseSn
                         replace(
                             region,
                             extraction_method=(
-                                "native_text"
-                                if page.page_number in document_index_pages
+                                (
+                                    "mixed"
+                                    if page.page_number in mixed_index_pages
+                                    else "native_text"
+                                )
+                                if page.page_number in native_index_pages
                                 and region.element_type == "document_index"
                                 else region.extraction_method
                             ),
-                            text_start=None,
-                            text_end=None,
                         )
                         for region in page.regions
                     ),
@@ -908,12 +993,18 @@ def _split_csv(text: str) -> List[DocumentChunk]:
         raise ValueError("CSV document contains no data rows")
 
     header = _render_csv_row(rows[0])
+    if len(header) + 1 >= _TEXT_CHUNK_TARGET_CHARS:
+        raise ValueError("CSV header exceeds the document chunk size limit")
     chunks: List[DocumentChunk] = []
     current: List[str] = []
     start_row = 1
     current_size = len(header) + 1
     for row_number, row in enumerate(rows[1:], start=1):
         rendered = _render_csv_row(row)
+        if len(header) + 1 + len(rendered) > _TEXT_CHUNK_TARGET_CHARS:
+            raise ValueError(
+                f"CSV row {row_number} exceeds the document chunk size limit"
+            )
         if current and current_size + len(rendered) + 1 > _TEXT_CHUNK_TARGET_CHARS:
             chunks.append(
                 DocumentChunk(
@@ -984,8 +1075,8 @@ def _extract_notebook_text(content: bytes) -> str:
         if not isinstance(source, str) or not source.strip():
             continue
         serialized_cells.append(
-            f"[[KNOGGIN_NOTEBOOK_CELL index={index} type={cell_type}]]\n"
-            f"{source.strip()}"
+            f"[[KNOGGIN_NOTEBOOK_CELL index={index} type={cell_type} "
+            f"length={len(source)}]]\n{source}"
         )
     if not serialized_cells:
         raise ValueError("Notebook contains no extractable code or Markdown cells")
@@ -993,25 +1084,59 @@ def _extract_notebook_text(content: bytes) -> str:
 
 
 def _split_notebook(text: str) -> List[DocumentChunk]:
-    matches = list(_NOTEBOOK_CELL_HEADER.finditer(text))
-    if not matches:
-        raise ValueError("Notebook produced no recognizable cells")
     chunks = []
-    for index, match in enumerate(matches):
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        content = text[match.end() : end].strip()
-        if not content:
+    position = 0
+    lines_before_position = 0
+    while position < len(text):
+        match = _NOTEBOOK_CELL_HEADER.match(text, position)
+        if match is None:
+            raise ValueError("Notebook produced no recognizable cells")
+        cell_number, cell_type, source_length = match.groups()
+        # The serialized header is one line; chunk ranges refer to this same
+        # snapshot text, which is what read_document later slices.
+        lines_before_source = lines_before_position + 1
+        end = match.end() + int(source_length)
+        if end > len(text):
+            raise ValueError("Notebook cell content is incomplete")
+        content = text[match.end() : end]
+        position = end
+        lines_before_position = lines_before_source + sum(
+            part.endswith(("\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"))
+            for part in content.splitlines(keepends=True)
+        )
+        if position < len(text):
+            if not text.startswith("\n\n", position):
+                raise ValueError("Notebook cell separator is invalid")
+            position += 2
+            # A trailing CR joins the separator's first LF into one CRLF.
+            lines_before_position += 1 if content.endswith("\r") else 2
+        if not content.strip():
             continue
-        cell_number, cell_type = match.groups()
-        chunks.append(
-            DocumentChunk(
-                content=content,
+        try:
+            if cell_type == "code":
+                lines = content.splitlines()
+                non_empty = [index for index, line in enumerate(lines) if line.strip()]
+                first, last = non_empty[0], non_empty[-1]
+                cell_chunks = _split_code_sections(
+                    "\n".join(lines[first : last + 1]),
+                    "notebook",
+                    [],
+                    line_offset=first,
+                )
+            else:
+                cell_chunks = _split_text_with_lines(content)
+        except ValueError as exc:
+            raise ValueError(f"Notebook cell {cell_number}: {exc}") from exc
+        chunks.extend(
+            replace(
+                chunk,
                 language="notebook",
                 chunk_kind=f"notebook_{cell_type}",
                 symbol_name=f"cell {cell_number}",
-                start_line=1,
-                end_line=len(content.splitlines()),
+                start_line=chunk.start_line + lines_before_source,
+                end_line=chunk.end_line + lines_before_source,
             )
+            for chunk in cell_chunks
         )
     if not chunks:
         raise ValueError("Notebook produced no non-empty cells")
@@ -1168,6 +1293,8 @@ def _split_code_sections(
     text: str,
     language: str,
     boundaries: List[tuple[int, str]],
+    *,
+    line_offset: int = 0,
 ) -> List[DocumentChunk]:
     lines = text.splitlines()
     if not lines:
@@ -1192,9 +1319,14 @@ def _split_code_sections(
         current_chars = 0
         start = section_start
         for line_index, line in enumerate(section_lines, start=section_start):
+            if len(line) > _CODE_CHUNK_TARGET_CHARS:
+                raise ValueError(
+                    f"Code line {line_index + line_offset + 1} "
+                    "exceeds the document chunk size limit"
+                )
             if current and current_chars + len(line) + 1 > _CODE_CHUNK_TARGET_CHARS:
                 chunks.append(
-                    _code_chunk(current, language, start, symbol_name)
+                    _code_chunk(current, language, start + line_offset, symbol_name)
                 )
                 current = []
                 current_chars = 0
@@ -1202,7 +1334,9 @@ def _split_code_sections(
             current.append(line)
             current_chars += len(line) + 1
         if current:
-            chunks.append(_code_chunk(current, language, start, symbol_name))
+            chunks.append(
+                _code_chunk(current, language, start + line_offset, symbol_name)
+            )
     return [chunk for chunk in chunks if chunk.content]
 
 

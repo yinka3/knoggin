@@ -81,7 +81,13 @@ def _layout_region_locator(value) -> Optional[Dict]:
         not _positive_int(page)
         or not isinstance(element_type, str)
         or not element_type.strip()
-        or extraction_method not in {"native_text", "ocr", "model_interpretation"}
+        or extraction_method not in {
+            "native_text",
+            "ocr",
+            "model_interpretation",
+            "mixed",
+            "unknown",
+        }
     ):
         return None
     locator: Dict = {
@@ -473,11 +479,12 @@ class DocumentSearchTools:
             raise ValueError("document operation is restricted to the focused subtree")
 
     def _request_focus_document_id(self) -> Optional[str]:
-        """Return the document ID for an unbypassable request selector."""
+        """Return the document ID only for a restrictive request selector."""
         if (
             self.document_focus
             and self.document_focus.get("mode") == "request"
             and self.document_focus.get("target_type") == "document"
+            and self._focus_is_restrictive()
         ):
             return self.document_focus["document_id"]
         return None
@@ -821,11 +828,24 @@ class DocumentSearchTools:
             and self.document_focus["target_type"] == "subtree"
         ):
             raise ValueError("read_project_document requires a selector within the focused subtree")
-        page_number, start_line, end_line = self._request_selection_defaults(
-            page_number=page_number,
-            start_line=start_line,
-            end_line=end_line,
-        )
+        if (
+            self.document_focus
+            and self.document_focus.get("mode") == "request"
+            and self.document_focus.get("target_type") == "document"
+            and (
+                document_id == self.document_focus.get("document_id")
+                or (
+                    document_id is None
+                    and relative_path is not None
+                    and relative_path == self.document_focus.get("relative_path")
+                )
+            )
+        ):
+            page_number, start_line, end_line = self._request_selection_defaults(
+                page_number=page_number,
+                start_line=start_line,
+                end_line=end_line,
+            )
         read_kwargs = {
             "document_id": document_id,
             "relative_path": relative_path,
@@ -902,6 +922,11 @@ class DocumentSearchTools:
             relative_path = None
             path_prefix = None
         document_filter = request_document_id
+        restrictive_subtree = bool(
+            self.document_focus
+            and self._focus_is_restrictive()
+            and self.document_focus["target_type"] == "subtree"
+        )
         if self.document_focus and self._focus_is_restrictive() and self.document_focus["target_type"] == "document":
             document_filter = self.document_focus["document_id"]
         if request_document_id is None and (
@@ -915,56 +940,56 @@ class DocumentSearchTools:
                 document_filter = self.document_focus["document_id"]
             else:
                 path_prefix = self.document_focus.get("path_prefix")
+        if restrictive_subtree and relative_path is None and path_prefix is None:
+            path_prefix = self.document_focus["path_prefix"]
 
-        if document_filter is not None:
+        if document_name and document_filter is not None:
             focused_document = await self.document_service.get_document_info(
                 document_id=document_filter,
             )
-            visible_documents = [focused_document]
-        else:
-            visible_documents = await self.document_service.list_documents(
+            matches = [focused_document] if focused_document.get("status") == "indexed" else []
+        elif document_name:
+            matches = await self.document_service.find_indexed_documents_by_name(
+                document_name,
                 path_prefix=path_prefix,
-                limit=1000,
             )
-        documents = [
-            document
-            for document in visible_documents
-            if document.get("status") == "indexed"
-        ]
-
-        if not documents:
-            return []
-
+        else:
+            # This only distinguishes a truly empty catalog from an indexed
+            # document with no matching passages. It must not gate search on
+            # the newest rows, since an older indexed row may be past the limit.
+            if document_filter is None and not await self.document_service.list_documents(
+                path_prefix=path_prefix,
+                limit=1,
+            ):
+                return []
+            matches = []
         if document_name:
             requested = document_name.lower()
             path_matches = [
                 document
-                for document in documents
+                for document in matches
                 if document.get("relative_path", "").lower() == requested
             ]
             name_matches = [
                 document
-                for document in documents
+                for document in matches
                 if document["original_name"].lower() == requested
             ]
-            matches = path_matches or name_matches
-            if len(matches) == 1:
-                document_filter = matches[0]["document_id"]
-            elif len(matches) > 1:
-                paths = [document["relative_path"] for document in matches]
+            selected = path_matches or name_matches
+            if len(selected) == 1:
+                document_filter = selected[0]["document_id"]
+                path_prefix = None
+            elif len(selected) > 1:
+                paths = [document["relative_path"] for document in selected]
                 raise ToolExecutionError(
                     "search_project_documents",
                     f"Document name '{document_name}' is ambiguous. "
                     f"Use one of these paths: {', '.join(paths)}",
                 )
             else:
-                available = [
-                    document["relative_path"] for document in documents
-                ]
                 raise ToolExecutionError(
                     "search_project_documents",
-                    f"Document '{document_name}' not found. Available: "
-                    f"{', '.join(available)}",
+                    f"Document '{document_name}' not found.",
                 )
 
         results = await self.document_service.search(

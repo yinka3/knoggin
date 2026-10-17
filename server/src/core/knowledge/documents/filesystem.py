@@ -19,6 +19,28 @@ from core.knowledge.documents.constants import MAX_DOCUMENT_SIZE
 from core.knowledge.documents.scanning import normalize_relative_path
 
 
+def _is_link_or_reparse_point(metadata: os.stat_result) -> bool:
+    """Treat Windows junctions and other reparse points like symlinks."""
+    return stat.S_ISLNK(metadata.st_mode) or bool(
+        getattr(metadata, "st_file_attributes", 0)
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    )
+
+
+def _is_link_or_reparse_path(path: Path) -> bool:
+    try:
+        return _is_link_or_reparse_point(path.lstat())
+    except FileNotFoundError:
+        return False
+
+
+def _assert_real_ancestors(path: Path, *, label: str) -> None:
+    """Reject links above a trusted directory, including Windows junctions."""
+    for ancestor in path.parents:
+        if _is_link_or_reparse_path(ancestor):
+            raise ValueError(f"{label} ancestor must be a real directory")
+
+
 class ProjectFilesystemConflictError(WorkspaceConflictError):
     """Raised when a caller attempts to replace stale project-file content."""
 
@@ -52,7 +74,7 @@ class ProjectFilesystem:
     """Read and write one project's local directory without escaping its root.
 
     The caller supplies a trusted absolute project root. Every public path is a
-    normalized project-relative path; symlinks inside that root are rejected so
+    normalized project-relative path; links inside that root are rejected so
     document and agent operations cannot silently reach elsewhere on the host.
     """
 
@@ -60,8 +82,11 @@ class ProjectFilesystem:
         root = Path(project_root)
         if not root.is_absolute():
             raise ValueError("project_root must be absolute")
-        if root.is_symlink():
-            raise ValueError("project_root must not be a symlink")
+        if _is_link_or_reparse_path(root.parent):
+            raise ValueError("project_root parent must be a real directory")
+        if _is_link_or_reparse_path(root):
+            raise ValueError("project_root must not be a symlink or reparse point")
+        _assert_real_ancestors(root.parent, label="project_root")
         self._root = root
 
     @property
@@ -73,8 +98,13 @@ class ProjectFilesystem:
         return normalize_relative_path(relative_path, relative_path)
 
     def ensure_root(self) -> None:
+        if _is_link_or_reparse_path(self._root.parent):
+            raise ValueError("project_root parent must be a real directory")
+        if _is_link_or_reparse_path(self._root):
+            raise ValueError("project_root must be a real directory")
+        _assert_real_ancestors(self._root.parent, label="project_root")
         self._root.mkdir(parents=True, exist_ok=True)
-        if self._root.is_symlink() or not self._root.is_dir():
+        if _is_link_or_reparse_path(self._root) or not self._root.is_dir():
             raise ValueError("project_root must be a real directory")
 
     def _lock_key(self) -> str:
@@ -82,16 +112,21 @@ class ProjectFilesystem:
 
     def acquire_mutation_lease(self) -> _MutationLease:
         """Hold the project mutation lock across filesystem and catalog work."""
+        if _is_link_or_reparse_path(self._root.parent):
+            raise ValueError("project_root parent must be a real directory")
+        _assert_real_ancestors(self._root.parent, label="project_root")
         # Keep coordination files outside the project tree scanned for documents.
         lock_directory = self._root.parent / ".knoggin-file-locks"
+        if _is_link_or_reparse_path(lock_directory):
+            raise ValueError("project file lock directory must be a real directory")
         lock_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if lock_directory.is_symlink() or not lock_directory.is_dir():
+        if _is_link_or_reparse_path(lock_directory) or not lock_directory.is_dir():
             raise ValueError("project file lock directory must be a real directory")
         root_key = self._lock_key()
         lock_name = hashlib.sha256(os.fsencode(root_key)).hexdigest() + ".lock"
         lock_path = lock_directory / lock_name
-        if lock_path.is_symlink():
-            raise ValueError("project file lock must not be a symlink")
+        if _is_link_or_reparse_path(lock_path):
+            raise ValueError("project file lock must not be a symlink or reparse point")
         flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(lock_path, flags, 0o600)
         try:
@@ -218,6 +253,7 @@ class ProjectFilesystem:
         *,
         overwrite: bool = False,
         expected_content_hash: str | None = None,
+        _allow_empty: bool = False,
         _lease: _MutationLease | None = None,
     ) -> ProjectFile:
         """Atomically create or replace one project file.
@@ -228,7 +264,7 @@ class ProjectFilesystem:
         """
         if not isinstance(content, bytes):
             raise TypeError("content must be bytes")
-        if not content:
+        if not content and not _allow_empty:
             raise ValueError("project file content must not be empty")
         if len(content) > MAX_DOCUMENT_SIZE:
             raise ValueError("document exceeds the 50 MB size limit")
@@ -293,9 +329,10 @@ class ProjectFilesystem:
         overwrite: bool,
         expected_content_hash: str | None,
     ) -> None:
-        exists = path.exists() or path.is_symlink()
-        if path.is_symlink():
-            raise ValueError("project file path must not be a symlink")
+        is_link = _is_link_or_reparse_path(path)
+        exists = path.exists() or is_link
+        if is_link:
+            raise ValueError("project file path must not be a symlink or reparse point")
         if exists and not path.is_file():
             raise IsADirectoryError(f"project path is not a regular file: {normalized}")
         if exists and not overwrite:
@@ -346,7 +383,7 @@ class ProjectFilesystem:
             if expected_content_hash is not None and content_hash != expected_content_hash:
                 raise ProjectFilesystemConflictError("project file changed")
             destination = self._path_for_write(destination_normalized)
-            if destination.exists() or destination.is_symlink():
+            if destination.exists() or _is_link_or_reparse_path(destination):
                 raise FileExistsError(
                     f"project file already exists: {destination_normalized}"
                 )
@@ -364,8 +401,9 @@ class ProjectFilesystem:
         self.ensure_root()
         folder = self._root.joinpath(*PurePosixPath(normalized).parts)
         self._ensure_real_parent_directories(folder.parent)
-        if folder.exists() or folder.is_symlink():
-            if folder.is_symlink() or not folder.is_dir():
+        is_link = _is_link_or_reparse_path(folder)
+        if folder.exists() or is_link:
+            if is_link or not folder.is_dir():
                 raise FileExistsError(f"project path already exists: {normalized}")
             return normalized
         folder.mkdir()
@@ -382,38 +420,51 @@ class ProjectFilesystem:
             not isinstance(limit, int) or isinstance(limit, bool) or limit < 1
         ):
             raise ValueError("limit must be a positive integer")
+        if _is_link_or_reparse_path(self._root):
+            raise ValueError("project_root must be a real directory")
         if not self._root.exists():
             return
         self.ensure_root()
 
-        files: list[ProjectFilePath] = []
-        pending = [self._root]
+        # A directory sorts as "name/" so its descendants keep the same order
+        # as sorting complete relative paths (including names like a.txt, a/).
+        pending: list[Path | ProjectFilePath] = [self._root]
+        yielded = 0
         while pending:
-            directory = pending.pop()
-            with os.scandir(directory) as scan:
-                entries = sorted(scan, key=lambda entry: entry.name)
-            directories: list[Path] = []
+            item = pending.pop()
+            if isinstance(item, ProjectFilePath):
+                yield item
+                yielded += 1
+                if limit is not None and yielded >= limit:
+                    return
+                continue
+            with os.scandir(item) as scan:
+                entries = list(scan)
+            children: list[tuple[str, Path | ProjectFilePath]] = []
             for entry in entries:
-                if entry.is_symlink():
+                metadata = entry.stat(follow_symlinks=False)
+                if _is_link_or_reparse_point(metadata):
                     continue
                 entry_path = Path(entry.path)
-                if entry.is_dir(follow_symlinks=False):
-                    directories.append(entry_path)
+                if stat.S_ISDIR(metadata.st_mode):
+                    children.append((entry.name + "/", entry_path))
                     continue
-                if not entry.is_file(follow_symlinks=False):
+                if not stat.S_ISREG(metadata.st_mode):
                     continue
                 relative_path = entry_path.relative_to(self._root).as_posix()
-                stat = entry.stat(follow_symlinks=False)
-                files.append(
-                    ProjectFilePath(
-                        relative_path=relative_path,
-                        size_bytes=stat.st_size,
-                        modified_ns=stat.st_mtime_ns,
+                children.append(
+                    (
+                        entry.name,
+                        ProjectFilePath(
+                            relative_path=relative_path,
+                            size_bytes=metadata.st_size,
+                            modified_ns=metadata.st_mtime_ns,
+                        ),
                     )
                 )
-            pending.extend(reversed(directories))
-        for entry in sorted(files, key=lambda item: item.relative_path)[:limit]:
-            yield entry
+            pending.extend(
+                child for _, child in sorted(children, key=lambda pair: pair[0], reverse=True)
+            )
 
     def _path_for_read(self, relative_path: str) -> Path:
         normalized = self.normalize_path(relative_path)
@@ -435,9 +486,12 @@ class ProjectFilesystem:
         current = self._root
         for part in relative_parent.parts:
             current = current / part
-            if current.exists() or current.is_symlink():
-                if current.is_symlink() or not current.is_dir():
-                    raise ValueError("project path contains a non-directory or symlink")
+            is_link = _is_link_or_reparse_path(current)
+            if current.exists() or is_link:
+                if is_link or not current.is_dir():
+                    raise ValueError(
+                        "project path contains a non-directory, symlink, or reparse point"
+                    )
                 continue
             current.mkdir()
 
@@ -446,8 +500,8 @@ class ProjectFilesystem:
         current = self._root
         for part in relative_path.parts:
             current = current / part
-            if current.is_symlink():
-                raise ValueError("project path must not traverse a symlink")
+            if _is_link_or_reparse_path(current):
+                raise ValueError("project path must not traverse a symlink or reparse point")
 
     @staticmethod
     def _content_hash(content: bytes) -> str:
@@ -475,8 +529,9 @@ class ProjectFilesystemFactory:
             or any(separator in project_id for separator in ("/", "\\", "\x00"))
         ):
             raise ValueError("project_id must be a single path component")
-        if self._library_root.is_symlink():
-            raise ValueError("project library root must not be a symlink")
+        if _is_link_or_reparse_path(self._library_root):
+            raise ValueError("project library root must not be a symlink or reparse point")
+        _assert_real_ancestors(self._library_root, label="project library root")
         return self._library_root / project_id
 
     def for_project(self, project_id: str) -> ProjectFilesystem:

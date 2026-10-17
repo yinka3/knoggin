@@ -530,7 +530,8 @@ async def test_orchestrator_resolves_session_document_focus_without_querying_pos
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_orchestrator_ignores_stale_document_focus():
+@pytest.mark.parametrize("mode", ["pinned", "request"])
+async def test_orchestrator_ignores_stale_preferred_document_focus(mode):
     context = FakeSession()
 
     class MissingFocusService:
@@ -539,7 +540,8 @@ async def test_orchestrator_ignores_stale_document_focus():
 
     context.document_service = MissingFocusService()
     context.document_focus = {
-        "mode": "pinned",
+        "mode": mode,
+        "behavior": "prefer",
         "target_type": "subtree",
         "path_prefix": "missing-folder",
         "created_at": "2026-06-22T12:00:00+00:00",
@@ -549,6 +551,67 @@ async def test_orchestrator_ignores_stale_document_focus():
         context,
         context.document_focus,
     ) is None
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("mode", "behavior"),
+    [("request", "restrict"), ("pinned", "restrict")],
+)
+async def test_orchestrator_stops_when_a_required_focus_is_stale(
+    monkeypatch, mode, behavior
+):
+    context = FakeSession()
+    context.resources.postgres.upsert_agent(
+        AgentConfig(id="agent-1", name="Researcher", persona="Careful", is_default=True)
+    )
+
+    class MissingFocusService:
+        async def resolve_focus_target(self, **kwargs):
+            raise FileNotFoundError("Document focus target not found")
+
+    context.document_service = MissingFocusService()
+    focus = {
+        "mode": mode,
+        "behavior": behavior,
+        "target_type": "subtree",
+        "path_prefix": "missing-folder",
+        "created_at": "2026-06-22T12:00:00+00:00",
+    }
+
+    async def unexpected_bootstrap(*args, **kwargs):
+        raise AssertionError("Unrestricted tools must not be created")
+
+    monkeypatch.setattr(AgentOrchestrator, "_bootstrap_services", unexpected_bootstrap)
+    events = [
+        event
+        async for event in make_orchestrator(context).run_stream(
+            user_query="hello",
+            context=context,
+            request_document_focus=focus,
+        )
+    ]
+
+    assert events[0]["event"] == "error"
+    assert events[0]["data"]["code"] == "workspace_conflict"
+    assert FakeExecutor.instances == []
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_orchestrator_stops_restricted_focus_without_document_service():
+    context = FakeSession()
+    focus = {
+        "mode": "request",
+        "behavior": "restrict",
+        "target_type": "subtree",
+        "path_prefix": "docs",
+        "created_at": "2026-06-22T12:00:00+00:00",
+    }
+
+    with pytest.raises(WorkspaceConflictError):
+        await make_orchestrator(context)._resolve_document_focus(context, focus)
 
 
 @pytest.mark.runtime
@@ -577,6 +640,7 @@ async def test_orchestrator_preserves_canonical_request_document_selection():
                 "extension": ".py",
                 "chunk_index": "lines:2-3",
                 "content_hash": "a" * 64,
+                "parse_snapshot_id": "snapshot-1",
                 "locator": {
                     "kind": "code_lines",
                     "start_line": 2,
@@ -617,9 +681,87 @@ async def test_orchestrator_preserves_canonical_request_document_selection():
         "extension": ".py",
         "chunk_index": "lines:2-3",
         "content_hash": "a" * 64,
+        "parse_snapshot_id": "snapshot-1",
         "locator": {"kind": "code_lines", "start_line": 2, "end_line": 3},
         "excerpt": "2: def useful():\n3:     return 42",
     }
+
+    candidate = make_orchestrator(context)._initial_source_candidates(
+        context=context,
+        run_id="run-1",
+        user_message_id=None,
+        message_content="Use this passage",
+        pasted_text_spans=None,
+        selection_context=selection_context,
+    )[0]
+    assert candidate.parse_snapshot_id == "snapshot-1"
+    assert candidate.excerpt == "2: def useful():\n3:     return 42"
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_orchestrator_runs_with_a_selected_document_passage(monkeypatch):
+    context = FakeSession()
+    context.resources.postgres.upsert_agent(
+        AgentConfig(id="agent-1", name="Researcher", persona="Careful", is_default=True)
+    )
+
+    class FocusDocumentService:
+        async def resolve_focus_target(self, **kwargs):
+            return {
+                "target_type": "document",
+                "document_id": "document-1",
+                "relative_path": "docs/notes.md",
+            }
+
+        async def resolve_document_selection(self, **kwargs):
+            return {
+                "document_id": "document-1",
+                "project_id": "project-1",
+                "relative_path": "docs/notes.md",
+                "document_name": "notes.md",
+                "extension": ".md",
+                "chunk_index": "lines:2-3",
+                "content_hash": "a" * 64,
+                "parse_snapshot_id": "snapshot-1",
+                "locator": {"kind": "text_lines", "start_line": 2, "end_line": 3},
+                "content": "2: Useful note\n3: Another note",
+            }
+
+    context.document_service = FocusDocumentService()
+    monkeypatch.setattr("core.agent.orchestrator.AgentExecutor", FakeExecutor)
+
+    async def fake_bootstrap_services(self, context_arg, agent_id, document_focus):
+        return FakeTools()
+
+    monkeypatch.setattr(AgentOrchestrator, "_bootstrap_services", fake_bootstrap_services)
+    focus = {
+        "mode": "request",
+        "behavior": "restrict",
+        "target_type": "document",
+        "document_id": "document-1",
+        "relative_path": "docs/notes.md",
+        "selection": {
+            "content_hash": "a" * 64,
+            "parse_snapshot_id": "snapshot-1",
+            "locator": {"kind": "text_lines", "start_line": 2, "end_line": 3},
+        },
+        "created_at": "2026-06-22T12:00:00+00:00",
+    }
+
+    events = [
+        event
+        async for event in make_orchestrator(context).run_stream(
+            user_query="Use this passage",
+            context=context,
+            request_document_focus=focus,
+        )
+    ]
+
+    assert events == [_resolved_response_event()]
+    candidate = FakeExecutor.instances[0].ctx.initial_source_candidates[0]
+    assert candidate.parse_snapshot_id == "snapshot-1"
+    assert candidate.excerpt == "2: Useful note\n3: Another note"
 
 
 @pytest.mark.runtime
