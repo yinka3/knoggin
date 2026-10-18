@@ -195,5 +195,5 @@ def test_empty_window_output_creates_no_episodes():
     build = _build()
     build.prepare_local_references()
 
-    assert build.apply_llm_output(LLMEpisodeWindowDecision()) == []
+    assert build.apply_llm_output(LLMEpisodeWindowDecision(proposals=[])) == []
     assert build.create_episodes() == []

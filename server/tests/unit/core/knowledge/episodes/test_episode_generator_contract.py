@@ -20,8 +20,17 @@ class _ScriptedLLM:
 
 
 class _RecordingEmbeddingService:
-    def __init__(self):
+    def __init__(self, *, chunk_limit=None):
         self.calls = []
+        self.chunk_limit = chunk_limit
+
+    def split_for_embedding(self, text):
+        if self.chunk_limit is None:
+            return [text]
+        return [
+            text[index : index + self.chunk_limit]
+            for index in range(0, len(text), self.chunk_limit)
+        ]
 
     async def encode(self, texts):
         self.calls.append(list(texts))
@@ -91,6 +100,128 @@ async def test_generator_uses_one_window_call_and_one_embedding_batch():
         [message.message_id for message in episode.messages]
         for episode in build.final_episodes
     ] == [[101, 102], [103]]
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    "repaired_sources",
+    [["message:2"], ["message:1", "message:2"]],
+)
+async def test_narrative_repair_rejects_changed_evidence_before_embedding(
+    repaired_sources,
+):
+    llm = _ScriptedLLM(
+        [
+            LLMEpisodeWindowDecision(
+                proposals=[
+                    LLMEpisodeDecision(
+                        summary="x" * 4001,
+                        message_influences=["message:1"],
+                    )
+                ]
+            ),
+            LLMEpisodeWindowDecision(
+                proposals=[
+                    LLMEpisodeDecision(
+                        summary="Repaired prose.",
+                        message_influences=repaired_sources,
+                    )
+                ]
+            ),
+        ]
+    )
+    embeddings = _RecordingEmbeddingService()
+    with pytest.raises(ValueError, match="changed proposal source references"):
+        await EpisodeGenerator(llm=llm, embedding_service=embeddings).generate(
+            user_name="ada",
+            project_id="project-1",
+            messages=[
+                {
+                    "message_id": message_id,
+                    "session_id": "session-1",
+                    "role": "user",
+                    "content": "Source evidence.",
+                    "timestamp_ms": index,
+                }
+                for index, message_id in enumerate((101, 102), start=1)
+            ],
+            policy=EpisodeGenerationPolicy.capture(settings=EpisodeSettings()),
+        )
+    assert len(llm.calls) == 2
+    assert embeddings.calls == []
+
+
+@pytest.mark.no_network
+async def test_narrative_repair_rejects_dropped_proposal_before_embedding():
+    llm = _ScriptedLLM(
+        [
+            LLMEpisodeWindowDecision(
+                proposals=[
+                    LLMEpisodeDecision(
+                        summary="x" * 4001,
+                        message_influences=["message:1"],
+                    )
+                ]
+            ),
+            LLMEpisodeWindowDecision(proposals=[]),
+        ]
+    )
+    embeddings = _RecordingEmbeddingService()
+    with pytest.raises(ValueError, match="changed proposal source references"):
+        await EpisodeGenerator(llm=llm, embedding_service=embeddings).generate(
+            user_name="ada",
+            project_id="project-1",
+            messages=[
+                {
+                    "message_id": 101,
+                    "session_id": "session-1",
+                    "role": "user",
+                    "content": "Source evidence.",
+                    "timestamp_ms": 1,
+                }
+            ],
+            policy=EpisodeGenerationPolicy.capture(settings=EpisodeSettings()),
+        )
+    assert embeddings.calls == []
+
+
+@pytest.mark.no_network
+async def test_valid_long_narrative_embeds_every_chunk_and_keeps_full_text():
+    summary = "A difficult decision was made. " * 110
+    assert len(summary) < 4000
+    llm = _ScriptedLLM(
+        [
+            LLMEpisodeWindowDecision(
+                proposals=[
+                    LLMEpisodeDecision(
+                        summary=summary,
+                        message_influences=["message:1"],
+                    )
+                ]
+            )
+        ]
+    )
+    embeddings = _RecordingEmbeddingService(chunk_limit=400)
+    build = await EpisodeGenerator(llm=llm, embedding_service=embeddings).generate(
+        user_name="ada",
+        project_id="project-1",
+        messages=[
+            {
+                "message_id": 101,
+                "session_id": "session-1",
+                "role": "user",
+                "content": "Source evidence.",
+                "timestamp_ms": 1,
+            }
+        ],
+        policy=EpisodeGenerationPolicy.capture(settings=EpisodeSettings()),
+    )
+    assert build.final_episodes[0].summary == summary.strip()
+    assert len(embeddings.calls) == 1
+    assert len(embeddings.calls[0]) > 1
+    assert all(len(chunk) <= 400 for chunk in embeddings.calls[0])
+    assert "".join(embeddings.calls[0]) == "Summary:\n" + summary.strip()
+    assert len(build.final_episodes[0].embedding) == 1024
 
 
 @pytest.mark.no_network

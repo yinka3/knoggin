@@ -44,7 +44,10 @@ async def make_port(postgres):
         VALUES ('episode-1', 'project-1', 's1', 1, 0), ('episode-2', 'project-2', 's2', 2, 0);
         """
     )
-    embedding = SimpleNamespace(encode=AsyncMock(return_value=[[0.25] * 1024]))
+    embedding = SimpleNamespace(
+        encode=AsyncMock(return_value=[[0.25] * 1024]),
+        split_for_embedding=lambda text: [text],
+    )
     store = KnowledgeStore(postgres, embedding)
     projects = object.__new__(ProjectManager)
     projects.user_name = "ada"

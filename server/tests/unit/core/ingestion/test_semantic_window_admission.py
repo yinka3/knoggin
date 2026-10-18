@@ -532,6 +532,12 @@ class _SemanticEpisodeStore:
             and kwargs["expected_attempt_count"] != self.window.attempt_count
         ):
             return None
+        if (
+            kwargs.get("expected_episode_result_recorded") is not None
+            and kwargs["expected_episode_result_recorded"]
+            != self.window.episode_result_recorded
+        ):
+            return None
         self.failures.append(kwargs)
         self.window = self.window.model_validate(
             self.window.model_dump()
@@ -839,6 +845,65 @@ async def test_scheduler_timeout_consumes_semantic_attempt_but_shutdown_does_not
     await asyncio.gather(running, return_exceptions=True)
     assert store.window.attempt_count == 0
     assert len(store.failures) == 2
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_scheduler_timeout_after_episode_commit_does_not_charge_context_retry():
+    settings = IngestionSettings(semantic_window_tokens=1)
+    admission_store = RecordingStore([_row(1, user_content="x", assistant_content="x")])
+    admission = SemanticWindowAdmission(
+        admission_store,
+        settings,
+        token_counter=lambda text: text.count("x"),
+    )
+    domain = make_domain_config().compile()
+    selected = await admission.select(
+        user_name="ada",
+        project_id="project-1",
+        domain=domain,
+        ingestion_policy=_policy(domain),
+    )
+    assert selected is not None
+
+    class CommittedThenBlockedStore(_SemanticEpisodeStore):
+        def __init__(self, window):
+            super().__init__(window)
+            self.committed = asyncio.Event()
+
+        async def write_project_semantic_window_episodes(self, **kwargs):
+            await super().write_project_semantic_window_episodes(**kwargs)
+            self.committed.set()
+            await asyncio.Event().wait()
+
+    async def capture_semantic_policy():
+        return _policy(domain)
+
+    store = CommittedThenBlockedStore(selected.window)
+    generator = _ZeroEpisodeGenerator()
+    job = _job(
+        admission,
+        store,
+        generator,
+        settings=settings,
+        capture_semantic_policy=capture_semantic_policy,
+        now_ms=lambda: 1_000,
+    )
+    scheduler = Scheduler("ada", "project-1")
+    scheduler.JOB_EXECUTION_TIMEOUT = 0.25
+    context = JobContext(user_name="ada", project_id="project-1")
+
+    assert await scheduler._execute_job(job, context) is None
+    assert store.committed.is_set()
+    assert store.window.episode_result_recorded is True
+    assert store.window.attempt_count == 0
+    assert store.window.next_retry_at_ms is None
+    assert store.failures == []
+
+    resumed = await job.execute(context)
+    assert resumed.success is True
+    assert store.window.stage.value == "completed"
+    assert len(generator.calls) == 1
 
 
 @pytest.mark.unit

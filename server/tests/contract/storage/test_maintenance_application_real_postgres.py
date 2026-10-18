@@ -52,6 +52,15 @@ async def test_duplicate_candidate_limit_keeps_the_strongest_pair(
         """
     )
     await real_postgres_client.execute(
+        """
+        INSERT INTO public.project_entity_contexts (
+            project_id, entity_id, user_name, entity_type, topic
+        ) VALUES
+            ('project-1', 4, 'ada', 'Concept', 'General'),
+            ('project-1', 5, 'ada', 'Concept', 'General')
+        """
+    )
+    await real_postgres_client.execute(
         "INSERT INTO public.entity_aliases (entity_id, alias) VALUES (2, 'Augusta Ada King')"
     )
     await real_postgres_client.execute(

@@ -480,6 +480,36 @@ async def test_semantic_episode_result_is_idempotent_and_has_no_legacy_side_effe
         "last_error_summary": None,
         "next_retry_at_ms": None,
     }
+    # The timeout callback may have read the old claimed checkpoint before
+    # the Episode transaction committed. Its stale failure must not charge
+    # the newly committed Context stage.
+    assert await store.record_project_semantic_window_failure(
+        window_id=str(window.window_id),
+        user_name="ada",
+        project_id="project-1",
+        expected_stage=SemanticWindowStage.CLAIMED,
+        expected_attempt_count=0,
+        expected_episode_result_recorded=False,
+        failure_stage="episode",
+        failure_code="TimeoutError",
+        error_summary="stale scheduler timeout",
+        failed_at_ms=2_000,
+        next_retry_at_ms=32_000,
+    ) is None
+    assert await real_postgres_client.fetch_one(
+        """
+        SELECT episode_result_recorded, attempt_count, last_failure_code,
+               next_retry_at_ms
+        FROM public.project_semantic_windows
+        WHERE window_id = %s
+        """,
+        (window.window_id,),
+    ) == {
+        "episode_result_recorded": True,
+        "attempt_count": 0,
+        "last_failure_code": None,
+        "next_retry_at_ms": None,
+    }
 
     zero_window = _window(project_id="project-2")
     assert (
@@ -719,6 +749,10 @@ async def test_window_local_episodes_reach_notebook_synthesis_with_reversal_hist
             return self.outputs.pop(0)
 
     class EpisodeEmbeddings:
+        @staticmethod
+        def split_for_embedding(text):
+            return [text]
+
         async def encode(self, texts):
             return [[0.25] * 1024 for _ in texts]
 

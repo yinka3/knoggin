@@ -1,5 +1,11 @@
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
+from huggingface_hub import snapshot_download
+from transformers import AutoTokenizer
 
 import core.knowledge.services.embedding_service as embedding_module
 from core.knowledge.services.embedding_service import EmbeddingService
@@ -250,6 +256,71 @@ async def test_torch_embedding_rejects_overlong_inputs_before_encoding(
     vectors = await service.encode(["short"])
     np.testing.assert_allclose(vectors, [[0.1, 0.2, 0.3]])
     assert embedder.calls == [["short"]]
+
+
+@pytest.mark.no_network
+def test_episode_split_keeps_every_character_and_each_chunk_within_token_limit():
+    class FakeTokenizer:
+        def encode(self, value, *, add_special_tokens, truncation):
+            assert add_special_tokens is True
+            assert truncation is False
+            return [0, *value.encode("utf-8"), 1]
+
+    class FakeEmbedder:
+        tokenizer = FakeTokenizer()
+        max_seq_length = 12
+
+    service = EmbeddingService(embedding_backend="torch")
+    service._embedder = FakeEmbedder()
+    text = "A short phrase. " * 10 + "🌍" * 10
+
+    chunks = service.split_for_embedding(text)
+
+    assert len(chunks) > 1
+    assert "".join(chunks) == text
+    assert all(
+        len(service._embedder.tokenizer.encode(
+            chunk, add_special_tokens=True, truncation=False
+        )) <= 12
+        for chunk in chunks
+    )
+
+
+@pytest.mark.no_network
+def test_cached_stella_tokenizer_splits_policy_valid_episode_without_truncation(
+    monkeypatch,
+):
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
+    try:
+        path = Path(snapshot_download(
+            "dunzhang/stella_en_1.5B_v5", local_files_only=True
+        ))
+        tokenizer = AutoTokenizer.from_pretrained(
+            str(path), local_files_only=True, trust_remote_code=True
+        )
+    except (OSError, ValueError):
+        pytest.skip("Stella tokenizer is not fully cached")
+    config = json.loads(
+        (path / "sentence_bert_config.json").read_text(encoding="utf-8")
+    )
+    limit = config["max_seq_length"]
+    service = EmbeddingService(embedding_backend="torch")
+    service._embedder = SimpleNamespace(tokenizer=tokenizer, max_seq_length=limit)
+    assert service.has_token_limit
+    text = "Summary:\n" + "Decision 42. " * 250
+    assert len(text) < 4000
+    assert len(tokenizer.encode(text, add_special_tokens=True, truncation=False)) > limit
+
+    chunks = service.split_for_embedding(text)
+
+    assert len(chunks) > 1
+    assert "".join(chunks) == text
+    assert all(
+        len(tokenizer.encode(chunk, add_special_tokens=True, truncation=False))
+        <= limit
+        for chunk in chunks
+    )
 
 
 @pytest.mark.no_network

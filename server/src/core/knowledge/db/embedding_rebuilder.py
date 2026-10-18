@@ -6,7 +6,10 @@ import json
 import math
 
 from core.knowledge.documents.extraction import DocumentChunk, embedding_text
-from core.knowledge.episodes.embedding import build_episode_embedding_text_from_fields
+from core.knowledge.episodes.embedding import (
+    build_episode_embedding_text_from_fields,
+    encode_episode_embedding_texts,
+)
 from core.knowledge.services.embedding_service import EmbeddingService
 from infrastructure.postgres_client import PostgresClient
 
@@ -121,19 +124,25 @@ class EmbeddingRebuilder:
             )
             for row in chunks
         ]
-        inputs = episode_inputs + chunk_inputs
-        vectors = self._validate_embeddings(
-            await self.embedding_service.encode(inputs) if inputs else [],
-            len(inputs),
-            "corpus",
+        episode_vectors = await encode_episode_embedding_texts(
+            self.embedding_service, episode_inputs
+        )
+        chunk_vectors = (
+            await self.embedding_service.encode(chunk_inputs) if chunk_inputs else []
+        )
+        episode_vectors = self._validate_embeddings(
+            episode_vectors, len(episode_inputs), "episode"
+        )
+        chunk_vectors = self._validate_embeddings(
+            chunk_vectors, len(chunk_inputs), "document"
         )
         async with self.client.transaction() as cur:
-            for row, vector in zip(episodes, vectors[: len(episodes)]):
+            for row, vector in zip(episodes, episode_vectors):
                 await cur.execute(
                     "UPDATE public.episodes SET embedding = %s::vector WHERE episode_id = %s",
                     (json.dumps(vector), row["episode_id"]),
                 )
-            for row, vector in zip(chunks, vectors[len(episodes) :]):
+            for row, vector in zip(chunks, chunk_vectors):
                 await cur.execute(
                     "UPDATE public.document_chunks SET embedding = %s::vector WHERE chunk_id = %s",
                     (json.dumps(vector), row["chunk_id"]),

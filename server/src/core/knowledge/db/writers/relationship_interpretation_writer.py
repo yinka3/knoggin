@@ -174,7 +174,7 @@ class RelationshipInterpretationWriter:
                         """
                         INSERT INTO public.relationships
                             (relationship_id, user_name, project_id, entity_a_id,
-                             entity_b_id, relationship_type, symmetric)
+                             entity_b_id, relationship_type, "symmetric")
                         VALUES (%s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (relationship_id) DO NOTHING
                         """,
@@ -304,29 +304,52 @@ class RelationshipInterpretationWriter:
         )
         await cur.execute(
             """
+            WITH matching_support AS (
+                SELECT episode_message.episode_id,
+                       episode_message.project_id,
+                       observation.observation_id,
+                       observation.relationship_id,
+                       observation_block.block_id,
+                       episode_message.message_id
+                FROM public.episode_messages episode_message
+                JOIN public.project_context_block_supports support
+                  ON support.project_id = episode_message.project_id
+                 AND support.session_id = episode_message.session_id
+                 AND support.message_id = episode_message.message_id
+                JOIN public.relationship_observation_blocks observation_block
+                  ON observation_block.project_id = support.project_id
+                 AND observation_block.block_id = support.block_id
+                JOIN public.relationship_observations observation
+                  ON observation.observation_id = observation_block.observation_id
+                 AND observation.project_id = observation_block.project_id
+                WHERE episode_message.project_id = %s
+                  AND episode_message.episode_id IN (
+                      SELECT episode_id FROM affected_maintenance_episodes
+                  )
+                  AND observation.retired_at IS NULL
+                  AND observation.relationship_id IS NOT NULL
+            ),
+            complete_observations AS (
+                SELECT episode_id, project_id, observation_id, relationship_id
+                FROM matching_support
+                GROUP BY episode_id, project_id, observation_id, relationship_id
+                HAVING count(DISTINCT block_id) = (
+                    SELECT count(*)
+                    FROM public.relationship_observation_blocks AS required_block
+                    WHERE required_block.observation_id = matching_support.observation_id
+                )
+            )
             INSERT INTO public.episode_relationships
                 (episode_id, project_id, relationship_id, source_message_count)
-            SELECT episode_message.episode_id, episode_message.project_id,
-                   observation.relationship_id,
-                   COUNT(DISTINCT episode_message.message_id)
-            FROM public.episode_messages episode_message
-            JOIN public.relationship_observations observation
-              ON observation.project_id = episode_message.project_id
-            JOIN public.relationship_observation_blocks observation_block
-              ON observation_block.observation_id = observation.observation_id
-             AND observation_block.project_id = observation.project_id
-            JOIN public.project_context_block_supports support
-              ON support.block_id = observation_block.block_id
-             AND support.project_id = observation_block.project_id
-             AND support.session_id = episode_message.session_id
-             AND support.message_id = episode_message.message_id
-            WHERE episode_message.project_id = %s
-              AND episode_message.episode_id IN (
-                  SELECT episode_id FROM affected_maintenance_episodes
-              )
-              AND observation.relationship_id IS NOT NULL
-            GROUP BY episode_message.episode_id, episode_message.project_id,
-                     observation.relationship_id
+            SELECT complete.episode_id, complete.project_id,
+                   complete.relationship_id,
+                   count(DISTINCT support.message_id)::integer
+            FROM complete_observations AS complete
+            JOIN matching_support AS support
+              ON support.episode_id = complete.episode_id
+             AND support.observation_id = complete.observation_id
+            GROUP BY complete.episode_id, complete.project_id,
+                     complete.relationship_id
             """,
             (project_id,),
         )

@@ -133,6 +133,7 @@ class SemanticEpisodeStore(Protocol):
         failed_at_ms: int,
         next_retry_at_ms: int | None,
         expected_attempt_count: int | None = None,
+        expected_episode_result_recorded: bool | None = None,
     ) -> SemanticWindowRecord | None: ...
 
 
@@ -162,6 +163,7 @@ class ProjectSemanticProcessor(BaseJob):
         context_entity_builder: ContextEntityBuildService,
         context_relationship_extractor: ContextRelationshipExtractor,
         publish_committed_entity_ids: Callable[[tuple[int, ...]], Awaitable[None]],
+        signal_relationship_advisories: Callable[[], bool] | None = None,
         now_ms: Callable[[], int] | None = None,
     ) -> None:
         if not callable(capture_semantic_policy):
@@ -192,6 +194,7 @@ class ProjectSemanticProcessor(BaseJob):
         self._context_entity_builder = context_entity_builder
         self._context_relationship_extractor = context_relationship_extractor
         self._publish_committed_entity_ids = publish_committed_entity_ids
+        self._signal_relationship_advisories = signal_relationship_advisories
         self._capture_semantic_policy = capture_semantic_policy
         self._now_ms = now_ms or (lambda: int(time() * 1000))
         self._timeout_stage: tuple[SemanticWindowRecord, str] | None = None
@@ -351,6 +354,7 @@ class ProjectSemanticProcessor(BaseJob):
             current is None
             or current.window_id != window.window_id
             or current.stage is not window.stage
+            or current.episode_result_recorded != window.episode_result_recorded
             or current.attempt_count != window.attempt_count
         ):
             return
@@ -360,6 +364,7 @@ class ProjectSemanticProcessor(BaseJob):
             TimeoutError("Semantic stage exceeded scheduler execution timeout"),
             failure_stage=stage_name.lower(),
             expected_attempt_count=window.attempt_count,
+            expected_episode_result_recorded=window.episode_result_recorded,
         )
 
     def _next_due_stage(
@@ -708,6 +713,11 @@ class ProjectSemanticProcessor(BaseJob):
             else:
                 build.set_empty_knowledge_result()
             summary = await self.knowledge_store.commit_project_semantic_knowledge(build)
+            if self._signal_relationship_advisories is not None:
+                try:
+                    self._signal_relationship_advisories()
+                except Exception:
+                    logger.exception("Could not wake relationship advisory refresh")
             return JobResult(
                 success=True,
                 summary=(
@@ -836,6 +846,7 @@ class ProjectSemanticProcessor(BaseJob):
         *,
         failure_stage: str,
         expected_attempt_count: int | None = None,
+        expected_episode_result_recorded: bool | None = None,
     ) -> None:
         failed_at_ms = self._now_ms()
         retry = self._settings.semantic_window_retry
@@ -854,6 +865,11 @@ class ProjectSemanticProcessor(BaseJob):
             if expected_attempt_count is not None
             else {}
         )
+        checkpoint_guard = (
+            {"expected_episode_result_recorded": expected_episode_result_recorded}
+            if expected_episode_result_recorded is not None
+            else {}
+        )
         await self.knowledge_store.record_project_semantic_window_failure(
             window_id=str(window.window_id),
             user_name=ctx.user_name,
@@ -865,4 +881,5 @@ class ProjectSemanticProcessor(BaseJob):
             failed_at_ms=failed_at_ms,
             next_retry_at_ms=next_retry_at_ms,
             **attempt_guard,
+            **checkpoint_guard,
         )

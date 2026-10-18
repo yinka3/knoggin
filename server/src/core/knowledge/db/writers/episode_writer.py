@@ -1,17 +1,13 @@
 import json
 from datetime import datetime, timezone
 from functools import wraps
-from typing import Dict, List, Set
+from typing import Dict, List
 
 from loguru import logger
 from psycopg import Error as PsycopgError
 
 from common.exceptions import EpisodeEditConflictError, StorageWriteError
-from common.schema.episode.models import (
-    EntityEpisode,
-    Episode,
-    RelationshipEpisode,
-)
+from common.schema.episode.models import Episode
 from common.scoping import require_scope_value
 from infrastructure.postgres_client import PostgresClient
 
@@ -192,7 +188,7 @@ class EpisodeWriter:
                   AND user_name = %s
                   AND project_id = %s
                   AND stage IN ('knowledge_committed', 'completed')
-                FOR KEY SHARE
+                FOR UPDATE
                 """,
                 (window_id, user_name, project_id),
             )
@@ -263,12 +259,28 @@ class EpisodeWriter:
                 (revision_id, window_id, project_id, project_id),
             )
             entity_links = cur.rowcount
+            # Rebuild this window's relationship links from active, complete
+            # observations. Earlier passes may have linked partial or since-
+            # retired evidence; an upsert alone cannot remove those links.
             await cur.execute(
                 """
-                WITH links AS (
+                DELETE FROM public.episode_relationships AS link
+                USING public.project_semantic_window_episodes AS membership
+                WHERE membership.window_id = %s
+                  AND membership.project_id = %s
+                  AND link.episode_id = membership.episode_id
+                  AND link.project_id = membership.project_id
+                """,
+                (window_id, project_id),
+            )
+            await cur.execute(
+                """
+                WITH matching_support AS (
                     SELECT episode.episode_id,
+                           observation.observation_id,
                            observation.relationship_id,
-                           count(DISTINCT support.message_id)::integer AS source_count
+                           support.block_id,
+                           support.message_id
                     FROM public.project_semantic_window_episodes AS membership
                     JOIN public.episodes AS episode
                       ON episode.episode_id = membership.episode_id
@@ -294,7 +306,26 @@ class EpisodeWriter:
                      AND observation.relationship_id IS NOT NULL
                     WHERE membership.window_id = %s
                       AND membership.project_id = %s
-                    GROUP BY episode.episode_id, observation.relationship_id
+                ),
+                complete_observations AS (
+                    SELECT episode_id, observation_id, relationship_id
+                    FROM matching_support
+                    GROUP BY episode_id, observation_id, relationship_id
+                    HAVING count(DISTINCT block_id) = (
+                        SELECT count(*)
+                        FROM public.relationship_observation_blocks AS required_block
+                        WHERE required_block.observation_id = matching_support.observation_id
+                    )
+                ),
+                links AS (
+                    SELECT complete.episode_id,
+                           complete.relationship_id,
+                           count(DISTINCT support.message_id)::integer AS source_count
+                    FROM complete_observations AS complete
+                    JOIN matching_support AS support
+                      ON support.episode_id = complete.episode_id
+                     AND support.observation_id = complete.observation_id
+                    GROUP BY complete.episode_id, complete.relationship_id
                 )
                 INSERT INTO public.episode_relationships (
                     episode_id, project_id, relationship_id, source_message_count
@@ -428,27 +459,6 @@ class EpisodeWriter:
         await self._insert_messages(cur, episode)
 
     @staticmethod
-    def _validate_ranked_context(
-        supplied_entities: List[EntityEpisode],
-        supplied_relationships: List[RelationshipEpisode],
-        entities_by_message: Dict[int, Set[int]],
-        relationships_by_message: Dict[int, Set[str]],
-    ) -> None:
-        derived_entity_ids = set().union(*entities_by_message.values())
-        supplied_entity_ids = {entity.entity_id for entity in supplied_entities}
-        if not supplied_entity_ids.issubset(derived_entity_ids):
-            raise ValueError("Episode entities must be derived from source messages")
-
-        derived_relationship_ids = set().union(*relationships_by_message.values())
-        supplied_relationship_ids = {
-            relationship.relationship_id for relationship in supplied_relationships
-        }
-        if not supplied_relationship_ids.issubset(derived_relationship_ids):
-            raise ValueError(
-                "Episode relationships must be derived from source messages"
-            )
-
-    @staticmethod
     async def _insert_semantic_episode(
         cur,
         episode: Episode,
@@ -538,97 +548,5 @@ class EpisodeWriter:
                     message.session_id,
                     message.message_id,
                     message.message_position,
-                ),
-            )
-
-    @staticmethod
-    async def _upsert_entities(
-        cur,
-        episode: Episode,
-        entities_by_message: Dict[int, Set[int]],
-        source_message_timestamps: Dict[int, int | None],
-    ) -> None:
-        entity_ids = set().union(*entities_by_message.values())
-
-        for entity_id in sorted(entity_ids):
-            source_message_ids = [
-                message_id
-                for message_id, message_entities in entities_by_message.items()
-                if entity_id in message_entities
-            ]
-            timestamps = [
-                source_message_timestamps[message_id]
-                for message_id in source_message_ids
-                if source_message_timestamps[message_id] is not None
-            ]
-            first_seen_at = (
-                datetime.fromtimestamp(min(timestamps) / 1000, tz=timezone.utc)
-                if timestamps
-                else None
-            )
-            last_seen_at = (
-                datetime.fromtimestamp(max(timestamps) / 1000, tz=timezone.utc)
-                if timestamps
-                else None
-            )
-            await cur.execute(
-                """
-                INSERT INTO episode_entities (
-                    episode_id,
-                    project_id,
-                    entity_id,
-                    source_message_count,
-                    first_seen_at,
-                    last_seen_at
-                )
-                VALUES (%s, %s, %s, %s, %s, %s)
-                ON CONFLICT (episode_id, entity_id) DO UPDATE
-                SET source_message_count = EXCLUDED.source_message_count,
-                    first_seen_at = EXCLUDED.first_seen_at,
-                    last_seen_at = EXCLUDED.last_seen_at
-                """,
-                (
-                    episode.episode_id,
-                    episode.project_id,
-                    entity_id,
-                    len(source_message_ids),
-                    first_seen_at,
-                    last_seen_at,
-                ),
-            )
-
-    @staticmethod
-    async def _upsert_relationships(
-        cur,
-        episode: Episode,
-        relationships_by_message: Dict[int, Set[str]],
-    ) -> None:
-        relationship_ids = set().union(*relationships_by_message.values())
-
-        for relationship_id in sorted(relationship_ids):
-            source_message_ids = [
-                message_id
-                for message_id, message_relationships in (
-                    relationships_by_message.items()
-                )
-                if relationship_id in message_relationships
-            ]
-            await cur.execute(
-                """
-                INSERT INTO episode_relationships (
-                    episode_id,
-                    project_id,
-                    relationship_id,
-                    source_message_count
-                )
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (episode_id, relationship_id) DO UPDATE
-                SET source_message_count = EXCLUDED.source_message_count
-                """,
-                (
-                    episode.episode_id,
-                    episode.project_id,
-                    relationship_id,
-                    len(source_message_ids),
                 ),
             )

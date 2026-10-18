@@ -28,6 +28,9 @@ from core.ingestion.jev_extraction import (
 )
 from core.knowledge.db.projection_rebuilder import GraphBuilder
 from core.knowledge.db.writers.maintenance_review_writer import MaintenanceReviewWriter
+from core.knowledge.db.writers.relationship_interpretation_writer import (
+    RelationshipInterpretationWriter,
+)
 from core.knowledge.entity.jev_classification import (
     accepted_classification_topic,
     proposed_topic,
@@ -121,7 +124,7 @@ class SemanticCommitWriter:
                     aliases_written = 0
                     associations_written = 0
                     refs_written = 0
-                    observations_retired = 0
+                    retired_observation_ids = []
                     relationships_written = 0
                     relationships_removed = 0
                 else:
@@ -176,7 +179,7 @@ class SemanticCommitWriter:
                         user_name=user_name,
                         project_id=project_id,
                     )
-                    observations_retired = await self._retire_noncurrent_observations(
+                    retired_observation_ids = await self._retire_noncurrent_observations(
                         cur,
                         user_name=user_name,
                         project_id=project_id,
@@ -192,6 +195,10 @@ class SemanticCommitWriter:
                         source_time_by_block_id=context_input.source_time_by_block_id,
                         domain=build.policy.domain,
                     )
+                    if retired_observation_ids:
+                        await RelationshipInterpretationWriter._reconcile_episodes(
+                            cur, project_id, retired_observation_ids
+                        )
                     relationships_removed = await self._remove_orphan_relationships(
                         cur, project_id=project_id
                     )
@@ -230,7 +237,7 @@ class SemanticCommitWriter:
                     block_entity_associations_written=associations_written,
                     message_entity_refs_written=refs_written,
                     relationships_written=relationships_written,
-                    observations_retired=observations_retired,
+                    observations_retired=len(retired_observation_ids),
                     relationships_removed=relationships_removed,
                 )
         except (StorageWriteError, TypeError, ValueError):
@@ -1349,7 +1356,7 @@ class SemanticCommitWriter:
         user_name: str,
         project_id: str,
         revision_id: UUID,
-    ) -> int:
+    ) -> list[int]:
         """Retire replaced Context evidence and preserve a deterministic audit.
 
         This is a reconciliation consequence of immutable Context membership,
@@ -1385,7 +1392,7 @@ class SemanticCommitWriter:
         )
         retired = await cur.fetchall()
         if not retired:
-            return 0
+            return []
 
         observation_ids = sorted(int(row["observation_id"]) for row in retired)
         await MaintenanceReviewWriter(self.client).mark_stale_for_observations(
@@ -1419,7 +1426,7 @@ class SemanticCommitWriter:
                 json.dumps(changes, sort_keys=True),
             ),
         )
-        return len(retired)
+        return observation_ids
 
     async def _write_relationships(
         self,

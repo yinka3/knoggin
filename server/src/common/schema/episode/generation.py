@@ -81,7 +81,7 @@ class LLMEpisodeWindowDecision(StructuredLLMOutput):
 
     model_config = ConfigDict(extra="forbid")
 
-    proposals: List[LLMEpisodeDecision] = Field(default_factory=list, max_length=3)
+    proposals: List[LLMEpisodeDecision] = Field(..., max_length=3)
 
     @model_validator(mode="after")
     def validate_proposals(self) -> "LLMEpisodeWindowDecision":

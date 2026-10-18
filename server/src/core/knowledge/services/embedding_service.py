@@ -521,6 +521,70 @@ class EmbeddingService:
                     f"({token_count} > {limit} tokens)"
                 )
 
+    def split_for_embedding(self, text: str) -> list[str]:
+        """Split long text at the loaded model's exact token limit.
+
+        Chunks concatenate to the original text. Each receives its own special
+        tokens when encoded, so counting includes those tokens on every chunk.
+        """
+
+        if not self._embedder:
+            raise RuntimeError("Embedder not loaded. Call load_models() first.")
+        tokenizer = (
+            self._embedder._tokenizer
+            if isinstance(self._embedder, _DirectOnnxSentenceEmbedder)
+            else getattr(self._embedder, "tokenizer", None)
+        )
+        limit = getattr(self._embedder, "max_seq_length", None)
+        if tokenizer is None or not isinstance(limit, int) or limit <= 0:
+            raise RuntimeError("Loaded embedding model must expose a tokenizer limit")
+
+        def fits(value: str) -> bool:
+            return len(
+                tokenizer.encode(value, add_special_tokens=True, truncation=False)
+            ) <= limit
+
+        if fits(text):
+            return [text]
+        chunks: list[str] = []
+        start = 0
+        while start < len(text):
+            low, high = start + 1, len(text)
+            end = start
+            while low <= high:
+                middle = (low + high) // 2
+                if fits(text[start:middle]):
+                    end = middle
+                    low = middle + 1
+                else:
+                    high = middle - 1
+            if end == start:
+                raise ValueError("One character exceeds the embedding model limit")
+            # Favor whole phrases when a separator is near the token boundary.
+            if end < len(text):
+                earliest = start + (end - start) * 3 // 4
+                for separator in ("\n\n", ". ", "\n", " "):
+                    boundary = text.rfind(separator, earliest, end)
+                    if boundary >= earliest:
+                        end = boundary + len(separator)
+                        break
+            chunks.append(text[start:end])
+            start = end
+        return chunks
+
+    @property
+    def has_token_limit(self) -> bool:
+        """Whether the loaded encoder exposes a countable sequence limit."""
+        if not self._embedder:
+            return False
+        tokenizer = (
+            self._embedder._tokenizer
+            if isinstance(self._embedder, _DirectOnnxSentenceEmbedder)
+            else getattr(self._embedder, "tokenizer", None)
+        )
+        limit = getattr(self._embedder, "max_seq_length", None)
+        return tokenizer is not None and isinstance(limit, int) and limit > 0
+
     async def rerank(
         self, query: str, candidates: List[str], batch_size: int = None
     ) -> List[float]:
