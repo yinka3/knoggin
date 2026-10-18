@@ -142,6 +142,33 @@ async def test_maintenance_failures_do_not_starve_the_other_job(fails):
 
 @pytest.mark.unit
 @pytest.mark.no_network
+async def test_pending_project_file_cleanup_retries_without_a_restart():
+    attempts = 0
+    recovered = asyncio.Event()
+
+    async def cleanup():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("temporary file lock")
+        recovered.set()
+
+    scheduler = ApplicationMaintenanceScheduler(
+        maintenance_service=FakeMaintenanceService(),
+        user_name="ada",
+        project_file_cleanup=cleanup,
+        interval_seconds=0.01,
+    )
+    try:
+        await scheduler.start()
+        await asyncio.wait_for(recovered.wait(), timeout=2)
+        assert attempts >= 2
+    finally:
+        await scheduler.stop()
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 async def test_stop_cancels_artifact_owner_but_not_unrelated_background_work():
     coordinator = BackgroundWorkCoordinator(max_concurrency=2)
     sweep_started, sweep_closed = asyncio.Event(), asyncio.Event()

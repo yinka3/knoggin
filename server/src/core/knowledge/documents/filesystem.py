@@ -185,6 +185,69 @@ class ProjectFilesystem:
         with self._mutation_lock(_lease) as lease:
             return self._read_mutation_generation(lease.descriptor)
 
+    def _pending_admission_marker(self, relative_path: str) -> Path:
+        normalized = self.normalize_path(relative_path)
+        lock_directory = self._root.parent / ".knoggin-file-locks"
+        if _is_link_or_reparse_path(lock_directory) or not lock_directory.is_dir():
+            raise ValueError("project file lock directory must be a real directory")
+        root_key = hashlib.sha256(os.fsencode(self._lock_key())).hexdigest()
+        path_key = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+        return lock_directory / f"{root_key}.upload-{path_key}.pending"
+
+    def mark_pending_admission(
+        self, relative_path: str, content_hash: str, *, _lease: _MutationLease
+    ) -> None:
+        """Journal an upload before its source enters the scanned tree."""
+        if len(content_hash) != 64 or any(char not in "0123456789abcdef" for char in content_hash):
+            raise ValueError("content_hash must be a SHA-256 hex digest")
+        with self._mutation_lock(_lease) as lease:
+            marker = self._pending_admission_marker(relative_path)
+            if marker.exists():
+                # A failed upload may have been removed outside the catalog.
+                # Only reclaim its marker after the source is gone.
+                source = self._path_for_write(self.normalize_path(relative_path))
+                if source.exists() or _is_link_or_reparse_path(source):
+                    raise FileExistsError(f"project file already exists: {relative_path}")
+                marker.unlink()
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=".knoggin-admission-", suffix=".tmp", dir=marker.parent
+            )
+            try:
+                with os.fdopen(descriptor, "wb") as temporary_file:
+                    temporary_file.write(content_hash.encode("ascii"))
+                    temporary_file.flush()
+                    os.fsync(temporary_file.fileno())
+                if _is_link_or_reparse_path(marker):
+                    raise ValueError("pending admission marker must not be a link")
+                # An earlier failed upload may still own this path. Never
+                # replace its exclusion marker with a later upload attempt.
+                os.link(temporary_name, marker)
+                self._bump_mutation_generation(lease)
+            finally:
+                if os.path.exists(temporary_name):
+                    os.unlink(temporary_name)
+
+    def pending_admission_hash(self, relative_path: str) -> str | None:
+        """Return the failed/pending upload hash without reading source bytes."""
+        marker = self._pending_admission_marker(relative_path)
+        if _is_link_or_reparse_path(marker):
+            raise ValueError("pending admission marker must not be a link")
+        try:
+            return marker.read_text(encoding="ascii")
+        except FileNotFoundError:
+            return None
+
+    def clear_pending_admission(
+        self, relative_path: str, *, _lease: _MutationLease
+    ) -> None:
+        with self._mutation_lock(_lease) as lease:
+            marker = self._pending_admission_marker(relative_path)
+            try:
+                marker.unlink()
+            except FileNotFoundError:
+                return
+            self._bump_mutation_generation(lease)
+
     @staticmethod
     def _acquire_file_lock(descriptor: int) -> None:
         deadline = time.monotonic() + 30
@@ -566,7 +629,9 @@ class ProjectFilesystemFactory:
                 child.unlink()
         directory.rmdir()
 
-    def remove_project_directory(self, project_id: str) -> bool:
+    def remove_project_directory(
+        self, project_id: str, *, _lease: _MutationLease | None = None
+    ) -> bool:
         """Remove one direct project child without traversing symlinks.
 
         A project directory is the complete native-file ownership boundary. A
@@ -574,6 +639,42 @@ class ProjectFilesystemFactory:
         unlinked rather than traversed so cleanup cannot reach outside the
         configured project library.
         """
+
+        root = self._project_root(project_id)
+        try:
+            metadata = root.lstat()
+        except FileNotFoundError:
+            metadata = None
+        # A linked root cannot be opened as a ProjectFilesystem, and normal
+        # file mutations reject it. Unlink that direct child without traversal.
+        if metadata is not None and (
+            self._is_windows_reparse_point(metadata)
+            or root.is_symlink()
+            or not stat.S_ISDIR(metadata.st_mode)
+        ):
+            removed = self._remove_project_directory_locked(project_id)
+            self._remove_pending_admission_markers(root)
+            return removed
+        filesystem = self.for_project(project_id)
+        with filesystem._mutation_lock(_lease):
+            removed = self._remove_project_directory_locked(project_id)
+            self._remove_pending_admission_markers(root)
+            return removed
+
+    @staticmethod
+    def _remove_pending_admission_markers(root: Path) -> None:
+        lock_directory = root.parent / ".knoggin-file-locks"
+        if _is_link_or_reparse_path(lock_directory):
+            raise ValueError("project file lock directory must be a real directory")
+        if not lock_directory.exists():
+            return
+        root_key = os.path.normcase(os.path.abspath(root))
+        prefix = hashlib.sha256(os.fsencode(root_key)).hexdigest()
+        for marker in lock_directory.glob(f"{prefix}.upload-*.pending"):
+            marker.unlink()
+
+    def _remove_project_directory_locked(self, project_id: str) -> bool:
+        """Remove a project tree while its shared mutation lease is held."""
 
         root = self._project_root(project_id)
         try:

@@ -70,7 +70,7 @@ from .extraction import (
 from .filesystem import ProjectFilesystem, ProjectFilesystemFactory, _MutationLease
 from .indexer import DocumentIndexer
 from .policy import DocumentIndexPolicy
-from .scanning import build_folder_preview, normalize_relative_path
+from .scanning import FolderScanPathEntry, build_folder_preview, normalize_relative_path
 
 BlockingRunner = Callable[..., Awaitable[Any]]
 _RECONCILIATION_MAX_FILES = 10_000
@@ -298,13 +298,14 @@ class DocumentService:
                     ),
                 }
 
-        entries: list[FolderUploadEntry] = []
+        entries: list[FolderScanPathEntry] = []
         next_fingerprints: dict[str, tuple[int, int, str | None]] = {
             path.relative_path: (path.size_bytes, path.modified_ns, None)
             for path in reserved_paths
         }
-        direct_files: dict[str, tuple[Any, bytes]] = {}
+        direct_files: dict[str, tuple[Any, str, int]] = {}
         oversized_paths = 0
+        pending_admissions = 0
         for path in paths:
             existing = current.get(path.relative_path)
             direct = existing is not None and not existing.get("scan_managed", False)
@@ -317,31 +318,62 @@ class DocumentService:
                 )
                 oversized_paths += 1
                 continue
-            content = await self._run_blocking(
-                filesystem.read_bytes,
-                path.relative_path,
-                max_bytes=max_bytes,
-            )
+            if existing is None:
+                pending_hash = await self._run_blocking(
+                    filesystem.pending_admission_hash, path.relative_path
+                )
+                if pending_hash is not None:
+                    pending_content = await self._run_blocking(
+                        filesystem.read_bytes,
+                        path.relative_path,
+                        max_bytes=max_bytes,
+                    )
+                    if pending_hash == hashlib.sha256(pending_content).hexdigest():
+                        next_fingerprints[path.relative_path] = (
+                            path.size_bytes, path.modified_ns, None
+                        )
+                        pending_admissions += 1
+                        continue
             if direct:
-                direct_files[path.relative_path] = (path, content)
+                content = await self._run_blocking(
+                    filesystem.read_bytes,
+                    path.relative_path,
+                    max_bytes=max_bytes,
+                )
+                direct_files[path.relative_path] = (
+                    path, hashlib.sha256(content).hexdigest(), len(content)
+                )
                 # A directly uploaded .gitignore still defines rules for files
                 # discovered next to it, but is not subject to those rules.
                 if PurePosixPath(path.relative_path).name != ".gitignore":
                     continue
-            entries.append(FolderUploadEntry(relative_path=path.relative_path, content=content))
-        preview = await self.preview_folder(
-            folder_name=self.project_id,
-            entries=entries,
-            settings=settings,
+            entries.append(
+                FolderScanPathEntry(
+                    relative_path=path.relative_path, size_bytes=path.size_bytes
+                )
+            )
+        preview = await self._run_blocking(
+            build_folder_preview,
+            self.project_id,
+            entries,
+            settings,
+            [],
+            content_loader=lambda relative_path, _size: filesystem.read_bytes(
+                relative_path,
+                max_bytes=(
+                    MAX_DOCUMENT_SIZE
+                    if relative_path in direct_files
+                    else settings.max_document_size_bytes
+                ),
+            ),
         )
         desired = {entry.relative_path: entry for entry in preview.included}
         for relative_path in direct_files:
             desired.pop(relative_path, None)
         created_rows: list[Dict[str, Any]] = []
         changed_rows: list[Dict[str, Any]] = []
-        for relative_path, (path, content) in direct_files.items():
+        for relative_path, (path, content_hash, content_size) in direct_files.items():
             existing = current.pop(relative_path)
-            content_hash = hashlib.sha256(content).hexdigest()
             next_fingerprints[relative_path] = (
                 path.size_bytes, path.modified_ns, content_hash
             )
@@ -351,7 +383,7 @@ class DocumentService:
                         "document_id": str(existing["document_id"]),
                         "original_name": existing["original_name"],
                         "extension": existing["extension"],
-                        "size_bytes": len(content),
+                        "size_bytes": content_size,
                         "content_hash": content_hash,
                     }
                 )
@@ -437,7 +469,10 @@ class DocumentService:
                 applied = await apply_under_lease(acquired_lease)
         else:
             applied = await apply_under_lease(lease)
-        excluded = preview.summary.excluded_count + len(reserved_paths) + oversized_paths
+        excluded = (
+            preview.summary.excluded_count + len(reserved_paths)
+            + oversized_paths + pending_admissions
+        )
         if not applied:
             return {"created": 0, "changed": 0, "deleted": 0, "excluded": excluded}
         created = len(created_rows)
@@ -1435,6 +1470,32 @@ class DocumentService:
         content_hash: str,
         created_at: str,
     ) -> Dict:
+        marker_task = asyncio.create_task(
+            self._run_blocking(
+                filesystem.mark_pending_admission,
+                normalized_path,
+                content_hash,
+                _lease=lease,
+            )
+        )
+        try:
+            await asyncio.shield(marker_task)
+        except asyncio.CancelledError:
+            try:
+                await settle_owned_task(marker_task)
+            except Exception:
+                pass
+            else:
+                await settle_owned_task(
+                    asyncio.create_task(
+                        self._run_blocking(
+                            filesystem.clear_pending_admission,
+                            normalized_path,
+                            _lease=lease,
+                        )
+                    )
+                )
+            raise
         write_task = asyncio.create_task(
             self._run_blocking(
                 filesystem.write_bytes, normalized_path, content, _lease=lease
@@ -1442,6 +1503,17 @@ class DocumentService:
         )
         try:
             await asyncio.shield(write_task)
+        except FileExistsError:
+            await settle_owned_task(
+                asyncio.create_task(
+                    self._run_blocking(
+                        filesystem.clear_pending_admission,
+                        normalized_path,
+                        _lease=lease,
+                    )
+                )
+            )
+            raise
         except asyncio.CancelledError:
             try:
                 await settle_owned_task(write_task)
@@ -1492,6 +1564,22 @@ class DocumentService:
                 lease=lease,
             )
             raise
+        clear_task = asyncio.create_task(
+            self._run_blocking(
+                filesystem.clear_pending_admission,
+                normalized_path,
+                _lease=lease,
+            )
+        )
+        try:
+            await asyncio.shield(clear_task)
+        except asyncio.CancelledError:
+            await settle_owned_task(clear_task)
+            raise
+        except Exception:
+            # A committed catalog row is authoritative; its stale marker is
+            # ignored by reconciliation and can be cleared on a later retry.
+            logger.exception("Could not clear accepted document admission marker")
         return {
             "document_id": document_id,
             "project_id": self.project_id,
@@ -1542,6 +1630,15 @@ class DocumentService:
                 logger.exception(
                     "Could not roll back local document file after catalog failure"
                 )
+                return
+            try:
+                await self._run_blocking(
+                    filesystem.clear_pending_admission,
+                    relative_path,
+                    _lease=lease,
+                )
+            except Exception:
+                logger.exception("Could not clear rolled-back document admission marker")
 
         await settle_owned_task(asyncio.create_task(cleanup()))
 

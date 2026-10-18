@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from loguru import logger
@@ -26,6 +27,7 @@ class ApplicationMaintenanceScheduler:
         maintenance_service: Any,
         user_name: str,
         artifact_retention_writer: ArtifactRetentionWriter | None = None,
+        project_file_cleanup: Callable[[], Awaitable[None]] | None = None,
         background_work: BackgroundWorkCoordinator | None = None,
         interval_seconds: float = 300.0,
     ) -> None:
@@ -34,6 +36,7 @@ class ApplicationMaintenanceScheduler:
         self.maintenance_service = maintenance_service
         self.user_name = user_name
         self.artifact_retention_writer = artifact_retention_writer
+        self.project_file_cleanup = project_file_cleanup
         self.background_work = background_work
         self.interval_seconds = float(interval_seconds)
         self._task: asyncio.Task | None = None
@@ -100,6 +103,13 @@ class ApplicationMaintenanceScheduler:
                     raise
                 except Exception:
                     logger.error("Artifact retention sweep failed; retrying next interval")
+                if self.project_file_cleanup is not None:
+                    try:
+                        await self.project_file_cleanup()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        logger.exception("Pending project file cleanup failed")
                 try:
                     await self.run_once()
                 except asyncio.CancelledError:

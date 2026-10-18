@@ -2,8 +2,10 @@ import asyncio
 import base64
 import hashlib
 import json
+import math
 import os
 import threading
+import tracemalloc
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -32,7 +34,10 @@ from core.knowledge.documents import (
     extraction as extraction_module,
 )
 from core.knowledge.documents.constants import document_extension
-from core.knowledge.documents.filesystem import ProjectFilesystemConflictError
+from core.knowledge.documents.filesystem import (
+    ProjectFilesystem,
+    ProjectFilesystemConflictError,
+)
 from core.project.project_files import CONTEXT_FILE_PATH
 from infrastructure.background_work import BackgroundWorkRejected
 from runtime.api_port import ApplicationRuntimePort
@@ -1241,6 +1246,80 @@ async def test_database_failure_leaves_no_content_or_metadata(document_harness):
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_failed_upload_cleanup_cannot_be_reconciled_as_a_new_document(
+    document_harness, monkeypatch
+):
+    service, postgres = document_harness
+    postgres.write_error = RuntimeError("catalog insert failed")
+    original_delete = ProjectFilesystem.delete_file
+
+    def fail_orphan_cleanup(self, relative_path, **kwargs):
+        if relative_path == "orphan.md":
+            raise PermissionError("temporary file lock")
+        return original_delete(self, relative_path, **kwargs)
+
+    monkeypatch.setattr(ProjectFilesystem, "delete_file", fail_orphan_cleanup)
+    with pytest.raises(RuntimeError, match="catalog insert failed"):
+        await service.add_document(content=b"failed upload", original_name="orphan.md")
+
+    filesystem = service._filesystem
+    assert filesystem.read_bytes("orphan.md") == b"failed upload"
+    assert filesystem.pending_admission_hash("orphan.md") == hashlib.sha256(
+        b"failed upload"
+    ).hexdigest()
+    assert postgres.rows == []
+
+    postgres.write_error = None
+    restarted = DocumentService(
+        project_id="project-1",
+        postgres_client=postgres,
+        embedding_service=FakeEmbeddingService(),
+        blocking_runner=run_inline,
+        document_rerank_enabled=False,
+        filesystem_factory=service._filesystem_factory,
+    )
+    with pytest.raises(FileExistsError):
+        await restarted.add_document(
+            content=b"second attempt", original_name="orphan.md"
+        )
+    assert filesystem.pending_admission_hash("orphan.md") == hashlib.sha256(
+        b"failed upload"
+    ).hexdigest()
+    assert (await restarted.reconcile_project_files())["created"] == 0
+    assert postgres.rows == []
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_reconciliation_keeps_file_bytes_bounded_before_total_quota(
+    document_harness,
+):
+    service, postgres = document_harness
+    payload = b"x" * (512 * 1024)
+    filesystem = service._filesystem
+    for index in range(24):
+        filesystem.write_bytes(f"source-{index:02}.md", payload)
+    await service.save_scan_settings(
+        FolderScanSettings(
+            max_document_size_bytes=len(payload),
+            max_total_size_bytes=4 * len(payload),
+        )
+    )
+
+    tracemalloc.start()
+    try:
+        result = await service.reconcile_project_files()
+        _, peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert result["created"] == 4
+    assert len(postgres.rows) == 4
+    assert peak_bytes < 8 * 1024 * 1024
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_concurrent_same_path_upload_keeps_winning_catalog_and_file(
     document_harness, monkeypatch
 ):
@@ -1615,16 +1694,20 @@ async def test_periodic_reconciliation_does_not_revert_newer_owned_edit(
     external_hash = hashlib.sha256(b"external").hexdigest()
     reconcile_started = asyncio.Event()
     release_reconcile = asyncio.Event()
-    real_preview = service.preview_folder
+    real_blocking = service._run_blocking
+    from core.knowledge.documents import service as service_module
 
-    async def delayed_preview(**kwargs):
-        result = await real_preview(**kwargs)
-        if any(entry.content == b"external" for entry in kwargs["entries"]):
+    async def delayed_preview(function, *args, **kwargs):
+        result = await real_blocking(function, *args, **kwargs)
+        if function is service_module.build_folder_preview and any(
+            entry.relative_path == "notes.md" and entry.content_hash == external_hash
+            for entry in result.included
+        ):
             reconcile_started.set()
             await release_reconcile.wait()
         return result
 
-    monkeypatch.setattr(service, "preview_folder", delayed_preview)
+    monkeypatch.setattr(service, "_run_blocking", delayed_preview)
     reconciling = asyncio.create_task(service.reconcile_project_files())
     await asyncio.wait_for(reconcile_started.wait(), 10)
     edited = await service.update_project_file(
@@ -3239,6 +3322,37 @@ async def test_index_document_extracts_utf8_bom_and_persists_chunks(document_har
     assert postgres.chunks[0]["chunk_index"] == 0
     assert postgres.chunks[0]["content"] == "Alpha beta gamma."
     assert service._embedding.calls == [["Alpha beta gamma."]]
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_index_document_embeds_every_part_of_an_overlong_chunk(document_harness):
+    service, postgres = document_harness
+    source = ("dense source " * 30).encode("utf-8")
+    uploaded = await service.add_document(content=source, original_name="dense.md")
+    encoded_parts = []
+
+    def split_for_embedding(value):
+        return [value[index : index + 80] for index in range(0, len(value), 80)]
+
+    async def encode_parts(values):
+        assert all(len(value) <= 80 for value in values)
+        encoded_parts.extend(values)
+        return [
+            [float(index + 1), 1.0] + [0.0] * 1022
+            for index, _ in enumerate(values)
+        ]
+
+    service._embedding.split_for_embedding = split_for_embedding
+    service._embedding.encode = encode_parts
+    indexed = await service.index_document(document_id=uploaded["document_id"])
+
+    assert indexed["status"] == "indexed"
+    assert indexed["chunk_count"] == 1
+    assert "".join(encoded_parts) == postgres.chunks[0]["content"]
+    vector = json.loads(postgres.chunks[0]["embedding"])
+    assert len(vector) == 1024
+    assert math.isclose(math.sqrt(sum(value * value for value in vector)), 1.0)
 
 
 @pytest.mark.storage

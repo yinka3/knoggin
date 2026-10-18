@@ -59,6 +59,51 @@ def test_project_filesystem_uses_atomic_replace_and_hash_preconditions(tmp_path)
     assert not list((tmp_path / "project").rglob(".knoggin-*.tmp"))
 
 
+def test_project_removal_waits_for_the_shared_mutation_lease(tmp_path):
+    factory = ProjectFilesystemFactory(tmp_path / "projects")
+    filesystem = factory.for_project("project-1")
+    filesystem.write_bytes("notes.md", b"owned")
+    lease = filesystem.acquire_mutation_lease()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        removal = pool.submit(factory.remove_project_directory, "project-1")
+        try:
+            with pytest.raises(TimeoutError):
+                removal.result(timeout=0.2)
+            assert filesystem.read_bytes("notes.md") == b"owned"
+        finally:
+            filesystem.release_mutation_lease(lease)
+        assert removal.result(timeout=10) is True
+    assert not filesystem.root.exists()
+
+
+def test_project_removal_clears_pending_upload_markers(tmp_path):
+    factory = ProjectFilesystemFactory(tmp_path / "projects")
+    filesystem = factory.for_project("project-1")
+    with filesystem._mutation_lock() as lease:
+        filesystem.mark_pending_admission(
+            "orphan.md", "a" * 64, _lease=lease
+        )
+        filesystem.write_bytes("orphan.md", b"orphan", _lease=lease)
+    assert filesystem.pending_admission_hash("orphan.md") == "a" * 64
+
+    assert factory.remove_project_directory("project-1") is True
+    assert filesystem.pending_admission_hash("orphan.md") is None
+
+
+def test_pending_upload_marker_survives_duplicate_and_reclaims_absent_source(tmp_path):
+    filesystem = ProjectFilesystem(tmp_path / "project")
+    with filesystem._mutation_lock() as lease:
+        filesystem.mark_pending_admission("orphan.md", "a" * 64, _lease=lease)
+        filesystem.write_bytes("orphan.md", b"failed upload", _lease=lease)
+        with pytest.raises(FileExistsError):
+            filesystem.mark_pending_admission("orphan.md", "b" * 64, _lease=lease)
+        assert filesystem.pending_admission_hash("orphan.md") == "a" * 64
+
+        filesystem.delete_file("orphan.md", _lease=lease)
+        filesystem.mark_pending_admission("orphan.md", "b" * 64, _lease=lease)
+        assert filesystem.pending_admission_hash("orphan.md") == "b" * 64
+
+
 @pytest.mark.parametrize("competing_operation", ["write", "delete", "move"])
 def test_expected_hash_mutations_recheck_after_a_concurrent_write(
     tmp_path, monkeypatch, competing_operation

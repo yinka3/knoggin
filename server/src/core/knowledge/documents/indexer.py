@@ -42,6 +42,7 @@ BlockingRunner = Callable[..., Awaitable[Any]]
 _DRAIN_BATCH_SIZE = 16
 _DRAIN_RETRY_SECONDS = 0.1
 _DRAIN_FAILURE_RETRY_SECONDS = 1.0
+_MAX_EMBEDDING_PARTS_PER_CHUNK = 64
 
 
 class DocumentIndexer:
@@ -303,9 +304,45 @@ class DocumentIndexer:
         embeddings: List[List[float]] = []
         for start in range(0, len(values), policy.embedding_chunk_batch_size):
             batch_values = values[start : start + policy.embedding_chunk_batch_size]
-            batch = await self._embedding.encode(batch_values)
-            self._validate_embedding_shape(batch, len(batch_values))
-            embeddings.extend(batch)
+            splitter = getattr(self._embedding, "split_for_embedding", None)
+            if isinstance(self._embedding, EmbeddingService) and not self._embedding.has_token_limit:
+                splitter = None
+            groups = [splitter(value) for value in batch_values] if callable(splitter) else [
+                [value] for value in batch_values
+            ]
+            for value, parts in zip(batch_values, groups):
+                if not parts or len(parts) > _MAX_EMBEDDING_PARTS_PER_CHUNK:
+                    raise ValueError("Document embedding exceeds the part budget")
+                if "".join(parts) != value:
+                    raise ValueError("Document embedding parts lost source text")
+            flat_parts = [part for group in groups for part in group]
+            part_vectors: List[List[float]] = []
+            for offset in range(0, len(flat_parts), policy.embedding_chunk_batch_size):
+                part_batch = flat_parts[offset : offset + policy.embedding_chunk_batch_size]
+                encoded = await self._embedding.encode(part_batch)
+                self._validate_embedding_shape(encoded, len(part_batch))
+                part_vectors.extend(encoded)
+            offset = 0
+            for group in groups:
+                vectors = part_vectors[offset : offset + len(group)]
+                offset += len(group)
+                if len(vectors) == 1:
+                    embeddings.append(vectors[0])
+                    continue
+                width = len(vectors[0])
+                if not width or any(len(vector) != width for vector in vectors):
+                    raise DependencyError("Document embedding parts have inconsistent dimensions")
+                pooled = [0.0] * width
+                for vector in vectors:
+                    norm = math.sqrt(sum(value * value for value in vector))
+                    if not math.isfinite(norm) or norm == 0:
+                        raise DependencyError("Document embedding parts require finite vectors")
+                    for index, value in enumerate(vector):
+                        pooled[index] += value / norm
+                norm = math.sqrt(sum(value * value for value in pooled))
+                if not math.isfinite(norm) or norm == 0:
+                    raise DependencyError("Document embedding parts cannot be pooled")
+                embeddings.append([value / norm for value in pooled])
         return embeddings
 
     @asynccontextmanager
