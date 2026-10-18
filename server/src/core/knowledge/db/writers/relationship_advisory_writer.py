@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from common.schema.evidence import EvidenceSnapshot
+from common.schema.evidence import EvidenceSnapshot, EvidenceTraversalLimits
 from common.scoping import require_scope_value
 from core.knowledge.db.writers.maintenance_review_writer import (
     MaintenanceReviewWriter,
@@ -18,9 +18,23 @@ from core.knowledge.relationship_advisories import (
 class RelationshipAdvisoryWriter:
     """Persist advisory proposals and decisions in the common review envelope."""
 
+    _MAX_EVIDENCE_IDS = EvidenceTraversalLimits().max_observations
+
     def __init__(self, client, reviews: MaintenanceReviewWriter | None = None):
         self.client = client
         self.reviews = reviews or MaintenanceReviewWriter(client)
+
+    @classmethod
+    def evidence_ids(cls, advisory: RelationshipAdvisory) -> tuple[int, ...]:
+        """Cite the highest-ID bounded slice while retaining the full count."""
+        return advisory.observation_ids[-cls._MAX_EVIDENCE_IDS :]
+
+    @staticmethod
+    async def _lock_pattern(cur, user_name: str, project_id: str, pattern_key: str) -> None:
+        await cur.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            (f"relationship-advisory:{user_name}:{project_id}:{pattern_key}",),
+        )
 
     async def materialize_pending(
         self,
@@ -33,9 +47,30 @@ class RelationshipAdvisoryWriter:
     ) -> None:
         if advisory.disposition != "pending":
             return
+        async with self.client.transaction() as cur:
+            await self._materialize_pending(
+                user_name=user_name,
+                project_id=project_id,
+                advisory=advisory,
+                domain_version=domain_version,
+                evidence_snapshot=evidence_snapshot,
+                cur=cur,
+            )
+
+    async def _materialize_pending(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        advisory: RelationshipAdvisory,
+        domain_version: int | None,
+        evidence_snapshot: EvidenceSnapshot | None,
+        cur,
+    ) -> None:
+        await self._lock_pattern(cur, user_name, project_id, advisory.pattern_key)
         evidence_refs = [
             {"kind": "relationship_observation", "identifier": str(item)}
-            for item in advisory.observation_ids
+            for item in self.evidence_ids(advisory)
         ]
         snapshot = evidence_snapshot or EvidenceSnapshot()
         existing = await self.reviews.get_by_key(
@@ -43,16 +78,23 @@ class RelationshipAdvisoryWriter:
             project_id=project_id,
             kind="relationship_advisory",
             dedupe_key=advisory.pattern_key,
+            cur=cur,
         )
-        if existing is not None and existing.status == "open":
+        if existing is not None:
             existing_refs = {
                 (ref.kind, ref.identifier) for ref in existing.evidence_refs
             }
-            if (
+            evidence_changed = (
                 existing_refs
                 != {(ref["kind"], ref["identifier"]) for ref in evidence_refs}
                 or existing.evidence_snapshot.state_token != snapshot.state_token
-            ):
+                or existing.expected_state.get("domain_version") != domain_version
+                or existing.expected_state.get("occurrence_count")
+                != advisory.occurrence_count
+            )
+            if not evidence_changed and existing.status != "stale":
+                return
+            if existing.status == "open":
                 await self.reviews.transition(
                     existing.review_id,
                     user_name=user_name,
@@ -60,7 +102,13 @@ class RelationshipAdvisoryWriter:
                     status="stale",
                     actor=user_name,
                     reason="New relationship evidence superseded this advisory",
+                    cur=cur,
                 )
+        expected_state = {"occurrence_count": advisory.occurrence_count}
+        if domain_version is not None:
+            expected_state["domain_version"] = domain_version
+        if existing is not None:
+            expected_state["supersedes_review_id"] = existing.review_id
         await self.reviews.open(
             user_name=user_name,
             scope="project",
@@ -70,7 +118,8 @@ class RelationshipAdvisoryWriter:
             evidence_refs=evidence_refs,
             evidence_snapshot=snapshot,
             reasoning=(
-                f"{advisory.occurrence_count} observations between "
+                f"{advisory.occurrence_count} observations "
+                f"({len(evidence_refs)} highest-ID cited) between "
                 f"{advisory.source_type or 'unknown'} and "
                 f"{advisory.target_type or 'unknown'} entities."
             ),
@@ -78,11 +127,8 @@ class RelationshipAdvisoryWriter:
                 pattern_key=advisory.pattern_key,
                 observed_label=advisory.observed_label,
             ),
-            expected_state=(
-                {"domain_version": domain_version}
-                if domain_version is not None
-                else {}
-            ),
+            expected_state=expected_state,
+            cur=cur,
         )
     async def apply_action(
         self,
@@ -91,19 +137,56 @@ class RelationshipAdvisoryWriter:
         project_id: str,
         pattern_key: str,
         action: str,
+        expected_review_id: str | None = None,
         relationship_type: str | None = None,
         note: str | None = None,
         decided_by: str | None = None,
     ) -> RelationshipAdvisoryDecision:
+        async with self.client.transaction() as cur:
+            return await self._apply_action(
+                user_name=user_name,
+                project_id=project_id,
+                pattern_key=pattern_key,
+                action=action,
+                expected_review_id=expected_review_id,
+                relationship_type=relationship_type,
+                note=note,
+                decided_by=decided_by,
+                cur=cur,
+            )
+
+    async def _apply_action(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        pattern_key: str,
+        action: str,
+        expected_review_id: str | None,
+        relationship_type: str | None,
+        note: str | None,
+        decided_by: str | None,
+        cur,
+    ) -> RelationshipAdvisoryDecision:
         user_name = require_scope_value(user_name, "user_name", "apply_relationship_advisory_action")
         project_id = require_scope_value(project_id, "project_id", "apply_relationship_advisory_action")
         pattern_key = require_scope_value(pattern_key, "pattern_key", "apply_relationship_advisory_action")
+        await self._lock_pattern(cur, user_name, project_id, pattern_key)
         current_review = await self.reviews.get_by_key(
             user_name=user_name,
             project_id=project_id,
             kind="relationship_advisory",
             dedupe_key=pattern_key,
+            cur=cur,
         )
+        if current_review is None:
+            raise ValueError("Relationship advisory review not found")
+        if expected_review_id is not None and (
+            current_review.review_id != expected_review_id
+        ):
+            raise ValueError("Relationship advisory review has been superseded")
+        if current_review is not None and current_review.status == "stale":
+            raise ValueError("Relationship advisory review is stale")
         current = self._decision_from_review(current_review, pattern_key)
         decision = apply_advisory_action(
             current,
@@ -123,6 +206,7 @@ class RelationshipAdvisoryWriter:
                 status="stale",
                 actor=decided_by or user_name,
                 reason="A new advisory decision superseded this proposal",
+                cur=cur,
             )
         review = await self.reviews.open(
             user_name=user_name,
@@ -144,7 +228,16 @@ class RelationshipAdvisoryWriter:
                 action=decision.last_action,
                 note=decision.decision_note,
             ),
-            expected_state={"revision": decision.revision},
+            expected_state={
+                "revision": decision.revision,
+                **{
+                    key: current_review.expected_state[key]
+                    for key in ("domain_version", "occurrence_count")
+                    if current_review is not None
+                    and key in current_review.expected_state
+                },
+            },
+            cur=cur,
         )
         if status != "open":
             await self.reviews.transition(
@@ -154,6 +247,7 @@ class RelationshipAdvisoryWriter:
                 status=status,
                 actor=decided_by or user_name,
                 reason=note,
+                cur=cur,
             )
         return decision
 

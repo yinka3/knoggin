@@ -2,6 +2,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 from common.schema.evidence import (
     EvidenceBundle,
@@ -312,6 +313,44 @@ async def test_packet_chunks_bounded_provenance_loads_and_reuses_them_for_render
 
 @pytest.mark.unit
 @pytest.mark.no_network
+async def test_packet_caps_total_provenance_work_before_loading_trimmed_neighbors():
+    seeds = [
+        _observation(seed_id, seed_id * 10, seed_id * 10 + 1, observed_at_ms=100)
+        for seed_id in range(1, 7)
+    ]
+    neighborhoods = {
+        seed_id * 10: [
+            _observation(
+                1000 + (seed_id - 1) * 128 + offset,
+                seed_id * 10,
+                100 + offset,
+                observed_at_ms=100,
+            )
+            for offset in range(128)
+        ]
+        for seed_id in range(1, 7)
+    }
+    loader = PacketEvidenceLoader()
+    reader = PacketReader(seeds, neighborhoods)
+
+    package = await ConflictPacketBuilder(
+        reader,
+        token_counter=lambda _prompt: 1,
+        evidence_loader=loader,
+    ).build(
+        ConflictDiscoveryCursor("ada", "project-1", 0),
+        max_span_days=60,
+        max_tokens=1,
+    )
+
+    assert package is not None
+    assert sum(len(batch) for batch in loader.calls) <= 512
+    assert len(package.observations) <= 128
+    assert package.next_observation_id < 6  # The unreviewed seed remains for the next run.
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 async def test_packet_fails_when_one_seed_and_its_provenance_cannot_fit():
     seed = _observation(101, 1, 2, observed_at_ms=100)
     loader = PacketEvidenceLoader()
@@ -471,7 +510,7 @@ async def test_job_advances_an_empty_response_but_not_a_provider_failure():
             return len(text)
 
         async def generate_structured(self, **_kwargs):
-            return LLMConflictDiscoveryResult()
+            return LLMConflictDiscoveryResult(candidates=[])
 
     empty_store = JobStore(package)
     result = await ConflictDiscoveryJob(
@@ -497,6 +536,14 @@ async def test_job_advances_an_empty_response_but_not_a_provider_failure():
             llm=FailingLLM(),
         ).execute(SimpleNamespace(user_name="ada", project_id="project-1"))
     assert failing_store.completed == []
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_conflict_discovery_requires_an_explicit_candidates_field():
+    with pytest.raises(ValidationError, match="candidates"):
+        LLMConflictDiscoveryResult.model_validate({})
+    assert LLMConflictDiscoveryResult.model_validate({"candidates": []}).candidates == []
 
 
 @pytest.mark.unit

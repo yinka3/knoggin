@@ -60,6 +60,7 @@ from common.schema.public import (
     PublicError,
     PublicStreamContractError,
     PublicStreamState,
+    RelationshipAdvisoryActionRequest,
     RunCompletedEvent,
     RunFailedEvent,
     RunResult,
@@ -289,6 +290,15 @@ class ApplicationPort(Protocol):
         project_id: str,
         review_id: str,
         request: MaintenanceReviewDecisionRequest,
+    ) -> dict[str, Any]: ...
+
+    async def decide_relationship_advisory(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        review_id: str,
+        request: RelationshipAdvisoryActionRequest,
     ) -> dict[str, Any]: ...
 
     async def preview_entity_merge_rollback(
@@ -870,6 +880,26 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
         return _maintenance_operation_response(
             await _call(
                 port.decide_project_maintenance_review,
+                user_name=user_name,
+                project_id=project_id,
+                review_id=review_id,
+                request=body,
+            )
+        )
+
+    @app.post(
+        "/v1/projects/{project_id}/maintenance/relationship-advisories/{review_id}/decision",
+        response_model=MaintenanceOperationResponse,
+    )
+    async def decide_relationship_advisory(
+        body: RelationshipAdvisoryActionRequest,
+        project_id: str = Path(min_length=1),
+        review_id: str = Path(min_length=1),
+        user_name: str = Depends(current_user),
+    ) -> MaintenanceOperationResponse:
+        return _maintenance_operation_response(
+            await _call(
+                port.decide_relationship_advisory,
                 user_name=user_name,
                 project_id=project_id,
                 review_id=review_id,

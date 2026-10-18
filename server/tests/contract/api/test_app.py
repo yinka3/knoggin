@@ -274,6 +274,14 @@ class FakeApplication:
         )
         return {"review_id": review_id, "action": request.action}
 
+    async def decide_relationship_advisory(
+        self, *, user_name, project_id, review_id, request
+    ):
+        self.calls.append(
+            ("relationship_advisory_decision", user_name, project_id, review_id, request)
+        )
+        return {"decision": {"disposition": "accepted"}}
+
     async def preview_entity_merge_rollback(self, *, user_name, merge_id):
         self.calls.append(("rollback_preview", user_name, merge_id))
         return {"merge_id": merge_id, "safe_mutation_ids": [1]}
@@ -547,6 +555,27 @@ async def test_maintenance_routes_expose_review_decisions_and_rollback():
         "rollback_preview",
         "rollback",
     ]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_relationship_advisory_decision_route_forwards_typed_action():
+    port = FakeApplication()
+    app = create_app(port)
+
+    async with await _client(app) as client:
+        response = await client.post(
+            "/v1/projects/project-1/maintenance/relationship-advisories/review-1/decision",
+            headers={"X-User-Name": "ada"},
+            json={"action": "accept", "relationship_type": "DEPLOYS_TO"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["result"]["decision"]["disposition"] == "accepted"
+    assert port.calls[0][0:4] == (
+        "relationship_advisory_decision", "ada", "project-1", "review-1"
+    )
+    assert port.calls[0][4].relationship_type == "DEPLOYS_TO"
 
 
 @pytest.mark.unit

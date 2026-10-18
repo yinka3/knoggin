@@ -8,6 +8,7 @@ from typing import Any, Iterable
 from common.conf.domain_config import CompiledDomain
 from common.scoping import IDENTITY_ENTITY_ID, require_scope_value
 from core.knowledge.db.writers.age_projection_writer import AgeProjectionWriter
+from core.knowledge.db.writers.maintenance_review_writer import MaintenanceReviewWriter
 from core.knowledge.entity.reclassification import (
     EntityReclassification,
     ReclassificationPlan,
@@ -164,6 +165,7 @@ class EntityReclassificationWriter:
             raise ValueError("Reclassification entity IDs must be unique")
 
         updated_entities: list[dict[str, Any]] = []
+        type_changed_entity_ids: list[int] = []
         conflicts = 0
         async with self.client.transaction() as cur:
             await cur.execute(
@@ -239,9 +241,35 @@ class EntityReclassificationWriter:
                         "topic": change.new_topic,
                     }
                 )
+                if change.old_type != change.new_type:
+                    type_changed_entity_ids.append(change.entity_id)
 
             if updated_entities:
                 await self.projection.project_entity_domain(cur, updated_entities)
+            if type_changed_entity_ids:
+                await cur.execute(
+                    """
+                    SELECT observation_id
+                    FROM public.relationship_observations
+                    WHERE user_name = %s AND project_id = %s
+                      AND retired_at IS NULL
+                      AND (source_entity_id = ANY(%s) OR target_entity_id = ANY(%s))
+                    """,
+                    (
+                        user_name, project_id, type_changed_entity_ids,
+                        type_changed_entity_ids,
+                    ),
+                )
+                observation_ids = [
+                    int(row["observation_id"]) for row in await cur.fetchall()
+                ]
+                await MaintenanceReviewWriter(self.client).mark_stale_for_observations(
+                    user_name=user_name,
+                    project_id=project_id,
+                    observation_ids=observation_ids,
+                    reason="Relationship endpoint type changed",
+                    cur=cur,
+                )
 
         return ReclassificationBatchResult(
             scanned=len(planned),

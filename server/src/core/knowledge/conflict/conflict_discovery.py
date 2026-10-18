@@ -17,6 +17,8 @@ from core.knowledge.db.readers.conflict_discovery_reader import (
 
 EvidenceLoader = Callable[[list[int]], Awaitable[tuple[EvidenceBundle, ...]]]
 _DEFAULT_EVIDENCE_BATCH_SIZE = EvidenceTraversalLimits().max_observations
+_MAX_PACKET_OBSERVATIONS = EvidenceTraversalLimits().max_observations
+_MAX_PROVENANCE_PER_RUN = 512
 
 
 class ConflictPacketBuilder:
@@ -70,6 +72,8 @@ class ConflictPacketBuilder:
 
         for seed in seeds:
             seed_id = int(seed["observation_id"])
+            if len(bundle_cache.keys() | accepted_seeds.keys() | {seed_id}) > _MAX_PROVENANCE_PER_RUN:
+                break
             endpoint_ids = [
                 int(seed["source_entity_id"]),
                 int(seed["target_entity_id"]),
@@ -103,6 +107,17 @@ class ConflictPacketBuilder:
                         optional_rows[observation_id] = row
             for observation_id in required_rows:
                 optional_rows.pop(observation_id, None)
+
+            # Keep the DB/provenance work bounded before loading bundles for
+            # neighbors that may be discarded by the prompt token ceiling.
+            for observation_id in self._neighbor_removal_order(optional_rows):
+                if (
+                    len(required_rows) + len(optional_rows) <= _MAX_PACKET_OBSERVATIONS
+                    and len(bundle_cache.keys() | required_rows.keys() | optional_rows.keys())
+                    <= _MAX_PROVENANCE_PER_RUN
+                ):
+                    break
+                optional_rows.pop(observation_id)
 
             (
                 prompt,

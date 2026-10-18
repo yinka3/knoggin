@@ -9,6 +9,9 @@ Working notebook, 2026-10-08. This review follows source code and test assertion
 - [Model routing and coverage](models-and-coverage.md): configured models, actual call sites, and what tests really assert.
 - [Extraction and Knowledge handoff](intersection.md): durable window stages, Context-to-Knowledge rules, and cascading handoff defects.
 - [General ingestion](general-ingestion.md): conversation admission, semantic job execution, document indexing, model work, retries, and coverage.
+- [Episodes](episodes.md): generation, source grounding, persistence, enrichment, retrieval, and the semantic-window handoff.
+- [Conflict discovery and relationship advisories](conflict-discovery-and-advisories.md): model review, durable cursor, review freshness, dormant advisory rules, and coverage.
+- [Artifact retention and cleanup](artifact-retention-and-cleanup.md): deleted-session expiry, project file cleanup, document admission compensation, and coverage.
 - [Health](health.md): runtime, resource, ingestion, and background health rules and false-green paths.
 - [General ingestion and health intersections](general-health-intersections.md): defects that cross admission, health, Knowledge, and maintenance.
 - [Remediation plan](remediation-plan.md): implementation order, acceptance checks, and design decisions.

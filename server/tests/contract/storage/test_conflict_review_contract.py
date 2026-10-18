@@ -268,3 +268,45 @@ async def test_conflict_review_reuses_equivalent_evidence_and_stales_only_change
     assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM public.maintenance_reviews",
     ) == {"count": 3}
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_stale_conflict_can_be_redetected_with_the_same_evidence_token(
+    real_postgres_client,
+):
+    observation_ids = await _seed_conflict_observations(real_postgres_client)
+    snapshot = EvidenceSnapshot(
+        pointers=tuple(
+            EvidencePointer.for_observation(value) for value in observation_ids
+        ),
+        total_nodes=2,
+        state_token="a" * 64,
+    )
+    writer = ConflictWriter(real_postgres_client)
+    kwargs = dict(
+        user_name="ada",
+        project_id="project-1",
+        origin="agent_discovery",
+        kind="possible_contradiction",
+        rationale="These observations need renewed review.",
+        confidence=0.8,
+        evidence_ids=observation_ids,
+        evidence_snapshot=snapshot,
+    )
+    first = await writer.record_detection(**kwargs)
+    assert await writer.reviews.mark_stale_for_observations(
+        user_name="ada",
+        project_id="project-1",
+        observation_ids=observation_ids,
+    ) == 1
+
+    reopened = await writer.record_detection(**kwargs)
+    assert reopened.created and reopened.should_notify
+    assert reopened.group.status == "open"
+    assert reopened.group.conflict_id != first.group.conflict_id
+    assert await real_postgres_client.fetch_one(
+        "SELECT status FROM public.maintenance_reviews WHERE review_id = %s",
+        (first.group.conflict_id,),
+    ) == {"status": "stale"}

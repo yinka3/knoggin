@@ -328,7 +328,10 @@ async def test_conflict_discovery_job_is_registered_with_its_policy_subscription
         conflict_discovery_job=conflict_job,
     )
 
-    assert list(state.scheduler._jobs) == ["project_semantic", "conflict_discovery"]
+    assert list(state.scheduler._jobs) == [
+        "project_semantic", "relationship_advisories", "conflict_discovery"
+    ]
+    assert state.scheduler._jobs["relationship_advisories"].maintenance_service is maintenance_service
     assert [path for _, path in config_manager.subscriptions] == [
         "developer_settings.entity_resolution",
         "developer_settings.nlp_pipeline",

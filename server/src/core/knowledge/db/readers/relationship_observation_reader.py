@@ -40,19 +40,19 @@ class RelationshipObservationReader:
         return await self.client.fetch_all(
             """
             SELECT
-                observation_id,
-                relationship_id,
-                user_name,
-                project_id,
-                semantic_window_id,
-                source_entity_id,
-                target_entity_id,
-                observed_relationship_label,
-                interpretation_source,
+                relationship_observations.observation_id,
+                relationship_observations.relationship_id,
+                relationship_observations.user_name,
+                relationship_observations.project_id,
+                relationship_observations.semantic_window_id,
+                relationship_observations.source_entity_id,
+                relationship_observations.target_entity_id,
+                relationship_observations.observed_relationship_label,
+                relationship_observations.interpretation_source,
                 source_context.entity_type AS source_type,
                 target_context.entity_type AS target_type,
-                context,
-                observed_at_ms,
+                relationship_observations.context,
+                relationship_observations.observed_at_ms,
                 CASE WHEN EXISTS (
                     SELECT 1
                     FROM public.relationship_observation_blocks AS block_support
@@ -70,7 +70,8 @@ class RelationshipObservationReader:
               AND relationship_observations.project_id = %s
               AND relationship_observations.interpretation_source = 'observed'
               AND relationship_observations.retired_at IS NULL
-            ORDER BY observed_at_ms, observation_id
+            ORDER BY relationship_observations.observed_at_ms,
+                     relationship_observations.observation_id
             """,
             (user_name, project_id),
         )

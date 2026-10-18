@@ -305,6 +305,7 @@ def _job(
     builder,
     relationships,
     publisher=_publish_nothing,
+    signal_advisories=None,
     now_ms=None,
 ):
     return ProjectSemanticProcessor(
@@ -318,6 +319,7 @@ def _job(
         context_entity_builder=builder,
         context_relationship_extractor=relationships,
         publish_committed_entity_ids=publisher,
+        signal_relationship_advisories=signal_advisories,
         now_ms=now_ms,
     )
 
@@ -350,6 +352,23 @@ async def test_knowledge_commit_precedes_episode_enrichment_and_completes_termin
         "complete",
     ]
     assert store.window.stage is SemanticWindowStage.COMPLETED
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_advisory_refresh_is_woken_after_knowledge_commit():
+    store = _Store()
+    job = _job(
+        store,
+        builder=_Builder(),
+        relationships=_Relationships(),
+        signal_advisories=lambda: store.events.append("advisory_wake") or True,
+    )
+
+    result = await job.execute(JobContext(user_name="ada", project_id="project-1"))
+
+    assert result.success
+    assert store.events.index("commit") < store.events.index("advisory_wake")
 
 
 @pytest.mark.unit
