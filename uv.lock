@@ -14,8 +14,6 @@ resolution-markers = [
 
 [manifest]
 members = [
-    "knoggin-app-backend",
-    "knoggin-sdk",
     "server",
 ]
 
@@ -1754,34 +1752,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/19/74/a633ee74eb36c44aa
 wheels = [
     { url = "https://files.pythonhosted.org/packages/41/45/1a4ed80516f02155c51f51e8cedb3c1902296743db0bbc66608a0db2814f/jsonschema_specifications-2025.9.1-py3-none-any.whl", hash = "sha256:98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe", size = 18437, upload-time = "2025-09-08T01:34:57.871Z" },
 ]
-
-[[package]]
-name = "knoggin-app-backend"
-version = "0.1.0"
-source = { editable = "app/backend" }
-dependencies = [
-    { name = "fastapi", extra = ["standard"] },
-    { name = "knoggin-sdk" },
-    { name = "loguru" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "fastapi", extras = ["standard"], specifier = ">=0.128.0" },
-    { name = "knoggin-sdk", editable = "sdk" },
-    { name = "loguru", specifier = ">=0.7.3" },
-]
-
-[[package]]
-name = "knoggin-sdk"
-version = "0.1.0"
-source = { editable = "sdk" }
-dependencies = [
-    { name = "server" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "server", editable = "server" }]
 
 [[package]]
 name = "langcodes"

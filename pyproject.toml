@@ -1,5 +1,5 @@
 [tool.uv.workspace]
-members = ["server", "sdk", "app/backend"]
+members = ["server"]
 
 [dependency-groups]
 dev = [
