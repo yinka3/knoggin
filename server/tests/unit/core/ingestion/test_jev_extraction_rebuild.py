@@ -149,6 +149,7 @@ async def test_exhausted_budget_reuses_prior_acceptance_behind_new_gap():
 async def test_exhausted_budget_replays_acceptance_after_preparation_limit():
     current_block = block("Orion works with Zephyr Dynamics.")
     current = build(blocks=(current_block,), compiled_domain=domain())
+    current.identity_pass_number = 1
     current.policy = policy(
         domain(),
         llm_ner_mode="disabled",
@@ -180,6 +181,7 @@ async def test_exhausted_budget_replays_acceptance_after_preparation_limit():
         for index in range(512)
     )
     current.set_unknown_endpoint_diagnostics((*earlier_diagnostics, zephyr))
+    current.identity_pass_number += 1
 
     replayed = await proc.extract_context_mentions(current)
 
