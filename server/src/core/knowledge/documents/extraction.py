@@ -448,7 +448,7 @@ def _parse_with_docling(content: bytes, extension: str):
         if "LocalEntryNotFoundError" in detail or "huggingface.co" in detail:
             raise DependencyError(
                 "Docling PDF models are not installed; run "
-                "./setup.sh --prefetch-models before indexing PDFs"
+                "uv run --package server python server/scripts/prefetch_models.py before indexing PDFs"
             ) from exc
         raise ValueError(f"Docling could not parse the {extension} document: {detail}") from exc
 
