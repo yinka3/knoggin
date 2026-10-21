@@ -107,6 +107,7 @@ class ConflictWriter:
                 )
             if (
                 existing is not None
+                and existing.status != "stale"
                 and existing.evidence_snapshot.state_token == snapshot.state_token
             ):
                 return self._write_result(existing, created=False)

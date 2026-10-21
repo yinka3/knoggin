@@ -80,6 +80,39 @@ class RelationshipDefinition:
     labels: tuple[str, ...] = ()
 
 
+def _relationship_lookup_key(value: str) -> str:
+    """Use one key for configured names and observed relationship wording."""
+
+    return re.sub(r"[-\s]+", "_", " ".join(value.split()).casefold())
+
+
+def _relationship_lookup(
+    relationships: Mapping[str, RelationshipDefinition],
+) -> dict[str, RelationshipDefinition]:
+    # Canonical names always win when replaying a snapshot made before
+    # ambiguous labels were rejected at activation.
+    lookup = {
+        _relationship_lookup_key(relationship.name): relationship
+        for relationship in relationships.values()
+    }
+    for relationship in relationships.values():
+        for label in relationship.labels:
+            lookup.setdefault(_relationship_lookup_key(label), relationship)
+    return lookup
+
+
+def _relationship_exact_lookup(
+    relationships: Mapping[str, RelationshipDefinition],
+) -> dict[str, RelationshipDefinition]:
+    """Retain exact label ownership in older ambiguous domain snapshots."""
+
+    lookup: dict[str, RelationshipDefinition] = {}
+    for relationship in relationships.values():
+        for label in relationship.labels:
+            lookup.setdefault(" ".join(label.split()).casefold(), relationship)
+    return lookup
+
+
 @dataclass(frozen=True, slots=True)
 class ContextSectionDefinition:
     """One ordered, model-visible section in the project Context document."""
@@ -118,6 +151,28 @@ class DomainConfig:
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any]) -> "DomainConfig":
+        """Validate a new domain definition, including unique relationship wording."""
+
+        return cls._parse_mapping(payload, allow_legacy_relationship_collisions=False)
+
+    @classmethod
+    def from_persisted_mapping(cls, payload: Mapping[str, Any]) -> "DomainConfig":
+        """Read an older stored definition without blocking its repair.
+
+        Earlier revisions allowed relationship wording to belong to multiple
+        rules. This exception applies only to durable reads; new candidates
+        still pass through ``from_mapping`` before activation.
+        """
+
+        return cls._parse_mapping(payload, allow_legacy_relationship_collisions=True)
+
+    @classmethod
+    def _parse_mapping(
+        cls,
+        payload: Mapping[str, Any],
+        *,
+        allow_legacy_relationship_collisions: bool,
+    ) -> "DomainConfig":
         if not isinstance(payload, Mapping):
             raise DomainConfigError("Domain configuration must be an object")
 
@@ -275,7 +330,6 @@ class DomainConfig:
         entity_names = {entity.name.casefold(): entity.name for entity in entity_types}
         relationships: list[RelationshipDefinition] = []
         relationship_keys: set[str] = set()
-        relationship_label_owners: dict[str, str] = {}
         for raw_name, raw_value in relationships_payload.items():
             name = _name(
                 raw_name,
@@ -350,15 +404,6 @@ class DomainConfig:
                     for item in (*labels, *aliases)
                 )
             )
-            for label in labels:
-                label_key = label.replace("-", "_").replace(" ", "_")
-                owner = relationship_label_owners.get(label_key)
-                if owner is not None and owner.casefold() != name.casefold():
-                    raise DomainConfigError(
-                        f"Relationship label {label!r} is claimed by both "
-                        f"{owner!r} and {name!r}"
-                    )
-                relationship_label_owners[label_key] = name
             relationships.append(
                 RelationshipDefinition(
                     name=name,
@@ -368,6 +413,22 @@ class DomainConfig:
                     labels=labels,
                 )
             )
+
+        relationship_owners: dict[str, str] = {}
+        for relationship in relationships:
+            for wording in (relationship.name, *relationship.labels):
+                key = _relationship_lookup_key(wording)
+                owner = relationship_owners.get(key)
+                if (
+                    not allow_legacy_relationship_collisions
+                    and owner is not None
+                    and owner != relationship.name
+                ):
+                    raise DomainConfigError(
+                        f"Relationship label {wording!r} is claimed by both "
+                        f"{owner!r} and {relationship.name!r}"
+                    )
+                relationship_owners[key] = relationship.name
 
         context_sections_payload = payload.get("context_sections")
         if context_sections_payload is None:
@@ -520,15 +581,9 @@ class DomainConfig:
                 entity_to_allowed_topics
             ),
             relationships=_frozen_mapping(relationship_map),
-            relationship_labels=_frozen_mapping(
-                {
-                    key: relationship
-                    for relationship in self.relationships
-                    for key in {
-                        relationship.name.casefold(),
-                        *relationship.labels,
-                    }
-                }
+            relationship_labels=_frozen_mapping(_relationship_lookup(relationship_map)),
+            relationship_exact_labels=_frozen_mapping(
+                _relationship_exact_lookup(relationship_map)
             ),
             topic_aliases=_frozen_mapping(
                 {topic.name.casefold(): topic.name for topic in self.topics}
@@ -566,6 +621,9 @@ class CompiledDomain:
     relationship_labels: Mapping[str, RelationshipDefinition] = field(
         default_factory=lambda: MappingProxyType({})
     )
+    relationship_exact_labels: Mapping[str, RelationshipDefinition] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
     topic_descriptions: Mapping[str, str] = field(
         default_factory=lambda: MappingProxyType({})
     )
@@ -594,6 +652,7 @@ class CompiledDomain:
             entity_type_to_allowed_topics=_frozen_mapping({}),
             relationships=_frozen_mapping({}),
             relationship_labels=_frozen_mapping({}),
+            relationship_exact_labels=_frozen_mapping({}),
             topic_aliases=_frozen_mapping({}),
             descriptions=_frozen_mapping({}),
             topic_descriptions=_frozen_mapping({}),
@@ -750,15 +809,9 @@ class CompiledDomain:
                 entity_type_to_allowed_topics
             ),
             relationships=_frozen_mapping(relationships),
-            relationship_labels=_frozen_mapping(
-                {
-                    key: relationship
-                    for relationship in relationships.values()
-                    for key in {
-                        relationship.name.casefold(),
-                        *relationship.labels,
-                    }
-                }
+            relationship_labels=_frozen_mapping(_relationship_lookup(relationships)),
+            relationship_exact_labels=_frozen_mapping(
+                _relationship_exact_lookup(relationships)
             ),
             topic_aliases=_frozen_mapping(topic_aliases),
             descriptions=_frozen_mapping(descriptions),
@@ -841,18 +894,23 @@ class CompiledDomain:
 
         if not isinstance(name, str):
             return None
-        key = name.strip().casefold()
-        direct = self.relationship_labels.get(key)
-        if direct is not None:
-            return direct
-        normalized = key.replace("-", "_").replace(" ", "_")
+        normalized = _relationship_lookup_key(name)
         direct = self.relationship_labels.get(normalized)
+        if direct is not None and _relationship_lookup_key(direct.name) == normalized:
+            return direct
+        canonical = self.relationships.get(normalized)
+        if canonical is not None:
+            return canonical
+        exact_label = " ".join(name.split()).casefold()
+        exact_match = self.relationship_exact_labels.get(exact_label)
+        if exact_match is not None:
+            return exact_match
         if direct is not None:
             return direct
         for relationship in self.relationships.values():
-            configured = relationship.name.casefold()
+            configured = _relationship_lookup_key(relationship.name)
             if configured == normalized or any(
-                label.replace("-", "_").replace(" ", "_") == normalized
+                _relationship_lookup_key(label) == normalized
                 for label in relationship.labels
             ):
                 return relationship

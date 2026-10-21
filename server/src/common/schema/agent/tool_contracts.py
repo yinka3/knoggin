@@ -1,5 +1,8 @@
 """Tool-call JSON schemas and argument validation."""
 
+import math
+import re
+
 TOOL_SCHEMAS = [
     {
         "type": "function",
@@ -916,12 +919,42 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "advise_entity_merge",
+            "description": (
+                "Ask the configured merge model to assess two entity IDs using "
+                "bounded stored message and episode evidence. This only returns "
+                "cited advice; it does not open a review or merge entities."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "primary_id": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "One candidate entity ID, initially preferred to survive.",
+                    },
+                    "duplicate_id": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "The other candidate entity ID.",
+                    },
+                },
+                "required": ["primary_id", "duplicate_id"],
+                "additionalProperties": False,
+            },
+            "tags": ["graph:read", "core"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "propose_entity_merge",
             "description": (
                 "Propose that a duplicate entity be merged into a primary entity. "
                 "This never grants permission to execute the destructive merge. "
                 "Ground the proposal with message or episode IDs returned by "
-                "graph tools."
+                "graph tools or advise_entity_merge. Include the advisor's state "
+                "hash when using its recommendation."
             ),
             "parameters": {
                 "type": "object",
@@ -947,6 +980,14 @@ TOOL_SCHEMAS = [
                         "type": "array",
                         "items": {"type": "string", "minLength": 4},
                         "description": "Episode IDs (for example ep_a3f91c) that support the proposal."
+                    },
+                    "expected_state_hash": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{64}$",
+                        "description": (
+                            "State hash returned by advise_entity_merge; the proposal "
+                            "is rejected if candidate evidence changed."
+                        ),
                     }
                 },
                 "required": [
@@ -1333,12 +1374,17 @@ def _validate_schema_value(value, schema: dict, path: str) -> list[str]:
         errors.append(f"{path} must be one of {schema['enum']}")
 
     if expected_type in {"integer", "number"}:
+        if isinstance(value, float) and not math.isfinite(value):
+            errors.append(f"{path} must be a finite number")
+            return errors
         if "minimum" in schema and value < schema["minimum"]:
             errors.append(f"{path} must be at least {schema['minimum']}")
         if "maximum" in schema and value > schema["maximum"]:
             errors.append(f"{path} must be at most {schema['maximum']}")
 
     if expected_type == "string":
+        if "pattern" in schema and re.search(schema["pattern"], value) is None:
+            errors.append(f"{path} has an invalid format")
         if "minLength" in schema and len(value) < schema["minLength"]:
             errors.append(f"{path} is too short")
         if "maxLength" in schema and len(value) > schema["maxLength"]:
@@ -1364,9 +1410,9 @@ def _validate_schema_value(value, schema: dict, path: str) -> list[str]:
         for key in required:
             if key not in value:
                 errors.append(f"{path}.{key} is required")
-        unknown = sorted(set(value) - set(properties))
+        unknown = set(value) - set(properties)
         if unknown and schema.get("additionalProperties") is False:
-            errors.append(f"{path} contains unknown fields: {', '.join(unknown)}")
+            errors.append(f"{path} contains {len(unknown)} unknown field(s)")
         for key, item in value.items():
             if key in properties:
                 errors.extend(

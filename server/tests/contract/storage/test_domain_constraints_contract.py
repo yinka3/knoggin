@@ -72,12 +72,12 @@ async def test_domain_constraints_reject_invalid_relationship_values_and_scope(
             INSERT INTO relationship_observations (
                 relationship_id, project_id, user_name, semantic_window_id,
                 source_entity_id, target_entity_id, observed_relationship_label,
-                interpretation_source, observed_at_ms
+                support_key, interpretation_source, observed_at_ms
             )
             VALUES (
                 'project-1:1:2:knows', 'project-1', 'ada',
                 '11111111-1111-4111-8111-111111111111',
-                1, 2, 'knows', 'invalid', 1
+                1, 2, 'knows', md5('[]'), 'invalid', 1
             )
             """
         )

@@ -94,11 +94,20 @@ async def test_health_drilldown_is_bounded_scoped_and_read_only():
         document_service=SimpleNamespace(
             indexing_snapshot_for_health=lambda: {"local_submission_tasks": 0},
             pending_index_count=lambda: 0,
+            terminal_index_failure_count=lambda: 0,
         ),
     )
     service = RuntimeHealthService(
         resources=resources,
-        projects=SimpleNamespace(active_projects={"project-a": project}),
+        projects=SimpleNamespace(
+            active_projects={"project-a": project},
+            entity_maintenance_service=SimpleNamespace(
+                projection_repair_health=lambda: {
+                    "pending_count": 0,
+                    "truncated": False,
+                }
+            ),
+        ),
         sessions=SimpleNamespace(
             get_runtime_session=lambda session_id: (
                 SimpleNamespace(project_id="project-a")

@@ -4,6 +4,7 @@ import math
 import pytest
 
 from common.schema.agent.identity import AgentConfig
+from common.utils.agent_identity import MAX_BRAIN_CHARS, MAX_BRAIN_SECTION_CHARS
 from core.agent.services.agent_manager import (
     AgentBrainRevisionConflictError,
     AgentManager,
@@ -77,6 +78,25 @@ async def test_agent_manager_create_update_and_lookup_preserves_config(manager):
         and "INSERT INTO public.agent_brain_snapshots" in call[1]
     )
     assert create_snapshot_write[2]["brain"]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_agent_manager_rejects_oversized_specialist_brain_before_insert(manager):
+    agent_manager, resources = manager
+    parent = await agent_manager.create_agent("Researcher", "Careful")
+    writes_before = len([call for call in resources.postgres.calls if call[0] == "execute"])
+
+    with pytest.raises(ValueError, match="Brain section exceeds"):
+        await agent_manager.create_specialist(
+            parent_id=parent.id,
+            name="Specialist",
+            persona=parent.persona,
+            brain="x" * (MAX_BRAIN_SECTION_CHARS + 1),
+        )
+
+    assert len(resources.postgres.agents) == 1
+    assert len([call for call in resources.postgres.calls if call[0] == "execute"]) == writes_before
 
 
 @pytest.mark.runtime
@@ -266,6 +286,24 @@ async def test_agent_manager_requires_revision_for_full_brain_replacement(manage
     assert len([call for call in resources.postgres.calls if call[0] == "execute"]) == (
         writes_before
     )
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_agent_manager_rejects_oversized_full_brain_update_before_write(manager):
+    agent_manager, resources = manager
+    created = await agent_manager.create_agent("Researcher", "Careful")
+    writes_before = len([call for call in resources.postgres.calls if call[0] == "execute"])
+
+    with pytest.raises(ValueError, match="Brain exceeds"):
+        await agent_manager.update_agent(
+            created.id,
+            brain="x" * MAX_BRAIN_CHARS,
+            expected_brain_revision=1,
+        )
+
+    assert resources.postgres.agents[created.id]["brain_revision"] == 1
+    assert len([call for call in resources.postgres.calls if call[0] == "execute"]) == writes_before
 
 
 @pytest.mark.runtime

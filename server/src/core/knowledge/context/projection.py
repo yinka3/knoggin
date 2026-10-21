@@ -142,7 +142,11 @@ class ContextProjection:
                 projection_hash=generated_hash,
             )
             return ContextProjectionResult(snapshot=snapshot, changed=False)
-        if current is not None and state.projection_revision_id == snapshot.revision_id:
+        if (
+            current is not None
+            and state.projection_revision_id == snapshot.revision_id
+            and current_hash != state.projection_hash
+        ):
             raise ContextProjectionConflictError(
                 "CONTEXT.md has user edits and cannot be overwritten by reconciliation"
             )

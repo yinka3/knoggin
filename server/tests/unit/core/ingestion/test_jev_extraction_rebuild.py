@@ -5,9 +5,15 @@ from dataclasses import replace
 
 import pytest
 
-from common.schema.ingestion.contracts import UnknownEndpointDiagnostic
+from common.schema.ingestion.contracts import (
+    ContextBlockMention,
+    UnknownEndpointDiagnostic,
+)
 from common.schema.jev import JevPolicy
 from core.ingestion.context_entity_build import ContextEntityBuildService
+from core.ingestion.text_processor import _ContextBlockText, _FallbackGap
+from core.knowledge.entity.profile import EntityProfile
+from infrastructure.jev_client import JevWorkBudget
 from tests.unit.core.ingestion.test_context_entity_build import (
     BudgetedExtractionJev,
     FakeEntityLLM,
@@ -26,9 +32,7 @@ from tests.unit.core.ingestion.test_context_entity_build import (
 
 @pytest.mark.parametrize("mode", ["active", "observe", "disabled"])
 @pytest.mark.parametrize("call_limit", [1, 2])
-async def test_supporting_occurrences_and_residual_gaps_stay_block_scoped(
-    mode, call_limit
-):
+async def test_support_only_names_stay_unresolved_and_block_scoped(mode, call_limit):
     first = block("Orion manages the rollout.")
     second = block("Vega manages the budget.")
     current = build(
@@ -47,7 +51,25 @@ async def test_supporting_occurrences_and_residual_gaps_stay_block_scoped(
         domain(), jev=JevPolicy(extraction_mode=mode, max_calls_per_window=call_limit)
     )
     offset = len(first.markdown) + 2
-    llm = FakeEntityLLM([])
+    llm = FakeEntityLLM(
+        [
+            {
+                "block_id": "b1",
+                "name": "Delta",
+                "type": "Company",
+                "supporting_message_id": "m1",
+                "evidence_quote": "Delta manages the rollout.",
+            },
+            {
+                "block_id": "b2",
+                "name": "Delta",
+                "type": "Company",
+                "supporting_message_id": "m2",
+                "evidence_quote": "Delta manages the budget.",
+            },
+        ]
+    )
+    jev = BudgetedExtractionJev()
     proc = processor(
         FakeVP01(
             [
@@ -58,41 +80,261 @@ async def test_supporting_occurrences_and_residual_gaps_stay_block_scoped(
             ]
         ),
         llm=llm,
-        jev_client=BudgetedExtractionJev(),
+        jev_client=jev,
     )
     proc.get_known_aliases = lambda: {"Delta": 701}
-    if mode != "active":
-        llm.mentions = [
-            {"block_id": "b1", "name": "Delta", "type": "Company"},
-            {"block_id": "b2", "name": "Delta", "type": "Company"},
-        ]
     mentions = await proc.extract_context_mentions(current)
-    recovered = [mention for mention in mentions if mention.name == "Delta"]
-    if mode == "active" and call_limit == 1:
-        assert [mention.block_ids for mention in recovered] == [(first.block_id,)]
-        assert len(llm.calls) == 1
-        residual = json.loads(llm.calls[0]["user"])["context_blocks"]
-        assert [item["markdown"] for item in residual] == [second.markdown]
-        assert current.trace.jev_extraction_avoided_fallback_blocks == 1
-        assert current.trace.jev_extraction_avoided_fallback_calls == 0
-    else:
-        assert {mention.block_ids for mention in recovered} == {
-            (first.block_id,),
-            (second.block_id,),
-        }
-        assert all(
-            mention.source_start is None and mention.source_end is None
-            for mention in recovered
+    assert [mention.name for mention in mentions] == ["Orion", "Vega"]
+    assert jev.calls == []
+    assert current.trace.jev_extraction_candidates == 0
+    assert current.trace.extraction_decisions == []
+    assert len(llm.calls) == 1
+    residual = json.loads(llm.calls[0]["user"])["context_blocks"]
+    assert [item["markdown"] for item in residual] == [
+        first.markdown,
+        second.markdown,
+    ]
+    unresolved = [
+        issue
+        for issue in current.issues
+        if issue.metadata.get("reason") == "supporting_message_name_unresolved"
+    ]
+    assert [
+        (issue.metadata["block_id"], issue.metadata["supporting_message_id"])
+        for issue in unresolved
+    ] == [
+        (str(first.block_id), "m1"),
+        (str(second.block_id), "m2"),
+    ]
+
+
+async def test_exhausted_budget_reuses_prior_acceptance_behind_new_gap():
+    current_block = block("Orion works with Zephyr Dynamics and Nova Systems.")
+    current = build(blocks=(current_block,), compiled_domain=domain())
+    current.policy = policy(
+        domain(),
+        llm_ner_mode="disabled",
+        jev=JevPolicy(extraction_mode="active", max_calls_per_window=1),
+    )
+    zephyr = UnknownEndpointDiagnostic(
+        block_id=current_block.block_id,
+        name="Zephyr Dynamics",
+        entity_type="Company",
+    )
+    nova = UnknownEndpointDiagnostic(
+        block_id=current_block.block_id,
+        name="Nova Systems",
+        entity_type="Company",
+    )
+    current.set_unknown_endpoint_diagnostics((zephyr,))
+    jev = BudgetedExtractionJev()
+    proc = processor(
+        FakeVP01([VP01EntitySpan(text="Orion", label="company", start=0, end=5)]),
+        llm_ner_mode="disabled",
+        jev_client=jev,
+    )
+
+    first = await proc.extract_context_mentions(current)
+    assert [mention.name for mention in first] == ["Orion", "Zephyr Dynamics"]
+    budget = current.jev_work_budget
+    budget.max_observations = 1
+    current.set_unknown_endpoint_diagnostics((nova, zephyr))
+
+    replayed = await proc.extract_context_mentions(current)
+
+    assert [mention.name for mention in replayed] == ["Orion", "Zephyr Dynamics"]
+    assert budget.observations == budget.calls == 1
+    assert len(jev.calls) == 1
+    assert len(current.trace.extraction_decisions) == 1
+    assert current.trace.extraction_decisions[0]["accepted_entity_type"] == "Company"
+    assert "reused_for_pass" in current.trace.extraction_decisions[0]
+
+
+async def test_exhausted_budget_replays_acceptance_after_preparation_limit():
+    current_block = block("Orion works with Zephyr Dynamics.")
+    current = build(blocks=(current_block,), compiled_domain=domain())
+    current.identity_pass_number = 1
+    current.policy = policy(
+        domain(),
+        llm_ner_mode="disabled",
+        jev=JevPolicy(extraction_mode="active", max_calls_per_window=1),
+    )
+    zephyr = UnknownEndpointDiagnostic(
+        block_id=current_block.block_id,
+        name="Zephyr Dynamics",
+        entity_type="Company",
+    )
+    current.set_unknown_endpoint_diagnostics((zephyr,))
+    jev = BudgetedExtractionJev()
+    proc = processor(
+        FakeVP01([VP01EntitySpan(text="Orion", label="company", start=0, end=5)]),
+        llm_ner_mode="disabled",
+        jev_client=jev,
+    )
+
+    first = await proc.extract_context_mentions(current)
+    assert [mention.name for mention in first] == ["Orion", "Zephyr Dynamics"]
+    budget = current.jev_work_budget
+    budget.max_observations = 1
+    earlier_diagnostics = tuple(
+        UnknownEndpointDiagnostic(
+            block_id=current_block.block_id,
+            name=f"Absent Endpoint {index}",
+            entity_type="Company",
         )
-        assert len(llm.calls) == (0 if mode == "active" else 1)
-    if mode == "active" and call_limit == 2:
-        assert (
-            sum(
-                item["accepted_entity_type"] is not None
-                for item in current.trace.extraction_decisions
+        for index in range(512)
+    )
+    current.set_unknown_endpoint_diagnostics((*earlier_diagnostics, zephyr))
+    current.identity_pass_number += 1
+
+    replayed = await proc.extract_context_mentions(current)
+
+    assert [mention.name for mention in replayed] == ["Orion", "Zephyr Dynamics"]
+    assert budget.observations == budget.calls == 1
+    assert len(jev.calls) == 1
+    assert current.trace.extraction_decisions[0]["reused_for_pass"] == 2
+
+
+@pytest.mark.parametrize("alias", ["Zephyr Dynamics", "Zephyr   Dynamics"])
+async def test_exhausted_budget_replays_alias_after_earlier_diagnostics(alias):
+    current_block = block("Orion works with Zephyr Dynamics.")
+    current = build(blocks=(current_block,), compiled_domain=domain())
+    current.policy = policy(domain())
+    current.jev_work_budget = JevWorkBudget(
+        max_calls=1, max_observations=1, observations=1
+    )
+    earlier_diagnostics = tuple(
+        UnknownEndpointDiagnostic(
+            block_id=current_block.block_id,
+            name=f"Absent Endpoint {index}",
+            entity_type="Company",
+        )
+        for index in range(512)
+    )
+    current.set_unknown_endpoint_diagnostics(
+        (
+            *earlier_diagnostics,
+            UnknownEndpointDiagnostic(
+                block_id=current_block.block_id,
+                name="Zephyr Dynamics",
+                entity_type="Company",
+            ),
+        )
+    )
+    proc = processor(FakeVP01([]))
+    proc.get_known_aliases = lambda: {alias: 701}
+    proc.get_profile = lambda _entity_id: _async_value(None)
+
+    candidates = await proc._prepare_jev_extraction_candidates(
+        current,
+        assembled=_ContextBlockText.from_blocks((current_block,)),
+        gaps=[
+            _FallbackGap(
+                block=current_block,
+                reasons=("known_alias_missing_from_extraction",),
+                support_text="",
             )
-            == 2
+        ],
+        mentions=[],
+        previous_acceptances=[
+            {
+                "candidate_name": "Zephyr Dynamics",
+                "evidence_origin": "known_alias_gap",
+                "record": {"evidence_block_ids": [str(current_block.block_id)]},
+            }
+        ],
+    )
+
+    assert [(item.name, item.evidence_origin) for item in candidates] == [
+        ("Zephyr Dynamics", "known_alias_gap")
+    ]
+    assert current.jev_work_budget.observations == 1
+
+
+async def test_exhausted_budget_replays_only_literal_candidates_in_current_gaps():
+    current_block = block("Acme works with Vega.")
+    removed_block = block("Ghost was removed.")
+    current = build(blocks=(current_block, removed_block), compiled_domain=domain())
+    current.jev_work_budget = JevWorkBudget(
+        max_calls=1, max_observations=1, observations=1
+    )
+    current.set_unknown_endpoint_diagnostics(
+        (
+            UnknownEndpointDiagnostic(block_id=removed_block.block_id, name="Ghost", entity_type="Company"),
+            UnknownEndpointDiagnostic(block_id=current_block.block_id, name="Vega", entity_type="Company"),
         )
+    )
+    proc = processor(FakeVP01([]))
+    proc.get_known_aliases = lambda: {"Acme": 701, "Missing": 702}
+    proc.get_profile = lambda _entity_id: _async_value(
+        EntityProfile(
+            canonical_name="Acme",
+            entity_type="Company",
+            topic="Work",
+            project_id="project-1",
+        )
+    )
+    acceptances = [
+        {
+            "candidate_name": name,
+            "evidence_origin": origin,
+            "record": {"evidence_block_ids": [str(block_id)]},
+        }
+        for name, origin, block_id in (
+            ("Ghost", "unknown_relationship_endpoint", removed_block.block_id),
+            ("Vega", "unknown_relationship_endpoint", current_block.block_id),
+            ("Acme", "known_alias_gap", current_block.block_id),
+            ("Missing", "known_alias_gap", current_block.block_id),
+        )
+    ]
+
+    candidates = await proc._prepare_jev_extraction_candidates(
+        current,
+        assembled=_ContextBlockText.from_blocks((current_block, removed_block)),
+        gaps=[_FallbackGap(current_block, ("known_alias_missing_from_extraction",), "")],
+        mentions=[],
+        previous_acceptances=acceptances,
+    )
+
+    assert {(item.name, item.evidence_origin) for item in candidates} == {
+        ("Vega", "unknown_relationship_endpoint"),
+        ("Acme", "known_alias_gap"),
+    }
+    assert next(item for item in candidates if item.name == "Acme").proposed_type == "Company"
+
+
+async def test_fresh_candidate_scan_skips_represented_and_nonliteral_endpoints():
+    current_block = block("Acme works with Vega.")
+    current = build(blocks=(current_block,), compiled_domain=domain())
+    current.jev_work_budget = JevWorkBudget(max_calls=1, max_observations=1)
+    current.set_unknown_endpoint_diagnostics(
+        tuple(
+            UnknownEndpointDiagnostic(block_id=current_block.block_id, name=name, entity_type="Company")
+            for name in ("Acme", "Absent", "Vega")
+        )
+    )
+    proc = processor(FakeVP01([]))
+    proc.get_known_aliases = lambda: {"Acme": 701}
+    represented = ContextBlockMention(
+        block_ids=(current_block.block_id,),
+        name="Acme",
+        entity_type="Company",
+        topic="Work",
+        origin="vp01",
+        source_start=0,
+        source_end=4,
+    )
+
+    candidates = await proc._prepare_jev_extraction_candidates(
+        current,
+        assembled=_ContextBlockText.from_blocks((current_block,)),
+        gaps=[_FallbackGap(current_block, ("unknown_relationship_endpoint",), "")],
+        mentions=[represented],
+    )
+
+    assert [(item.name, item.evidence_origin) for item in candidates] == [
+        ("Vega", "unknown_relationship_endpoint")
+    ]
 
 
 @pytest.mark.parametrize("changed", [None, "evidence", "policy", "removed_gap"])

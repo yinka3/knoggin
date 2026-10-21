@@ -122,14 +122,12 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
             self,
             embedding_model=None,
             reranker_model=None,
-            nli_model=None,
             device=None,
             batch_size=None,
             model_work=None,
         ):
             self.embedding_model = embedding_model
             self.reranker_model = reranker_model
-            self.nli_model = nli_model
             self.device = device
 
         async def load_models(self):
@@ -160,7 +158,6 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
     monkeypatch.setenv("KNOGGIN_GPU", "false")
     monkeypatch.setenv("KNOGGIN_EMBEDDING_MODEL", "custom/embedder")
     monkeypatch.setenv("KNOGGIN_RERANKER_MODEL", "custom/reranker")
-    monkeypatch.setenv("KNOGGIN_NLI_MODEL", "custom/nli")
     monkeypatch.delenv("KNOGGIN_LLM_TRACE", raising=False)
     monkeypatch.setattr(
         resources_module.ConfigManager, "get", staticmethod(lambda: fake_config)
@@ -187,7 +184,6 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
     assert captured_llm_kwargs["trace_logger"] is None
     assert manager.embedding.embedding_model == "custom/embedder"
     assert manager.embedding.reranker_model == "custom/reranker"
-    assert manager.embedding.nli_model == "custom/nli"
     assert manager.knowledge_store.postgres_client is manager.postgres
     assert [path for _callback, path in subscribe_calls] == [
         "developer_settings.coordination_log",
@@ -374,7 +370,6 @@ async def test_resource_manager_resolves_gpu_cuda(monkeypatch, tmp_path):
             self,
             embedding_model=None,
             reranker_model=None,
-            nli_model=None,
             device=None,
             batch_size=None,
             model_work=None,
@@ -446,7 +441,6 @@ async def test_resource_manager_resolves_gpu_mps(monkeypatch, tmp_path):
             self,
             embedding_model=None,
             reranker_model=None,
-            nli_model=None,
             device=None,
             batch_size=None,
             model_work=None,
@@ -535,7 +529,6 @@ async def test_resource_manager_resolves_cpu_when_gpu_false(monkeypatch, tmp_pat
             self,
             embedding_model=None,
             reranker_model=None,
-            nli_model=None,
             device=None,
             batch_size=None,
             model_work=None,

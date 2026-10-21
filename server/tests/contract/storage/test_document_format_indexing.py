@@ -22,6 +22,19 @@ class DeterministicDocumentEmbedding:
         return [[float(index % 7) / 7 for index in range(1024)] for _ in values]
 
 
+class TokenBoundDocumentEmbedding(DeterministicDocumentEmbedding):
+    def __init__(self):
+        self.encoded_parts = []
+
+    def split_for_embedding(self, value):
+        return [value[index : index + 80] for index in range(0, len(value), 80)]
+
+    async def encode(self, values):
+        assert all(len(value) <= 80 for value in values)
+        self.encoded_parts.extend(values)
+        return await super().encode(values)
+
+
 def _document_samples():
     return [
         (
@@ -99,16 +112,16 @@ def _document_samples():
                     "language": "notebook",
                     "chunk_kind": "notebook_markdown",
                     "symbol_name": "cell 1",
-                    "start_line": 1,
-                    "end_line": 2,
+                    "start_line": 2,
+                    "end_line": 3,
                 },
                 {
                     "content": "def launch():\n    return 'ready'",
                     "language": "notebook",
                     "chunk_kind": "notebook_code",
                     "symbol_name": "cell 2",
-                    "start_line": 1,
-                    "end_line": 2,
+                    "start_line": 6,
+                    "end_line": 7,
                 },
             ],
         ),
@@ -293,11 +306,12 @@ async def test_failed_extraction_publishes_no_partial_derived_document_state(
         filesystem_factory=ProjectFilesystemFactory(tmp_path / "projects"),
     )
 
-    with pytest.raises(RuntimeError, match="Notebook is not valid JSON"):
-        await service.submit_document(
-            content=b"not-json",
-            original_name="broken.ipynb",
-        )
+    result = await service.submit_document(
+        content=b"not-json",
+        original_name="broken.ipynb",
+    )
+    assert result["status"] == "failed"
+    assert result["error_message"] == "Notebook is not valid JSON"
 
     document = await real_postgres_client.fetch_one(
         """
@@ -308,6 +322,7 @@ async def test_failed_extraction_publishes_no_partial_derived_document_state(
     )
     assert document["status"] == "failed"
     assert document["error_message"] == "Notebook is not valid JSON"
+    assert result["document_id"] == str(document["document_id"])
     assert (
         await real_postgres_client.fetch_all(
             "SELECT chunk_id FROM public.document_chunks WHERE document_id = %s",
@@ -323,3 +338,37 @@ async def test_failed_extraction_publishes_no_partial_derived_document_state(
         """,
         (document["document_id"],),
     ) is None
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.requires_pgvector
+@pytest.mark.no_network
+async def test_long_document_chunk_indexes_all_embedding_parts(
+    real_postgres_client, tmp_path
+):
+    embedding = TokenBoundDocumentEmbedding()
+    service = DocumentService(
+        project_id="project-1",
+        postgres_client=real_postgres_client,
+        embedding_service=embedding,
+        document_rerank_enabled=False,
+        filesystem_factory=ProjectFilesystemFactory(tmp_path / "projects"),
+    )
+    indexed = await service.submit_document(
+        content=("dense source " * 30).encode("utf-8"),
+        original_name="dense.md",
+    )
+
+    assert indexed["status"] == "indexed"
+    assert indexed["chunk_count"] == 1
+    row = await real_postgres_client.fetch_one(
+        """
+        SELECT content, vector_dims(embedding) AS dimensions
+        FROM public.document_chunks WHERE document_id = %s
+        """,
+        (indexed["document_id"],),
+    )
+    assert len(embedding.encoded_parts) > 1
+    assert "".join(embedding.encoded_parts) == row["content"]
+    assert row["dimensions"] == 1024

@@ -26,6 +26,7 @@ class AdvisoryThresholds:
 
     min_occurrences: int = 3
     min_distinct_entities: int = 2
+    min_distinct_pairs: int = 2
     min_distinct_windows: int = 2
 
     def __post_init__(self) -> None:
@@ -33,6 +34,8 @@ class AdvisoryThresholds:
             raise ValueError("min_occurrences must be positive")
         if self.min_distinct_entities < 1:
             raise ValueError("min_distinct_entities must be positive")
+        if self.min_distinct_pairs < 1:
+            raise ValueError("min_distinct_pairs must be positive")
         if self.min_distinct_windows < 1:
             raise ValueError("min_distinct_windows must be positive")
 
@@ -270,9 +273,10 @@ def build_relationship_advisories(
                 "target_entities": set(),
                 "first_observed_ms": None,
                 "last_observed_ms": None,
-                "independent_occurrences": 0,
-                "independent_windows": set(),
-                "independent_entities": set(),
+                "qualifying_occurrences": 0,
+                "qualifying_windows": set(),
+                "qualifying_entities": set(),
+                "qualifying_pairs": set(),
             },
         )
         group["occurrences"] += 1
@@ -286,13 +290,18 @@ def build_relationship_advisories(
             group["source_entities"].add(int(source_id))
         if target_id is not None:
             group["target_entities"].add(int(target_id))
-        if row.get("evidence_origin", "independent") == "independent":
-            group["independent_occurrences"] += 1
-            group["independent_windows"].add(str(row["semantic_window_id"]))
+        # Context extraction is the normal observation source. Separate
+        # semantic windows and entities provide the evidence floor; the
+        # advisory remains a suggestion until a person changes the domain.
+        if row.get("evidence_origin", "independent") in {"independent", "context"}:
+            group["qualifying_occurrences"] += 1
+            group["qualifying_windows"].add(str(row["semantic_window_id"]))
             if source_id is not None:
-                group["independent_entities"].add(int(source_id))
+                group["qualifying_entities"].add(int(source_id))
             if target_id is not None:
-                group["independent_entities"].add(int(target_id))
+                group["qualifying_entities"].add(int(target_id))
+            if source_id is not None and target_id is not None:
+                group["qualifying_pairs"].add((int(source_id), int(target_id)))
         observed_ms = row.get("observed_at_ms")
         if observed_ms is not None:
             observed_ms = int(observed_ms)
@@ -309,9 +318,10 @@ def build_relationship_advisories(
     for key, group in groups.items():
         occurrence_count = group["occurrences"]
         if (
-            group["independent_occurrences"] < thresholds.min_occurrences
-            or len(group["independent_entities"]) < thresholds.min_distinct_entities
-            or len(group["independent_windows"]) < thresholds.min_distinct_windows
+            group["qualifying_occurrences"] < thresholds.min_occurrences
+            or len(group["qualifying_entities"]) < thresholds.min_distinct_entities
+            or len(group["qualifying_pairs"]) < thresholds.min_distinct_pairs
+            or len(group["qualifying_windows"]) < thresholds.min_distinct_windows
         ):
             continue
         advisories.append(

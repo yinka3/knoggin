@@ -44,6 +44,7 @@ def test_policy_normalizes_approved_event_and_drops_raw_content():
             "msg_ids": [1, 2],
             "stage": "semantic_knowledge",
             "error": "x" * 250,
+            "error_type": "RuntimeError",
             "prompt": "raw prompt must not be logged",
             "messages": [{"content": "raw message must not be logged"}],
         },
@@ -54,7 +55,8 @@ def test_policy_normalizes_approved_event_and_drops_raw_content():
     assert record["event"] == "job.failed"
     assert record["user"] == "ada"
     assert record["message_ids"] == "1,2"
-    assert record["error"].endswith("...")
+    assert "error" not in record
+    assert record["error_type"] == "RuntimeError"
     assert "prompt" not in record
     assert "messages" not in record
 
@@ -88,6 +90,7 @@ def test_policy_allows_job_failure_events_with_safe_fields_only():
             "episode_count": 3,
             "failed_episode_ids": ["episode-1", "episode-2"],
             "error": "write failed",
+            "error_type": "StorageError",
             "content": "raw episode text must not be logged",
         },
     ))
@@ -97,7 +100,8 @@ def test_policy_allows_job_failure_events_with_safe_fields_only():
     assert record["entity_id"] == 42
     assert record["episode_count"] == 3
     assert record["failed_episode_ids"] == "episode-1,episode-2"
-    assert record["error"] == "write failed"
+    assert "error" not in record
+    assert record["error_type"] == "StorageError"
     assert "content" not in record
 
 

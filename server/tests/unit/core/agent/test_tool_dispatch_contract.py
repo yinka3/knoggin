@@ -1,13 +1,18 @@
 from types import SimpleNamespace
 
 import pytest
+from loguru import logger
 
 from common.exceptions import StorageReadError, ToolExecutionError
 from common.schema.agent.tool_contracts import (
     TOOL_SCHEMAS_BY_NAME,
 )
 from core.agent.notebook import RunNotebook
-from core.agent.tool_runtime import _tool_argument_metadata, execute_tool
+from core.agent.tool_runtime import (
+    _safe_finish_tool_audit,
+    _tool_argument_metadata,
+    execute_tool,
+)
 from core.agent.tools.memory import MemoryTools
 from core.agent.tools.registry import (
     Tools,
@@ -79,7 +84,7 @@ class DispatchTools:
 
 
     async def broken(self):
-        raise RuntimeError("method exploded")
+        raise RuntimeError("private stored passage from tool")
 
     async def broken_storage(self):
         raise StorageReadError("message search")
@@ -97,7 +102,8 @@ def test_tool_argument_logs_contain_only_bounded_metadata():
             "content": content,
             "api_key": secret,
             "limit": 5,
-        }
+        },
+        {"content", "api_key", "limit"},
     )
 
     rendered = str(metadata)
@@ -108,6 +114,26 @@ def test_tool_argument_logs_contain_only_bounded_metadata():
         "content": {"type": "str", "size": len(content)},
         "limit": {"type": "int"},
     }
+
+
+@pytest.mark.no_network
+async def test_tool_call_log_does_not_copy_unknown_model_argument_keys():
+    private_key = "private stored source passage used as an invalid field"
+    logged = []
+    sink = logger.add(lambda message: logged.append(str(message)))
+    try:
+        with pytest.raises(ToolExecutionError) as failure:
+            await execute_tool(
+                DispatchTools(),
+                "load_project_topic_context",
+                {"topics": ["Work"], private_key: "ignored"},
+            )
+    finally:
+        logger.remove(sink)
+
+    assert private_key not in "".join(logged)
+    assert private_key not in failure.value.message
+    assert any("'_unknown_fields': {'count': 1}" in line for line in logged)
 
 
 @pytest.mark.no_network
@@ -422,13 +448,42 @@ async def test_execute_tool_wraps_tool_method_exceptions(monkeypatch):
         ),
     )
 
-    with pytest.raises(ToolExecutionError) as exc:
-        await execute_tool(tools, "broken_tool", {})
+    logged = []
+    sink = logger.add(lambda message: logged.append(str(message)))
+    try:
+        with pytest.raises(ToolExecutionError) as exc:
+            await execute_tool(tools, "broken_tool", {})
+    finally:
+        logger.remove(sink)
 
     assert exc.value.details["tool"] == "broken_tool"
     assert "Tool execution failed" in exc.value.message
     assert exc.value.retryable is False
     assert exc.value.details["retryable"] is False
+    assert "private stored passage from tool" not in "".join(logged)
+    assert any("RuntimeError" in line for line in logged)
+
+
+@pytest.mark.no_network
+async def test_tool_audit_completion_failure_does_not_log_private_result():
+    class FailingPostgres:
+        async def execute(self, _query, _params):
+            raise RuntimeError("private persisted audit result")
+
+    logged = []
+    sink = logger.add(lambda message: logged.append(str(message)))
+    try:
+        await _safe_finish_tool_audit(
+            SimpleNamespace(postgres=FailingPostgres()),
+            "audit-1",
+            status="succeeded",
+            result={"content": "private persisted audit result"},
+        )
+    finally:
+        logger.remove(sink)
+
+    assert any("RuntimeError" in line for line in logged)
+    assert "private persisted audit result" not in "".join(logged)
 
 
 @pytest.mark.no_network

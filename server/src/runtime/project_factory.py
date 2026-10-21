@@ -35,6 +35,7 @@ from core.knowledge.documents import (
 from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.episodes.generator import EpisodeGenerator
 from core.knowledge.jobs.conflict_discovery_job import ConflictDiscoveryJob
+from core.knowledge.jobs.relationship_advisory_job import RelationshipAdvisoryJob
 from core.knowledge.retrieval import KnowledgeRetrieval
 from core.project.domain_config_store import DomainConfigStore
 from core.project.maintenance_service import ProjectMaintenanceService
@@ -275,6 +276,7 @@ class ProjectRuntimeFactory:
             resources.knowledge_store,
             developer_settings.ingestion,
             token_counter=token_counter,
+            token_counter_batch=getattr(resources.llm_service, "count_tokens_batch", None),
             episode_settings=developer_settings.jobs.episode,
         )
         episode_generator = EpisodeGenerator(
@@ -311,6 +313,9 @@ class ProjectRuntimeFactory:
                 entities=runtime.entities,
             ),
             publish_committed_entity_ids=runtime.entities.publish_committed_entity_ids,
+            signal_relationship_advisories=lambda: runtime.scheduler.wake_job(
+                "relationship_advisories"
+            ),
         )
 
     def _create_conflict_discovery_job(
@@ -358,6 +363,8 @@ class ProjectRuntimeFactory:
             )
         )
         scheduler.register(project_semantic_processor)
+        if self._maintenance_service is not None:
+            scheduler.register(RelationshipAdvisoryJob(self._maintenance_service))
         runtime.add_config_unsubscriber(
             config_manager.subscribe(
                 project_semantic_processor.update_settings,

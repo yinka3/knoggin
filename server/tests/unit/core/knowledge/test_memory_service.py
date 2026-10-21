@@ -1,6 +1,7 @@
 import pytest
 
 from common.exceptions import ToolExecutionError, WorkspaceConflictError
+from common.utils.agent_identity import MAX_BRAIN_CHARS, MAX_BRAIN_SECTION_CHARS
 from core.agent.tools.memory import MemoryTools
 
 
@@ -20,12 +21,15 @@ class RecordingPostgres:
 
 
 class StatefulBrainPostgres:
-    def __init__(self):
-        self.row = brain_row(revision=1)
+    def __init__(self, row=None, snapshot=None):
+        self.row = dict(row) if row is not None else brain_row(revision=1)
+        self.snapshot = snapshot
         self.calls = []
 
     async def fetch_all(self, query, params=None):
         self.calls.append(("fetch_all", query, params))
+        if "FROM public.agent_brain_snapshots" in query:
+            return [{"content": self.snapshot}] if self.snapshot is not None else []
         return [dict(self.row)]
 
     async def execute(self, query, params=None):
@@ -69,6 +73,84 @@ async def test_read_agent_brain_returns_durable_content_and_revision():
         "user_name": "ada",
         "agent_id": "agent-1",
     }
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    "legacy_brain",
+    [
+        brain_row()["brain"] + "x" * MAX_BRAIN_CHARS,
+        brain_row()["brain"] + "\n# Behavioral Directives\nDuplicate directive",
+    ],
+)
+async def test_legacy_invalid_brain_remains_readable_for_repair(legacy_brain):
+    row = {**brain_row(), "brain": legacy_brain}
+    postgres = RecordingPostgres([[row]])
+
+    result = await BrainHarness(postgres).read_agent_brain()
+
+    assert result["revision"] == row["brain_revision"]
+    assert result["content"] == legacy_brain.strip()
+    assert not any(call[0] == "execute" for call in postgres.calls)
+
+
+@pytest.mark.no_network
+async def test_legacy_invalid_brain_still_rejects_a_section_write():
+    row = brain_row()
+    row["brain"] += "x" * MAX_BRAIN_CHARS
+    postgres = RecordingPostgres([[row]])
+
+    with pytest.raises(ToolExecutionError, match="Brain exceeds"):
+        await BrainHarness(postgres).edit_agent_brain(
+            "Project Context", "Replacement context", expected_revision=3,
+        )
+
+    assert not any(call[0] == "execute" for call in postgres.calls)
+
+
+@pytest.mark.no_network
+async def test_edit_agent_brain_can_repair_legacy_oversized_section():
+    row = brain_row(revision=1)
+    row["brain"] = row["brain"].replace(
+        "Old context", "x" * (MAX_BRAIN_SECTION_CHARS + 1)
+    )
+    postgres = StatefulBrainPostgres(row)
+    tools = BrainHarness(postgres)
+
+    before = await tools.read_agent_brain()
+    edited = await tools.edit_agent_brain(
+        "Project Context", "Repaired context", expected_revision=before["revision"]
+    )
+    after = await tools.read_agent_brain()
+
+    assert "x" * (MAX_BRAIN_SECTION_CHARS + 1) in before["content"]
+    assert edited["revision"] == 2
+    assert after["revision"] == 2
+    assert "# Project Context\nRepaired context" in after["content"]
+    assert len(postgres.row["brain"]) <= MAX_BRAIN_CHARS
+
+
+@pytest.mark.no_network
+async def test_restore_agent_brain_can_repair_legacy_oversized_section():
+    row = brain_row(revision=3)
+    row["brain"] = row["brain"].replace(
+        "Old context", "x" * (MAX_BRAIN_SECTION_CHARS + 1)
+    )
+    snapshot = brain_row(revision=1)["brain"].replace(
+        "Old context", "Restored context"
+    ).replace("Stay grounded.", "y" * (MAX_BRAIN_SECTION_CHARS + 1))
+    postgres = StatefulBrainPostgres(row, snapshot=snapshot)
+    tools = BrainHarness(postgres)
+
+    restored = await tools.restore_agent_brain_section(
+        "Project Context", from_snapshot_revision=1, expected_current_revision=3
+    )
+    after = await tools.read_agent_brain()
+
+    assert restored["revision"] == 4
+    assert after["revision"] == 4
+    assert "# Project Context\nRestored context" in after["content"]
+    assert len(postgres.row["brain"]) <= MAX_BRAIN_CHARS
 
 
 @pytest.mark.no_network
@@ -241,6 +323,17 @@ async def test_read_agent_brain_snapshot_returns_owned_snapshot_content():
     assert result["revision"] == 5
     assert "Old context" in result["content"]
     assert postgres.calls[0][2]["revision"] == 5
+
+
+@pytest.mark.no_network
+async def test_legacy_oversized_brain_snapshot_remains_readable():
+    legacy_brain = brain_row()["brain"] + "x" * MAX_BRAIN_CHARS
+    postgres = RecordingPostgres([[{"revision": 1, "content": legacy_brain}]])
+
+    result = await BrainHarness(postgres).read_agent_brain_snapshot(1)
+
+    assert result["revision"] == 1
+    assert result["content"] == legacy_brain.strip()
 
 
 @pytest.mark.no_network

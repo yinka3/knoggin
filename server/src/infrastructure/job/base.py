@@ -37,3 +37,6 @@ class BaseJob(ABC):
     @abstractmethod
     async def execute(self, ctx: JobContext) -> JobResult:
         raise NotImplementedError
+
+    async def on_timeout(self, ctx: JobContext) -> None:
+        """Optional callback after scheduler timeout cancellation has unwound."""

@@ -19,6 +19,30 @@ class DocumentWriter:
         self._client = client
         self._project_id = project_id
 
+    async def queue_legacy_locator_reindex(
+        self, *, pdf_fingerprint: str, notebook_fingerprint: str
+    ) -> int:
+        """Queue old indexed snapshots while preserving them until replacement."""
+        async with self._client.transaction() as cur:
+            await cur.execute(
+                """
+                UPDATE public.project_documents AS document
+                SET status = 'queued', index_attempt_count = 0,
+                    next_index_retry_at = NULL, last_index_failure_kind = NULL,
+                    error_message = NULL, updated_at = now()
+                FROM public.document_parse_snapshots AS snapshot
+                WHERE document.project_id = %s
+                  AND document.status = 'indexed'
+                  AND document.current_snapshot_id = snapshot.snapshot_id
+                  AND snapshot.source_content_hash = document.content_hash
+                  AND ((document.extension = '.pdf' AND snapshot.parser_fingerprint <> %s)
+                    OR (document.extension = '.ipynb' AND snapshot.parser_fingerprint <> %s))
+                RETURNING document.document_id
+                """,
+                (self._project_id, pdf_fingerprint, notebook_fingerprint),
+            )
+            return len(await cur.fetchall())
+
     @staticmethod
     def _validate_chunk_embeddings(
         chunks: List[Union["DocumentChunk", str]],
@@ -29,6 +53,10 @@ class DocumentWriter:
             raise ValueError(
                 f"{operation}: chunks and embeddings must have the same length"
             )
+        for chunk, embedding in zip(chunks, embeddings):
+            json.dumps(embedding, allow_nan=False)
+            if not isinstance(chunk, str) and chunk.layout_region is not None:
+                json.dumps(chunk.layout_region, allow_nan=False)
 
     @staticmethod
     async def _copy_chunk_rows(cur, rows: List[tuple]) -> None:
@@ -84,7 +112,7 @@ class DocumentWriter:
             chunk_index,
             chunk.content,
             relative_path,
-            json.dumps(embedding),
+            json.dumps(embedding, allow_nan=False),
             chunk.language,
             chunk.chunk_kind,
             chunk.symbol_name,
@@ -96,7 +124,9 @@ class DocumentWriter:
             list(chunk.section_path) if chunk.section_path is not None else None,
             chunk.start_paragraph,
             chunk.end_paragraph,
-            json.dumps(chunk.layout_region) if chunk.layout_region is not None else None,
+            json.dumps(chunk.layout_region, allow_nan=False)
+            if chunk.layout_region is not None
+            else None,
         )
 
     async def insert_document(
@@ -124,13 +154,14 @@ class DocumentWriter:
                     extension,
                     size_bytes,
                     content_hash,
+                    scan_managed,
                     status,
                     created_at,
                     updated_at
                 )
                 VALUES (
                     %s, %s,
-                    %s, %s, %s, %s, %s, 'queued', %s, %s
+                    %s, %s, %s, %s, %s, false, 'queued', %s, %s
                 )
                 """,
                 (
@@ -206,11 +237,12 @@ class DocumentWriter:
                         extension,
                         size_bytes,
                         content_hash,
+                        scan_managed,
                         status,
                         created_at,
                         updated_at
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, 'queued', %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, true, 'queued', %s, %s)
                     """,
                     (
                         item["document_id"],
@@ -443,7 +475,7 @@ class DocumentWriter:
             "persist_indexed_chunks",
         )
         snapshot_id = str(uuid.uuid4())
-        snapshot_payload = json.dumps(parse_snapshot.to_storage_payload())
+        snapshot_payload = json.dumps(parse_snapshot.to_storage_payload(), allow_nan=False)
         async with self._client.transaction() as cur:
             await cur.execute(
                 """
@@ -753,16 +785,18 @@ class DocumentWriter:
         link_id: str,
         title: str | None,
         summary: str | None,
+        update_title: bool,
+        update_summary: bool,
         updated_at: str,
     ) -> Optional[Dict]:
-        """Replace bookmark presentation fields within the active project."""
+        """Update supplied bookmark fields without overwriting concurrent edits."""
         async with self._client.transaction() as cur:
             await cur.execute(
                 """
                 UPDATE public.saved_web_links
                 SET
-                    title = %s,
-                    summary = %s,
+                    title = CASE WHEN %s THEN %s ELSE title END,
+                    summary = CASE WHEN %s THEN %s ELSE summary END,
                     updated_at = %s
                 WHERE link_id = %s
                   AND project_id = %s
@@ -775,7 +809,15 @@ class DocumentWriter:
                     created_at,
                     updated_at
                 """,
-                (title, summary, updated_at, link_id, self._project_id),
+                (
+                    update_title,
+                    title,
+                    update_summary,
+                    summary,
+                    updated_at,
+                    link_id,
+                    self._project_id,
+                ),
             )
             row = await cur.fetchone()
         return dict(row) if row is not None else None

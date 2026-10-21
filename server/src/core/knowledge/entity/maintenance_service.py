@@ -16,6 +16,7 @@ from core.knowledge.db.writers.global_entity_merge_writer import (
     GlobalEntityMergeWriter,
 )
 from core.knowledge.db.writers.maintenance_review_writer import MaintenanceReviewWriter
+from core.knowledge.entity.merge_advisor import EntityMergeAdvisor
 from core.knowledge.maintenance.maintenance_reviews import (
     EntityContextMergeChoice,
     EntityMergePlan,
@@ -36,6 +37,7 @@ class EntityMaintenanceService:
         self,
         postgres: PostgresClient,
         user_name: str,
+        llm=None,
     ) -> None:
         if postgres is None:
             raise ValueError("EntityMaintenanceService requires PostgreSQL")
@@ -47,6 +49,9 @@ class EntityMaintenanceService:
         self.review_writer = MaintenanceReviewWriter(postgres)
         self.projection_rebuilder = GraphBuilder(postgres)
         self.semantic_window_reader = SemanticWindowReader(postgres)
+        self.merge_advisor = (
+            EntityMergeAdvisor(postgres, llm, self.user_name) if llm is not None else None
+        )
 
     @asynccontextmanager
     async def _cursor(self, cur=None):
@@ -101,13 +106,13 @@ class EntityMaintenanceService:
             SELECT p.entity_a_id, p.entity_b_id, p.name_a, p.name_b, p.signal,
                    COALESCE(array_agg(DISTINCT context.project_id)
                             FILTER (WHERE context.project_id IS NOT NULL), '{}') AS project_ids,
-                   (SELECT count(*) FROM public.message_entity_refs ref
+                   (SELECT count(DISTINCT ref.message_id) FROM public.message_entity_refs ref
                     WHERE ref.entity_id IN (p.entity_a_id, p.entity_b_id)) AS message_ref_count
             FROM pairs p
             LEFT JOIN public.project_entity_contexts context
               ON context.entity_id IN (p.entity_a_id, p.entity_b_id)
             GROUP BY p.entity_a_id, p.entity_b_id, p.name_a, p.name_b, p.signal
-            ORDER BY p.entity_a_id, p.entity_b_id
+            ORDER BY message_ref_count DESC, p.entity_a_id, p.entity_b_id
             LIMIT %s
             """,
             (actor.strip(), limit),
@@ -231,6 +236,34 @@ class EntityMaintenanceService:
             "definition_versions": definition_versions,
         }
 
+    async def advise_merge(
+        self,
+        *,
+        user_name: str | None = None,
+        survivor_entity_id: int,
+        retired_entity_id: int,
+    ) -> dict[str, Any]:
+        """Return bounded model advice without opening or applying a merge review."""
+
+        if self.merge_advisor is None:
+            raise RuntimeError("Entity merge advisor has no configured LLM")
+        actor = user_name or self.user_name
+        if actor != self.user_name:
+            raise ValueError("merge advisor cannot cross its user scope")
+        preview = await self.preview_merge(
+            user_name=actor,
+            survivor_entity_id=survivor_entity_id,
+            retired_entity_id=retired_entity_id,
+        )
+        advice = await self.merge_advisor.advise(preview)
+        return {
+            "candidate_entity_ids": [survivor_entity_id, retired_entity_id],
+            "state_hash": preview["state_hash"],
+            "context_conflicts": preview["context_conflicts"],
+            "context_plan_ready": preview["ready"],
+            **advice,
+        }
+
     async def propose(
         self,
         *,
@@ -240,6 +273,7 @@ class EntityMaintenanceService:
         reasoning: str,
         evidence_refs: Iterable[EvidencePointer | dict[str, Any] | int] = (),
         context_choices: Iterable[EntityContextMergeChoice | dict[str, Any]] = (),
+        expected_state_hash: str | None = None,
     ):
         """Persist an explicit global merge review; no mutation occurs."""
 
@@ -252,6 +286,15 @@ class EntityMaintenanceService:
             retired_entity_id=retired_entity_id,
             context_choices=context_choices,
         )
+        if (
+            expected_state_hash is not None
+            and preview["state_hash"] != expected_state_hash
+        ):
+            raise ValueError("candidate state changed before the merge review was opened")
+        if not preview["ready"]:
+            raise ValueError(
+                "merge review requires a valid choice for every project context conflict"
+            )
         refs = [
             value
             if isinstance(value, EvidencePointer)
@@ -272,9 +315,8 @@ class EntityMaintenanceService:
         invalid_refs = [
             ref
             for ref in refs
-            if (
-                ref.kind == "message" and ref.identifier not in valid_message_ids
-            )
+            if ref.kind not in {"message", "episode"}
+            or (ref.kind == "message" and ref.identifier not in valid_message_ids)
             or (ref.kind == "episode" and ref.identifier not in valid_episode_ids)
         ]
         if invalid_refs:

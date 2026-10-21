@@ -10,12 +10,14 @@ from core.project.domain_config_operations import (
 from core.project.domain_config_store import (
     DomainActivation,
     DomainConfigConflict,
+    DomainConfigSectionRemovalConflict,
     DomainConfigStore,
 )
 
 __all__ = [
     "DomainActivation",
     "DomainConfigConflict",
+    "DomainConfigSectionRemovalConflict",
     "DomainConfigStore",
     "DomainPreview",
     "DomainValidation",

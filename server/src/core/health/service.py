@@ -74,6 +74,8 @@ class RuntimeHealthService:
             warnings.append("PostgreSQL probe failed")
         if projection_repair.get("pending_count", 0):
             warnings.append("Maintenance projection repair is pending")
+        if projection_repair.get("available") is not True:
+            warnings.append("Maintenance projection repair health is unavailable")
         warnings.extend(
             f"{name.replace('_', ' ')} is unavailable"
             for name in unavailable_subsystems
@@ -88,6 +90,7 @@ class RuntimeHealthService:
         elif (
             self._closing
             or projection_repair.get("pending_count", 0)
+            or projection_repair.get("available") is not True
         ):
             status = HealthStatus.DEGRADED
             summary = "Runtime is operating with degraded health"
@@ -272,17 +275,78 @@ class RuntimeHealthService:
         claimed_count = self._nonnegative_int(queue_details.get("claimed_count"))
         failed_count = self._nonnegative_int(queue_details.get("failed_count"))
         exhausted_count = self._nonnegative_int(queue_details.get("exhausted_count"))
+        due_count = self._nonnegative_int(queue_details.get("due_count"))
+        ready_exchange_count = self._nonnegative_int(
+            queue_details.get("ready_exchange_count")
+        )
+        blocked_session_count = self._nonnegative_int(
+            queue_details.get("blocked_session_count")
+        )
+        blocked_closed_count = self._nonnegative_int(
+            queue_details.get("blocked_closed_count")
+        )
         consecutive_failures = self._nonnegative_int(
             scheduler_snapshot.get("recent_failed_jobs")
+        )
+        check_failures_by_job = scheduler_snapshot.get("check_failures_by_job")
+        semantic_check_failures = self._nonnegative_int(
+            check_failures_by_job.get("project_semantic")
+            if isinstance(check_failures_by_job, Mapping)
+            else None
         )
         projection_failed = projection_details.get("failed") is True
 
         oldest_age = queue_details.get("oldest_pending_age_seconds")
+        oldest_due_age = queue_details.get("oldest_due_progress_age_seconds")
+        latest_ready_close_age = queue_details.get("latest_ready_close_age_seconds")
+        oldest_blocked_close_age = queue_details.get("oldest_blocked_close_age_seconds")
+        active_jobs = scheduler_snapshot.get("active_jobs")
+        semantic_job_active = isinstance(active_jobs, list) and any(
+            isinstance(job, Mapping)
+            and job.get("name") == "project_semantic"
+            and job.get("state") in {"queued", "running"}
+            for job in active_jobs
+        )
+        cadence = getattr(semantic_processor, "cadence_seconds", 30)
+        delay_grace = (
+            max(60, 2 * cadence)
+            if isinstance(cadence, (int, float)) and cadence > 0
+            else 60
+        )
+        overdue_without_job = (
+            due_count > 0
+            and oldest_due_age is not None
+            and oldest_due_age > delay_grace
+            and not semantic_job_active
+        )
+        idle_flush_grace = 300 + delay_grace
+        unclaimed_stalled = (
+            pending_count == 0
+            and ready_exchange_count > 0
+            and latest_ready_close_age is not None
+            and latest_ready_close_age > idle_flush_grace
+            and not semantic_job_active
+        )
+        fifo_blocked = (
+            blocked_closed_count > 0
+            and oldest_blocked_close_age is not None
+            and oldest_blocked_close_age > idle_flush_grace
+        )
         scheduler_state = scheduler_snapshot.get("state")
         if semantic_processor is None:
             scheduler_state = "not_registered"
-        if scheduler_state == "stopped" or self._nonnegative_int(
-            scheduler_snapshot.get("stalled_jobs")
+        enabled_jobs = scheduler_snapshot.get("enabled_jobs")
+        semantic_job_disabled = (
+            isinstance(enabled_jobs, list)
+            and "project_semantic" not in enabled_jobs
+        )
+        if (
+            scheduler_state == "stopped"
+            or self._nonnegative_int(scheduler_snapshot.get("stalled_jobs"))
+            or overdue_without_job
+            or unclaimed_stalled
+            or fifo_blocked
+            or (semantic_job_disabled and (pending_count or ready_exchange_count))
         ):
             delay_state = "stalled"
         elif pending_count:
@@ -292,6 +356,8 @@ class RuntimeHealthService:
 
         if delay_state == "stalled":
             warnings.append("pending semantic work is stalled")
+        if fifo_blocked:
+            warnings.append("closed semantic exchanges are blocked by earlier session work")
         if failed_count:
             warnings.append("semantic windows have recorded failures")
         if exhausted_count:
@@ -300,10 +366,14 @@ class RuntimeHealthService:
             )
         if consecutive_failures:
             warnings.append("semantic scheduler has recent failures")
+        if semantic_check_failures:
+            warnings.append("semantic scheduler admission checks are failing")
         if projection_failed:
             warnings.append("Context projection has a recorded synchronization failure")
         if scheduler_state in {"not_registered", "stopped"}:
             warnings.append("project semantic job is not running")
+        if semantic_job_disabled:
+            warnings.append("project semantic job is disabled")
 
         if not project_runtime_loaded:
             status = HealthStatus.DEGRADED
@@ -314,10 +384,12 @@ class RuntimeHealthService:
         elif (
             not queue_available
             or scheduler_state != "running"
+            or semantic_job_disabled
             or delay_state == "stalled"
             or failed_count
             or exhausted_count
             or consecutive_failures
+            or semantic_check_failures
             or projection_failed
             or projection_details.get("read_failed") is True
         ):
@@ -331,6 +403,7 @@ class RuntimeHealthService:
             activity = HealthActivity.DELAYED
         elif (
             pending_count
+            or ready_exchange_count
             or claimed_count
             or self._nonnegative_int(scheduler_snapshot.get("running_jobs"))
         ):
@@ -367,11 +440,18 @@ class RuntimeHealthService:
                     "claimed_count": claimed_count,
                     "failed_count": failed_count,
                     "exhausted_count": exhausted_count,
+                    "due_count": due_count,
+                    "ready_exchange_count": ready_exchange_count,
+                    "blocked_session_count": blocked_session_count,
+                    "blocked_closed_count": blocked_closed_count,
+                    "latest_ready_close_age_seconds": latest_ready_close_age,
+                    "oldest_blocked_close_age_seconds": oldest_blocked_close_age,
                     "manual_retry_required": exhausted_count > 0,
                     "oldest_pending_available": (
                         queue_details.get("oldest_pending_available") is True
                     ),
                     "oldest_pending_age_seconds": oldest_age,
+                    "oldest_due_progress_age_seconds": oldest_due_age,
                     "delay_state": delay_state,
                 },
                 "context_projection": {
@@ -435,6 +515,11 @@ class RuntimeHealthService:
         )
         if pending_error is not None:
             warnings.append("durable document-index count is unavailable")
+        terminal_failure_count, terminal_error = await self._read_terminal_index_failure_count(
+            document_service
+        )
+        if terminal_error is not None:
+            warnings.append("terminal document-index failure count is unavailable")
 
         scheduler_state = scheduler_snapshot.get("state")
         queued_jobs = self._nonnegative_int(scheduler_snapshot.get("queued_jobs"))
@@ -450,7 +535,22 @@ class RuntimeHealthService:
         local_indexing_tasks = self._nonnegative_int(
             indexing_snapshot.get("local_submission_tasks")
         )
+        index_operations = [
+            name
+            for key in ("queued_operation_categories", "active_operation_categories")
+            for categories in [background_snapshot.get(key)]
+            if isinstance(categories, (list, tuple))
+            for name in categories
+        ]
+        indexing_active = bool(
+            local_indexing_tasks
+            or indexing_snapshot.get("admission_loop_active") is True
+            or "document-index" in index_operations
+        )
         pending_documents = pending_count if pending_count is not None else 0
+        terminal_failures = (
+            terminal_failure_count if terminal_failure_count is not None else 0
+        )
         work_present = bool(
             queued_jobs
             or running_jobs
@@ -487,15 +587,18 @@ class RuntimeHealthService:
         elif pending_error is not None:
             status = HealthStatus.DEGRADED
             summary = "Document-indexing health is unavailable"
+        elif terminal_error is not None:
+            status = HealthStatus.DEGRADED
+            summary = "Document-indexing failure health is unavailable"
+        elif terminal_failures:
+            status = HealthStatus.DEGRADED
+            summary = "Documents have terminal indexing failures"
         elif conflict_discovery_unavailable:
             status = HealthStatus.DEGRADED
             summary = "Assisted conflict discovery is unavailable"
         elif (
             pending_documents
-            and not running_jobs
-            and not queued_jobs
-            and not queued_background
-            and not active_background
+            and not indexing_active
         ):
             status = HealthStatus.DEGRADED
             summary = "Durable document indexing is not progressing"
@@ -506,7 +609,8 @@ class RuntimeHealthService:
         if (
             stalled_jobs
             or (scheduler_state != "running" and work_present)
-            or (pending_documents and not running_jobs and not active_background)
+            or (pending_documents and not indexing_active)
+            or terminal_failures
         ):
             activity = HealthActivity.DELAYED
         elif work_present:
@@ -524,6 +628,8 @@ class RuntimeHealthService:
             warnings.append("project background work is queued")
         if pending_documents:
             warnings.append("durable document indexing is pending")
+        if terminal_failures:
+            warnings.append("documents have terminal indexing failures")
         if conflict_discovery_unavailable:
             warnings.append("assisted conflict discovery is unavailable")
 
@@ -539,6 +645,7 @@ class RuntimeHealthService:
                 "document_indexing": {
                     **indexing_snapshot,
                     "pending_document_count": pending_count,
+                    "terminal_failure_count": terminal_failure_count,
                 },
             },
             warnings=warnings,
@@ -567,6 +674,22 @@ class RuntimeHealthService:
             return None, error
         return self._nonnegative_int_or_none(value), None
 
+    async def _read_terminal_index_failure_count(
+        self,
+        document_service: Any,
+    ) -> tuple[int | None, str | None]:
+        method = (
+            getattr(document_service, "terminal_index_failure_count", None)
+            if document_service is not None
+            else None
+        )
+        if not callable(method):
+            return None, "unavailable"
+        value, error = await self._bounded_read(method)
+        if error is not None:
+            return None, error
+        return self._nonnegative_int_or_none(value), None
+
     async def _read_semantic_window_health(
         self,
         *,
@@ -585,8 +708,15 @@ class RuntimeHealthService:
                 "claimed_count": 0,
                 "failed_count": 0,
                 "exhausted_count": 0,
+                "due_count": 0,
+                "ready_exchange_count": 0,
+                "blocked_session_count": 0,
+                "blocked_closed_count": 0,
+                "latest_ready_close_age_seconds": None,
+                "oldest_blocked_close_age_seconds": None,
                 "oldest_pending_available": False,
                 "oldest_pending_age_seconds": None,
+                "oldest_due_progress_age_seconds": None,
                 "last_processed_available": False,
             }
 
@@ -604,8 +734,15 @@ class RuntimeHealthService:
                 "claimed_count": 0,
                 "failed_count": 0,
                 "exhausted_count": 0,
+                "due_count": 0,
+                "ready_exchange_count": 0,
+                "blocked_session_count": 0,
+                "blocked_closed_count": 0,
+                "latest_ready_close_age_seconds": None,
+                "oldest_blocked_close_age_seconds": None,
                 "oldest_pending_available": False,
                 "oldest_pending_age_seconds": None,
+                "oldest_due_progress_age_seconds": None,
                 "last_processed_available": False,
             }
 
@@ -615,6 +752,21 @@ class RuntimeHealthService:
             if oldest_ms is not None
             else None
         )
+        oldest_due_ms = self._nonnegative_int_or_none(
+            queue.get("oldest_due_progress_ms")
+        )
+        oldest_due_age = (
+            max(get_now().timestamp() - oldest_due_ms / 1000, 0.0)
+            if oldest_due_ms is not None
+            else None
+        )
+        latest_ready_close_ms = self._nonnegative_int_or_none(
+            queue.get("latest_ready_close_ms")
+        )
+        oldest_blocked_close_ms = self._nonnegative_int_or_none(
+            queue.get("oldest_blocked_close_ms")
+        )
+        now_seconds = get_now().timestamp()
         return {
             "queue_available": True,
             "warnings": [],
@@ -622,8 +774,29 @@ class RuntimeHealthService:
             "claimed_count": self._nonnegative_int(queue.get("claimed_count")),
             "failed_count": self._nonnegative_int(queue.get("failed_count")),
             "exhausted_count": self._nonnegative_int(queue.get("exhausted_count")),
+            "due_count": self._nonnegative_int(queue.get("due_count")),
+            "ready_exchange_count": self._nonnegative_int(
+                queue.get("ready_exchange_count")
+            ),
+            "blocked_session_count": self._nonnegative_int(
+                queue.get("blocked_session_count")
+            ),
+            "blocked_closed_count": self._nonnegative_int(
+                queue.get("blocked_closed_count")
+            ),
+            "latest_ready_close_age_seconds": (
+                max(now_seconds - latest_ready_close_ms / 1000, 0.0)
+                if latest_ready_close_ms is not None
+                else None
+            ),
+            "oldest_blocked_close_age_seconds": (
+                max(now_seconds - oldest_blocked_close_ms / 1000, 0.0)
+                if oldest_blocked_close_ms is not None
+                else None
+            ),
             "oldest_pending_available": oldest_ms is not None,
             "oldest_pending_age_seconds": oldest_age,
+            "oldest_due_progress_age_seconds": oldest_due_age,
             "last_processed_available": queue.get("last_processed_ms") is not None,
         }
 

@@ -94,4 +94,7 @@ def test_window_rejects_proposals_that_share_a_source_message():
 
 
 def test_empty_window_proposals_are_the_explicit_skip_result():
-    assert LLMEpisodeWindowDecision().proposals == []
+    assert LLMEpisodeWindowDecision(proposals=[]).proposals == []
+
+    with pytest.raises(ValidationError, match="proposals"):
+        LLMEpisodeWindowDecision.model_validate({})

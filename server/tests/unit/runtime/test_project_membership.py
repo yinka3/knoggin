@@ -100,8 +100,11 @@ class RecordingEntityCache:
 
 
 def make_manager(postgres, *, filesystem_factory=None):
+    async def get_vp01(_language):
+        return SimpleNamespace(extract_entities=lambda *_args, **_kwargs: ())
+
     return ProjectManager(
-        resources=SimpleNamespace(postgres=postgres),
+        resources=SimpleNamespace(postgres=postgres, get_vp01=get_vp01),
         user_name="ada",
         filesystem_factory=filesystem_factory,
     )
@@ -238,9 +241,8 @@ async def test_create_project_persists_metadata_and_default_topics(
             [project_row()],
         ]
     )
-    manager = ProjectManager(
-        resources=SimpleNamespace(postgres=postgres),
-        user_name="ada",
+    manager = make_manager(
+        postgres,
         filesystem_factory=ProjectFilesystemFactory(tmp_path / "projects"),
     )
     monkeypatch.setattr(
@@ -264,6 +266,40 @@ async def test_create_project_persists_metadata_and_default_topics(
     assert result["id"] == "project-1"
     assert postgres.transaction_enters == 1
     assert postgres.transaction_exits == 1
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+@pytest.mark.parametrize("invalid_adapter", [False, True])
+async def test_create_project_rejects_unavailable_vp01_before_files_or_storage(
+    invalid_adapter, tmp_path
+):
+    postgres = RecordingPostgres()
+    projects_root = tmp_path / "projects"
+
+    async def get_vp01(language):
+        assert language == "multilingual"
+        if invalid_adapter:
+            return object()
+        raise RuntimeError("model unavailable")
+
+    project_manager = ProjectManager(
+        resources=SimpleNamespace(postgres=postgres, get_vp01=get_vp01),
+        user_name="ada",
+        filesystem_factory=ProjectFilesystemFactory(projects_root),
+    )
+    candidate = make_domain_config(version=0).to_dict()
+    candidate["vp01_language"] = "multilingual"
+
+    with pytest.raises(
+        TypeError if invalid_adapter else RuntimeError,
+        match="VP-01 adapter" if invalid_adapter else "model unavailable",
+    ):
+        await project_manager.create_project("Research", domain_config=candidate)
+
+    assert postgres.calls == []
+    assert postgres.transaction_enters == 0
+    assert not projects_root.exists()
 
 
 @pytest.mark.runtime

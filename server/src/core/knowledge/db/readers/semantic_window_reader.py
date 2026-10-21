@@ -258,7 +258,7 @@ class SemanticWindowReader:
         user_name: str,
         project_id: str,
     ) -> dict[str, int | None]:
-        """Return bounded aggregate window status without message identifiers."""
+        """Return bounded window and admission status without message payloads."""
 
         user_name, project_id = self._scope(
             user_name, project_id, "get_health_summary"
@@ -276,6 +276,21 @@ class SemanticWindowReader:
                 ) AS exhausted_count,
                 min((EXTRACT(EPOCH FROM claimed_at) * 1000)::BIGINT)
                     FILTER (WHERE stage <> 'completed') AS oldest_pending_ms,
+                count(*) FILTER (
+                    WHERE stage <> 'completed'
+                      AND (last_failure_at_ms IS NULL OR next_retry_at_ms IS NOT NULL)
+                      AND (next_retry_at_ms IS NULL OR next_retry_at_ms <=
+                           (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT)
+                ) AS due_count,
+                min(GREATEST(
+                    (EXTRACT(EPOCH FROM updated_at) * 1000)::BIGINT,
+                    COALESCE(next_retry_at_ms, 0)
+                )) FILTER (
+                    WHERE stage <> 'completed'
+                      AND (last_failure_at_ms IS NULL OR next_retry_at_ms IS NOT NULL)
+                      AND (next_retry_at_ms IS NULL OR next_retry_at_ms <=
+                           (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT)
+                ) AS oldest_due_progress_ms,
                 max((EXTRACT(EPOCH FROM completed_at) * 1000)::BIGINT)
                     AS last_processed_ms
             FROM public.project_semantic_windows
@@ -283,7 +298,7 @@ class SemanticWindowReader:
             """,
             (user_name, project_id),
         )
-        return {
+        summary = {
             key: row.get(key) if row else None
             for key in (
                 "pending_count",
@@ -291,9 +306,97 @@ class SemanticWindowReader:
                 "failed_count",
                 "exhausted_count",
                 "oldest_pending_ms",
+                "due_count",
+                "oldest_due_progress_ms",
                 "last_processed_ms",
             )
         }
+        admission = await self.client.fetch_one(
+            f"""
+            WITH {_ELIGIBLE_CONVERSATION_EXCHANGES_CTE},
+            unclaimed AS (
+                SELECT
+                    eligible.session_id,
+                    eligible.user_message_id,
+                    eligible.user_timestamp_ms,
+                    eligible.exchange_closed_at_ms,
+                    CASE
+                        WHEN eligible.user_exchange_state = 'closed'
+                         AND eligible.user_lifecycle_state = 'sealed'
+                         AND eligible.user_exchange_outcome IS NOT NULL
+                         AND eligible.exchange_closed_at_ms IS NOT NULL
+                         AND eligible.user_exchange_outcome IN ('failed', 'cancelled')
+                        THEN 'skipped'
+                        WHEN eligible.user_exchange_state = 'closed'
+                         AND eligible.user_lifecycle_state = 'sealed'
+                         AND eligible.user_exchange_outcome IS NOT NULL
+                         AND eligible.exchange_closed_at_ms IS NOT NULL
+                         AND (
+                            (eligible.user_exchange_outcome IN
+                                ('assistant_final', 'clarification')
+                             AND eligible.assistant_message_id IS NOT NULL
+                             AND eligible.assistant_lifecycle_state = 'sealed')
+                            OR (eligible.user_exchange_outcome NOT IN
+                                ('assistant_final', 'clarification', 'failed', 'cancelled')
+                                AND eligible.assistant_message_id IS NULL)
+                         )
+                        THEN 'ready'
+                        ELSE 'blocked'
+                    END AS admission_state
+                FROM eligible_conversation_exchanges AS eligible
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM public.project_semantic_window_messages AS membership
+                    WHERE membership.project_id = eligible.project_id
+                      AND membership.message_id IN (
+                          eligible.user_message_id,
+                          COALESCE(eligible.assistant_message_id, -1)
+                      )
+                )
+            ),
+            ordered AS (
+                SELECT
+                    unclaimed.*,
+                    count(*) FILTER (WHERE admission_state = 'blocked') OVER (
+                        PARTITION BY session_id
+                        ORDER BY user_timestamp_ms ASC NULLS LAST, user_message_id
+                        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                    ) AS blockers_through
+                FROM unclaimed
+            )
+            SELECT
+                count(*) FILTER (
+                    WHERE admission_state = 'ready' AND blockers_through = 0
+                ) AS ready_exchange_count,
+                max(exchange_closed_at_ms) FILTER (
+                    WHERE admission_state = 'ready' AND blockers_through = 0
+                ) AS latest_ready_close_ms,
+                count(DISTINCT session_id) FILTER (
+                    WHERE admission_state = 'blocked'
+                ) AS blocked_session_count,
+                count(*) FILTER (
+                    WHERE admission_state = 'ready' AND blockers_through > 0
+                ) AS blocked_closed_count,
+                min(exchange_closed_at_ms) FILTER (
+                    WHERE admission_state = 'ready' AND blockers_through > 0
+                ) AS oldest_blocked_close_ms
+            FROM ordered
+            """,
+            (user_name, project_id),
+        )
+        summary.update(
+            {
+                key: admission.get(key) if admission else None
+                for key in (
+                    "ready_exchange_count",
+                    "latest_ready_close_ms",
+                    "blocked_session_count",
+                    "blocked_closed_count",
+                    "oldest_blocked_close_ms",
+                )
+            }
+        )
+        return summary
 
     async def get_window_messages(
         self,
@@ -492,16 +595,17 @@ class SemanticWindowReader:
                 eligible.assistant_content,
                 eligible.assistant_timestamp_ms,
                 eligible.assistant_lifecycle_state,
-                EXISTS (
-                    SELECT 1
-                    FROM public.project_semantic_window_messages AS membership
-                    WHERE membership.project_id = eligible.project_id
-                      AND membership.message_id IN (
-                          eligible.user_message_id,
-                          COALESCE(eligible.assistant_message_id, -1)
-                      )
-                ) AS already_claimed
+                FALSE AS already_claimed
             FROM eligible_conversation_exchanges AS eligible
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM public.project_semantic_window_messages AS membership
+                WHERE membership.project_id = eligible.project_id
+                  AND membership.message_id IN (
+                      eligible.user_message_id,
+                      COALESCE(eligible.assistant_message_id, -1)
+                  )
+            )
             ORDER BY eligible.session_id,
                      eligible.user_timestamp_ms ASC NULLS LAST,
                      eligible.user_message_id
@@ -533,6 +637,7 @@ class SemanticWindowReader:
                 SELECT count(*) AS pending_exchange_count
                 FROM eligible_conversation_exchanges AS eligible
                 WHERE eligible.user_exchange_state = 'closed'
+                  AND eligible.user_exchange_outcome NOT IN ('failed', 'cancelled')
                   AND NOT EXISTS (
                       SELECT 1
                       FROM public.project_semantic_window_messages AS membership

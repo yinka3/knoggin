@@ -564,6 +564,12 @@ class MaintenanceReviewDecisionRequest(PublicModel):
     reason: str | None = Field(default=None, max_length=2_000)
 
 
+class RelationshipAdvisoryActionRequest(PublicModel):
+    action: Literal["accept", "edit", "dismiss", "reopen", "suppress"]
+    relationship_type: str | None = Field(default=None, max_length=40)
+    note: str | None = Field(default=None, max_length=2_000)
+
+
 class MaintenanceOperationResponse(PublicModel):
     result: dict[str, Any]
 

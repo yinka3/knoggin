@@ -174,6 +174,7 @@ class DocumentReader:
                 pd.extension,
                 pd.size_bytes,
                 pd.content_hash,
+                pd.scan_managed,
                 pd.current_snapshot_id,
                 pd.status,
                 pd.created_at,
@@ -325,6 +326,7 @@ class DocumentReader:
                 pd.extension,
                 pd.size_bytes,
                 pd.content_hash,
+                pd.scan_managed,
                 pd.current_snapshot_id,
                 pd.status,
                 pd.index_attempt_count,
@@ -354,6 +356,20 @@ class DocumentReader:
                 status = 'queued'
                 OR (status = 'failed' AND next_index_retry_at IS NOT NULL)
               )
+            """,
+            (self._project_id,),
+        )
+        return int(rows[0]["count"]) if rows else 0
+
+    async def count_terminal_index_failures(self) -> int:
+        """Count failed project documents that have no automatic retry."""
+        rows = await self._client.fetch_all(
+            """
+            SELECT COUNT(*)::INTEGER AS count
+            FROM public.project_documents
+            WHERE project_id = %s
+              AND status = 'failed'
+              AND next_index_retry_at IS NULL
             """,
             (self._project_id,),
         )
@@ -422,6 +438,41 @@ class DocumentReader:
         """
         params.append(limit)
         return await self._client.fetch_all(query, tuple(params))
+
+    async def find_indexed_documents_by_name(
+        self,
+        *,
+        document_name: str,
+        path_prefix: Optional[str] = None,
+    ) -> List[Dict]:
+        """Find up to two visible matches across the full indexed catalog."""
+        query = """
+            SELECT pd.document_id, pd.project_id, pd.original_name,
+                   pd.relative_path, pd.status
+            FROM public.project_documents AS pd
+            WHERE pd.status = 'indexed'
+              AND (LOWER(pd.relative_path) = LOWER(%s)
+                   OR LOWER(pd.original_name) = LOWER(%s))
+        """
+        params: list = [document_name, document_name]
+        query += self._document_visibility_sql()
+        params.extend(self._document_visibility_params())
+        if path_prefix is not None:
+            escaped = self._escape_like(path_prefix)
+            query += (
+                " AND (pd.relative_path = %s "
+                "OR pd.relative_path LIKE %s ESCAPE '\\')"
+            )
+            params.extend([path_prefix, f"{escaped}/%"])
+        query += """
+            ORDER BY CASE WHEN LOWER(pd.relative_path) = LOWER(%s)
+                          THEN 0 ELSE 1 END,
+                     pd.created_at DESC, pd.document_id DESC
+            LIMIT 2
+        """
+        params.append(document_name)
+        return await self._client.fetch_all(query, tuple(params))
+
     async def search_chunks(
         self,
         *,

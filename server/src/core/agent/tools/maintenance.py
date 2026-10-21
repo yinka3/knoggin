@@ -56,6 +56,16 @@ class MaintenanceTools:
             "survivor_required": True,
         }
 
+    async def advise_entity_merge(self, primary_id: int, duplicate_id: int) -> Dict:
+        """Ask the configured merge model for cited, nonbinding pair advice."""
+
+        service = self._require_entity_maintenance_service()
+        return await service.advise_merge(
+            user_name=self.user_name,
+            survivor_entity_id=primary_id,
+            retired_entity_id=duplicate_id,
+        )
+
     async def propose_entity_merge(
         self,
         primary_id: int,
@@ -63,6 +73,7 @@ class MaintenanceTools:
         reasoning: str,
         evidence_message_ids: Optional[List[int]] = None,
         evidence_episode_ids: Optional[List[str]] = None,
+        expected_state_hash: Optional[str] = None,
     ) -> Dict:
         """Submit a grounded merge proposal without granting destructive access."""
         service = self._require_entity_maintenance_service()
@@ -82,6 +93,7 @@ class MaintenanceTools:
             retired_entity_id=duplicate_id,
             evidence_refs=evidence_refs,
             reasoning=reasoning,
+            expected_state_hash=expected_state_hash,
         )
         return {
             "policy_result": "confirmation_required",

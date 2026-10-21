@@ -190,15 +190,14 @@ def assert_vp01_regression_gates(
             "mean latency "
             f"{report.mean_latency_ms:.3f}ms > {gates.maximum_mean_latency_ms:.3f}ms"
         )
-    if (
-        gates.maximum_peak_rss_delta_kib is not None
-        and report.peak_rss_delta_kib is not None
-        and report.peak_rss_delta_kib > gates.maximum_peak_rss_delta_kib
-    ):
-        failures.append(
-            "peak RSS delta "
-            f"{report.peak_rss_delta_kib}KiB > {gates.maximum_peak_rss_delta_kib}KiB"
-        )
+    if gates.maximum_peak_rss_delta_kib is not None:
+        if report.peak_rss_delta_kib is None:
+            failures.append("peak RSS delta unavailable on this platform")
+        elif report.peak_rss_delta_kib > gates.maximum_peak_rss_delta_kib:
+            failures.append(
+                "peak RSS delta "
+                f"{report.peak_rss_delta_kib}KiB > {gates.maximum_peak_rss_delta_kib}KiB"
+            )
     if report.fallback_rate > gates.maximum_fallback_rate:
         failures.append(
             "fallback rate "

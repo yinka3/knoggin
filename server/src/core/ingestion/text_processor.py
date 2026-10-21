@@ -74,6 +74,9 @@ class _FallbackGap:
     support_text: str
 
 
+_JEV_EXTRACTION_PREPARATION_CHECK_LIMIT = 512
+
+
 class TextProcessor:
     """Extract typed Context-block mentions for Context-first resolution."""
 
@@ -386,7 +389,11 @@ class TextProcessor:
         resolved_endpoints: set[tuple[UUID, str]] = set()
         if extraction_mode != "disabled" and self._jev_client is not None:
             candidates = await self._prepare_jev_extraction_candidates(
-                build, assembled=assembled, gaps=gaps, mentions=mentions
+                build,
+                assembled=assembled,
+                gaps=gaps,
+                mentions=mentions,
+                previous_acceptances=previous_acceptances,
             )
             build.trace.jev_extraction_candidates += len(candidates)
             for index, candidate in enumerate(candidates, start=1):
@@ -485,13 +492,31 @@ class TextProcessor:
         support_text_by_block = {gap.block.block_id: gap.support_text for gap in gaps}
         known_names = sorted(self.get_known_aliases())[:50]
         supporting_excerpts = []
+        local_message_ref_by_id: dict[int, str] = {}
+        local_message_text_by_ref: dict[str, str] = {}
+        local_message_refs_by_block: dict[UUID, set[str]] = {}
         for local_id, block in local_to_block.items():
-            excerpts = [
-                excerpt[:500]
-                for excerpt in support_text_by_block.get(block.block_id, "").splitlines()
-                if excerpt
-            ][:3]
-            supporting_excerpts.append({"block_id": local_id, "excerpts": excerpts})
+            messages = []
+            for support in build.block_supports.get(block.block_id, ())[:3]:
+                message_id = int(support.message_id)
+                message_text = build.message_text_by_id.get(message_id)
+                if not message_text:
+                    continue
+                local_message_ref = local_message_ref_by_id.get(message_id)
+                if local_message_ref is None:
+                    local_message_ref = f"m{len(local_message_ref_by_id) + 1}"
+                    local_message_ref_by_id[message_id] = local_message_ref
+                    local_message_text_by_ref[local_message_ref] = message_text
+                local_message_refs_by_block.setdefault(block.block_id, set()).add(
+                    local_message_ref
+                )
+                messages.append(
+                    {
+                        "message_id": local_message_ref,
+                        "excerpt": message_text[:500],
+                    }
+                )
+            supporting_excerpts.append({"block_id": local_id, "messages": messages})
         prompt = json.dumps(
             {
                 "trigger": trigger,
@@ -562,6 +587,38 @@ class TextProcessor:
             if literal is None and supporting_literal is None:
                 self._reject_fallback(build, returned.name, "literal_support_missing")
                 continue
+            if literal is None:
+                message_ref = returned.supporting_message_id
+                message_text = local_message_text_by_ref.get(message_ref or "")
+                quote = returned.evidence_quote
+                if (
+                    message_ref not in local_message_refs_by_block.get(block.block_id, set())
+                    or message_text is None
+                    or not quote
+                    or quote not in message_text
+                    or not re.search(
+                        self._literal_expression(returned.name),
+                        quote,
+                        re.IGNORECASE,
+                    )
+                ):
+                    self._reject_fallback(
+                        build,
+                        returned.name,
+                        "supporting_message_evidence_invalid",
+                    )
+                    continue
+                self._reject_fallback(
+                    build,
+                    returned.name,
+                    "supporting_message_name_unresolved",
+                    metadata={
+                        "block_id": str(block.block_id),
+                        "supporting_message_id": message_ref,
+                        "evidence_quote": quote,
+                    },
+                )
+                continue
             block_start, _ = block_offsets[block.block_id]
             if add_mention(
                 ContextBlockMention(
@@ -570,8 +627,8 @@ class TextProcessor:
                     entity_type=entity_type,
                     topic=topic,
                     origin="llm_fallback",
-                    source_start=(block_start + literal.start()) if literal else None,
-                    source_end=(block_start + literal.end()) if literal else None,
+                    source_start=block_start + literal.start(),
+                    source_end=block_start + literal.end(),
                 )
             ):
                 build.trace.llm_mentions_accepted += 1
@@ -649,10 +706,31 @@ class TextProcessor:
         assembled: _ContextBlockText,
         gaps: list[_FallbackGap],
         mentions: list[ContextBlockMention],
+        previous_acceptances: list[dict] | None = None,
     ) -> list[ExtractionCandidate]:
         """Create bounded literal candidates from existing diagnostics and aliases."""
 
+        if build.jev_work_budget is None:
+            build.jev_work_budget = JevWorkBudget(
+                build.policy.jev.max_calls_per_window,
+                build.policy.jev.max_elapsed_seconds_per_window,
+            )
+        budget = build.jev_work_budget
+        fresh_limit = max(0, budget.max_observations - budget.observations)
+        replay_origins = {
+            (block_id, name.casefold()): previous.get("evidence_origin")
+            for previous in previous_acceptances or ()
+            if isinstance(name := previous.get("candidate_name"), str)
+            for block_id in previous.get("record", {}).get("evidence_block_ids", ())
+            if isinstance(block_id, str)
+        }
+        replay_keys = set(replay_origins)
+        if fresh_limit == 0 and not replay_keys:
+            return []
         gaps_by_id = {gap.block.block_id: gap for gap in gaps}
+        known_aliases = sorted(
+            self.get_known_aliases().items(), key=lambda item: item[0].casefold()
+        )
         block_offsets = {
             block_id: start for block_id, start, _end in assembled.offsets
         }
@@ -662,7 +740,15 @@ class TextProcessor:
             for block_id in mention.block_ids
         }
         candidates: list[ExtractionCandidate] = []
+        replay_candidates: list[ExtractionCandidate] = []
         seen: set[tuple[UUID, str]] = set()
+        checks = 0
+
+        def capacity_reached() -> bool:
+            return (
+                len(candidates) >= fresh_limit
+                and len(replay_candidates) >= len(replay_keys)
+            )
 
         def append_candidate(
             *,
@@ -677,16 +763,21 @@ class TextProcessor:
             key = (gap.block.block_id, normalized.casefold())
             if key in seen:
                 return
+            replay_key = (str(gap.block.block_id), key[1])
+            replay = replay_key in replay_keys and replay_origins[replay_key] in (
+                None,
+                origin,
+            )
+            if not replay and len(candidates) >= fresh_limit:
+                return
             expression = self._literal_expression(normalized)
             literal = re.search(expression, gap.block.markdown, re.IGNORECASE)
-            supporting_literal = re.search(
-                expression, gap.support_text, re.IGNORECASE
-            )
-            if literal is None and supporting_literal is None:
+            if literal is None:
                 return
             seen.add(key)
             block_start = block_offsets[gap.block.block_id]
-            candidates.append(
+            target = replay_candidates if replay else candidates
+            target.append(
                 ExtractionCandidate(
                     block_id=gap.block.block_id,
                     name=normalized,
@@ -696,12 +787,96 @@ class TextProcessor:
                         f"Supporting excerpts:\n{gap.support_text}"
                     ),
                     proposed_type=proposed_type,
-                    source_start=(block_start + literal.start()) if literal else None,
-                    source_end=(block_start + literal.end()) if literal else None,
+                    source_start=block_start + literal.start(),
+                    source_end=block_start + literal.end(),
                 )
             )
 
+        # Rebuilds can reuse accepted judgments after the observation budget is
+        # spent. Locate those exact block/name pairs before the bounded scan of
+        # new diagnostics, or a long list of new gaps can hide an old acceptance.
+        if replay_keys:
+            checked_replays: set[tuple[str, str]] = set()
+            for diagnostic in build.unknown_endpoint_diagnostics:
+                replay_key = (
+                    str(diagnostic.block_id),
+                    " ".join(diagnostic.name.split()).casefold(),
+                )
+                if (
+                    replay_key not in replay_keys
+                    or replay_key in checked_replays
+                    or replay_origins[replay_key]
+                    not in (None, "unknown_relationship_endpoint")
+                ):
+                    continue
+                if checks >= _JEV_EXTRACTION_PREPARATION_CHECK_LIMIT:
+                    break
+                checked_replays.add(replay_key)
+                checks += 1
+                gap = gaps_by_id.get(diagnostic.block_id)
+                if gap is None or (
+                    diagnostic.block_id, diagnostic.name.casefold()
+                ) in represented:
+                    continue
+                append_candidate(
+                    gap=gap,
+                    name=diagnostic.name,
+                    origin="unknown_relationship_endpoint",
+                    proposed_type=build.policy.domain.canonical_entity_type(
+                        diagnostic.entity_type
+                    ),
+                )
+
+            gaps_by_string_id = {
+                str(gap.block.block_id): gap for gap in gaps
+            }
+            replay_gaps: dict[str, list[_FallbackGap]] = {}
+            for block_id, name in replay_keys:
+                if replay_origins[(block_id, name)] not in (None, "known_alias_gap"):
+                    continue
+                gap = gaps_by_string_id.get(block_id)
+                if gap is not None:
+                    replay_gaps.setdefault(name, []).append(gap)
+            for alias, entity_id in known_aliases:
+                alias_key = " ".join(alias.split()).casefold()
+                if alias_key not in replay_gaps:
+                    continue
+                matching_gaps = []
+                expression = self._literal_expression(alias)
+                for gap in replay_gaps[alias_key]:
+                    if checks >= _JEV_EXTRACTION_PREPARATION_CHECK_LIMIT:
+                        break
+                    checks += 1
+                    key = (gap.block.block_id, alias_key)
+                    if key in represented or key in seen:
+                        continue
+                    if re.search(expression, gap.block.markdown, re.IGNORECASE):
+                        matching_gaps.append(gap)
+                if not matching_gaps:
+                    continue
+                profile = await self.get_profile(entity_id)
+                proposed_type = None
+                if profile is not None and profile.is_classified_in(build.project_id):
+                    proposed_type = build.policy.domain.canonical_entity_type(
+                        profile.entity_type
+                    ) or build.policy.domain.resolve_entity_type(profile.entity_type)
+                for gap in matching_gaps:
+                    append_candidate(
+                        gap=gap,
+                        name=alias,
+                        origin="known_alias_gap",
+                        proposed_type=proposed_type,
+                    )
+        if fresh_limit == 0:
+            return replay_candidates
+
         for diagnostic in build.unknown_endpoint_diagnostics:
+            if (
+                checks >= _JEV_EXTRACTION_PREPARATION_CHECK_LIMIT
+                or capacity_reached()
+            ):
+                break
+            checks += 1
             gap = gaps_by_id.get(diagnostic.block_id)
             if gap is None or (
                 diagnostic.block_id, diagnostic.name.casefold()
@@ -716,10 +891,36 @@ class TextProcessor:
                 ),
             )
 
-        for alias, entity_id in sorted(
-            self.get_known_aliases().items(), key=lambda item: item[0].casefold()
-        ):
+        for alias, entity_id in known_aliases:
+            if (
+                checks >= _JEV_EXTRACTION_PREPARATION_CHECK_LIMIT
+                or capacity_reached()
+            ):
+                break
             if not alias.strip():
+                continue
+            matching_gaps = []
+            expression = self._literal_expression(alias)
+            for gap in gaps:
+                if (
+                    checks >= _JEV_EXTRACTION_PREPARATION_CHECK_LIMIT
+                    or capacity_reached()
+                ):
+                    break
+                checks += 1
+                if (gap.block.block_id, alias.casefold()) in represented or (
+                    gap.block.block_id,
+                    alias.casefold(),
+                ) in seen:
+                    continue
+                if (
+                    (str(gap.block.block_id), alias.casefold()) not in replay_keys
+                    and len(candidates) >= fresh_limit
+                ):
+                    continue
+                if re.search(expression, gap.block.markdown, re.IGNORECASE):
+                    matching_gaps.append(gap)
+            if not matching_gaps:
                 continue
             profile = await self.get_profile(entity_id)
             proposed_type = None
@@ -727,16 +928,14 @@ class TextProcessor:
                 proposed_type = build.policy.domain.canonical_entity_type(
                     profile.entity_type
                 ) or build.policy.domain.resolve_entity_type(profile.entity_type)
-            for gap in gaps:
-                if (gap.block.block_id, alias.casefold()) in represented:
-                    continue
+            for gap in matching_gaps:
                 append_candidate(
                     gap=gap,
                     name=alias,
                     origin="known_alias_gap",
                     proposed_type=proposed_type,
                 )
-        return candidates
+        return replay_candidates + candidates
 
     async def _observe_or_accept_jev_extraction(
         self,
@@ -882,7 +1081,11 @@ class TextProcessor:
 
     @staticmethod
     def _reject_fallback(
-        build: SemanticWindowBuild, name: str, reason: str
+        build: SemanticWindowBuild,
+        name: str,
+        reason: str,
+        *,
+        metadata: dict | None = None,
     ) -> None:
         build.trace.llm_mentions_rejected += 1
         build.issues.append(
@@ -891,7 +1094,7 @@ class TextProcessor:
                 code="llm_ner_mention_rejected",
                 message="Context NER fallback mention failed validation",
                 item_ref=name,
-                metadata={"reason": reason},
+                metadata={"reason": reason, **(metadata or {})},
             )
         )
 

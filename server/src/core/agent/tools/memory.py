@@ -10,6 +10,7 @@ from common.utils.agent_identity import (
     build_brain_snapshot_summary,
     extract_brain_section,
     normalize_agent_brain,
+    normalize_agent_brain_for_read,
     replace_brain_section,
     should_snapshot_brain_revision,
 )
@@ -46,7 +47,7 @@ class MemoryTools:
                 )
             row = rows[0]
             return {
-                "content": normalize_agent_brain(
+                "content": normalize_agent_brain_for_read(
                     row.get("brain") or "",
                     row.get("persona") or "",
                 ),
@@ -144,7 +145,7 @@ class MemoryTools:
                     "read_agent_brain_snapshot", "Brain snapshot was not found"
                 )
             row = rows[0]
-            row["content"] = normalize_agent_brain(row.get("content") or "")
+            row["content"] = normalize_agent_brain_for_read(row.get("content") or "")
             return row
         except ToolExecutionError:
             raise
@@ -187,14 +188,12 @@ class MemoryTools:
                     details={"current_revision": current_revision},
                 )
 
-            current_content = normalize_agent_brain(
+            current_content = normalize_agent_brain_for_read(
                 current.get("brain") or "",
                 current.get("persona") or "",
             )
-            updated_content = replace_brain_section(
-                current_content,
-                section,
-                content,
+            updated_content = normalize_agent_brain(
+                replace_brain_section(current_content, section, content)
             )
             new_revision = current_revision + 1
             params = {
@@ -332,19 +331,17 @@ class MemoryTools:
                     "restore_agent_brain_section", "Brain snapshot was not found"
                 )
 
-            current_content = normalize_agent_brain(
+            current_content = normalize_agent_brain_for_read(
                 current.get("brain") or "",
                 current.get("persona") or "",
             )
-            snapshot_content = normalize_agent_brain(
+            snapshot_content = normalize_agent_brain_for_read(
                 snapshot_rows[0].get("content") or "",
                 current.get("persona") or "",
             )
             restored_section = extract_brain_section(snapshot_content, section)
-            updated_content = replace_brain_section(
-                current_content,
-                section,
-                restored_section,
+            updated_content = normalize_agent_brain(
+                replace_brain_section(current_content, section, restored_section)
             )
             new_revision = current_revision + 1
             updated = await self.postgres.execute(

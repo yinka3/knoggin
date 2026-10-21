@@ -86,3 +86,19 @@ async def test_writer_preserves_invalid_observation_cursor_error():
             project_id="demo",
             after_observation_id=-1,
         )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_reclassification_scan_excludes_retired_relationship_observations():
+    row = unknown_row()
+    client = RecordingPostgresClient(fetch_all_results=[[row]])
+
+    result = await RelationshipReclassificationWriter(client).fetch_observations(
+        user_name="ada",
+        project_id="demo",
+    )
+
+    assert result == [row]
+    query = next(call[1] for call in client.calls if call[0] == "fetch_all")
+    assert "observation.retired_at IS NULL" in query

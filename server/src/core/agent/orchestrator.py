@@ -317,11 +317,13 @@ class AgentOrchestrator:
         context: SessionRuntime,
         focus: Optional[DocumentFocus],
     ) -> Optional[DocumentFocus]:
-        """Validate session-owned focus without rereading session persistence."""
-        if focus is None or context.document_service is None:
+        """Recheck the run's focus against current document state."""
+        if focus is None:
             return None
+        persisted = parse_document_focus(focus)
         try:
-            persisted = parse_document_focus(focus)
+            if context.document_service is None:
+                raise FileNotFoundError("Document service is unavailable")
             target = await context.document_service.resolve_focus_target(
                 document_id=(
                     persisted.document_id
@@ -343,6 +345,8 @@ class AgentOrchestrator:
                 **target,
             )
         except (FileNotFoundError, ValueError) as exc:
+            if persisted.behavior == "restrict":
+                raise WorkspaceConflictError("Document focus target changed") from exc
             logger.warning(
                 "Ignoring invalid or inaccessible document focus for session "
                 f"{context.session_id}: {exc}"
@@ -379,6 +383,7 @@ class AgentOrchestrator:
             "extension": result["extension"],
             "chunk_index": result.get("chunk_index"),
             "content_hash": result["content_hash"],
+            "parse_snapshot_id": result["parse_snapshot_id"],
             "locator": result["locator"],
             "excerpt": result["content"],
         }

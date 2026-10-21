@@ -132,6 +132,8 @@ class SemanticEpisodeStore(Protocol):
         error_summary: str,
         failed_at_ms: int,
         next_retry_at_ms: int | None,
+        expected_attempt_count: int | None = None,
+        expected_episode_result_recorded: bool | None = None,
     ) -> SemanticWindowRecord | None: ...
 
 
@@ -161,6 +163,7 @@ class ProjectSemanticProcessor(BaseJob):
         context_entity_builder: ContextEntityBuildService,
         context_relationship_extractor: ContextRelationshipExtractor,
         publish_committed_entity_ids: Callable[[tuple[int, ...]], Awaitable[None]],
+        signal_relationship_advisories: Callable[[], bool] | None = None,
         now_ms: Callable[[], int] | None = None,
     ) -> None:
         if not callable(capture_semantic_policy):
@@ -191,8 +194,10 @@ class ProjectSemanticProcessor(BaseJob):
         self._context_entity_builder = context_entity_builder
         self._context_relationship_extractor = context_relationship_extractor
         self._publish_committed_entity_ids = publish_committed_entity_ids
+        self._signal_relationship_advisories = signal_relationship_advisories
         self._capture_semantic_policy = capture_semantic_policy
         self._now_ms = now_ms or (lambda: int(time() * 1000))
+        self._timeout_stage: tuple[SemanticWindowRecord, str] | None = None
         self.update_settings(settings)
 
     @property
@@ -226,6 +231,7 @@ class ProjectSemanticProcessor(BaseJob):
         return False
 
     async def execute(self, ctx: JobContext) -> JobResult:
+        self._timeout_stage = None
         window = await self.knowledge_store.get_active_project_semantic_window(
             user_name=ctx.user_name,
             project_id=ctx.project_id,
@@ -293,7 +299,9 @@ class ProjectSemanticProcessor(BaseJob):
                 return JobResult(success=True, summary="No semantic window stage is due")
 
             stage_name, execute_stage = stage
+            self._timeout_stage = (window, stage_name)
             result = await execute_stage(window, ctx)
+            self._timeout_stage = None
             if not result.success:
                 return result
             completed_stages.append(stage_name)
@@ -330,6 +338,34 @@ class ProjectSemanticProcessor(BaseJob):
                     summary="Semantic processor stopped without durable progress",
                 )
             window = reloaded
+
+    async def on_timeout(self, ctx: JobContext) -> None:
+        """Charge a cancelled stage only if its durable checkpoint is unchanged."""
+        attempt = self._timeout_stage
+        self._timeout_stage = None
+        if attempt is None:
+            return
+        window, stage_name = attempt
+        current = await self.knowledge_store.get_active_project_semantic_window(
+            user_name=ctx.user_name,
+            project_id=ctx.project_id,
+        )
+        if (
+            current is None
+            or current.window_id != window.window_id
+            or current.stage is not window.stage
+            or current.episode_result_recorded != window.episode_result_recorded
+            or current.attempt_count != window.attempt_count
+        ):
+            return
+        await self._record_failure(
+            window,
+            ctx,
+            TimeoutError("Semantic stage exceeded scheduler execution timeout"),
+            failure_stage=stage_name.lower(),
+            expected_attempt_count=window.attempt_count,
+            expected_episode_result_recorded=window.episode_result_recorded,
+        )
 
     def _next_due_stage(
         self,
@@ -541,6 +577,26 @@ class ProjectSemanticProcessor(BaseJob):
                         new_block_ids=frozenset(),
                     ),
                 )
+            elif snapshot.domain_version != domain.version:
+                # A domain activation changes the interpretation rules even
+                # when Context text stays the same. Give this window a
+                # revision at its frozen version with an empty impact closure;
+                # the Knowledge stage can then checkpoint the no-op safely.
+                committed = await self.knowledge_store.commit_project_context_revision(
+                    user_name=ctx.user_name,
+                    project_id=ctx.project_id,
+                    expected_parent_revision_id=str(snapshot.revision_id),
+                    window_id=str(window.window_id),
+                    origin=ContextRevisionOrigin.CONVERSATION,
+                    domain_version=domain.version,
+                    edit_summary="Context rules updated; no block changes",
+                    materialization=ContextMaterialization(
+                        blocks=tuple(snapshot.blocks),
+                        content_hash=context_document_hash(snapshot.blocks, domain),
+                        new_block_ids=frozenset(),
+                        impacted_block_ids=frozenset(),
+                    ),
+                )
             else:
                 committed = snapshot
 
@@ -657,6 +713,11 @@ class ProjectSemanticProcessor(BaseJob):
             else:
                 build.set_empty_knowledge_result()
             summary = await self.knowledge_store.commit_project_semantic_knowledge(build)
+            if self._signal_relationship_advisories is not None:
+                try:
+                    self._signal_relationship_advisories()
+                except Exception:
+                    logger.exception("Could not wake relationship advisory refresh")
             return JobResult(
                 success=True,
                 summary=(
@@ -784,6 +845,8 @@ class ProjectSemanticProcessor(BaseJob):
         exc: Exception,
         *,
         failure_stage: str,
+        expected_attempt_count: int | None = None,
+        expected_episode_result_recorded: bool | None = None,
     ) -> None:
         failed_at_ms = self._now_ms()
         retry = self._settings.semantic_window_retry
@@ -797,6 +860,16 @@ class ProjectSemanticProcessor(BaseJob):
             if attempt < retry.max_attempts
             else None
         )
+        attempt_guard = (
+            {"expected_attempt_count": expected_attempt_count}
+            if expected_attempt_count is not None
+            else {}
+        )
+        checkpoint_guard = (
+            {"expected_episode_result_recorded": expected_episode_result_recorded}
+            if expected_episode_result_recorded is not None
+            else {}
+        )
         await self.knowledge_store.record_project_semantic_window_failure(
             window_id=str(window.window_id),
             user_name=ctx.user_name,
@@ -807,4 +880,6 @@ class ProjectSemanticProcessor(BaseJob):
             error_summary=str(exc)[:2_000] or type(exc).__name__,
             failed_at_ms=failed_at_ms,
             next_retry_at_ms=next_retry_at_ms,
+            **attempt_guard,
+            **checkpoint_guard,
         )

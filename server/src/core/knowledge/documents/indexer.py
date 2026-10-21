@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import math
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
 
@@ -27,6 +28,7 @@ from core.knowledge.documents.extraction import (
     DocumentChunk,
     embedding_text,
     extract_and_split_document,
+    locator_repair_fingerprints,
 )
 from core.knowledge.documents.filesystem import ProjectFilesystem
 from core.knowledge.documents.policy import DocumentIndexPolicy
@@ -40,6 +42,8 @@ BlockingRunner = Callable[..., Awaitable[Any]]
 
 _DRAIN_BATCH_SIZE = 16
 _DRAIN_RETRY_SECONDS = 0.1
+_DRAIN_FAILURE_RETRY_SECONDS = 1.0
+_MAX_EMBEDDING_PARTS_PER_CHUNK = 64
 
 
 class DocumentIndexer:
@@ -116,7 +120,7 @@ class DocumentIndexer:
             relative_path=None,
         )
         metadata = rows[0] if rows else None
-        if metadata is None:
+        if metadata is None or metadata["project_id"] != self.project_id:
             raise FileNotFoundError("Document not found")
         if metadata["status"] == "indexed" and not force:
             return metadata
@@ -239,20 +243,43 @@ class DocumentIndexer:
         }
 
     @staticmethod
+    def _validate_embedding_shape(embeddings: object, expected_count: int) -> None:
+        if not isinstance(embeddings, (list, tuple)):
+            raise DependencyError("Document embedding service returned a malformed batch")
+        if len(embeddings) != expected_count:
+            raise DependencyError("Embedding count does not match chunk count")
+        if any(not isinstance(embedding, (list, tuple)) for embedding in embeddings):
+            raise DependencyError("Document embedding service returned a malformed vector")
+
+    @staticmethod
     def _validate_embeddings(
         embeddings: List[List[float]],
         chunks: List[DocumentChunk],
     ) -> None:
-        if len(embeddings) != len(chunks):
-            raise ValueError("Embedding count does not match chunk count")
+        DocumentIndexer._validate_embedding_shape(embeddings, len(chunks))
         if any(
             len(embedding) != EXPECTED_EMBEDDING_DIMENSION
             for embedding in embeddings
         ):
-            raise ValueError(
+            raise DependencyError(
                 "Document chunk embeddings must have exactly "
                 f"{EXPECTED_EMBEDDING_DIMENSION} dimensions"
             )
+        for embedding in embeddings:
+            for value in embedding:
+                try:
+                    valid = (
+                        isinstance(value, (int, float))
+                        and not isinstance(value, bool)
+                        and math.isfinite(value)
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    valid = False
+                if not valid:
+                    raise DependencyError(
+                        "Document embedding service returned a non-finite or "
+                        "non-JSON-native value"
+                    )
 
     @staticmethod
     def _classify_index_failure(exc: Exception) -> tuple[str, bool]:
@@ -277,11 +304,46 @@ class DocumentIndexer:
     ) -> List[List[float]]:
         embeddings: List[List[float]] = []
         for start in range(0, len(values), policy.embedding_chunk_batch_size):
-            embeddings.extend(
-                await self._embedding.encode(
-                    values[start : start + policy.embedding_chunk_batch_size]
-                )
-            )
+            batch_values = values[start : start + policy.embedding_chunk_batch_size]
+            splitter = getattr(self._embedding, "split_for_embedding", None)
+            if isinstance(self._embedding, EmbeddingService) and not self._embedding.has_token_limit:
+                splitter = None
+            groups = [splitter(value) for value in batch_values] if callable(splitter) else [
+                [value] for value in batch_values
+            ]
+            for value, parts in zip(batch_values, groups):
+                if not parts or len(parts) > _MAX_EMBEDDING_PARTS_PER_CHUNK:
+                    raise ValueError("Document embedding exceeds the part budget")
+                if "".join(parts) != value:
+                    raise ValueError("Document embedding parts lost source text")
+            flat_parts = [part for group in groups for part in group]
+            part_vectors: List[List[float]] = []
+            for offset in range(0, len(flat_parts), policy.embedding_chunk_batch_size):
+                part_batch = flat_parts[offset : offset + policy.embedding_chunk_batch_size]
+                encoded = await self._embedding.encode(part_batch)
+                self._validate_embedding_shape(encoded, len(part_batch))
+                part_vectors.extend(encoded)
+            offset = 0
+            for group in groups:
+                vectors = part_vectors[offset : offset + len(group)]
+                offset += len(group)
+                if len(vectors) == 1:
+                    embeddings.append(vectors[0])
+                    continue
+                width = len(vectors[0])
+                if not width or any(len(vector) != width for vector in vectors):
+                    raise DependencyError("Document embedding parts have inconsistent dimensions")
+                pooled = [0.0] * width
+                for vector in vectors:
+                    norm = math.sqrt(sum(value * value for value in vector))
+                    if not math.isfinite(norm) or norm == 0:
+                        raise DependencyError("Document embedding parts require finite vectors")
+                    for index, value in enumerate(vector):
+                        pooled[index] += value / norm
+                norm = math.sqrt(sum(value * value for value in pooled))
+                if not math.isfinite(norm) or norm == 0:
+                    raise DependencyError("Document embedding parts cannot be pooled")
+                embeddings.append([value / norm for value in pooled])
         return embeddings
 
     @asynccontextmanager
@@ -329,6 +391,8 @@ class DocumentIndexer:
         if not rows:
             raise FileNotFoundError("Document not found")
         document = rows[0]
+        if document["project_id"] != self.project_id:
+            raise FileNotFoundError("Document not found")
         if document["status"] != "queued":
             return document
         queued = document
@@ -425,20 +489,21 @@ class DocumentIndexer:
                 self._drain_wakeup.clear()
 
                 while not self._stopping:
-                    await self._admit_durable_work(_DRAIN_BATCH_SIZE)
-                    if await self.pending_index_count() == 0:
-                        break
-                    retry_at = await self._reader.next_index_retry_at()
-                    retry_time = parse_iso_time(retry_at) if retry_at is not None else None
-                    if retry_time is not None and not self._document_tasks:
-                        timeout = max(0.01, (retry_time - get_now()).total_seconds())
-                    else:
-                        timeout = _DRAIN_RETRY_SECONDS
                     try:
-                        await asyncio.wait_for(
-                            self._drain_wakeup.wait(),
-                            timeout=timeout,
-                        )
+                        await self._admit_durable_work(_DRAIN_BATCH_SIZE)
+                        if await self.pending_index_count() == 0:
+                            break
+                        retry_at = await self._reader.next_index_retry_at()
+                        retry_time = parse_iso_time(retry_at) if retry_at is not None else None
+                        if retry_time is not None and not self._document_tasks:
+                            timeout = max(0.01, (retry_time - get_now()).total_seconds())
+                        else:
+                            timeout = _DRAIN_RETRY_SECONDS
+                    except Exception as exc:
+                        logger.error("Document index admission loop failed: {}", exc)
+                        timeout = _DRAIN_FAILURE_RETRY_SECONDS
+                    try:
+                        await asyncio.wait_for(self._drain_wakeup.wait(), timeout=timeout)
                     except TimeoutError:
                         pass
                     self._drain_wakeup.clear()
@@ -538,6 +603,11 @@ class DocumentIndexer:
 
     async def recover_pending_indexes(self, limit: int = 16) -> int:
         """Resume durable queued work and repair claims left by a stopped runtime."""
+        fingerprints = locator_repair_fingerprints()
+        await self._writer.queue_legacy_locator_reindex(
+            pdf_fingerprint=fingerprints[".pdf"],
+            notebook_fingerprint=fingerprints[".ipynb"],
+        )
         self._last_recovery_requeued = await self._writer.requeue_interrupted_indexes(
             updated_at=get_now_iso()
         )
@@ -554,6 +624,9 @@ class DocumentIndexer:
 
     async def pending_index_count(self) -> int:
         return await self._reader.count_documents_for_index_recovery()
+
+    async def terminal_index_failure_count(self) -> int:
+        return await self._reader.count_terminal_index_failures()
 
     def indexing_snapshot(self) -> Dict:
         return {

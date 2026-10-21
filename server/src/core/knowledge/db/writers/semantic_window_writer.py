@@ -225,6 +225,8 @@ class SemanticWindowWriter:
         error_summary: str,
         failed_at_ms: int,
         next_retry_at_ms: int | None,
+        expected_attempt_count: int | None = None,
+        expected_episode_result_recorded: bool | None = None,
     ) -> SemanticWindowRecord | None:
         """Record a retryable failure without mutating the successful checkpoint."""
 
@@ -236,6 +238,16 @@ class SemanticWindowWriter:
         error_summary = self._text(error_summary, "error_summary")
         if not isinstance(failed_at_ms, int) or isinstance(failed_at_ms, bool) or failed_at_ms < 0:
             raise ValueError("failed_at_ms must be a non-negative integer")
+        if expected_attempt_count is not None and (
+            not isinstance(expected_attempt_count, int)
+            or isinstance(expected_attempt_count, bool)
+            or expected_attempt_count < 0
+        ):
+            raise ValueError("expected_attempt_count must be non-negative")
+        if expected_episode_result_recorded is not None and not isinstance(
+            expected_episode_result_recorded, bool
+        ):
+            raise TypeError("expected_episode_result_recorded must be a boolean")
         if (
             next_retry_at_ms is not None
             and (
@@ -261,6 +273,8 @@ class SemanticWindowWriter:
                       AND user_name = %s
                       AND project_id = %s
                       AND stage = %s
+                      AND (%s::integer IS NULL OR attempt_count = %s::integer)
+                      AND (%s::boolean IS NULL OR episode_result_recorded = %s::boolean)
                     RETURNING {_WINDOW_COLUMNS}
                     """,
                     (
@@ -273,6 +287,10 @@ class SemanticWindowWriter:
                         user_name,
                         project_id,
                         expected_stage.value,
+                        expected_attempt_count,
+                        expected_attempt_count,
+                        expected_episode_result_recorded,
+                        expected_episode_result_recorded,
                     ),
                 )
                 row = await cur.fetchone()
@@ -289,9 +307,10 @@ class SemanticWindowWriter:
     ) -> SemanticWindowRecord | None:
         """Reset one failed active window for an explicit operator retry.
 
-        Membership, policy, stage, and every successful checkpoint remain
-        untouched.  Resetting the bounded automatic-attempt counter is what
-        makes an exhausted window eligible for a new bounded retry cycle.
+        Membership and frozen policy remain untouched. Resetting the bounded
+        automatic-attempt counter makes an exhausted window eligible again.
+        A legacy Context checkpoint at the wrong domain version is reopened at
+        the Context stage so the frozen updater can publish a valid bridge.
         """
 
         user_name = require_scope_value(user_name, "user_name", "retry_window")
@@ -299,21 +318,61 @@ class SemanticWindowWriter:
         window_id = self._uuid(window_id, "window_id")
         try:
             async with self.client.transaction() as cur:
+                # Serialize retry with domain activation and window admission.
+                await cur.execute(
+                    """
+                    SELECT project_id
+                    FROM public.projects
+                    WHERE user_name = %s AND project_id = %s
+                    FOR UPDATE
+                    """,
+                    (user_name, project_id),
+                )
+                if await cur.fetchone() is None:
+                    return None
                 await cur.execute(
                     f"""
-                    UPDATE public.project_semantic_windows
+                    UPDATE public.project_semantic_windows AS semantic_window
                     SET attempt_count = 0,
+                        stage = CASE
+                            WHEN semantic_window.stage = 'context_committed'
+                             AND semantic_window.context_revision_id IS NOT NULL
+                             AND EXISTS (
+                                SELECT 1
+                                FROM public.project_context_revisions AS revision
+                                WHERE revision.revision_id = semantic_window.context_revision_id
+                                  AND revision.project_id = semantic_window.project_id
+                                  AND revision.domain_version <> semantic_window.domain_version
+                                  AND revision.window_id IS DISTINCT FROM semantic_window.window_id
+                             )
+                            THEN 'claimed'
+                            ELSE semantic_window.stage
+                        END,
+                        context_revision_id = CASE
+                            WHEN semantic_window.stage = 'context_committed'
+                             AND semantic_window.context_revision_id IS NOT NULL
+                             AND EXISTS (
+                                SELECT 1
+                                FROM public.project_context_revisions AS revision
+                                WHERE revision.revision_id = semantic_window.context_revision_id
+                                  AND revision.project_id = semantic_window.project_id
+                                  AND revision.domain_version <> semantic_window.domain_version
+                                  AND revision.window_id IS DISTINCT FROM semantic_window.window_id
+                             )
+                            THEN NULL
+                            ELSE semantic_window.context_revision_id
+                        END,
                         last_failure_stage = NULL,
                         last_failure_code = NULL,
                         last_failure_at_ms = NULL,
                         last_error_summary = NULL,
                         next_retry_at_ms = NULL,
                         updated_at = NOW()
-                    WHERE window_id = %s
-                      AND user_name = %s
-                      AND project_id = %s
-                      AND stage <> 'completed'
-                      AND last_failure_at_ms IS NOT NULL
+                    WHERE semantic_window.window_id = %s
+                      AND semantic_window.user_name = %s
+                      AND semantic_window.project_id = %s
+                      AND semantic_window.stage <> 'completed'
+                      AND semantic_window.last_failure_at_ms IS NOT NULL
                     RETURNING {_WINDOW_COLUMNS}
                     """,
                     (window_id, user_name, project_id),

@@ -328,7 +328,10 @@ async def test_conflict_discovery_job_is_registered_with_its_policy_subscription
         conflict_discovery_job=conflict_job,
     )
 
-    assert list(state.scheduler._jobs) == ["project_semantic", "conflict_discovery"]
+    assert list(state.scheduler._jobs) == [
+        "project_semantic", "relationship_advisories", "conflict_discovery"
+    ]
+    assert state.scheduler._jobs["relationship_advisories"].maintenance_service is maintenance_service
     assert [path for _, path in config_manager.subscriptions] == [
         "developer_settings.entity_resolution",
         "developer_settings.nlp_pipeline",
@@ -358,6 +361,9 @@ def test_project_semantic_factory_wires_committed_entity_publication(monkeypatch
     async def publisher(_entity_ids):
         return None
 
+    def count_tokens_batch(values):
+        return [1 for _ in values]
+
     entities = SimpleNamespace(publish_committed_entity_ids=publisher)
     runtime = SimpleNamespace(
         project_id="project-1",
@@ -367,7 +373,10 @@ def test_project_semantic_factory_wires_committed_entity_publication(monkeypatch
     )
     resources = SimpleNamespace(
         postgres=object(),
-        llm_service=SimpleNamespace(count_tokens=lambda _text: 1),
+        llm_service=SimpleNamespace(
+            count_tokens=lambda _text: 1,
+            count_tokens_batch=count_tokens_batch,
+        ),
         knowledge_store=SimpleNamespace(allocate_entity_id=lambda: None),
         embedding=object(),
     )
@@ -381,8 +390,12 @@ def test_project_semantic_factory_wires_committed_entity_publication(monkeypatch
         "runtime.project_factory.ConfigManager.get",
         staticmethod(lambda: config_manager),
     )
+    captured_admission = {}
+    monkeypatch.setattr(
+        "runtime.project_factory.SemanticWindowAdmission",
+        lambda *args, **kwargs: captured_admission.update(kwargs) or object(),
+    )
     for symbol in (
-        "SemanticWindowAdmission",
         "EpisodeGenerator",
         "ProjectContextReader",
         "ProjectContextWriter",
@@ -406,6 +419,7 @@ def test_project_semantic_factory_wires_committed_entity_publication(monkeypatch
     assert job.kwargs["publish_committed_entity_ids"] is publisher
     assert job.kwargs["capture_semantic_policy"] is runtime.capture_semantic_policy
     assert captured_context["filesystem"] is context_filesystem
+    assert captured_admission["token_counter_batch"] is count_tokens_batch
 
 
 @pytest.mark.runtime

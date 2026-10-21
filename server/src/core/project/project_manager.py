@@ -2,6 +2,7 @@ import asyncio
 import json
 import uuid
 from collections.abc import Mapping
+from contextlib import asynccontextmanager
 from enum import Enum
 from typing import Dict, List, Optional
 
@@ -120,11 +121,17 @@ class ProjectManager:
         self.entity_maintenance_service = EntityMaintenanceService(
             resources.postgres,
             user_name=user_name,
+            llm=getattr(resources, "llm_service", None),
         )
         self.maintenance_scheduler = ApplicationMaintenanceScheduler(
             maintenance_service=self.entity_maintenance_service,
             user_name=user_name,
             artifact_retention_writer=ArtifactRetentionWriter(self.pg),
+            project_file_cleanup=(
+                self.retry_pending_project_file_cleanup
+                if filesystem_factory is not None
+                else None
+            ),
             background_work=getattr(resources, "background_work", None),
         )
         self._closed = False
@@ -250,16 +257,73 @@ class ProjectManager:
         for project_id in project_ids:
             await self._finish_project_file_cleanup(project_id)
 
-    async def _finish_project_file_cleanup(self, project_id: str) -> str:
+    async def retry_pending_project_file_cleanup(self) -> None:
+        async with self.maintenance_service.lock:
+            await self._recover_pending_project_file_cleanup()
+
+    @asynccontextmanager
+    async def _project_file_lease(self, project_id: str):
+        """Hold the same OS lease used by document mutations across deletion."""
+        if self._filesystem_factory is None:
+            raise RuntimeError("Project filesystem is not configured")
+        try:
+            filesystem = self._filesystem_factory.for_project(project_id)
+        except ValueError:
+            root = self._filesystem_factory._project_root(project_id)
+            metadata = root.lstat()
+            if root.is_symlink() or self._filesystem_factory._is_windows_reparse_point(metadata):
+                # No legal file mutation can open a linked project root.
+                yield None
+                return
+            raise
+        acquire = asyncio.create_task(
+            asyncio.to_thread(filesystem.acquire_mutation_lease)
+        )
+        try:
+            lease = await asyncio.shield(acquire)
+        except asyncio.CancelledError:
+            try:
+                lease = await settle_owned_task(acquire)
+            except Exception:
+                pass
+            else:
+                await settle_owned_task(
+                    asyncio.create_task(
+                        asyncio.to_thread(filesystem.release_mutation_lease, lease)
+                    )
+                )
+            raise
+        try:
+            yield lease
+        finally:
+            await settle_owned_task(
+                asyncio.create_task(
+                    asyncio.to_thread(filesystem.release_mutation_lease, lease)
+                )
+            )
+
+    async def _finish_project_file_cleanup(self, project_id: str, *, lease=None) -> str:
         """Remove one owned directory and clear its durable retry task."""
 
         if self._filesystem_factory is None:
             raise RuntimeError("Project filesystem is not configured")
-        try:
-            await asyncio.to_thread(
+        remove_task = asyncio.create_task(
+            asyncio.to_thread(
                 self._filesystem_factory.remove_project_directory,
                 project_id,
+                _lease=lease,
             )
+        )
+        try:
+            await asyncio.shield(remove_task)
+        except asyncio.CancelledError:
+            try:
+                await settle_owned_task(remove_task)
+            except Exception:
+                logger.exception(
+                    "Project {} file cleanup failed after cancellation", project_id
+                )
+            raise
         except Exception:
             logger.exception(
                 "Project {} database state was deleted but file cleanup is pending",
@@ -280,6 +344,20 @@ class ProjectManager:
             return "pending"
         return "complete"
 
+    async def _remove_failed_project_directory(self, project_id: str) -> None:
+        """Settle compensation for a project that never reached the catalog."""
+        try:
+            await settle_owned_task(
+                asyncio.create_task(
+                    asyncio.to_thread(
+                        self._filesystem_factory.remove_project_directory,
+                        project_id,
+                    )
+                )
+            )
+        except Exception:
+            logger.exception("Could not remove project files after creation failed")
+
     async def create_project(
         self,
         name: str,
@@ -297,6 +375,9 @@ class ProjectManager:
         allowed_projects = await self._validate_allowed_project_ids(
             project_id, allowed_projects or []
         )
+        if self._filesystem_factory is None:
+            raise RuntimeError("Project filesystem is not configured")
+        await self._prepare_vp01(active_domain)
         project_query = """
             INSERT INTO public.projects (
                 project_id, user_name, name, description, status,
@@ -313,15 +394,25 @@ class ProjectManager:
             VALUES (%(user_name)s, %(project_id)s, %(readable)s)
         """
         project_file_content = build_project_markdown(name, description).encode("utf-8")
-        if self._filesystem_factory is None:
-            raise RuntimeError("Project filesystem is not configured")
         filesystem = self._filesystem_factory.for_project(project_id)
-        await asyncio.to_thread(
-            filesystem.write_bytes,
-            PROJECT_FILE_PATH,
-            project_file_content,
+        write_task = asyncio.create_task(
+            asyncio.to_thread(
+                filesystem.write_bytes,
+                PROJECT_FILE_PATH,
+                project_file_content,
+            )
         )
         try:
+            await asyncio.shield(write_task)
+        except BaseException:
+            try:
+                await settle_owned_task(write_task)
+            except BaseException:
+                pass
+            await self._remove_failed_project_directory(project_id)
+            raise
+
+        async def persist_project() -> None:
             async with self.pg.transaction() as cur:
                 await cur.execute(
                     project_query,
@@ -343,16 +434,18 @@ class ProjectManager:
                             "readable": allowed_id,
                         },
                     )
-        except Exception:
+
+        insert_task = asyncio.create_task(persist_project())
+        try:
+            await asyncio.shield(insert_task)
+        except asyncio.CancelledError:
             try:
-                await asyncio.to_thread(
-                    filesystem.delete_file,
-                    PROJECT_FILE_PATH,
-                )
-            except Exception:
-                logger.exception(
-                    "Could not roll back PROJECT.md after project creation failed"
-                )
+                await settle_owned_task(insert_task)
+            except BaseException:
+                await self._remove_failed_project_directory(project_id)
+            raise
+        except Exception:
+            await self._remove_failed_project_directory(project_id)
             raise
 
         logger.info(f"Created project {project_id} ('{name}')")
@@ -405,6 +498,13 @@ class ProjectManager:
         """Validate a complete candidate without touching project state."""
 
         return validate_domain_candidate(candidate)
+
+    async def _prepare_vp01(self, candidate: DomainConfig) -> None:
+        """Fail before durable writes if the selected extraction model cannot load."""
+
+        adapter = await self.resources.get_vp01(candidate.vp01_language)
+        if not callable(getattr(adapter, "extract_entities", None)):
+            raise TypeError("VP-01 adapter must expose extract_entities")
 
     async def get_domain_config(self, project_id: str) -> DomainConfig:
         """Read the durable active domain configuration for one project."""
@@ -459,10 +559,24 @@ class ProjectManager:
         storage directly; their next runtime bootstrap reads the new revision.
         """
 
+        if (
+            not isinstance(expected_version, int)
+            or isinstance(expected_version, bool)
+            or expected_version < 0
+        ):
+            raise ValueError("expected_version must be a non-negative integer")
+        if self._closed:
+            raise RuntimeError("ProjectManager is shutting down")
+        parsed = parse_candidate(candidate)
+        await self._require_domain_project(project_id, allow_archived=False)
+        # Model loading can be slow. Finish it before locking project lifecycle
+        # work, then recheck status and revision under the lock and store CAS.
+        await self._prepare_vp01(parsed)
         async with self.maintenance_service.lock:
+            if self._closed:
+                raise RuntimeError("ProjectManager is shutting down")
             await self._require_domain_project(project_id, allow_archived=False)
             active_state = self.active_projects.get(project_id)
-            parsed = parse_candidate(candidate)
             if active_state is not None:
                 return await active_state.activate_domain_config(
                     parsed,
@@ -829,17 +943,20 @@ class ProjectManager:
                 await active_state.shutdown()
                 del self.active_projects[project_id]
 
-            deleted = await self._project_deletion_writer.delete_project(
-                user_name=self.user_name,
-                project_id=project_id,
-            )
-            if deleted is None:
-                raise RuntimeError(
-                    f"Project '{project_id}' disappeared during deletion"
+            async with self._project_file_lease(project_id) as lease:
+                deleted = await self._project_deletion_writer.delete_project(
+                    user_name=self.user_name,
+                    project_id=project_id,
                 )
+                if deleted is None:
+                    raise RuntimeError(
+                        f"Project '{project_id}' disappeared during deletion"
+                    )
 
-            cache_invalidations = self._invalidate_entity_caches(deleted)
-            file_cleanup_status = await self._finish_project_file_cleanup(project_id)
+                cache_invalidations = self._invalidate_entity_caches(deleted)
+                file_cleanup_status = await self._finish_project_file_cleanup(
+                    project_id, lease=lease
+                )
 
             logger.info(
                 "Hard deleted project {} database state: {}; file cleanup: {}; "

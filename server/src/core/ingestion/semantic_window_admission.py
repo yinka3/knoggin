@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import batched
 from time import time
 from typing import Callable, Protocol
 from uuid import uuid4
@@ -33,6 +34,7 @@ class SemanticWindowStore(Protocol):
 
 
 TokenCounter = Callable[[str], int]
+BatchTokenCounter = Callable[[list[str]], list[int]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +72,7 @@ class SemanticWindowAdmission:
     TOKEN_ESTIMATOR = "llm.count_tokens"
     TOKEN_ESTIMATOR_VERSION = "runtime-v1"
     POLICY_VERSION = 1
+    TOKEN_COUNT_BATCH_SIZE = 8
 
     def __init__(
         self,
@@ -77,13 +80,17 @@ class SemanticWindowAdmission:
         settings: IngestionSettings,
         *,
         token_counter: TokenCounter,
+        token_counter_batch: BatchTokenCounter | None = None,
         episode_settings: EpisodeSettings | None = None,
         now_ms: Callable[[], int] | None = None,
     ) -> None:
         if not callable(token_counter):
             raise TypeError("Semantic window admission requires an LLM token counter")
+        if token_counter_batch is not None and not callable(token_counter_batch):
+            raise TypeError("batch token counter must be callable")
         self.knowledge_store = knowledge_store
         self._token_counter = token_counter
+        self._token_counter_batch = token_counter_batch
         self._now_ms = now_ms or (lambda: int(time() * 1000))
         self.update_settings(settings)
         self.update_episode_settings(episode_settings or EpisodeSettings())
@@ -128,14 +135,56 @@ class SemanticWindowAdmission:
         target = self._settings.semantic_window_tokens
         close_reason: str | None = None
         selected_token_count = 0
-        for exchange in exchanges:
-            selected.append(exchange)
-            selected_token_count = self._count_tokens(selected)
-            if selected_token_count >= target:
-                close_reason = (
-                    "oversized_exchange" if len(selected) == 1 else "target_crossed"
-                )
-                break
+        if self._token_counter_batch is None:
+            for exchange in exchanges:
+                selected.append(exchange)
+                selected_token_count = self._count_tokens(selected)
+                if selected_token_count >= target:
+                    close_reason = (
+                        "oversized_exchange" if len(selected) == 1 else "target_crossed"
+                    )
+                    break
+        else:
+            rendered = ""
+            for chunk in batched(exchanges, self.TOKEN_COUNT_BATCH_SIZE):
+                prefixes = []
+                for exchange in chunk:
+                    exchange_text = "\n\n".join(
+                        f"{message['role'].upper()}:\n{message['content']}"
+                        for message in exchange.messages
+                    )
+                    rendered = f"{rendered}\n\n{exchange_text}" if rendered else exchange_text
+                    prefixes.append(rendered)
+                try:
+                    counts = self._token_counter_batch(prefixes)
+                    if len(counts) != len(prefixes) or any(
+                        not isinstance(count, int)
+                        or isinstance(count, bool)
+                        or count < 0
+                        for count in counts
+                    ):
+                        raise ValueError("LLM batch token counter returned invalid counts")
+                except Exception:
+                    # A later prefix may fail even though an earlier one closes
+                    # the window. Recheck in order to preserve the scalar rule.
+                    counts = None
+                for index, exchange in enumerate(chunk):
+                    count = (
+                        counts[index]
+                        if counts is not None
+                        else self._token_counter(prefixes[index])
+                    )
+                    selected.append(exchange)
+                    selected_token_count = count
+                    if count >= target:
+                        close_reason = (
+                            "oversized_exchange"
+                            if len(selected) == 1
+                            else "target_crossed"
+                        )
+                        break
+                if close_reason is not None:
+                    break
 
         if close_reason is None:
             latest_close = max(exchange.closed_at_ms for exchange in selected)

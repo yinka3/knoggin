@@ -132,18 +132,20 @@ async def _seed_observation_matrix(client) -> None:
         INSERT INTO relationship_observations (
             observation_id, relationship_id, project_id, user_name,
             semantic_window_id, source_entity_id, target_entity_id,
-            observed_relationship_label, context, observed_at_ms,
+            observed_relationship_label, support_key, context, observed_at_ms,
             retired_at, retired_reason
         ) VALUES
             (1, 'project-1:2:3:works_at', 'project-1', 'ada',
              '11111111-1111-4111-8111-111111111111', 2, 3, 'works at',
+             md5('44444444-4444-4444-8444-444444444444'),
              'Ade works at Acme.', 200, NULL, NULL),
             (2, 'project-1:2:3:works_at', 'project-1', 'ada',
              '22222222-2222-4222-8222-222222222222', 2, 3, 'works at',
+             md5('55555555-5555-4555-8555-555555555555'),
              'Ade no longer works at Acme.', 900, now(), 'test_replaced'),
             (3, 'project-2:2:4:works_at', 'project-2', 'ada',
              '33333333-3333-4333-8333-333333333333', 2, 4, 'works at',
-             'Ade works at Other Co.', 300, NULL, NULL);
+             md5('[]'), 'Ade works at Other Co.', 300, NULL, NULL);
 
         INSERT INTO relationship_observation_blocks (
             observation_id, project_id, block_id

@@ -18,6 +18,10 @@ from common.schema.context import (
     ContextReplace,
     LLMContextUpdate,
 )
+from common.schema.episode.generation import (
+    LLMEpisodeDecision,
+    LLMEpisodeWindowDecision,
+)
 from common.schema.ingestion.contracts import (
     ContextBlockEntityAssociation,
     ContextEntityResult,
@@ -49,6 +53,7 @@ from core.knowledge.db.writers.project_context_writer import ProjectContextWrite
 from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
 from core.knowledge.documents.filesystem import ProjectFilesystem
 from core.knowledge.entity.resolver import EntityResolver
+from core.knowledge.episodes.build import ProjectEpisodeBuild
 from core.knowledge.store import KnowledgeStore
 from core.project.domain_config_store import DomainConfigStore
 from core.project.project_manager import ProjectManager
@@ -100,6 +105,29 @@ class _ZeroEpisodeGenerator:
         return type("EpisodeBuild", (), {"final_episodes": []})()
 
 
+class _OneEpisodeGenerator:
+    async def generate(self, *, project_id, messages, policy, **_kwargs):
+        build = ProjectEpisodeBuild(
+            project_id=project_id,
+            policy=policy,
+            messages=[dict(message) for message in messages],
+        )
+        build.prepare_local_references()
+        build.apply_llm_output(
+            LLMEpisodeWindowDecision(
+                proposals=[
+                    LLMEpisodeDecision(
+                        summary="Both sessions asked for shared project Context.",
+                        message_influences=list(build.message_ids_by_local),
+                    )
+                ]
+            )
+        )
+        build.create_episodes()
+        build.attach_embeddings([[0.25] * 1024])
+        return build
+
+
 class _AgentDerivedUpdater:
     async def update(self, *, snapshot, domain, project_id, **_kwargs):
         return ContextUpdateResult(
@@ -119,6 +147,13 @@ class _AgentDerivedUpdater:
             edit_summary="Recorded composed Context update",
             operation_count=1,
         )
+
+
+class _EpisodeAwareAgentDerivedUpdater(_AgentDerivedUpdater):
+    async def update(self, *, episodes, **kwargs):
+        assert len(episodes) == 1
+        assert [message.message_id for message in episodes[0].messages] == [101, 102]
+        return await super().update(episodes=episodes, **kwargs)
 
 
 class _EmptyEntityBuilder:
@@ -946,10 +981,10 @@ async def test_project_semantic_processor_uses_real_storage_for_agent_derived_co
             now_ms=lambda: 1_000_000,
         ),
         store,
-        _ZeroEpisodeGenerator(),
+        _OneEpisodeGenerator(),
         settings=IngestionSettings(semantic_window_tokens=100),
         capture_semantic_policy=capture_semantic_policy,
-        context_updater=_AgentDerivedUpdater(),
+        context_updater=_EpisodeAwareAgentDerivedUpdater(),
         context_projection=projection,
         context_entity_builder=_EmptyEntityBuilder(),
         context_relationship_extractor=_EmptyRelationships(),
@@ -984,6 +1019,29 @@ async def test_project_semantic_processor_uses_real_storage_for_agent_derived_co
         """,
         (project_id,),
     ) == {"stage": "completed", "episode_result_recorded": True}
+    episode_rows = await postgres.fetch_all(
+        """
+        SELECT episode_id, summary, source_message_count
+        FROM public.episodes
+        WHERE project_id = %s
+        """,
+        (project_id,),
+    )
+    assert len(episode_rows) == 1
+    assert episode_rows[0]["summary"] == "Both sessions asked for shared project Context."
+    assert episode_rows[0]["source_message_count"] == 2
+    assert await postgres.fetch_all(
+        """
+        SELECT message_id, session_id
+        FROM public.episode_messages
+        WHERE episode_id = %s
+        ORDER BY message_position
+        """,
+        (episode_rows[0]["episode_id"],),
+    ) == [
+        {"message_id": 101, "session_id": session_id},
+        {"message_id": 102, "session_id": "second-semantic-session"},
+    ]
     assert await postgres.fetch_one(
         "SELECT count(*) AS count FROM public.context_block_entities WHERE project_id = %s",
         (project_id,),

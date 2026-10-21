@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Collection
 from typing import Dict, Optional, Tuple
 
 from loguru import logger
@@ -138,7 +139,10 @@ async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
     authorization = getattr(tools, "tool_authorization", None)
     capability = definition.capability if schema else READ_CAPABILITY
 
-    logger.info("[TOOL CALL] {}: {}", name, _tool_argument_metadata(args))
+    known_fields = set(
+        canonical_schema["function"].get("parameters", {}).get("properties", {})
+    )
+    logger.info("[TOOL CALL] {}: {}", name, _tool_argument_metadata(args, known_fields))
     audit_id = None
     try:
         if authorization is not None:
@@ -244,7 +248,7 @@ async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
                 status="failed",
                 error="Tool execution failed.",
             )
-        logger.exception("Tool {} failed", name)
+        logger.error("Tool {} failed: {}", name, type(exc).__name__)
         raise ToolExecutionError(
             name,
             "Tool execution failed",
@@ -289,24 +293,30 @@ def _normalize_tool_result(tool_name: str, result):
     return result
 
 
-def _tool_argument_metadata(arguments: Dict) -> dict:
-    """Describe arguments for logs without copying their values."""
+def _tool_argument_metadata(arguments: Dict, known_fields: Collection[str]) -> dict:
+    """Describe declared arguments without copying model-supplied keys or values."""
 
+    if not isinstance(arguments, dict):
+        return {"_arguments": {"type": type(arguments).__name__}}
     metadata = {}
-    for key in sorted(arguments)[:20]:
-        safe_key = str(key)[:64]
+    declared = sorted(
+        key for key in arguments if isinstance(key, str) and key in known_fields
+    )
+    for key in declared[:20]:
         value = arguments[key]
         entry = {"type": type(value).__name__}
         if any(
-            marker in safe_key.casefold()
+            marker in key.casefold()
             for marker in ("token", "secret", "password", "api_key")
         ):
             entry["redacted"] = True
         elif isinstance(value, (str, bytes, list, tuple, dict, set)):
             entry["size"] = len(value)
-        metadata[safe_key] = entry
-    if len(arguments) > len(metadata):
-        metadata["_truncated"] = {"count": len(arguments) - len(metadata)}
+        metadata[key] = entry
+    if len(arguments) > len(declared):
+        metadata["_unknown_fields"] = {"count": len(arguments) - len(declared)}
+    if len(declared) > 20:
+        metadata["_truncated"] = {"count": len(declared) - 20}
     return metadata
 
 
@@ -429,10 +439,12 @@ async def _finish_tool_audit(
 async def _safe_finish_tool_audit(tools, audit_id: str, **values) -> None:
     try:
         await _finish_tool_audit(tools, audit_id, **values)
-    except Exception:
+    except Exception as exc:
         # The durable "started" row still proves the write was authorized and
         # attempted. Do not turn a completed domain write into a false failure
         # solely because its audit completion update had an infrastructure fault.
-        logger.exception(
-            f"Failed to finish agent tool audit {audit_id}"
+        logger.error(
+            "Failed to finish agent tool audit {}: {}",
+            audit_id,
+            type(exc).__name__,
         )

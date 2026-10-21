@@ -14,6 +14,8 @@ async def _insert_document_snapshot(
     document_id: str,
     project_id: str,
     text: str,
+    original_name: str = "notes.md",
+    relative_path: str | None = None,
 ) -> tuple[str, str]:
     content_hash = hashlib.sha256(text.encode()).hexdigest()
     snapshot_id = str(uuid4())
@@ -30,12 +32,13 @@ async def _insert_document_snapshot(
             document_id, project_id, original_name, relative_path,
             extension, size_bytes, content_hash, status
         )
-        VALUES (%s, %s, 'notes.md', %s, '.md', %s, %s, 'indexed')
+        VALUES (%s, %s, %s, %s, '.md', %s, %s, 'indexed')
         """,
         (
             document_id,
             project_id,
-            f"{document_id}.md",
+            original_name,
+            relative_path or f"{document_id}.md",
             len(text.encode()),
             content_hash,
         ),
@@ -63,6 +66,97 @@ async def _insert_document_snapshot(
         (snapshot_id, document_id),
     )
     return content_hash, snapshot_id
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_indexed_name_lookup_reaches_older_rows_and_honors_subtree_scope(
+    real_postgres_client,
+):
+    old_id = str(uuid4())
+    await _insert_document_snapshot(
+        real_postgres_client,
+        document_id=old_id,
+        project_id="project-1",
+        text="old indexed document",
+        original_name="history.md",
+        relative_path="archive/history.md",
+    )
+    await real_postgres_client.execute(
+        "UPDATE public.project_documents SET created_at = now() - interval '2 days' "
+        "WHERE document_id = %s",
+        (old_id,),
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.project_documents (
+            document_id, project_id, original_name, relative_path,
+            extension, size_bytes, content_hash, status
+        )
+        SELECT
+            ('10000000-0000-0000-0000-' || lpad(number::text, 12, '0'))::uuid,
+            'project-1',
+            'recent-' || number || '.md',
+            'recent/recent-' || number || '.md',
+            '.md', 1, repeat('a', 64), 'queued'
+        FROM generate_series(1, 1000) AS generated(number)
+        """
+    )
+    reader = DocumentReader(real_postgres_client, "project-1")
+
+    newest_page = await reader.list_documents(limit=1000)
+    assert len(newest_page) == 1000
+    assert old_id not in {str(row["document_id"]) for row in newest_page}
+    matches = await reader.find_indexed_documents_by_name(document_name="history.md")
+    assert [str(row["document_id"]) for row in matches] == [old_id]
+    path_match = await reader.find_indexed_documents_by_name(
+        document_name="ARCHIVE/HISTORY.MD"
+    )
+    assert [str(row["document_id"]) for row in path_match] == [old_id]
+
+    second_id = str(uuid4())
+    await _insert_document_snapshot(
+        real_postgres_client,
+        document_id=second_id,
+        project_id="project-1",
+        text="second indexed document",
+        original_name="history.md",
+        relative_path="docs/history.md",
+    )
+    ambiguous = await reader.find_indexed_documents_by_name(document_name="history.md")
+    assert {str(row["document_id"]) for row in ambiguous} == {old_id, second_id}
+    assert len(ambiguous) == 2
+    in_archive = await reader.find_indexed_documents_by_name(
+        document_name="history.md", path_prefix="archive"
+    )
+    assert [str(row["document_id"]) for row in in_archive] == [old_id]
+    in_docs = await reader.find_indexed_documents_by_name(
+        document_name="history.md", path_prefix="docs"
+    )
+    assert [str(row["document_id"]) for row in in_docs] == [second_id]
+
+    foreign_id = str(uuid4())
+    await _insert_document_snapshot(
+        real_postgres_client,
+        document_id=foreign_id,
+        project_id="project-2",
+        text="linked project document",
+        original_name="history.md",
+        relative_path="external/history.md",
+    )
+    assert await reader.find_indexed_documents_by_name(
+        document_name="history.md", path_prefix="external"
+    ) == []
+    linked_reader = DocumentReader(
+        real_postgres_client,
+        "project-1",
+        readable_project_ids=["project-1", "project-2"],
+    )
+    linked = await linked_reader.find_indexed_documents_by_name(
+        document_name="history.md", path_prefix="external"
+    )
+    assert [str(row["document_id"]) for row in linked] == [foreign_id]
 
 
 @pytest.mark.storage

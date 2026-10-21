@@ -62,7 +62,10 @@ from core.knowledge.db.writers.semantic_commit_writer import (
 )
 from core.knowledge.db.writers.semantic_window_writer import SemanticWindowWriter
 from core.knowledge.db.writers.source_reference_writer import SourceReferenceWriter
-from core.knowledge.episodes.embedding import build_episode_embedding_text_from_fields
+from core.knowledge.episodes.embedding import (
+    build_episode_embedding_text_from_fields,
+    encode_episode_embedding_texts,
+)
 from core.knowledge.evidence_service import EvidenceService
 from core.knowledge.services.embedding_service import EmbeddingService
 from infrastructure.postgres_client import PostgresClient
@@ -670,6 +673,8 @@ class KnowledgeStore:
         error_summary: str,
         failed_at_ms: int,
         next_retry_at_ms: int | None,
+        expected_attempt_count: int | None = None,
+        expected_episode_result_recorded: bool | None = None,
     ) -> SemanticWindowRecord | None:
         return await self._semantic_window_writer.record_failure(
             window_id=window_id,
@@ -681,6 +686,8 @@ class KnowledgeStore:
             error_summary=error_summary,
             failed_at_ms=failed_at_ms,
             next_retry_at_ms=next_retry_at_ms,
+            expected_attempt_count=expected_attempt_count,
+            expected_episode_result_recorded=expected_episode_result_recorded,
         )
 
     async def retry_project_semantic_window(
@@ -952,7 +959,9 @@ class KnowledgeStore:
             narrative.updates,
             narrative.unresolved,
         )
-        embeddings = await self._embedding_service.encode([embedding_text])
+        embeddings = await encode_episode_embedding_texts(
+            self._embedding_service, [embedding_text]
+        )
         if not isinstance(embeddings, list) or len(embeddings) != 1:
             raise RuntimeError("Episode edit embedding result must contain one vector")
         try:

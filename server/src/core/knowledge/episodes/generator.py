@@ -13,7 +13,11 @@ from common.schema.episode.generation import LLMEpisodeWindowDecision
 from common.schema.episode.models import EpisodeNarrativeLimitError
 from common.utils.diagnostic_context import diagnostic_scope
 from core.knowledge.episodes.build import ProjectEpisodeBuild
-from core.knowledge.episodes.embedding import build_episode_embedding_text
+from core.knowledge.episodes.embedding import (
+    EpisodeEmbeddingEncoder,
+    build_episode_embedding_text,
+    encode_episode_embedding_texts,
+)
 from core.knowledge.episodes.policy import EpisodeGenerationPolicy
 from core.knowledge.episodes.prompts import (
     get_episode_generation_prompt,
@@ -34,10 +38,6 @@ class StructuredGenerator(Protocol):
     ) -> ResponseT: ...
 
 
-class EmbeddingEncoder(Protocol):
-    async def encode(self, texts: list[str]) -> list[list[float]]: ...
-
-
 class EpisodeGenerator:
     """Generate validated, immutable episodes from one frozen window."""
 
@@ -45,7 +45,7 @@ class EpisodeGenerator:
         self,
         *,
         llm: StructuredGenerator | None,
-        embedding_service: EmbeddingEncoder | None,
+        embedding_service: EpisodeEmbeddingEncoder | None,
     ) -> None:
         self.llm = llm
         self.embedding_service = embedding_service
@@ -122,7 +122,7 @@ class EpisodeGenerator:
             try:
                 build.apply_llm_output(output)
             except EpisodeNarrativeLimitError:
-                output = await self.llm.generate_structured(
+                repaired = await self.llm.generate_structured(
                     response_model=LLMEpisodeWindowDecision,
                     system=get_episode_narrative_repair_prompt(
                         user_name,
@@ -131,11 +131,23 @@ class EpisodeGenerator:
                     user=build.repair_brief(output),
                     temperature=0.0,
                 )
-                build.apply_llm_output(output)
+                if (
+                    len(repaired.proposals) != len(output.proposals)
+                    or any(
+                        set(before.message_influences)
+                        != set(after.message_influences)
+                        for before, after in zip(output.proposals, repaired.proposals)
+                    )
+                ):
+                    raise ValueError(
+                        "episode narrative repair changed proposal source references"
+                    )
+                build.apply_llm_output(repaired)
             episodes = build.create_episodes()
             if episodes:
                 build.attach_embeddings(
-                    await self.embedding_service.encode(
+                    await encode_episode_embedding_texts(
+                        self.embedding_service,
                         [build_episode_embedding_text(episode) for episode in episodes]
                     )
                 )

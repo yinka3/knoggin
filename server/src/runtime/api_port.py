@@ -69,6 +69,7 @@ from common.schema.public import (
     PublicError,
     PublicLLMSettings,
     PublicSearchSettings,
+    RelationshipAdvisoryActionRequest,
     RunCompletedEvent,
     RunFailedEvent,
     RunResult,
@@ -803,6 +804,25 @@ class ApplicationRuntimePort:
             reason=request.reason,
         )
         return {"review": self._maintenance_review_response(review).model_dump(mode="json")}
+
+    async def decide_relationship_advisory(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        review_id: str,
+        request: RelationshipAdvisoryActionRequest,
+    ) -> dict:
+        self._require_user(user_name)
+        decision = await self.runtime.projects.maintenance_service.apply_relationship_advisory_action(
+            project_id,
+            review_id,
+            request.action,
+            relationship_type=request.relationship_type,
+            note=request.note,
+            decided_by=user_name,
+        )
+        return {"decision": decision.to_dict()}
 
     async def preview_entity_merge_rollback(
         self,

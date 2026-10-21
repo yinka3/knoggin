@@ -6,7 +6,10 @@ import pytest
 
 from core.knowledge.db.readers.document_reader import DocumentReader
 from core.knowledge.db.writers.document_writer import DocumentWriter
-from core.knowledge.documents.extraction import DocumentParseSnapshot
+from core.knowledge.documents.extraction import (
+    DocumentParseSnapshot,
+    locator_repair_fingerprints,
+)
 
 
 def _snapshot(text: str, *, parser_version: str = "test") -> DocumentParseSnapshot:
@@ -72,6 +75,112 @@ async def _insert_snapshot(
         (snapshot_id, document_id),
     )
     return snapshot_id
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.requires_pgvector
+@pytest.mark.no_network
+async def test_legacy_locator_reindex_queues_once_and_preserves_snapshot(real_postgres_client):
+    notebook_id = str(uuid.uuid4())
+    await _insert_document(
+        real_postgres_client, document_id=notebook_id, status="indexed"
+    )
+    await real_postgres_client.execute(
+        "UPDATE public.project_documents SET extension = '.ipynb', relative_path = 'notes.ipynb' WHERE document_id = %s",
+        (notebook_id,),
+    )
+    notebook_snapshot = await _insert_snapshot(
+        real_postgres_client, document_id=notebook_id, content_hash="a" * 64
+    )
+    pdf_id = str(uuid.uuid4())
+    await _insert_document(
+        real_postgres_client, document_id=pdf_id, status="indexed"
+    )
+    await real_postgres_client.execute(
+        "UPDATE public.project_documents SET extension = '.pdf', relative_path = 'notes.pdf' WHERE document_id = %s",
+        (pdf_id,),
+    )
+    pdf_snapshot = await _insert_snapshot(
+        real_postgres_client, document_id=pdf_id, content_hash="a" * 64
+    )
+    fingerprints = locator_repair_fingerprints()
+    writer = DocumentWriter(real_postgres_client, "project-1")
+
+    assert await writer.queue_legacy_locator_reindex(
+        pdf_fingerprint=fingerprints[".pdf"],
+        notebook_fingerprint=fingerprints[".ipynb"],
+    ) == 2
+    rows = await real_postgres_client.fetch_all(
+        "SELECT document_id, status, current_snapshot_id FROM public.project_documents WHERE document_id = ANY(%s)",
+        ([notebook_id, pdf_id],),
+    )
+    assert {str(row["document_id"]): row["status"] for row in rows} == {
+        notebook_id: "queued", pdf_id: "queued",
+    }
+    assert {str(row["current_snapshot_id"]) for row in rows} == {
+        notebook_snapshot, pdf_snapshot,
+    }
+    assert await writer.queue_legacy_locator_reindex(
+        pdf_fingerprint=fingerprints[".pdf"],
+        notebook_fingerprint=fingerprints[".ipynb"],
+    ) == 0
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.requires_pgvector
+@pytest.mark.no_network
+async def test_document_catalog_records_direct_and_scan_admission(real_postgres_client):
+    direct_id = str(uuid.uuid4())
+    scanned_id = str(uuid.uuid4())
+    legacy_id = str(uuid.uuid4())
+    writer = DocumentWriter(real_postgres_client, "project-1")
+    reader = DocumentReader(real_postgres_client, "project-1")
+
+    await writer.insert_document(
+        document_id=direct_id,
+        original_name="upload.png",
+        relative_path="upload.png",
+        extension=".png",
+        size_bytes=5,
+        content_hash="a" * 64,
+        created_at="2026-10-16T00:00:00+00:00",
+    )
+    await writer.apply_filesystem_reconciliation(
+        created=[
+            {
+                "document_id": scanned_id,
+                "original_name": "scanned.md",
+                "relative_path": "scanned.md",
+                "extension": ".md",
+                "size_bytes": 5,
+                "content_hash": "b" * 64,
+            }
+        ],
+        changed=[],
+        deleted_document_ids=[],
+        updated_at="2026-10-16T00:00:00+00:00",
+    )
+    await _insert_document(
+        real_postgres_client,
+        document_id=legacy_id,
+        content_hash="c" * 64,
+    )
+
+    rows = await reader.list_documents_for_reconciliation(limit=10)
+    assert {str(row["document_id"]): row["scan_managed"] for row in rows} == {
+        direct_id: False,
+        scanned_id: True,
+        legacy_id: False,
+    }
+    path_rows = await reader.fetch_project_documents_for_paths(
+        relative_paths=["upload.png", "scanned.md"]
+    )
+    assert {row["relative_path"]: row["scan_managed"] for row in path_rows} == {
+        "upload.png": False,
+        "scanned.md": True,
+    }
 
 
 @pytest.mark.storage

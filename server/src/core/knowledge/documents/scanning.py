@@ -1,7 +1,8 @@
 import fnmatch
 import hashlib
+from dataclasses import dataclass
 from pathlib import PurePosixPath, PureWindowsPath
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from pathspec import GitIgnoreSpec
 
@@ -28,6 +29,14 @@ from core.knowledge.documents.constants import (
     document_extension,
 )
 from core.knowledge.documents.extraction import looks_binary
+
+
+@dataclass(frozen=True, slots=True)
+class FolderScanPathEntry:
+    """A local path whose bytes are loaded only while it is evaluated."""
+
+    relative_path: str
+    size_bytes: int
 
 
 def normalize_relative_path(
@@ -152,9 +161,11 @@ def ancestor_match(path: str, excluded_directories):
 
 def build_folder_preview(
     folder_name: str,
-    entries: List[FolderUploadEntry],
+    entries: List[FolderUploadEntry | FolderScanPathEntry],
     settings: FolderScanSettings,
     force_include_paths: List[str],
+    *,
+    content_loader: Callable[[str, int], bytes] | None = None,
 ) -> FolderPreview:
     normalized_entries = {}
     for entry in entries:
@@ -166,7 +177,15 @@ def build_folder_preview(
             raise ValueError(
                 f"duplicate normalized relative_path: {normalized}"
             )
-        normalized_entries[normalized] = entry.content
+        normalized_entries[normalized] = entry
+
+    def content_for(path: str) -> bytes:
+        entry = normalized_entries[path]
+        if isinstance(entry, FolderUploadEntry):
+            return entry.content
+        if content_loader is None:
+            raise ValueError("content_loader is required for local scan paths")
+        return content_loader(path, entry.size_bytes)
 
     normalized_overrides = {
         normalize_relative_path(path, path)
@@ -181,10 +200,11 @@ def build_folder_preview(
 
     gitignore_specs = []
     if settings.respect_gitignore:
-        for path, content in normalized_entries.items():
+        for path in normalized_entries:
             path_obj = PurePosixPath(path)
             if path_obj.name != ".gitignore":
                 continue
+            content = content_for(path)
             base_parts = (
                 ()
                 if path_obj.parent.as_posix() == "."
@@ -261,7 +281,7 @@ def build_folder_preview(
         )
 
     for path in sorted(normalized_entries):
-        content = normalized_entries[path]
+        content = content_for(path)
         path_obj = PurePosixPath(path)
         name = path_obj.name
         lower_name = name.lower()

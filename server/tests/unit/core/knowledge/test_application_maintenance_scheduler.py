@@ -75,6 +75,17 @@ def test_project_manager_composes_user_owned_expiry_without_loaded_projects():
 
 @pytest.mark.unit
 @pytest.mark.no_network
+def test_project_manager_wires_configured_llm_into_merge_advisor():
+    resources = FakeResources()
+    resources.llm_service = object()
+
+    manager = ProjectManager(resources, "ada")
+
+    assert manager.entity_maintenance_service.merge_advisor.llm is resources.llm_service
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 async def test_artifact_sweep_runs_directly_and_retries_with_honest_status():
     writer = SimpleNamespace(purge_expired_artifacts=AsyncMock(side_effect=[StorageWriteError("expiry"), 2, 0]))
     scheduler = ApplicationMaintenanceScheduler(
@@ -125,6 +136,33 @@ async def test_maintenance_failures_do_not_starve_the_other_job(fails):
         await scheduler.start()
         await asyncio.wait_for(progressed.wait(), timeout=2)
         assert service.calls >= 1 and sweeps >= 2
+    finally:
+        await scheduler.stop()
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_pending_project_file_cleanup_retries_without_a_restart():
+    attempts = 0
+    recovered = asyncio.Event()
+
+    async def cleanup():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("temporary file lock")
+        recovered.set()
+
+    scheduler = ApplicationMaintenanceScheduler(
+        maintenance_service=FakeMaintenanceService(),
+        user_name="ada",
+        project_file_cleanup=cleanup,
+        interval_seconds=0.01,
+    )
+    try:
+        await scheduler.start()
+        await asyncio.wait_for(recovered.wait(), timeout=2)
+        assert attempts >= 2
     finally:
         await scheduler.stop()
 

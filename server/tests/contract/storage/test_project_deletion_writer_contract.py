@@ -422,15 +422,17 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
             INSERT INTO relationship_observations (
                 relationship_id, project_id, user_name, semantic_window_id,
                 source_entity_id, target_entity_id, observed_relationship_label,
-                observed_at_ms
+                support_key, observed_at_ms
             ) VALUES
                 (
                     'project-1:42:43:related', 'project-1', 'ada',
-                    '11111111-1111-4111-8111-111111111111', 42, 43, 'related to', 1000
+                    '11111111-1111-4111-8111-111111111111', 42, 43,
+                    'related to', md5('[]'), 1000
                 ),
                 (
                     'project-2:52:53:related', 'project-2', 'ada',
-                    '22222222-2222-4222-8222-222222222222', 52, 53, 'related to', 2000
+                    '22222222-2222-4222-8222-222222222222', 52, 53,
+                    'related to', md5('[]'), 2000
                 )
             """
         )

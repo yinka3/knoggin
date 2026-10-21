@@ -38,7 +38,7 @@ def _domain():
                 "OWNS": {
                     "source_types": ["Person"],
                     "target_types": ["Company"],
-                    "labels": ["owns"],
+                    "labels": ["owns", "has ownership of"],
                 }
             },
         }
@@ -257,6 +257,57 @@ async def test_context_vp02_uses_current_multi_block_evidence_and_rejects_unknow
     assert [issue.code for issue in build.issues] == [
         "invalid_context_connection_block"
     ]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_context_vp02_keeps_independent_support_sets_and_observed_labels():
+    first = _block("Alice owns Delta.")
+    second = _block("Alice also controls Delta.")
+    build = _build(first, second)
+    llm = _ScriptedLLM(
+        [
+            {
+                "block_ids": ["b1"],
+                "entity_a": "e2",
+                "entity_b": "e3",
+                "relationship": "owns",
+            },
+            {
+                "block_ids": ["b2"],
+                "entity_a": "e2",
+                "entity_b": "e3",
+                "relationship": "owns",
+            },
+            {
+                "block_ids": ["b1"],
+                "entity_a": "e2",
+                "entity_b": "e3",
+                "relationship": "has ownership of",
+            },
+            {
+                "block_ids": ["b1"],
+                "entity_a": "e2",
+                "entity_b": "e3",
+                "relationship": "owns",
+                "context": "duplicate support group",
+            },
+        ]
+    )
+
+    writes = await ContextRelationshipExtractor(
+        user_name="ada", llm=llm, entities=_Entities()
+    ).extract(build)
+
+    assert len(writes) == 3
+    assert {
+        (write.observed_label, frozenset(write.support_block_ids))
+        for write in writes
+    } == {
+        ("owns", frozenset({first.block_id})),
+        ("owns", frozenset({second.block_id})),
+        ("has ownership of", frozenset({first.block_id})),
+    }
 
 
 class _ForeignSourceEntities:

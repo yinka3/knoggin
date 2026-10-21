@@ -85,7 +85,9 @@ def test_advisories_are_directional_and_require_thresholds():
 
     advisories = build_relationship_advisories(
         rows,
-        thresholds=AdvisoryThresholds(min_occurrences=2, min_distinct_entities=2),
+        thresholds=AdvisoryThresholds(
+            min_occurrences=2, min_distinct_entities=2, min_distinct_pairs=1
+        ),
     )
 
     assert len(advisories) == 1
@@ -100,6 +102,8 @@ def test_advisory_thresholds_reject_non_positive_values():
         AdvisoryThresholds(min_occurrences=0)
     with pytest.raises(ValueError, match="min_distinct_entities"):
         AdvisoryThresholds(min_distinct_entities=0)
+    with pytest.raises(ValueError, match="min_distinct_pairs"):
+        AdvisoryThresholds(min_distinct_pairs=0)
     with pytest.raises(ValueError, match="min_distinct_windows"):
         AdvisoryThresholds(min_distinct_windows=0)
 
@@ -118,12 +122,14 @@ def test_advisories_do_not_promote_repetition_within_one_semantic_window():
 
 @pytest.mark.unit
 @pytest.mark.no_network
-def test_context_only_observations_do_not_create_advisory_but_mixed_groups_survive():
+def test_context_observations_from_separate_windows_create_advisory():
     context_rows = [
         {**unknown_observation(index, index, index + 10), "evidence_origin": "context"}
         for index in range(1, 4)
     ]
-    assert build_relationship_advisories(context_rows) == []
+    advisories = build_relationship_advisories(context_rows)
+    assert len(advisories) == 1
+    assert advisories[0].observation_ids == (1, 2, 3)
 
     independent_rows = [
         {
@@ -137,6 +143,34 @@ def test_context_only_observations_do_not_create_advisory_but_mixed_groups_survi
     assert len(advisories) == 1
     assert advisories[0].occurrence_count == 6
     assert advisories[0].observation_ids == (1, 2, 3, 4, 5, 6)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_context_observations_in_one_window_remain_below_evidence_floor():
+    context_rows = [
+        {
+            **unknown_observation(index, index, index + 10, semantic_window_id="one-window"),
+            "evidence_origin": "context",
+        }
+        for index in range(1, 4)
+    ]
+
+    assert build_relationship_advisories(context_rows) == []
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_repeated_context_extraction_of_one_pair_is_not_domain_advisory():
+    rows = [
+        {
+            **unknown_observation(index, 101, 201),
+            "evidence_origin": "context",
+        }
+        for index in range(1, 4)
+    ]
+
+    assert build_relationship_advisories(rows) == []
 
 
 @pytest.mark.unit

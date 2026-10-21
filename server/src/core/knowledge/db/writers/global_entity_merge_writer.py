@@ -8,6 +8,7 @@ from typing import Any, Iterable
 
 from common.schema.ingestion.contracts import relationship_identity
 from common.scoping import IDENTITY_ENTITY_ID
+from core.knowledge.db.writers.maintenance_review_writer import MaintenanceReviewWriter
 from infrastructure.postgres_client import PostgresClient
 
 _PROJECTION_REPAIR_PENDING = "projection_repair_pending"
@@ -31,6 +32,7 @@ class GlobalEntityMergeWriter:
 
     def __init__(self, client: PostgresClient):
         self.client = client
+        self.reviews = MaintenanceReviewWriter(client)
 
     @asynccontextmanager
     async def _cursor(self, cur=None):
@@ -48,6 +50,108 @@ class GlobalEntityMergeWriter:
         await cur.execute(query, tuple(params))
         row = await cur.fetchone()
         return dict(row) if row else None
+
+    async def _episode_entity_source_count(
+        self, cur, *, project_id: str, episode_id: str, entity_id: int
+    ) -> int:
+        row = await self._fetch_one(
+            cur,
+            """
+            WITH per_window AS (
+                SELECT membership.window_id,
+                       count(DISTINCT episode_message.message_id)::integer
+                           AS source_count
+                FROM public.project_semantic_window_episodes AS membership
+                JOIN public.project_semantic_windows AS semantic_window
+                  ON semantic_window.window_id = membership.window_id
+                 AND semantic_window.project_id = membership.project_id
+                JOIN public.episode_messages AS episode_message
+                  ON episode_message.episode_id = membership.episode_id
+                 AND episode_message.project_id = membership.project_id
+                JOIN public.project_context_block_supports AS support
+                  ON support.project_id = episode_message.project_id
+                 AND support.session_id = episode_message.session_id
+                 AND support.message_id = episode_message.message_id
+                JOIN public.project_context_revision_blocks AS revision_block
+                  ON revision_block.revision_id = semantic_window.context_revision_id
+                 AND revision_block.project_id = support.project_id
+                 AND revision_block.block_id = support.block_id
+                JOIN public.context_block_entities AS association
+                  ON association.project_id = support.project_id
+                 AND association.block_id = support.block_id
+                WHERE membership.project_id = %s
+                  AND membership.episode_id = %s
+                  AND association.entity_id = %s
+                GROUP BY membership.window_id
+            )
+            SELECT coalesce(max(source_count), 0)::integer AS source_count
+            FROM per_window
+            """,
+            (project_id, episode_id, entity_id),
+        )
+        return int(row["source_count"])
+
+    async def _episode_relationship_source_count(
+        self, cur, *, project_id: str, episode_id: str, relationship_id: str
+    ) -> int:
+        row = await self._fetch_one(
+            cur,
+            """
+            WITH matching_support AS (
+                SELECT membership.window_id,
+                       observation.observation_id,
+                       observation_block.block_id,
+                       episode_message.message_id
+                FROM public.project_semantic_window_episodes AS membership
+                JOIN public.project_semantic_windows AS semantic_window
+                  ON semantic_window.window_id = membership.window_id
+                 AND semantic_window.project_id = membership.project_id
+                JOIN public.episode_messages AS episode_message
+                  ON episode_message.episode_id = membership.episode_id
+                 AND episode_message.project_id = membership.project_id
+                JOIN public.project_context_block_supports AS support
+                  ON support.project_id = episode_message.project_id
+                 AND support.session_id = episode_message.session_id
+                 AND support.message_id = episode_message.message_id
+                JOIN public.project_context_revision_blocks AS revision_block
+                  ON revision_block.revision_id = semantic_window.context_revision_id
+                 AND revision_block.project_id = support.project_id
+                 AND revision_block.block_id = support.block_id
+                JOIN public.relationship_observation_blocks AS observation_block
+                  ON observation_block.project_id = support.project_id
+                 AND observation_block.block_id = support.block_id
+                JOIN public.relationship_observations AS observation
+                  ON observation.observation_id = observation_block.observation_id
+                 AND observation.project_id = observation_block.project_id
+                WHERE membership.project_id = %s
+                  AND membership.episode_id = %s
+                  AND observation.relationship_id = %s
+                  AND observation.retired_at IS NULL
+            ),
+            complete_observations AS (
+                SELECT window_id, observation_id
+                FROM matching_support
+                GROUP BY window_id, observation_id
+                HAVING count(DISTINCT block_id) = (
+                    SELECT count(*)
+                    FROM public.relationship_observation_blocks AS required_block
+                    WHERE required_block.observation_id = matching_support.observation_id
+                )
+            ), per_window AS (
+                SELECT support.window_id,
+                       count(DISTINCT support.message_id)::integer AS source_count
+                FROM matching_support AS support
+                JOIN complete_observations AS complete
+                  ON complete.window_id = support.window_id
+                 AND complete.observation_id = support.observation_id
+                GROUP BY support.window_id
+            )
+            SELECT coalesce(max(source_count), 0)::integer AS source_count
+            FROM per_window
+            """,
+            (project_id, episode_id, relationship_id),
+        )
+        return int(row["source_count"])
 
     async def snapshot(
         self,
@@ -163,7 +267,8 @@ class GlobalEntityMergeWriter:
                 """
                 SELECT observation_id, relationship_id, project_id, user_name,
                        semantic_window_id, source_entity_id, target_entity_id,
-                       observed_relationship_label, interpretation_source, context,
+                       observed_relationship_label, support_key,
+                       interpretation_source, context,
                        observed_at_ms
                 FROM public.relationship_observations
                 WHERE user_name = %s
@@ -585,11 +690,6 @@ class GlobalEntityMergeWriter:
             for row in before["episode_entities"]:
                 if int(row["entity_id"]) != retired_id:
                     continue
-                survivor_episode_existed = any(
-                    existing["episode_id"] == row["episode_id"]
-                    and int(existing["entity_id"]) == survivor_id
-                    for existing in before["episode_entities"]
-                )
                 survivor_episode = next(
                     (
                         existing
@@ -599,6 +699,12 @@ class GlobalEntityMergeWriter:
                     ),
                     None,
                 )
+                source_count = await self._episode_entity_source_count(
+                    active_cur,
+                    project_id=row["project_id"],
+                    episode_id=row["episode_id"],
+                    entity_id=survivor_id,
+                )
                 await active_cur.execute(
                     """
                     INSERT INTO public.episode_entities
@@ -606,8 +712,7 @@ class GlobalEntityMergeWriter:
                          first_seen_at, last_seen_at)
                     VALUES (%s, %s, %s, %s, %s, %s)
                     ON CONFLICT (episode_id, entity_id) DO UPDATE SET
-                        source_message_count = episode_entities.source_message_count
-                            + EXCLUDED.source_message_count,
+                        source_message_count = EXCLUDED.source_message_count,
                         first_seen_at = LEAST(episode_entities.first_seen_at,
                                               EXCLUDED.first_seen_at),
                         last_seen_at = GREATEST(episode_entities.last_seen_at,
@@ -617,7 +722,7 @@ class GlobalEntityMergeWriter:
                         row["episode_id"],
                         row["project_id"],
                         survivor_id,
-                        int(row["source_message_count"] or 0),
+                        source_count,
                         row["first_seen_at"],
                         row["last_seen_at"],
                     ),
@@ -629,48 +734,24 @@ class GlobalEntityMergeWriter:
                     """,
                     (row["episode_id"], retired_id),
                 )
+                merged_episode = await self._fetch_one(
+                    active_cur,
+                    """
+                    SELECT episode_id, project_id, entity_id, source_message_count,
+                           first_seen_at, last_seen_at
+                    FROM public.episode_entities
+                    WHERE episode_id = %s AND entity_id = %s
+                    """,
+                    (row["episode_id"], survivor_id),
+                )
                 await record(
                     "episode_entity",
                     f"{row['project_id']}:{row['episode_id']}:{retired_id}",
                     row,
                     {
-                        **row,
-                        "entity_id": survivor_id,
-                        "created": not survivor_episode_existed,
-                        "source_message_count": int(row["source_message_count"] or 0)
-                        + int((survivor_episode or {}).get("source_message_count") or 0),
-                        "first_seen_at": min(
-                            value
-                            for value in (
-                                row.get("first_seen_at"),
-                                (survivor_episode or {}).get("first_seen_at"),
-                            )
-                            if value is not None
-                        )
-                        if any(
-                            value is not None
-                            for value in (
-                                row.get("first_seen_at"),
-                                (survivor_episode or {}).get("first_seen_at"),
-                            )
-                        )
-                        else None,
-                        "last_seen_at": max(
-                            value
-                            for value in (
-                                row.get("last_seen_at"),
-                                (survivor_episode or {}).get("last_seen_at"),
-                            )
-                            if value is not None
-                        )
-                        if any(
-                            value is not None
-                            for value in (
-                                row.get("last_seen_at"),
-                                (survivor_episode or {}).get("last_seen_at"),
-                            )
-                        )
-                        else None,
+                        **merged_episode,
+                        "created": survivor_episode is None,
+                        "survivor_before": survivor_episode,
                     },
                 )
 
@@ -678,6 +759,7 @@ class GlobalEntityMergeWriter:
             # aggregate edges.  Evidence rows remain distinct unless the DB's
             # explicit source-evidence uniqueness says they are the same fact.
             relation_rows = list(before["relationships"])
+            relationship_remaps: dict[tuple[str, str], str | None] = {}
             for relation in relation_rows:
                 old_id = relation["relationship_id"]
                 new_a = survivor_id if int(relation["entity_a_id"]) == retired_id else int(relation["entity_a_id"])
@@ -688,6 +770,7 @@ class GlobalEntityMergeWriter:
                     if item["relationship_id"] == old_id
                 ]
                 if new_a == new_b:
+                    relationship_remaps[(relation["project_id"], old_id)] = None
                     for observation in observations:
                         await active_cur.execute(
                             """
@@ -727,6 +810,8 @@ class GlobalEntityMergeWriter:
                     relation["relationship_type"],
                     symmetric=bool(relation["symmetric"]),
                 )
+                if new_id != old_id:
+                    relationship_remaps[(relation["project_id"], old_id)] = new_id
                 target_row = await self._fetch_one(
                     active_cur,
                     """SELECT relationship_id FROM public.relationships
@@ -762,6 +847,7 @@ class GlobalEntityMergeWriter:
                              AND source_entity_id = %s
                              AND target_entity_id = %s
                              AND observed_relationship_label = %s
+                             AND support_key = %s
                              AND observation_id <> %s""",
                         (
                             observation["project_id"],
@@ -769,6 +855,7 @@ class GlobalEntityMergeWriter:
                             new_source,
                             new_target,
                             observation["observed_relationship_label"],
+                            observation["support_key"],
                             observation["observation_id"],
                         ),
                     )
@@ -819,40 +906,14 @@ class GlobalEntityMergeWriter:
                             else int(observation["target_entity_id"]),
                         },
                     )
-                old_episode_refs = [
-                    item
-                    for item in before["episode_relationships"]
-                    if item["relationship_id"] == old_id
-                    and item["project_id"] == relation["project_id"]
-                ]
-                for episode_ref in old_episode_refs:
-                    await record(
-                        "episode_relationship",
-                        f"{episode_ref['project_id']}:{episode_ref['episode_id']}:{old_id}",
-                        episode_ref,
-                        {**episode_ref, "relationship_id": new_id},
-                    )
-                await active_cur.execute(
-                    """
-                    INSERT INTO public.episode_relationships
-                        (episode_id, project_id, relationship_id, source_message_count)
-                    SELECT episode_id, project_id, %s, source_message_count
-                    FROM public.episode_relationships
-                    WHERE relationship_id = %s AND project_id = %s
-                    ON CONFLICT (episode_id, relationship_id) DO UPDATE SET
-                        source_message_count = episode_relationships.source_message_count
-                            + EXCLUDED.source_message_count
-                    """,
-                    (new_id, old_id, relation["project_id"]),
-                )
-                await active_cur.execute(
-                    """
-                    DELETE FROM public.episode_relationships
-                    WHERE relationship_id = %s AND project_id = %s
-                    """,
-                    (old_id, relation["project_id"]),
-                )
                 if new_id != old_id:
+                    await active_cur.execute(
+                        """
+                        DELETE FROM public.episode_relationships
+                        WHERE relationship_id = %s AND project_id = %s
+                        """,
+                        (old_id, relation["project_id"]),
+                    )
                     await active_cur.execute(
                         """
                         DELETE FROM public.relationships
@@ -871,6 +932,79 @@ class GlobalEntityMergeWriter:
                         "entity_b_id": new_b,
                         "created": not target_existed,
                     },
+                )
+
+            # A changed edge may merge into an existing edge.  Count the
+            # distinct supporting messages after all observations have their
+            # final relationship IDs, then journal every original link in the
+            # affected physical row so rollback can restore it exactly.
+            affected_links: dict[tuple[str, str, str], tuple[str | None, list[dict[str, Any]]]] = {}
+            for link in before["episode_relationships"]:
+                old_key = (link["project_id"], link["relationship_id"])
+                if old_key not in relationship_remaps:
+                    continue
+                target_id = relationship_remaps[old_key]
+                group_key = (
+                    link["project_id"],
+                    link["episode_id"],
+                    target_id or link["relationship_id"],
+                )
+                if group_key not in affected_links:
+                    affected_links[group_key] = (target_id, [])
+                affected_links[group_key][1].append(link)
+
+            for (project_id, episode_id, key_id), (target_id, original) in affected_links.items():
+                if target_id is not None:
+                    original.extend(
+                        link
+                        for link in before["episode_relationships"]
+                        if link["project_id"] == project_id
+                        and link["episode_id"] == episode_id
+                        and link["relationship_id"] == target_id
+                    )
+                    source_count = await self._episode_relationship_source_count(
+                        active_cur,
+                        project_id=project_id,
+                        episode_id=episode_id,
+                        relationship_id=target_id,
+                    )
+                    if source_count:
+                        await active_cur.execute(
+                            """
+                            INSERT INTO public.episode_relationships
+                                (episode_id, project_id, relationship_id,
+                                 source_message_count)
+                            VALUES (%s, %s, %s, %s)
+                            ON CONFLICT (episode_id, relationship_id) DO UPDATE SET
+                                source_message_count = EXCLUDED.source_message_count
+                            """,
+                            (episode_id, project_id, target_id, source_count),
+                        )
+                    else:
+                        await active_cur.execute(
+                            """
+                            DELETE FROM public.episode_relationships
+                            WHERE episode_id = %s AND project_id = %s
+                              AND relationship_id = %s
+                            """,
+                            (episode_id, project_id, target_id),
+                        )
+                after_link = await self._fetch_one(
+                    active_cur,
+                    """
+                    SELECT episode_id, project_id, relationship_id,
+                           source_message_count
+                    FROM public.episode_relationships
+                    WHERE episode_id = %s AND project_id = %s
+                      AND relationship_id = %s
+                    """,
+                    (episode_id, project_id, key_id),
+                )
+                await record(
+                    "episode_relationship",
+                    f"{project_id}:{episode_id}:{key_id}",
+                    original,
+                    after_link,
                 )
 
             # Detached observations are still canonical evidence.  Rewrite
@@ -904,6 +1038,23 @@ class GlobalEntityMergeWriter:
                             "target_entity_id": target,
                         },
                     )
+
+            # A review's evidence token covers source text, but not the
+            # observation's endpoint or aggregate relationship identity.
+            # Invalidate cited reviews in the same transaction as the merge.
+            observation_ids_by_project: dict[str, set[int]] = {}
+            for observation in before["relationship_observations"]:
+                observation_ids_by_project.setdefault(
+                    observation["project_id"], set()
+                ).add(int(observation["observation_id"]))
+            for project_id, observation_ids in sorted(observation_ids_by_project.items()):
+                await self.reviews.mark_stale_for_observations(
+                    user_name=user_name,
+                    project_id=project_id,
+                    observation_ids=observation_ids,
+                    reason="Entity merge changed relationship identity",
+                    cur=active_cur,
+                )
 
             await active_cur.execute(
                 """
@@ -1079,7 +1230,10 @@ class GlobalEntityMergeWriter:
                    WHERE project_id = %s AND episode_id = %s AND entity_id = %s""",
                 (parts[0], parts[1], int(after["entity_id"])),
             )
-            return {**(found or {}), "created": bool(after.get("created"))} if found else None
+            return {
+                **found,
+                "created": bool(after.get("created")),
+            } if found else None
         if kind == "relationship":
             if after is None:
                 return None
@@ -1097,14 +1251,15 @@ class GlobalEntityMergeWriter:
                 cur,
                 """SELECT observation_id, relationship_id, project_id, user_name,
                           semantic_window_id, source_entity_id, target_entity_id,
-                          observed_relationship_label, interpretation_source, context,
+                          observed_relationship_label, support_key,
+                          interpretation_source, context,
                           observed_at_ms
                    FROM public.relationship_observations WHERE observation_id = %s""",
                 (int(key),),
             )
         if kind == "episode_relationship":
             parts = key.split(":", 2)
-            relationship_id = after["relationship_id"]
+            relationship_id = parts[2] if isinstance(before, list) else after["relationship_id"]
             return await self._fetch_one(
                 cur,
                 """SELECT episode_id, project_id, relationship_id, source_message_count
@@ -1118,6 +1273,96 @@ class GlobalEntityMergeWriter:
     def _json_equal(left: Any, right: Any) -> bool:
         return json.dumps(left, sort_keys=True, default=str) == json.dumps(
             right, sort_keys=True, default=str
+        )
+
+    @staticmethod
+    def _relationship_rollback_groups(
+        mutations: list[dict[str, Any]],
+    ) -> list[set[int]]:
+        """Keep each changed edge with the evidence that depends on it."""
+
+        groups: dict[tuple[str, str], set[int]] = {}
+        old_to_group: dict[tuple[str, str], tuple[str, str]] = {}
+        for mutation in mutations:
+            if mutation["object_kind"] != "relationship":
+                continue
+            before = mutation["before_value"]
+            after = mutation["after_value"]
+            if after is not None and before["relationship_id"] == after["relationship_id"]:
+                continue
+            project_id = before["project_id"]
+            target_id = after["relationship_id"] if after else before["relationship_id"]
+            group_key = (project_id, target_id)
+            groups.setdefault(group_key, set()).add(int(mutation["mutation_id"]))
+            old_to_group[(project_id, before["relationship_id"])] = group_key
+
+        for mutation in mutations:
+            kind = mutation["object_kind"]
+            before = mutation["before_value"]
+            if kind == "relationship_observation":
+                old_key = (before["project_id"], before["relationship_id"])
+                group_key = old_to_group.get(old_key)
+                if group_key is not None:
+                    groups[group_key].add(int(mutation["mutation_id"]))
+            elif kind == "episode_relationship":
+                original_links = before if isinstance(before, list) else [before]
+                for link in original_links:
+                    group_key = old_to_group.get(
+                        (link["project_id"], link["relationship_id"])
+                    )
+                    if group_key is not None:
+                        groups[group_key].add(int(mutation["mutation_id"]))
+        return list(groups.values())
+
+    async def _created_relationship_has_untracked_dependents(
+        self,
+        cur,
+        relationship: dict[str, Any],
+        mutations: list[dict[str, Any]],
+    ) -> bool:
+        """Avoid deleting a target edge that acquired evidence after merge."""
+
+        after = relationship["after_value"]
+        if after is None or not after.get("created"):
+            return False
+        project_id = after["project_id"]
+        relationship_id = after["relationship_id"]
+        expected_observations = {
+            int(mutation["after_value"]["observation_id"])
+            for mutation in mutations
+            if mutation["object_kind"] == "relationship_observation"
+            and mutation["inverse_status"] != "applied"
+            and mutation["after_value"]["relationship_id"] == relationship_id
+            and mutation["after_value"]["project_id"] == project_id
+        }
+        current_observations = await self._fetch_all(
+            cur,
+            """SELECT observation_id FROM public.relationship_observations
+               WHERE project_id = %s AND relationship_id = %s""",
+            (project_id, relationship_id),
+        )
+        if any(
+            int(row["observation_id"]) not in expected_observations
+            for row in current_observations
+        ):
+            return True
+        expected_episodes = {
+            mutation["after_value"]["episode_id"]
+            for mutation in mutations
+            if mutation["object_kind"] == "episode_relationship"
+            and mutation["inverse_status"] != "applied"
+            and mutation["after_value"] is not None
+            and mutation["after_value"]["relationship_id"] == relationship_id
+            and mutation["after_value"]["project_id"] == project_id
+        }
+        current_links = await self._fetch_all(
+            cur,
+            """SELECT episode_id FROM public.episode_relationships
+               WHERE project_id = %s AND relationship_id = %s""",
+            (project_id, relationship_id),
+        )
+        return any(
+            row["episode_id"] not in expected_episodes for row in current_links
         )
 
     async def plan_rollback(
@@ -1179,10 +1424,13 @@ class GlobalEntityMergeWriter:
                         {k: expected.get(k) for k in ("observation_id", "relationship_id", "source_entity_id", "target_entity_id")},
                     )
                 elif mutation["object_kind"] == "episode_relationship":
-                    matches = current is not None and self._json_equal(
-                        {k: current.get(k) for k in ("episode_id", "project_id", "relationship_id", "source_message_count")},
-                        {k: expected.get(k) for k in ("episode_id", "project_id", "relationship_id", "source_message_count")},
-                    )
+                    if isinstance(mutation["before_value"], list):
+                        matches = self._json_equal(current, expected)
+                    else:
+                        matches = current is not None and self._json_equal(
+                            {k: current.get(k) for k in ("episode_id", "project_id", "relationship_id", "source_message_count")},
+                            {k: expected.get(k) for k in ("episode_id", "project_id", "relationship_id", "source_message_count")},
+                        )
                 else:
                     matches = self._json_equal(current, expected)
                 if matches:
@@ -1197,6 +1445,41 @@ class GlobalEntityMergeWriter:
                             "current": current,
                         }
                     )
+            by_mutation_id = {
+                int(mutation["mutation_id"]): mutation for mutation in mutations
+            }
+            conflicting_ids = {item["mutation_id"] for item in conflicts}
+            for group in self._relationship_rollback_groups(mutations):
+                pending = {
+                    mutation_id for mutation_id in group
+                    if by_mutation_id[mutation_id]["inverse_status"] != "applied"
+                }
+                has_untracked_dependents = False
+                for mutation_id in pending:
+                    if by_mutation_id[mutation_id]["object_kind"] == "relationship":
+                        if await self._created_relationship_has_untracked_dependents(
+                            active_cur, by_mutation_id[mutation_id], mutations
+                        ):
+                            has_untracked_dependents = True
+                            break
+                if not (pending & conflicting_ids or has_untracked_dependents):
+                    continue
+                for mutation_id in pending - conflicting_ids:
+                    mutation = by_mutation_id[mutation_id]
+                    safe.remove(mutation_id)
+                    conflicts.append(
+                        {
+                            "mutation_id": mutation_id,
+                            "object_kind": mutation["object_kind"],
+                            "object_key": mutation["object_key"],
+                            "expected": mutation["after_value"],
+                            "current": None,
+                            "reason": "dependent relationship evidence changed"
+                            if not has_untracked_dependents
+                            else "new evidence is attached to the merged relationship",
+                        }
+                    )
+                    conflicting_ids.add(mutation_id)
             return {
                 "merge_id": merge_id,
                 "survivor_entity_id": int(audit["survivor_entity_id"]),
@@ -1250,6 +1533,30 @@ class GlobalEntityMergeWriter:
                 )
                 and mutation["inverse_status"] != "applied"
             }
+            by_mutation_id = {
+                int(mutation["mutation_id"]): mutation for mutation in mutations
+            }
+            dependency_deferred: set[int] = set()
+            for group in self._relationship_rollback_groups(mutations):
+                pending = {
+                    mutation_id for mutation_id in group
+                    if by_mutation_id[mutation_id]["inverse_status"] != "applied"
+                }
+                if not pending.intersection(selected):
+                    continue
+                has_untracked_dependents = False
+                for mutation_id in pending:
+                    if by_mutation_id[mutation_id]["object_kind"] == "relationship":
+                        if await self._created_relationship_has_untracked_dependents(
+                            active_cur, by_mutation_id[mutation_id], mutations
+                        ):
+                            has_untracked_dependents = True
+                            break
+                if pending <= selected.keys() and not has_untracked_dependents:
+                    continue
+                for mutation_id in pending:
+                    if selected.pop(mutation_id, None) is not None:
+                        dependency_deferred.add(mutation_id)
             order = {
                 "entity": 0,
                 "entity_aliases": 1,
@@ -1268,6 +1575,18 @@ class GlobalEntityMergeWriter:
                     "UPDATE public.entity_global_merge_mutations SET inverse_status = 'applied' WHERE mutation_id = %s",
                     (mutation["mutation_id"],),
                 )
+            # New relationship rows must remain while their observations and
+            # Episode links are moved back to the original relationship IDs.
+            for mutation in selected.values():
+                if mutation["object_kind"] != "relationship":
+                    continue
+                after = mutation["after_value"]
+                if after is not None and after.get("created"):
+                    await active_cur.execute(
+                        """DELETE FROM public.relationships
+                           WHERE relationship_id = %s AND project_id = %s""",
+                        (after["relationship_id"], after["project_id"]),
+                    )
             pending_mutation_count = sum(
                 mutation["inverse_status"] != "applied" for mutation in mutations
             )
@@ -1310,6 +1629,7 @@ class GlobalEntityMergeWriter:
                 "concurrent_conflicts": sorted(
                     set(safe_mutation_ids) - fresh_safe_ids
                 ),
+                "dependency_deferred_mutation_ids": sorted(dependency_deferred),
             }
 
     async def _apply_inverse(self, cur, mutation: dict[str, Any]) -> None:
@@ -1419,10 +1739,23 @@ class GlobalEntityMergeWriter:
             project_id, episode_id, _ = key.split(":", 2)
             retired_id = int(before["entity_id"])
             survivor_id = int(after["entity_id"])
-            if after.get("created"):
+            survivor_before = after.get("survivor_before")
+            if "survivor_before" in after and survivor_before is None or (
+                "survivor_before" not in after and after.get("created")
+            ):
                 await cur.execute(
                     "DELETE FROM public.episode_entities WHERE project_id = %s AND episode_id = %s AND entity_id = %s",
                     (project_id, episode_id, survivor_id),
+                )
+            elif survivor_before is not None:
+                await cur.execute(
+                    """UPDATE public.episode_entities
+                       SET source_message_count = %s,
+                           first_seen_at = %s, last_seen_at = %s
+                       WHERE project_id = %s AND episode_id = %s AND entity_id = %s""",
+                    (survivor_before["source_message_count"],
+                     survivor_before["first_seen_at"], survivor_before["last_seen_at"],
+                     project_id, episode_id, survivor_id),
                 )
             else:
                 await cur.execute(
@@ -1442,11 +1775,6 @@ class GlobalEntityMergeWriter:
                 (episode_id, project_id, retired_id, before["source_message_count"], before["first_seen_at"], before["last_seen_at"]),
             )
         elif kind == "relationship":
-            if after is not None and after.get("created"):
-                await cur.execute(
-                    "DELETE FROM public.relationships WHERE relationship_id = %s AND project_id = %s",
-                    (after["relationship_id"], after["project_id"]),
-                )
             if before is not None:
                 await cur.execute(
                     """INSERT INTO public.relationships
@@ -1466,6 +1794,26 @@ class GlobalEntityMergeWriter:
                 fields,
             )
         elif kind == "episode_relationship":
+            if isinstance(before, list):
+                project_id, episode_id, relationship_id = key.split(":", 2)
+                await cur.execute(
+                    """DELETE FROM public.episode_relationships
+                       WHERE project_id = %s AND episode_id = %s
+                         AND relationship_id = %s""",
+                    (project_id, episode_id, relationship_id),
+                )
+                for link in before:
+                    await cur.execute(
+                        """INSERT INTO public.episode_relationships
+                           (episode_id, project_id, relationship_id,
+                            source_message_count)
+                           VALUES (%s, %s, %s, %s)
+                           ON CONFLICT (episode_id, relationship_id) DO UPDATE SET
+                               source_message_count = EXCLUDED.source_message_count""",
+                        (link["episode_id"], link["project_id"],
+                         link["relationship_id"], link["source_message_count"]),
+                    )
+                return
             if after is not None and after["relationship_id"] != before["relationship_id"]:
                 await cur.execute(
                     "DELETE FROM public.episode_relationships WHERE project_id = %s AND episode_id = %s AND relationship_id = %s",

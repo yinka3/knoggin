@@ -12,9 +12,18 @@ class RecordingEmbeddingService:
     embedding_dim = 1024
     configuration_fingerprint = "fingerprint-v2"
 
-    def __init__(self, *, fail: bool = False):
+    def __init__(self, *, fail: bool = False, chunk_limit=None):
         self.fail = fail
         self.calls = []
+        self.chunk_limit = chunk_limit
+
+    def split_for_embedding(self, text):
+        if self.chunk_limit is None:
+            return [text]
+        return [
+            text[index : index + self.chunk_limit]
+            for index in range(0, len(text), self.chunk_limit)
+        ]
 
     @staticmethod
     def vector_for(text: str):
@@ -66,6 +75,8 @@ async def test_full_rebuild_replaces_episode_and_document_vectors_and_fingerprin
         [
             "Summary:\nWidget storage uses durable evidence.\n\n"
             "New developments:\n- Hybrid retrieval is enabled.",
+        ],
+        [
             "File: src/store.py\nLanguage: python\nSymbol: durable_write\n\n"
             "def durable_write(): pass",
         ]
@@ -85,6 +96,28 @@ async def test_full_rebuild_replaces_episode_and_document_vectors_and_fingerprin
     )
     assert client.transaction_enters == 2
     assert client.transaction_exits == 2
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_rebuild_embeds_all_of_a_long_episode_and_keeps_documents_separate():
+    client = rebuild_client()
+    summary = "Episode detail remains available. " * 110
+    client.fetch_all_results[0][0]["summary"] = summary
+    embedding = RecordingEmbeddingService(chunk_limit=400)
+
+    await EmbeddingRebuilder(client, embedding).rebuild_all_embeddings()
+
+    assert len(embedding.calls) == 2
+    assert len(embedding.calls[0]) > 1
+    assert all(len(chunk) <= 400 for chunk in embedding.calls[0])
+    assert "".join(embedding.calls[0]) == (
+        "Summary:\n" + summary.strip()
+        + "\n\nNew developments:\n- Hybrid retrieval is enabled."
+    )
+    assert len(embedding.calls[1]) == 1
+    writes = [call for call in client.calls if call[0] == "execute" and "UPDATE public." in call[1]]
+    assert len(writes) == 2
 
 
 @pytest.mark.storage

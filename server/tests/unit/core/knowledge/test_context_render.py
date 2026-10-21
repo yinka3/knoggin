@@ -4,7 +4,11 @@ from uuid import uuid4
 
 import pytest
 
-from common.conf.domain_config import DomainConfig
+from common.conf.domain_config import (
+    DEFAULT_CONTEXT_SECTIONS,
+    ContextSectionDefinition,
+    DomainConfig,
+)
 from common.schema.context import (
     AssertionKind,
     ContextAdd,
@@ -179,6 +183,115 @@ async def test_known_stale_projection_is_repaired_without_user_edit_blocking():
     assert result.changed is True
     assert writes[0][0] == "CONTEXT.md"
     assert writes[0][2]["expected_content_hash"] == hashlib.sha256(stale).hexdigest()
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+@pytest.mark.parametrize("bridge_revision", [False, True])
+@pytest.mark.parametrize("edited", [False, True])
+async def test_domain_title_change_repairs_clean_projection_before_or_after_bridge(
+    bridge_revision, edited,
+):
+    original_domain = _domain()
+    updated_domain = DomainConfig(
+        version=2,
+        topics=(),
+        entity_types=(),
+        context_sections=tuple(
+            ContextSectionDefinition(
+                key=section.key,
+                title=(
+                    "Current Work"
+                    if section.key == "active_work"
+                    else section.title
+                ),
+            )
+            for section in DEFAULT_CONTEXT_SECTIONS
+        ),
+    ).compile()
+    original_snapshot = _snapshot(
+        _block(section_key="active_work", markdown="Ship the parser.")
+    )
+    original_projection = render_context_markdown(
+        original_snapshot, original_domain
+    ).encode()
+    bridged_snapshot = original_snapshot.model_copy(
+        update={
+            "revision_id": uuid4(),
+            "revision_number": original_snapshot.revision_number + 1,
+            "domain_version": updated_domain.version,
+        }
+    )
+    current_snapshot = bridged_snapshot if bridge_revision else original_snapshot
+    file_content = original_projection + b"\nUser edit" if edited else original_projection
+    writes = []
+    failures = []
+
+    class Reader:
+        async def get_projection_state(self, **_kwargs):
+            return SimpleNamespace(
+                current_revision_id=current_snapshot.revision_id,
+                projection_revision_id=original_snapshot.revision_id,
+                projection_hash=hashlib.sha256(original_projection).hexdigest(),
+                projection_pending_hash=None,
+            )
+
+        async def get_snapshot(self, *_args, **_kwargs):
+            return current_snapshot
+
+    class Writer:
+        async def ensure_context(self, **_kwargs):
+            return None
+
+        async def record_projection(self, **_kwargs):
+            return True
+
+        async def record_projection_failure(self, **_kwargs):
+            failures.append(_kwargs)
+
+    class Filesystem:
+        def read_bytes(self, _path):
+            return file_content
+
+        def write_bytes(self, path, content, **kwargs):
+            writes.append((path, content, kwargs))
+
+    policy = IngestionPolicy.capture(
+        text_processor=TextProcessorSettings(),
+        entity_resolution=EntityResolutionSettings(),
+        compiled_domain=updated_domain,
+    )
+    projection = ContextProjection(
+        reader=Reader(),
+        writer=Writer(),
+        filesystem=Filesystem(),
+    )
+
+    if edited:
+        with pytest.raises(ContextProjectionConflictError):
+            await projection.synchronize(
+                user_name="ada",
+                project_id="project-1",
+                ingestion_policy=policy,
+                allow_user_edit=False,
+            )
+        assert writes == []
+        assert failures[0]["failure_code"] == "ContextProjectionConflictError"
+        return
+
+    result = await projection.synchronize(
+        user_name="ada",
+        project_id="project-1",
+        ingestion_policy=policy,
+        allow_user_edit=False,
+    )
+
+    assert result.changed is True
+    assert failures == []
+    assert b"## Current Work" in writes[0][1]
+    assert writes[0][2]["expected_content_hash"] == hashlib.sha256(
+        original_projection
+    ).hexdigest()
 
 
 @pytest.mark.unit

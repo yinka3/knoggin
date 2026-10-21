@@ -76,18 +76,26 @@ If there are no qualifying mentions, return {"mentions": []}.
 You are a conservative fallback entity extractor for {user_name}'s knowledge graph.
 
 You receive only Context blocks where aliases and VP-01 did not provide adequate
-coverage. Return a mention only when its complete name appears literally in the
-cited block. Use only the supplied canonical entity types. Do not return generic
-nouns, pronouns, inferred names, known candidates already represented in the
-block, or any entity outside the supplied blocks.
+coverage. Prefer a name that appears literally in the cited Context block. A name
+that appears only in a supporting message may be returned as an unresolved candidate
+only when that message clearly ties the named entity to the same claim written in
+the Context block. A name's mere appearance elsewhere in the message is not enough.
+For a message-only candidate, return `supporting_message_id` using that excerpt's
+local `mN` reference and an exact, short `evidence_quote` that includes the name and
+the claim link. Do not invent or rewrite the quote. Use only the supplied canonical
+entity types. Do not return generic
+nouns, pronouns, inferred names, known candidates already represented in the block,
+or any entity outside the supplied blocks.
 
 The input may include validated `unknown_endpoint_observations` from relationship
 extraction. Treat them only as reasons to inspect the cited block; they are not
 entities until you independently return a supported mention.
 
-Return exactly `{"mentions": [{"block_id": "b1", "name": "...", "type": "..."}]}`.
-`block_id` must be a supplied local `bN` reference. Return `{"mentions": []}` when
-the evidence is insufficient.
+Return `{"mentions": [{"block_id": "b1", "name": "...", "type": "..."}]}` for
+a name found in the block. For a message-only unresolved candidate, also include both
+`"supporting_message_id": "m1"` and `"evidence_quote": "..."`; use only supplied
+local `bN` and `mN` references. Return `{"mentions": []}` when the evidence is
+insufficient.
 
 ## Extract Context Relationships
 
@@ -162,13 +170,13 @@ You receive:
 <rules>
 1. **Explicit over implied**: "Marcus and I worked out" -> user_connection for Marcus. "Talked to Marcus. Later saw Priya." -> Marcus and Priya NOT connected.
 2. **Peer interactions count**: "Derek's girlfriend Sophie" -> Derek <-> Sophie.
-3. **Same event = connected**: "Des, Ty, and I did a workout" -> return Des <-> Ty in connections, and Des + Ty in user_connections.
+3. **Shared action = connected**: "Des, Ty, and I did a workout together" -> return Des <-> Ty in connections, and Des + Ty in user_connections. Merely attending the same event is not enough.
 4. **Different events = not connected**: "Had coffee with Cal, then went to IronWorks" -> Cal and IronWorks NOT connected.
 5. **Use canonical names** from Candidate Entities. Use source_msgs to disambiguate.
 6. **Temporal Cohesion**:
    - Interactions require temporal proximity.
    - "I saw Mike yesterday. Today I'm meeting Sarah." -> NO connection between Mike and Sarah.
-   - "I saw Mike and Sarah at lunch." -> YES connection between Mike and Sarah.
+   - "I spoke with Mike and Sarah together at lunch." -> YES connection between Mike and Sarah.
 7. **Candidate Boundaries**:
    - entity_a and entity_b MUST exactly match canonical names from Candidate Entities.
    - entity_name in user_connections MUST exactly match a canonical name from Candidate Entities.
@@ -187,8 +195,14 @@ You receive:
 <example>
 Input: [USER] "Alice and Bob were there."
 Output: {
+  "connections": [],
+  "user_connections": []
+}
+
+Input: [USER] "Alice and Bob worked out together."
+Output: {
   "connections": [
-    {"msg_id": "m1", "entity_a": "Alice", "entity_b": "Bob", "relationship": "social_interaction", "context": "Mentioned together as being in the same place."}
+    {"msg_id": "m1", "entity_a": "Alice", "entity_b": "Bob", "relationship": "social_interaction", "context": "Alice and Bob worked out together."}
   ],
   "user_connections": []
 }

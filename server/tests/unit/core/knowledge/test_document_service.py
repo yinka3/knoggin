@@ -1,21 +1,30 @@
 import asyncio
+import base64
 import hashlib
 import json
+import math
+import os
+import threading
+import tracemalloc
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
 from decimal import Decimal
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
 
-from common.exceptions import ToolExecutionError
+from common.exceptions import DependencyError, ToolExecutionError
 from common.schema.document import (
     DocumentSelection,
     FolderScanSettings,
     FolderUploadEntry,
 )
+from common.schema.public import BatchSourceRequest, UploadDocumentRequest
 from common.utils.time_utils import frozen_time
+from core.health.service import RuntimeHealthService
 from core.knowledge.documents import (
     DocumentIndexPolicy,
     DocumentService,
@@ -25,8 +34,52 @@ from core.knowledge.documents import (
     extraction as extraction_module,
 )
 from core.knowledge.documents.constants import document_extension
+from core.knowledge.documents.filesystem import (
+    ProjectFilesystem,
+    ProjectFilesystemConflictError,
+)
 from core.project.project_files import CONTEXT_FILE_PATH
 from infrastructure.background_work import BackgroundWorkRejected
+from runtime.api_port import ApplicationRuntimePort
+
+if os.name == "nt":
+    from core.knowledge.documents.io import (
+        windows_handle_io as windows_handle_io_module,
+    )
+
+
+def pause_project_replace(monkeypatch, root, entered, release, *, once):
+    if os.name == "nt":
+        real_rename = windows_handle_io_module._rename
+
+        def pause(handle, parent, name, *, replace):
+            if name == "notes.md" and (not once or not entered.is_set()):
+                entered.set()
+                assert release.wait(10)
+            return real_rename(handle, parent, name, replace=replace)
+
+        monkeypatch.setattr(windows_handle_io_module, "_rename", pause)
+        return
+
+    real_replace = os.replace
+
+    def pause(source, destination, *args, **kwargs):
+        parent_fd = kwargs.get("dst_dir_fd")
+        relative_project_file = (
+            destination == "notes.md"
+            and parent_fd is not None
+            and (os.fstat(parent_fd).st_dev, os.fstat(parent_fd).st_ino)
+            == (root.stat().st_dev, root.stat().st_ino)
+        )
+        if (
+            (destination == root / "notes.md" or relative_project_file)
+            and (not once or not entered.is_set())
+        ):
+            entered.set()
+            assert release.wait(10)
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", pause)
 
 
 async def run_inline(function, *args, **kwargs):
@@ -200,6 +253,15 @@ class MemoryPostgres:
                     row["updated_at"] = updated_at
                     updated.append({"document_id": row["document_id"]})
             return updated
+
+        if "COUNT(*)::INTEGER AS count" in query and "status = 'failed'" in query and "next_index_retry_at IS NULL" in query:
+            project_id = params[0]
+            return [{"count": sum(
+                row["project_id"] == project_id
+                and row["status"] == "failed"
+                and row.get("next_index_retry_at") is None
+                for row in self.rows
+            )}]
 
         if "COUNT(*)::INTEGER AS count" in query and "status = 'queued'" in query:
             project_id = params[0]
@@ -429,6 +491,26 @@ class MemoryCursor:
         if self.postgres.write_error is not None:
             raise self.postgres.write_error
         normalized = " ".join(query.split())
+
+        if normalized.startswith("UPDATE public.project_documents AS document") and "snapshot.parser_fingerprint" in normalized:
+            project_id, pdf_fingerprint, notebook_fingerprint = params
+            updated = []
+            for row in self.postgres.rows:
+                snapshot = self.postgres.parse_snapshots.get(row.get("current_snapshot_id"))
+                if (
+                    row["project_id"] == project_id
+                    and row["status"] == "indexed"
+                    and snapshot is not None
+                    and snapshot["source_content_hash"] == row["content_hash"]
+                    and (
+                        (row["extension"] == ".pdf" and snapshot["parser_fingerprint"] != pdf_fingerprint)
+                        or (row["extension"] == ".ipynb" and snapshot["parser_fingerprint"] != notebook_fingerprint)
+                    )
+                ):
+                    row.update(status="queued", index_attempt_count=0, next_index_retry_at=None, last_index_failure_kind=None, error_message=None)
+                    updated.append({"document_id": row["document_id"]})
+            self.result = updated
+            return
 
 
         if (
@@ -707,6 +789,7 @@ class MemoryCursor:
                         "extension": extension,
                         "size_bytes": size_bytes,
                         "content_hash": content_hash,
+                        "scan_managed": "true, 'queued'" in normalized.lower(),
                         "current_snapshot_id": None,
                         "status": "queued",
                         "index_attempt_count": 0,
@@ -1098,6 +1181,37 @@ def document_harness(tmp_path):
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_notebook_second_cell_search_lines_read_the_same_cell(document_harness):
+    service, postgres = document_harness
+    notebook = {
+        "cells": [
+            {"cell_type": "markdown", "source": ["# Launch notes\n", "First cell"]},
+            {"cell_type": "code", "source": ["def launch():\n", "    return 'ready'"]},
+        ]
+    }
+    uploaded = await service.add_document(
+        content=json.dumps(notebook).encode(), original_name="launch.ipynb"
+    )
+    await service.index_document(document_id=uploaded["document_id"])
+    second_cell = next(
+        chunk for chunk in postgres.chunks if chunk["symbol_name"] == "cell 2"
+    )
+
+    read = await service.read_document(
+        document_id=uploaded["document_id"],
+        start_line=second_cell["start_line"],
+        end_line=second_cell["end_line"],
+    )
+
+    assert (second_cell["start_line"], second_cell["end_line"]) == (6, 7)
+    assert "def launch():" in read["content"]
+    assert "return 'ready'" in read["content"]
+    assert "First cell" not in read["content"]
+    assert "KNOGGIN_NOTEBOOK_CELL" not in read["content"]
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_add_document_writes_project_file_and_persists_metadata(document_harness):
     service, postgres = document_harness
     content = b"alpha beta gamma"
@@ -1124,6 +1238,60 @@ async def test_add_document_writes_project_file_and_persists_metadata(document_h
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_add_document_rejects_a_path_with_a_different_file_type(document_harness):
+    service, postgres = document_harness
+
+    with pytest.raises(ValueError, match="same file type"):
+        await service.add_document(
+            content=b"plain text",
+            original_name="report.pdf",
+            relative_path="report.md",
+        )
+
+    assert postgres.rows == []
+    assert not (service._filesystem.root / "report.md").exists()
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_saved_queued_document_is_unhealthy_when_only_unrelated_work_runs(
+    document_harness,
+):
+    service, _postgres = document_harness
+    await service.add_document(content=b"waiting for index", original_name="waiting.md")
+    health = RuntimeHealthService(
+        resources=SimpleNamespace(
+            background_work=SimpleNamespace(
+                snapshot_for_health=lambda **_kwargs: {
+                    "active_for_project": True,
+                    "active_operation_categories": ["episode-generation"],
+                }
+            )
+        ),
+        projects=SimpleNamespace(
+            active_projects={
+                "project-1": SimpleNamespace(
+                    document_service=service,
+                    scheduler=SimpleNamespace(
+                        snapshot_for_health=lambda: {
+                            "state": "running",
+                            "running_jobs": 1,
+                        }
+                    ),
+                )
+            }
+        ),
+        sessions=SimpleNamespace(),
+    )
+
+    background = await health.get_background_health(project_id="project-1")
+    assert background.status.value == "degraded"
+    assert background.activity.value == "delayed"
+    assert background.details["document_indexing"]["pending_document_count"] == 1
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_database_failure_leaves_no_content_or_metadata(document_harness):
     service, postgres = document_harness
     postgres.write_error = RuntimeError("insert failed")
@@ -1133,6 +1301,330 @@ async def test_database_failure_leaves_no_content_or_metadata(document_harness):
 
     assert postgres.rows == []
     assert list(service._filesystem.iter_files()) == []
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_failed_upload_cleanup_cannot_be_reconciled_as_a_new_document(
+    document_harness, monkeypatch
+):
+    service, postgres = document_harness
+    postgres.write_error = RuntimeError("catalog insert failed")
+    original_delete = ProjectFilesystem.delete_file
+
+    def fail_orphan_cleanup(self, relative_path, **kwargs):
+        if relative_path == "orphan.md":
+            raise PermissionError("temporary file lock")
+        return original_delete(self, relative_path, **kwargs)
+
+    monkeypatch.setattr(ProjectFilesystem, "delete_file", fail_orphan_cleanup)
+    with pytest.raises(RuntimeError, match="catalog insert failed"):
+        await service.add_document(content=b"failed upload", original_name="orphan.md")
+
+    filesystem = service._filesystem
+    assert filesystem.read_bytes("orphan.md") == b"failed upload"
+    assert filesystem.pending_admission_hash("orphan.md") == hashlib.sha256(
+        b"failed upload"
+    ).hexdigest()
+    assert postgres.rows == []
+
+    postgres.write_error = None
+    restarted = DocumentService(
+        project_id="project-1",
+        postgres_client=postgres,
+        embedding_service=FakeEmbeddingService(),
+        blocking_runner=run_inline,
+        document_rerank_enabled=False,
+        filesystem_factory=service._filesystem_factory,
+    )
+    with pytest.raises(FileExistsError):
+        await restarted.add_document(
+            content=b"second attempt", original_name="orphan.md"
+        )
+    assert filesystem.pending_admission_hash("orphan.md") == hashlib.sha256(
+        b"failed upload"
+    ).hexdigest()
+    assert (await restarted.reconcile_project_files())["created"] == 0
+    assert postgres.rows == []
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_reconciliation_keeps_file_bytes_bounded_before_total_quota(
+    document_harness,
+):
+    service, postgres = document_harness
+    payload = b"x" * (512 * 1024)
+    filesystem = service._filesystem
+    for index in range(24):
+        filesystem.write_bytes(f"source-{index:02}.md", payload)
+    await service.save_scan_settings(
+        FolderScanSettings(
+            max_document_size_bytes=len(payload),
+            max_total_size_bytes=4 * len(payload),
+        )
+    )
+
+    tracemalloc.start()
+    try:
+        result = await service.reconcile_project_files()
+        _, peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert result["created"] == 4
+    assert len(postgres.rows) == 4
+    assert peak_bytes < 8 * 1024 * 1024
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_concurrent_same_path_upload_keeps_winning_catalog_and_file(
+    document_harness, monkeypatch
+):
+    service, postgres = document_harness
+    service._run_blocking = asyncio.to_thread
+    insert_started = asyncio.Event()
+    release_insert = asyncio.Event()
+    real_insert = service._writer.insert_document
+
+    async def delayed_insert(**kwargs):
+        insert_started.set()
+        await release_insert.wait()
+        return await real_insert(**kwargs)
+
+    monkeypatch.setattr(service._writer, "insert_document", delayed_insert)
+    first_upload = asyncio.create_task(
+        service.add_document(content=b"first version", original_name="same.md")
+    )
+    await asyncio.wait_for(insert_started.wait(), 10)
+    second_upload = asyncio.create_task(
+        service.add_document(content=b"second version", original_name="same.md")
+    )
+    await asyncio.sleep(0.1)
+    assert not second_upload.done()
+    release_insert.set()
+    accepted = await first_upload
+    with pytest.raises(FileExistsError):
+        await second_upload
+
+    assert len(postgres.rows) == 1
+    assert postgres.rows[0]["document_id"] == accepted["document_id"]
+    content = service._filesystem.read_bytes("same.md")
+    assert hashlib.sha256(content).hexdigest() == accepted["content_hash"]
+    assert content == b"first version"
+    assert not list(service._filesystem.root.rglob(".knoggin-*.tmp"))
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_project_file_edit_waits_for_upload_catalog_insert(
+    document_harness, monkeypatch
+):
+    service, postgres = document_harness
+    insert_started = asyncio.Event()
+    release_insert = asyncio.Event()
+    real_insert = service._writer.insert_document
+
+    async def delayed_insert(**kwargs):
+        insert_started.set()
+        await release_insert.wait()
+        return await real_insert(**kwargs)
+
+    monkeypatch.setattr(service._writer, "insert_document", delayed_insert)
+    uploading = asyncio.create_task(
+        service.add_document(content=b"original", original_name="notes.md")
+    )
+    await asyncio.wait_for(insert_started.wait(), 10)
+    editing = asyncio.create_task(
+        service.update_project_file(
+            "notes.md", "edited",
+            expected_content_hash=hashlib.sha256(b"original").hexdigest(),
+        )
+    )
+    await asyncio.sleep(0.1)
+    assert not editing.done()
+    release_insert.set()
+    uploaded = await uploading
+    edited = await editing
+
+    active = [
+        row for row in postgres.rows
+        if row["relative_path"] == "notes.md" and row["status"] != "deleted"
+    ]
+    assert len(active) == 1
+    assert active[0]["document_id"] == uploaded["document_id"]
+    assert active[0]["content_hash"] == edited["content_hash"]
+    assert service._filesystem.read_bytes("notes.md") == b"edited"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_cancelled_upload_waits_for_file_worker_then_removes_orphan(
+    document_harness
+):
+    service, postgres = document_harness
+    started = threading.Event()
+    release = threading.Event()
+
+    async def delayed_file_worker(function, *args, **kwargs):
+        def run():
+            if function.__name__ == "write_bytes":
+                started.set()
+                assert release.wait(timeout=5)
+            return function(*args, **kwargs)
+
+        return await asyncio.to_thread(run)
+
+    service._run_blocking = delayed_file_worker
+    upload = asyncio.create_task(
+        service.add_document(content=b"cancelled bytes", original_name="cancel.md")
+    )
+    assert await asyncio.to_thread(started.wait, 5)
+    upload.cancel()
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await upload
+
+    assert postgres.rows == []
+    assert list(service._filesystem.iter_files()) == []
+    await service.reconcile_project_files()
+    assert postgres.rows == []
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_cancelled_upload_tombstones_completed_catalog_insert(
+    document_harness, monkeypatch
+):
+    service, postgres = document_harness
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    insert_document = service._writer.insert_document
+
+    async def delayed_insert(**kwargs):
+        entered.set()
+        await release.wait()
+        return await insert_document(**kwargs)
+
+    monkeypatch.setattr(service._writer, "insert_document", delayed_insert)
+    upload = asyncio.create_task(
+        service.add_document(content=b"cancelled bytes", original_name="cancel.md")
+    )
+    await asyncio.wait_for(entered.wait(), 5)
+    upload.cancel()
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await upload
+
+    assert len(postgres.rows) == 1
+    assert postgres.rows[0]["status"] == "deleted"
+    assert list(service._filesystem.iter_files()) == []
+    await service.reconcile_project_files()
+    assert len(postgres.rows) == 1
+    assert postgres.rows[0]["status"] == "deleted"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_cancelled_admission_keeps_source_when_catalog_tombstone_fails(
+    document_harness, monkeypatch
+):
+    service, _ = document_harness
+    filesystem = service._filesystem
+    assert filesystem is not None
+    created = filesystem.write_bytes("pending.md", b"keep until catalog is repaired")
+
+    async def unavailable_tombstone(*, document_id):
+        raise RuntimeError(f"catalog unavailable for {document_id}")
+
+    monkeypatch.setattr(service._writer, "delete_document", unavailable_tombstone)
+    await service._rollback_document_admission(
+        filesystem=filesystem,
+        relative_path="pending.md",
+        content_hash=created.content_hash,
+        document_id="pending-document",
+    )
+
+    assert filesystem.read_bytes("pending.md") == b"keep until catalog is repaired"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_cancelled_admission_clears_marker_when_source_is_already_absent(
+    document_harness
+):
+    service, _ = document_harness
+    filesystem = service._filesystem
+    assert filesystem is not None
+    with filesystem._mutation_lock() as lease:
+        filesystem.mark_pending_admission("missing.md", "a" * 64, _lease=lease)
+
+    await service._rollback_document_admission(
+        filesystem=filesystem,
+        relative_path="missing.md",
+        content_hash="a" * 64,
+    )
+
+    assert filesystem.pending_admission_hash("missing.md") is None
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+@pytest.mark.parametrize("marker_fails", [False, True])
+async def test_cancelled_upload_settles_pending_marker_before_returning(
+    document_harness, marker_fails
+):
+    service, postgres = document_harness
+    filesystem = service._filesystem
+    assert filesystem is not None
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original_run = service._run_blocking
+
+    async def delayed_marker(function, *args, **kwargs):
+        if function.__name__ == "mark_pending_admission":
+            entered.set()
+            await release.wait()
+            if marker_fails:
+                raise OSError("marker unavailable")
+        return await original_run(function, *args, **kwargs)
+
+    service._run_blocking = delayed_marker
+    upload = asyncio.create_task(
+        service.add_document(content=b"cancelled", original_name="pending.md")
+    )
+    await asyncio.wait_for(entered.wait(), 5)
+    upload.cancel()
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await upload
+    assert filesystem.pending_admission_hash("pending.md") is None
+    assert not filesystem.root.joinpath("pending.md").exists()
+    assert postgres.rows == []
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_accepted_upload_survives_marker_cleanup_failure(
+    document_harness, monkeypatch
+):
+    service, postgres = document_harness
+    filesystem = service._filesystem
+    assert filesystem is not None
+
+    def unavailable_marker_cleanup(*_args, **_kwargs):
+        raise OSError("marker cleanup unavailable")
+
+    monkeypatch.setattr(filesystem, "clear_pending_admission", unavailable_marker_cleanup)
+    uploaded = await service.add_document(content=b"accepted", original_name="notes.md")
+
+    assert uploaded["status"] == "queued"
+    assert filesystem.read_bytes("notes.md") == b"accepted"
+    assert postgres.rows[0]["document_id"] == uploaded["document_id"]
 
 
 @pytest.mark.storage
@@ -1187,6 +1679,115 @@ async def test_reconciliation_catalogs_local_changes_and_tombstones_missing_file
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_reconciliation_applies_unchanged_ignore_rules_and_cumulative_limits(
+    document_harness,
+):
+    service, postgres = document_harness
+    filesystem = service._filesystem
+    assert filesystem is not None
+    await service.save_scan_settings(
+        FolderScanSettings(
+            max_document_size_bytes=100,
+            max_total_size_bytes=100,
+            max_file_count=1,
+        )
+    )
+    filesystem.write_bytes(".gitignore", b"private.md\n")
+    filesystem.write_bytes("a.md", b"first")
+    await service.reconcile_project_files()
+    filesystem.write_bytes("private.md", b"private")
+    filesystem.write_bytes("b.md", b"second")
+    await service.reconcile_project_files()
+
+    live = {row["relative_path"]: row for row in postgres.rows if row["status"] != "deleted"}
+    assert set(live) == {"a.md"}
+    assert live["a.md"]["scan_managed"] is True
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_reconciliation_tombstones_scan_managed_file_when_ignore_rule_changes(
+    document_harness,
+):
+    service, postgres = document_harness
+    filesystem = service._filesystem
+    assert filesystem is not None
+    filesystem.write_bytes("a.md", b"admitted")
+    await service.reconcile_project_files()
+    filesystem.write_bytes(".gitignore", b"a.md\n")
+
+    result = await service.reconcile_project_files()
+
+    assert result["deleted"] == 1
+    assert next(row for row in postgres.rows if row["relative_path"] == "a.md")["status"] == "deleted"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_reconciliation_notices_scan_settings_changed_by_another_runtime(
+    document_harness,
+):
+    service, postgres = document_harness
+    filesystem = service._filesystem
+    assert filesystem is not None
+    filesystem.write_bytes("a.md", b"admitted")
+    await service.reconcile_project_files()
+    other_runtime = DocumentService(
+        project_id=service.project_id,
+        postgres_client=postgres,
+        embedding_service=FakeEmbeddingService(),
+        blocking_runner=run_inline,
+        document_rerank_enabled=False,
+        filesystem_factory=service._filesystem_factory,
+    )
+    await other_runtime.save_scan_settings(FolderScanSettings(ignored_patterns=("a.md",)))
+
+    result = await service.reconcile_project_files()
+
+    assert result["deleted"] == 1
+    assert next(row for row in postgres.rows if row["relative_path"] == "a.md")["status"] == "deleted"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_direct_uploads_bypass_folder_scan_rules_but_track_source_changes(
+    document_harness,
+):
+    service, postgres = document_harness
+    filesystem = service._filesystem
+    assert filesystem is not None
+    image = await service.add_document(content=b"image bytes", original_name="image.png")
+    ignored = await service.add_document(
+        content=b"explicit note", original_name="note.md", relative_path=".hidden/note.md"
+    )
+    await service.index_document(document_id=ignored["document_id"])
+    assert any(chunk["document_id"] == ignored["document_id"] for chunk in postgres.chunks)
+    filesystem.write_bytes("unsubmitted.png", b"other image")
+    await service.reconcile_project_files()
+    filesystem.write_bytes("image.png", b"new image bytes", overwrite=True)
+    changed = await service.reconcile_project_files()
+
+    live = {row["document_id"]: row for row in postgres.rows if row["status"] != "deleted"}
+    assert {image["document_id"], ignored["document_id"]} <= live.keys()
+    assert all(not row["scan_managed"] for row in live.values())
+    assert live[ignored["document_id"]]["status"] == "indexed"
+    assert any(chunk["document_id"] == ignored["document_id"] for chunk in postgres.chunks)
+    assert changed["changed"] == 1
+    assert live[image["document_id"]]["content_hash"] == hashlib.sha256(b"new image bytes").hexdigest()
+    assert not any(row["relative_path"] == "unsubmitted.png" for row in postgres.rows)
+
+    filesystem.write_bytes(".hidden/note.md", b"updated note", overwrite=True)
+    await service.reconcile_project_files()
+    assert live[ignored["document_id"]]["status"] == "queued"
+    assert not any(chunk["document_id"] == ignored["document_id"] for chunk in postgres.chunks)
+
+    filesystem.delete_file("image.png")
+    await service.reconcile_project_files()
+    assert live[image["document_id"]]["status"] == "deleted"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_reconciliation_rolls_back_all_catalog_changes_when_commit_fails(
     document_harness,
 ):
@@ -1209,6 +1810,77 @@ async def test_reconciliation_rolls_back_all_catalog_changes_when_commit_fails(
     assert next(
         row for row in postgres.rows if row["document_id"] == existing["document_id"]
     )["content_hash"] == hashlib.sha256(b"old content").hexdigest()
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_failed_reconciliation_retries_when_source_metadata_is_unchanged(
+    document_harness,
+):
+    service, postgres = document_harness
+    filesystem = service._filesystem
+    assert filesystem is not None
+    filesystem.write_bytes("a.md", b"old")
+    await service.reconcile_project_files()
+    source = filesystem.root / "a.md"
+    stat = source.stat()
+    filesystem.write_bytes("a.md", b"new", overwrite=True)
+    os.utime(source, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    from core.knowledge.documents import service as service_module
+
+    service._reconciliation_run_count = service_module._RECONCILIATION_FULL_HASH_INTERVAL - 1
+    postgres.transaction_commit_error = RuntimeError("commit failed")
+    with pytest.raises(RuntimeError, match="commit failed"):
+        await service.reconcile_project_files()
+    postgres.transaction_commit_error = None
+
+    result = await service.reconcile_project_files()
+
+    assert result["changed"] == 1
+    assert next(row for row in postgres.rows if row["relative_path"] == "a.md")["content_hash"] == hashlib.sha256(b"new").hexdigest()
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_periodic_reconciliation_does_not_revert_newer_owned_edit(
+    document_harness, monkeypatch
+):
+    service, postgres = document_harness
+    created = await service.create_project_file("notes.md", "original")
+    filesystem = service._filesystem
+    assert filesystem is not None
+    filesystem.write_bytes("notes.md", b"external", overwrite=True)
+    external_hash = hashlib.sha256(b"external").hexdigest()
+    reconcile_started = asyncio.Event()
+    release_reconcile = asyncio.Event()
+    real_blocking = service._run_blocking
+    from core.knowledge.documents import service as service_module
+
+    async def delayed_preview(function, *args, **kwargs):
+        result = await real_blocking(function, *args, **kwargs)
+        if function is service_module.build_folder_preview and any(
+            entry.relative_path == "notes.md" and entry.content_hash == external_hash
+            for entry in result.included
+        ):
+            reconcile_started.set()
+            await release_reconcile.wait()
+        return result
+
+    monkeypatch.setattr(service, "_run_blocking", delayed_preview)
+    reconciling = asyncio.create_task(service.reconcile_project_files())
+    await asyncio.wait_for(reconcile_started.wait(), 10)
+    edited = await service.update_project_file(
+        "notes.md", "owned", expected_content_hash=external_hash
+    )
+    release_reconcile.set()
+    await reconciling
+
+    catalog = next(
+        row for row in postgres.rows
+        if row["relative_path"] == "notes.md" and row["status"] != "deleted"
+    )
+    assert created["content_hash"] != edited["content_hash"]
+    assert catalog["content_hash"] == edited["content_hash"]
 
 
 @pytest.mark.storage
@@ -1285,6 +1957,338 @@ async def test_native_project_file_operations_reconcile_the_document_catalog(
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_move_rejects_an_oversized_source_before_changing_its_path(
+    document_harness, monkeypatch
+):
+    service, postgres = document_harness
+    filesystem = service._filesystem
+    assert filesystem is not None
+    filesystem.write_bytes("source.md", b"12345")
+    from core.knowledge.documents import service as service_module
+
+    monkeypatch.setattr(service_module, "MAX_DOCUMENT_SIZE", 4)
+
+    with pytest.raises(ValueError, match="read limit"):
+        await service.move_project_file(
+            "source.md",
+            "moved.md",
+            expected_content_hash=hashlib.sha256(b"12345").hexdigest(),
+        )
+
+    assert filesystem.read_bytes("source.md") == b"12345"
+    with pytest.raises(FileNotFoundError):
+        filesystem.read_bytes("moved.md")
+    assert postgres.rows == []
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+@pytest.mark.parametrize("operation", ["create", "update", "append", "move", "delete"])
+async def test_native_file_mutation_restores_source_when_catalog_commit_fails(
+    document_harness, operation
+):
+    service, postgres = document_harness
+    filesystem = service._filesystem
+    assert filesystem is not None
+    existing = None
+    if operation != "create":
+        existing = await service.create_project_file("source.md", "before")
+    original_rows = deepcopy(postgres.rows)
+    postgres.transaction_commit_error = RuntimeError("catalog commit failed")
+
+    with pytest.raises(RuntimeError, match="catalog commit failed"):
+        if operation == "create":
+            await service.create_project_file("new.md", "new")
+        elif operation == "update":
+            await service.update_project_file(
+                "source.md", "after", expected_content_hash=existing["content_hash"]
+            )
+        elif operation == "append":
+            await service.append_project_file(
+                "source.md", " after", expected_content_hash=existing["content_hash"]
+            )
+        elif operation == "move":
+            await service.move_project_file(
+                "source.md", "moved.md", expected_content_hash=existing["content_hash"]
+            )
+        else:
+            await service.delete_project_file(
+                "source.md", expected_content_hash=existing["content_hash"]
+            )
+
+    assert postgres.rows == original_rows
+    if operation == "create":
+        with pytest.raises(FileNotFoundError):
+            filesystem.read_bytes("new.md")
+    else:
+        assert filesystem.read_bytes("source.md") == b"before"
+    if operation == "move":
+        with pytest.raises(FileNotFoundError):
+            filesystem.read_bytes("moved.md")
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_native_edit_restores_source_when_catalog_work_is_cancelled(
+    document_harness,
+):
+    service, postgres = document_harness
+    filesystem = service._filesystem
+    assert filesystem is not None
+    created = await service.create_project_file("source.md", "before")
+    original_rows = deepcopy(postgres.rows)
+    postgres.transaction_commit_error = asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError):
+        await service.update_project_file(
+            "source.md", "after", expected_content_hash=created["content_hash"]
+        )
+
+    assert filesystem.read_bytes("source.md") == b"before"
+    assert postgres.rows == original_rows
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+@pytest.mark.parametrize("operation", ["update", "append", "delete"])
+async def test_failed_native_mutation_restores_an_existing_empty_source(
+    document_harness, operation
+):
+    service, postgres = document_harness
+    filesystem = service._filesystem
+    assert filesystem is not None
+    filesystem.ensure_root()
+    (filesystem.root / "empty.md").write_bytes(b"")
+    postgres.transaction_commit_error = RuntimeError("catalog commit failed")
+    empty_hash = hashlib.sha256(b"").hexdigest()
+
+    with pytest.raises(RuntimeError, match="catalog commit failed"):
+        if operation == "update":
+            await service.update_project_file(
+                "empty.md", "replacement", expected_content_hash=empty_hash
+            )
+        elif operation == "append":
+            await service.append_project_file(
+                "empty.md", "extra", expected_content_hash=empty_hash
+            )
+        else:
+            await service.delete_project_file(
+                "empty.md", expected_content_hash=empty_hash
+            )
+
+    assert filesystem.read_bytes("empty.md") == b""
+    assert postgres.rows == []
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_document_delete_restores_source_when_catalog_commit_fails(document_harness):
+    service, postgres = document_harness
+    filesystem = service._filesystem
+    assert filesystem is not None
+    document = await service.add_document(content=b"original", original_name="source.md")
+    original_rows = deepcopy(postgres.rows)
+    postgres.transaction_commit_error = RuntimeError("catalog commit failed")
+
+    with pytest.raises(RuntimeError, match="catalog commit failed"):
+        await service.delete_document(document_id=document["document_id"])
+
+    assert filesystem.read_bytes("source.md") == b"original"
+    assert postgres.rows == original_rows
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_document_delete_restores_empty_scanned_source_on_catalog_failure(
+    document_harness,
+):
+    service, postgres = document_harness
+    filesystem = service._filesystem
+    assert filesystem is not None
+    filesystem.ensure_root()
+    (filesystem.root / "empty.md").write_bytes(b"")
+    await service.reconcile_project_files()
+    document = next(row for row in postgres.rows if row["relative_path"] == "empty.md")
+    postgres.transaction_commit_error = RuntimeError("catalog commit failed")
+
+    with pytest.raises(RuntimeError, match="catalog commit failed"):
+        await service.delete_document(document_id=document["document_id"])
+
+    assert filesystem.read_bytes("empty.md") == b""
+    assert next(row for row in postgres.rows if row["document_id"] == document["document_id"])["status"] == "queued"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_concurrent_project_file_edits_reject_stale_hash_and_preserve_catalog(
+    document_harness, monkeypatch
+):
+    service, postgres = document_harness
+    created = await service.create_project_file("notes.md", "original")
+    filesystem = service._filesystem
+    assert filesystem is not None
+    service._run_blocking = asyncio.to_thread
+    entered_replace = threading.Event()
+    release_replace = threading.Event()
+    pause_project_replace(
+        monkeypatch, filesystem.root, entered_replace, release_replace, once=True
+    )
+    winner = asyncio.create_task(
+        service.update_project_file(
+            "notes.md", "winner", expected_content_hash=created["content_hash"]
+        )
+    )
+    try:
+        assert await asyncio.to_thread(entered_replace.wait, 10)
+        loser = asyncio.create_task(
+            service.update_project_file(
+                "notes.md", "other", expected_content_hash=created["content_hash"]
+            )
+        )
+        await asyncio.sleep(0.1)
+    finally:
+        release_replace.set()
+
+    accepted = await winner
+    with pytest.raises(ProjectFilesystemConflictError):
+        await loser
+    catalog = next(
+        row for row in postgres.rows
+        if row["relative_path"] == "notes.md" and row["status"] != "deleted"
+    )
+    assert accepted["content"] == "winner"
+    assert catalog["content_hash"] == accepted["content_hash"]
+    assert filesystem.read_bytes("notes.md") == b"winner"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_chained_project_file_edits_do_not_regress_catalog_hash(
+    document_harness, monkeypatch
+):
+    service, postgres = document_harness
+    created = await service.create_project_file("notes.md", "original")
+    filesystem = service._filesystem
+    assert filesystem is not None
+    first_reconcile_started = asyncio.Event()
+    release_first_reconcile = asyncio.Event()
+    real_reconcile = service._reconcile_owned_file_changes
+
+    async def delayed_reconcile(*, upserts, removed_paths=(), lease):
+        if upserts.get("notes.md") == b"first edit":
+            first_reconcile_started.set()
+            await release_first_reconcile.wait()
+        await real_reconcile(upserts=upserts, removed_paths=removed_paths, lease=lease)
+
+    monkeypatch.setattr(service, "_reconcile_owned_file_changes", delayed_reconcile)
+    first_edit = asyncio.create_task(
+        service.update_project_file(
+            "notes.md", "first edit", expected_content_hash=created["content_hash"]
+        )
+    )
+    await asyncio.wait_for(first_reconcile_started.wait(), 10)
+    second_task = asyncio.create_task(
+        service.update_project_file(
+            "notes.md", "second edit",
+            expected_content_hash=hashlib.sha256(b"first edit").hexdigest(),
+        )
+    )
+    await asyncio.sleep(0.1)
+    assert not second_task.done()
+    release_first_reconcile.set()
+    await first_edit
+    second_edit = await second_task
+
+    catalog = next(
+        row for row in postgres.rows
+        if row["relative_path"] == "notes.md" and row["status"] != "deleted"
+    )
+    assert second_edit["content_hash"] == catalog["content_hash"]
+    assert filesystem.read_bytes("notes.md") == b"second edit"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_cancelled_project_file_edit_finishes_file_and_catalog(
+    document_harness, monkeypatch
+):
+    service, postgres = document_harness
+    created = await service.create_project_file("notes.md", "original")
+    filesystem = service._filesystem
+    assert filesystem is not None
+    service._run_blocking = asyncio.to_thread
+    entered_replace = threading.Event()
+    release_replace = threading.Event()
+    pause_project_replace(
+        monkeypatch, filesystem.root, entered_replace, release_replace, once=False
+    )
+    operation = asyncio.create_task(
+        service.update_project_file(
+            "notes.md", "edited", expected_content_hash=created["content_hash"]
+        )
+    )
+    try:
+        assert await asyncio.to_thread(entered_replace.wait, 10)
+        operation.cancel()
+        await asyncio.sleep(0.1)
+        assert not operation.done()
+    finally:
+        release_replace.set()
+    with pytest.raises(asyncio.CancelledError):
+        await operation
+
+    catalog = next(
+        row for row in postgres.rows
+        if row["relative_path"] == "notes.md" and row["status"] != "deleted"
+    )
+    expected_hash = hashlib.sha256(b"edited").hexdigest()
+    assert filesystem.read_bytes("notes.md") == b"edited"
+    assert catalog["content_hash"] == expected_hash
+    followup = await service.update_project_file(
+        "notes.md", "next", expected_content_hash=expected_hash
+    )
+    assert followup["content"] == "next"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_document_delete_and_same_path_create_preserve_new_catalog_row(
+    document_harness, monkeypatch
+):
+    service, postgres = document_harness
+    original = await service.add_document(content=b"original", original_name="notes.md")
+    delete_started = asyncio.Event()
+    release_delete = asyncio.Event()
+    real_delete = service._writer.delete_document
+
+    async def delayed_delete(*, document_id):
+        delete_started.set()
+        await release_delete.wait()
+        return await real_delete(document_id=document_id)
+
+    monkeypatch.setattr(service._writer, "delete_document", delayed_delete)
+    deleting = asyncio.create_task(
+        service.delete_document(document_id=original["document_id"])
+    )
+    await asyncio.wait_for(delete_started.wait(), 10)
+    creating = asyncio.create_task(service.create_project_file("notes.md", "replacement"))
+    await asyncio.sleep(0.1)
+    assert not creating.done()
+    release_delete.set()
+    await deleting
+    created = await creating
+
+    active = [
+        row for row in postgres.rows
+        if row["relative_path"] == "notes.md" and row["status"] != "deleted"
+    ]
+    assert created["content"] == "replacement"
+    assert len(active) == 1
+    assert active[0]["content_hash"] == created["content_hash"]
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_native_project_file_mutations_do_not_scan_the_project_tree(
     document_harness,
     monkeypatch,
@@ -1325,6 +2329,93 @@ async def test_native_project_file_mutations_do_not_scan_the_project_tree(
     )
 
     assert archived["status"] == "deleted"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_native_file_edits_apply_ancestor_ignore_rules_and_catalog_limits(
+    document_harness,
+):
+    service, postgres = document_harness
+    filesystem = service._filesystem
+    assert filesystem is not None
+    await service.save_scan_settings(
+        FolderScanSettings(
+            max_document_size_bytes=100,
+            max_total_size_bytes=100,
+            max_file_count=1,
+        )
+    )
+    filesystem.write_bytes(".gitignore", b"private.md\n")
+    await service.create_project_file("a.md", "accepted")
+    await service.create_project_file("private.md", "ignored")
+    await service.create_project_file("b.md", "over limit")
+
+    live_paths = {row["relative_path"] for row in postgres.rows if row["status"] != "deleted"}
+    assert live_paths == {"a.md"}
+    assert filesystem.read_bytes("private.md") == b"ignored"
+    assert filesystem.read_bytes("b.md") == b"over limit"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_native_edit_uses_same_lexical_quota_winner_as_full_scan(document_harness):
+    service, postgres = document_harness
+    filesystem = service._filesystem
+    assert filesystem is not None
+    await service.save_scan_settings(
+        FolderScanSettings(
+            max_document_size_bytes=10,
+            max_total_size_bytes=10,
+            max_file_count=5,
+        )
+    )
+    filesystem.write_bytes("a.md", b"aaaaa")
+    filesystem.write_bytes("b.md", b"bbbbb")
+    await service.reconcile_project_files()
+    await service.update_project_file(
+        "a.md", "aaaaaa", expected_content_hash=hashlib.sha256(b"aaaaa").hexdigest()
+    )
+
+    live = {row["relative_path"] for row in postgres.rows if row["status"] != "deleted"}
+    assert live == {"a.md"}
+    assert (await service.reconcile_project_files())["changed"] == 0
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_native_create_uses_same_lexical_count_winner_as_full_scan(document_harness):
+    service, postgres = document_harness
+    await service.save_scan_settings(
+        FolderScanSettings(
+            max_document_size_bytes=10,
+            max_total_size_bytes=20,
+            max_file_count=1,
+        )
+    )
+    await service.create_project_file("b.md", "second")
+    await service.create_project_file("a.md", "first")
+
+    live = {row["relative_path"] for row in postgres.rows if row["status"] != "deleted"}
+    assert live == {"a.md"}
+    assert (await service.reconcile_project_files())["created"] == 0
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_native_ignore_rule_removal_reconciles_old_catalog_rows(document_harness):
+    service, postgres = document_harness
+    filesystem = service._filesystem
+    assert filesystem is not None
+    filesystem.write_bytes(".gitignore", b"a.md\n")
+    filesystem.write_bytes("a.md", b"previously ignored")
+    await service.reconcile_project_files()
+    assert not any(row["relative_path"] == "a.md" for row in postgres.rows)
+    await service.delete_project_file(
+        ".gitignore", expected_content_hash=hashlib.sha256(b"a.md\n").hexdigest()
+    )
+    assert filesystem.read_bytes("a.md") == b"previously ignored"
+    assert next(row for row in postgres.rows if row["relative_path"] == "a.md")["status"] == "queued"
 
 
 @pytest.mark.storage
@@ -1415,6 +2506,7 @@ async def test_document_listing_is_scoped_to_the_active_project(tmp_path):
         "project-2",
         postgres,
         embedding,
+        readable_project_ids=["project-1", "project-2"],
         filesystem_factory=filesystem_factory,
         blocking_runner=run_inline,
     )
@@ -1872,6 +2964,8 @@ async def test_delete_document_enforces_project_ownership(tmp_path):
         )
 
     assert len(postgres.rows) == 1
+    assert project_one._filesystem.read_bytes("private.txt") == b"private"
+    assert postgres.rows[0]["status"] != "deleted"
     deleted = await project_one.delete_document(
         document_id=uploaded["document_id"],
     )
@@ -1915,6 +3009,38 @@ async def test_indexer_recovery_requeues_interrupted_document_indexing(document_
     assert recovered == 1
     assert postgres.rows[0]["status"] == "indexed"
     assert service.indexer.indexing_snapshot()["last_recovery_requeued"] == 1
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_indexer_drain_recovers_after_one_database_read_failure(
+    document_harness, monkeypatch,
+):
+    service, postgres = document_harness
+    uploaded = await service.add_document(content=b"recover me", original_name="notes.md")
+    reader = service.indexer._reader
+    original_list = reader.list_documents_for_index_recovery
+    failed_once = asyncio.Event()
+
+    async def list_after_outage(*, due_at, limit):
+        if not failed_once.is_set():
+            failed_once.set()
+            raise ConnectionError("temporary database outage")
+        return await original_list(due_at=due_at, limit=limit)
+
+    monkeypatch.setattr(reader, "list_documents_for_index_recovery", list_after_outage)
+    service.indexer._started = True
+    try:
+        service.indexer.wake_pending_indexes()
+        await asyncio.wait_for(failed_once.wait(), timeout=1)
+        for _ in range(200):
+            if postgres.rows[0]["status"] == "indexed":
+                break
+            await asyncio.sleep(0.01)
+        assert postgres.rows[0]["document_id"] == uploaded["document_id"]
+        assert postgres.rows[0]["status"] == "indexed"
+    finally:
+        await service.indexer.shutdown()
 
 
 @pytest.mark.storage
@@ -1963,6 +3089,36 @@ async def test_reindex_document_publishes_a_fresh_snapshot(document_harness):
     assert second["status"] == "indexed"
     assert second["current_snapshot_id"] != first["current_snapshot_id"]
     assert len(postgres.parse_snapshots) == 2
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_linked_readable_document_cannot_be_indexed_by_another_project(tmp_path):
+    postgres = MemoryPostgres()
+    embedding = FakeEmbeddingService()
+    filesystem_factory = ProjectFilesystemFactory(tmp_path / "projects")
+    owner = DocumentService(
+        "project-2", postgres, embedding,
+        filesystem_factory=filesystem_factory,
+        blocking_runner=run_inline,
+    )
+    reader = DocumentService(
+        "project-1", postgres, embedding,
+        readable_project_ids=["project-1", "project-2"],
+        filesystem_factory=filesystem_factory,
+        blocking_runner=run_inline,
+    )
+    foreign = await owner.add_document(content=b"source", original_name="source.md")
+    assert (await reader.get_document_info(document_id=foreign["document_id"]))["project_id"] == "project-2"
+    transactions = postgres.transaction_count
+
+    with pytest.raises(FileNotFoundError, match="Document not found"):
+        await reader.reindex_document(document_id=foreign["document_id"])
+    with pytest.raises(FileNotFoundError, match="Document not found"):
+        await reader.schedule_document_index(document_id=foreign["document_id"])
+
+    assert postgres.transaction_count == transactions
+    assert next(row for row in postgres.rows if row["document_id"] == foreign["document_id"])["status"] == "queued"
 
 
 @pytest.mark.unit
@@ -2317,6 +3473,83 @@ async def test_index_document_extracts_utf8_bom_and_persists_chunks(document_har
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_index_document_embeds_every_part_of_an_overlong_chunk(document_harness):
+    service, postgres = document_harness
+    source = ("dense source " * 30).encode("utf-8")
+    uploaded = await service.add_document(content=source, original_name="dense.md")
+    encoded_parts = []
+
+    def split_for_embedding(value):
+        return [value[index : index + 80] for index in range(0, len(value), 80)]
+
+    async def encode_parts(values):
+        assert all(len(value) <= 80 for value in values)
+        encoded_parts.extend(values)
+        return [
+            [float(index + 1), 1.0] + [0.0] * 1022
+            for index, _ in enumerate(values)
+        ]
+
+    service._embedding.split_for_embedding = split_for_embedding
+    service._embedding.encode = encode_parts
+    indexed = await service.index_document(document_id=uploaded["document_id"])
+
+    assert indexed["status"] == "indexed"
+    assert indexed["chunk_count"] == 1
+    assert "".join(encoded_parts) == postgres.chunks[0]["content"]
+    vector = json.loads(postgres.chunks[0]["embedding"])
+    assert len(vector) == 1024
+    assert math.isclose(math.sqrt(sum(value * value for value in vector)), 1.0)
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("parts", "message"),
+    [
+        ([], "part budget"),
+        (["s"] * 65, "part budget"),
+        (["different"], "lost source text"),
+    ],
+)
+async def test_document_embedding_rejects_invalid_text_parts(
+    document_harness, parts, message
+):
+    service, _ = document_harness
+    service._embedding.split_for_embedding = lambda _value: parts
+
+    with pytest.raises(ValueError, match=message):
+        await service.indexer._encode_embeddings(
+            ["source"], policy=DocumentIndexPolicy.capture()
+        )
+    assert service._embedding.calls == []
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("vectors", "message"),
+    [
+        ([[1.0], [1.0, 2.0]], "inconsistent dimensions"),
+        ([[0.0, 0.0], [1.0, 0.0]], "require finite vectors"),
+        ([[1.0, 0.0], [-1.0, 0.0]], "cannot be pooled"),
+    ],
+)
+async def test_document_embedding_rejects_unusable_part_vectors(
+    document_harness, vectors, message
+):
+    service, _ = document_harness
+    service._embedding.split_for_embedding = lambda _value: ["a", "b"]
+    service._embedding.embeddings = vectors
+
+    with pytest.raises(DependencyError, match=message):
+        await service.indexer._encode_embeddings(
+            ["ab"], policy=DocumentIndexPolicy.capture()
+        )
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_index_document_preserves_code_location_metadata(document_harness):
     service, postgres = document_harness
     uploaded = await service.add_document(
@@ -2383,6 +3616,44 @@ async def test_index_document_uses_its_captured_embedding_batch_policy(
 
     assert len(service._embedding.calls) == 3
     assert all(len(call) == 1 for call in service._embedding.calls)
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_malformed_later_embedding_batch_does_not_publish_partial_index(
+    document_harness,
+):
+    service, postgres = document_harness
+    uploaded = await service.add_document(
+        content=(
+            b"import os\n\n"
+            b"def build_index(path):\n"
+            b"    return path\n\n"
+            b"class Searcher:\n"
+            b"    pass\n"
+        ),
+        original_name="indexer.py",
+    )
+    policy = DocumentIndexPolicy.capture(
+        embedding_chunk_batch_size=1, max_attempts=1
+    )
+    calls = 0
+
+    async def encode(values):
+        nonlocal calls
+        calls += 1
+        return [[0.1] * 1024] if calls == 1 else None
+
+    service._embedding.encode = encode
+
+    with pytest.raises(RuntimeError, match="malformed batch"):
+        await service.index_document(document_id=uploaded["document_id"], policy=policy)
+
+    assert calls == 2
+    assert postgres.rows[0]["last_index_failure_kind"] == "transient_dependency"
+    assert postgres.rows[0]["next_index_retry_at"] is None
+    assert postgres.parse_snapshots == {}
+    assert postgres.chunks == []
 
 
 @pytest.mark.storage
@@ -2527,6 +3798,29 @@ async def test_read_document_keeps_pdf_line_ranges_page_local(
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_pdf_page_read_keeps_a_mixed_index_region_locator(
+    monkeypatch, document_harness
+):
+    monkeypatch.setattr(
+        extraction_module,
+        "_extract_docling_snapshot",
+        lambda *_: docling_snapshot("Native and OCR", pages=("Native and OCR",)),
+    )
+    service, postgres = document_harness
+    uploaded = await service.add_document(content=b"pdf", original_name="index.pdf")
+    indexed = await service.index_document(document_id=uploaded["document_id"])
+    snapshot = postgres.parse_snapshots[indexed["current_snapshot_id"]]["snapshot"]
+    snapshot["pages"][0]["regions"][0]["extraction_method"] = "mixed"
+
+    result = await service.read_document(
+        document_id=uploaded["document_id"], page_number=1
+    )
+
+    assert result["locator"]["extraction_method"] == "mixed"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_document_selection_reads_docx_from_its_captured_snapshot(
     monkeypatch,
     document_harness,
@@ -2604,6 +3898,25 @@ async def test_read_document_reports_csv_data_rows_not_physical_file_lines(
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_recovery_reindexes_legacy_notebook_locator_snapshot(document_harness):
+    service, postgres = document_harness
+    notebook = b'{"cells":[{"cell_type":"markdown","source":["first cell"]}],"metadata":{},"nbformat":4,"nbformat_minor":5}'
+    uploaded = await service.add_document(content=notebook, original_name="notes.ipynb")
+    indexed = await service.index_document(document_id=uploaded["document_id"])
+    old_snapshot_id = indexed["current_snapshot_id"]
+    postgres.parse_snapshots[old_snapshot_id]["parser_fingerprint"] = "0" * 64
+
+    assert await service.indexer.recover_pending_indexes() == 1
+    refreshed = postgres.rows[0]
+    assert refreshed["status"] == "indexed"
+    assert refreshed["current_snapshot_id"] != old_snapshot_id
+    assert old_snapshot_id in postgres.parse_snapshots
+    assert postgres.parse_snapshots[refreshed["current_snapshot_id"]]["parser_fingerprint"] == extraction_module.locator_repair_fingerprints()[".ipynb"]
+    assert await service.indexer.recover_pending_indexes() == 0
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_index_document_records_document_parser_errors(
     monkeypatch, document_harness
 ):
@@ -2626,10 +3939,82 @@ async def test_index_document_records_document_parser_errors(
     assert postgres.rows[0]["index_attempt_count"] == 1
     assert postgres.rows[0]["last_index_failure_kind"] == "invalid_content"
     assert postgres.rows[0]["next_index_retry_at"] is None
+    assert await service.terminal_index_failure_count() == 1
+    health = RuntimeHealthService(
+        resources=SimpleNamespace(),
+        projects=SimpleNamespace(
+            active_projects={
+                "project-1": SimpleNamespace(
+                    document_service=service,
+                    scheduler=SimpleNamespace(
+                        snapshot_for_health=lambda: {"state": "running"}
+                    ),
+                )
+            }
+        ),
+        sessions=SimpleNamespace(),
+    )
+    background = await health.get_background_health(project_id="project-1")
+    assert background.status.value == "degraded"
+    assert background.details["document_indexing"]["terminal_failure_count"] == 1
+    assert "damaged PDF" not in str(background.model_dump())
     assert await service.indexer.recover_pending_indexes() == 0
     assert (
         await service.schedule_document_index(document_id=uploaded["document_id"])
     )["status"] == "failed"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_upload_api_returns_saved_identity_after_inline_index_failure(
+    monkeypatch, document_harness
+):
+    service, postgres = document_harness
+
+    def fail_pdf_parse(*_args):
+        raise ValueError("private damaged PDF detail")
+
+    monkeypatch.setattr(extraction_module, "_extract_docling_snapshot", fail_pdf_parse)
+    projects = SimpleNamespace(
+        acquire_project_for_session=AsyncMock(
+            return_value=SimpleNamespace(document_service=service)
+        ),
+        release_project_for_session=AsyncMock(),
+    )
+    port = ApplicationRuntimePort(
+        SimpleNamespace(sessions=SimpleNamespace(user_name="ada"), projects=projects)
+    )
+
+    uploaded = await port.upload_document(
+        user_name="ada",
+        project_id="project-1",
+        request=UploadDocumentRequest(
+            original_name="invalid.pdf",
+            content_base64=base64.b64encode(b"invalid PDF").decode(),
+        ),
+    )
+    batch = await port.admit_sources_batch(
+        user_name="ada",
+        project_id="project-1",
+        request=BatchSourceRequest(
+            items=[
+                {
+                    "source_type": "document",
+                    "original_name": "invalid-batch.pdf",
+                    "content_base64": base64.b64encode(b"another invalid PDF").decode(),
+                }
+            ]
+        ),
+    )
+
+    assert uploaded.status == "failed"
+    assert uploaded.document_id == postgres.rows[0]["document_id"]
+    assert service._filesystem.read_bytes("invalid.pdf") == b"invalid PDF"
+    assert batch.results[0].status == "accepted_document"
+    assert batch.results[0].document.status == "failed"
+    assert batch.results[0].document.document_id == postgres.rows[1]["document_id"]
+    assert "private damaged PDF detail" not in uploaded.model_dump_json()
+    assert "private damaged PDF detail" not in batch.model_dump_json()
 
 
 @pytest.mark.storage
@@ -2671,6 +4056,50 @@ async def test_transient_embedding_failure_retries_from_durable_due_state(
     assert recovered["last_index_failure_kind"] is None
     assert len(postgres.chunks) == 1
     assert attempts == 2
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_exhausted_pdf_dependency_recovers_by_explicit_reindex(
+    monkeypatch, document_harness
+):
+    service, postgres = document_harness
+    uploaded = await service.add_document(
+        content=b"captured PDF source", original_name="notes.pdf"
+    )
+    policy = DocumentIndexPolicy.capture(max_attempts=1, retry_backoff_seconds=1)
+
+    def missing_models(*_args):
+        raise DependencyError("Docling PDF models are not installed")
+
+    monkeypatch.setattr(extraction_module, "_extract_docling_snapshot", missing_models)
+    with pytest.raises(RuntimeError, match="Docling PDF models are not installed"):
+        await service.index_document(document_id=uploaded["document_id"], policy=policy)
+
+    failed = postgres.rows[0]
+    assert failed["status"] == "failed"
+    assert failed["index_attempt_count"] == 1
+    assert failed["last_index_failure_kind"] == "transient_dependency"
+    assert failed["next_index_retry_at"] is None
+    assert await service.terminal_index_failure_count() == 1
+    assert await service.indexer.recover_pending_indexes() == 0
+
+    monkeypatch.setattr(
+        extraction_module,
+        "_extract_docling_snapshot",
+        lambda *_args: docling_snapshot(
+            "Recovered PDF text", pages=("Recovered PDF text",)
+        ),
+    )
+    recovered = await service.reindex_document(
+        document_id=uploaded["document_id"], policy=policy
+    )
+
+    assert recovered["status"] == "indexed"
+    assert postgres.rows[0]["index_attempt_count"] == 0
+    assert postgres.rows[0]["last_index_failure_kind"] is None
+    assert await service.terminal_index_failure_count() == 0
+    assert await service.read_document(document_id=uploaded["document_id"])
 
 
 @pytest.mark.storage
@@ -2805,21 +4234,55 @@ async def test_index_document_does_not_publish_after_catalog_changes_during_deri
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_index_document_validates_embedding_count_and_dimension(document_harness):
+@pytest.mark.parametrize(
+    ("embeddings", "detail"),
+    [
+        ([], "Embedding count"),
+        ([[0.1] * 3], "exactly 1024 dimensions"),
+        ([[float("nan")] + [0.1] * 1023], "non-finite"),
+        ([[Decimal("0.1")] + [0.1] * 1023], "non-JSON-native"),
+        (None, "malformed batch"),
+        ("not-vectors", "malformed batch"),
+        ([None], "malformed vector"),
+        ([3], "malformed vector"),
+    ],
+)
+async def test_malformed_embedding_response_exhausts_bounded_dependency_retry(
+    document_harness, embeddings, detail
+):
     service, postgres = document_harness
     uploaded = await service.add_document(content=b"alpha", original_name="notes.txt")
-    service._embedding.embeddings = []
+    if embeddings is None:
+        async def malformed_batch(_values):
+            return None
 
-    with pytest.raises(RuntimeError, match="Embedding count"):
-        await service.index_document(document_id=uploaded["document_id"])
+        service._embedding.encode = malformed_batch
+    else:
+        service._embedding.embeddings = embeddings
+    policy = DocumentIndexPolicy.capture(max_attempts=2, retry_backoff_seconds=1)
 
-    assert postgres.rows[0]["status"] == "failed"
-    service._embedding.embeddings = [[0.1] * 3]
+    with pytest.raises(RuntimeError, match=detail):
+        await service.index_document(document_id=uploaded["document_id"], policy=policy)
 
-    with pytest.raises(RuntimeError, match="exactly 1024 dimensions"):
-        await service.index_document(document_id=uploaded["document_id"])
+    pending = postgres.rows[0]
+    assert pending["status"] == "queued"
+    assert pending["index_attempt_count"] == 1
+    assert pending["last_index_failure_kind"] == "transient_dependency"
+    assert pending["next_index_retry_at"] is not None
+    assert postgres.parse_snapshots == {}
+    assert postgres.chunks == []
 
-    assert postgres.rows[0]["status"] == "failed"
+    with pytest.raises(RuntimeError, match=detail):
+        await service.index_document(document_id=uploaded["document_id"], policy=policy)
+
+    terminal = postgres.rows[0]
+    assert terminal["status"] == "failed"
+    assert terminal["index_attempt_count"] == 2
+    assert terminal["last_index_failure_kind"] == "transient_dependency"
+    assert terminal["next_index_retry_at"] is None
+    assert await service.terminal_index_failure_count() == 1
+    assert postgres.parse_snapshots == {}
+    assert postgres.chunks == []
 
 
 @pytest.mark.storage

@@ -101,7 +101,7 @@ class WorkRecord:
             parent_id=parent_id,
             priority=priority,
             cpu_weight=2 if kind in {"spacy", "gliner", "document_index"} else 1,
-            memory_weight=2 if kind in {"embedding", "rerank", "nli", "gliner"} else 1,
+            memory_weight=2 if kind in {"embedding", "rerank", "gliner"} else 1,
             expected_embedding_calls=1 if kind == "embedding" else 0,
             stage=stage or kind,
         )

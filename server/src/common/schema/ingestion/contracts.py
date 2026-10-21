@@ -207,10 +207,11 @@ class ProjectEntityClassification:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ContextRelationshipWrite:
-    """One Context-grounded relationship observation ready for reconciliation.
+    """One Context-grounded relationship support set ready for reconciliation.
 
-    Its evidence is one or more immutable Context block versions, never a
-    single message or session.
+    Its evidence is one independently sufficient set of immutable Context
+    block versions, never a single message or session. Separate sufficient
+    sets and observed labels remain separate durable observations.
     """
 
     support_block_ids: tuple[UUID, ...]

@@ -2,9 +2,20 @@ import asyncio
 import hashlib
 import json
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime
+from functools import wraps
 from pathlib import PurePosixPath
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
+from typing import (
+    Any,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+)
 
 from loguru import logger
 from pydantic import TypeAdapter
@@ -25,6 +36,7 @@ from common.schema.source.locators import (
     LayoutRegionLocator,
     TextLineLocator,
 )
+from common.utils.lifecycle import settle_owned_task
 from common.utils.time_utils import get_now_iso
 from core.knowledge.db.readers.document_reader import DocumentReader
 from core.knowledge.db.writers.document_writer import DocumentWriter
@@ -55,10 +67,10 @@ from .extraction import (
     csv_data_rows,
     is_code_extension,
 )
-from .filesystem import ProjectFilesystem, ProjectFilesystemFactory
+from .filesystem import ProjectFilesystem, ProjectFilesystemFactory, _MutationLease
 from .indexer import DocumentIndexer
 from .policy import DocumentIndexPolicy
-from .scanning import build_folder_preview, normalize_relative_path
+from .scanning import FolderScanPathEntry, build_folder_preview, normalize_relative_path
 
 BlockingRunner = Callable[..., Awaitable[Any]]
 _RECONCILIATION_MAX_FILES = 10_000
@@ -78,6 +90,25 @@ async def _run_in_worker(
 ) -> Any:
     """Run CPU- or blocking-I/O work without blocking the event loop."""
     return await asyncio.to_thread(function, *args, **kwargs)
+
+
+def _settle_file_operation(method: Callable[..., Awaitable[Any]]):
+    """Finish owned file and catalog work before returning caller cancellation."""
+
+    @wraps(method)
+    async def wrapped(self, *args, **kwargs):
+        owned = asyncio.create_task(method(self, *args, **kwargs))
+        try:
+            return await asyncio.shield(owned)
+        except asyncio.CancelledError:
+            if not owned.cancelled():
+                try:
+                    await settle_owned_task(owned)
+                except Exception:
+                    logger.exception("Project file operation failed after cancellation")
+            raise
+
+    return wrapped
 
 
 class DocumentService:
@@ -113,6 +144,7 @@ class DocumentService:
         self._reconciliation_fingerprints: dict[
             str, tuple[int, int, str | None]
         ] = {}
+        self._reconciliation_settings: FolderScanSettings | None = None
         self._reconciliation_run_count = 0
         if indexer is None:
             indexing_policy = DocumentIndexPolicy.capture(
@@ -157,10 +189,36 @@ class DocumentService:
             return None
         return self._filesystem_factory.for_project(self.project_id)
 
-    def _filesystem_for_document(self, document: Dict) -> ProjectFilesystem | None:
-        if self._filesystem_factory is None:
-            return None
-        return self._filesystem_factory.for_project(document["project_id"])
+    @asynccontextmanager
+    async def _owned_file_mutation(
+        self, filesystem: ProjectFilesystem
+    ) -> AsyncIterator[_MutationLease]:
+        """Keep filesystem and catalog changes in one project mutation order."""
+        acquire = asyncio.create_task(
+            asyncio.to_thread(filesystem.acquire_mutation_lease)
+        )
+        try:
+            lease = await asyncio.shield(acquire)
+        except asyncio.CancelledError:
+            try:
+                lease = await settle_owned_task(acquire)
+            except Exception:
+                pass
+            else:
+                await settle_owned_task(
+                    asyncio.create_task(
+                        asyncio.to_thread(filesystem.release_mutation_lease, lease)
+                    )
+                )
+            raise
+        try:
+            yield lease
+        finally:
+            await settle_owned_task(
+                asyncio.create_task(
+                    asyncio.to_thread(filesystem.release_mutation_lease, lease)
+                )
+            )
 
     async def reconcile_project_files(self) -> Dict[str, int]:
         """Bring the manual-document catalog into line with the local project tree.
@@ -169,9 +227,18 @@ class DocumentService:
         ignored, generated, sensitive, binary, and oversized files do not enter
         the document catalog merely because an editor created them locally.
         """
+        return await self._reconcile_project_files()
+
+    async def _reconcile_project_files(
+        self, *, lease: _MutationLease | None = None
+    ) -> Dict[str, int]:
         filesystem = self._filesystem
         if filesystem is None:
             return {"created": 0, "changed": 0, "deleted": 0, "excluded": 0}
+
+        scan_generation = await self._run_blocking(
+            filesystem.get_mutation_generation, _lease=lease
+        )
 
         paths = await self._run_blocking(
             lambda: list(filesystem.iter_paths(limit=_RECONCILIATION_MAX_FILES + 1))
@@ -184,6 +251,8 @@ class DocumentService:
         reserved_paths = [path for path in paths if is_controlled_context_file(path.relative_path)]
         paths = [path for path in paths if not is_controlled_context_file(path.relative_path)]
         settings = await self.get_scan_settings()
+        if settings != self._reconciliation_settings:
+            self._reconciliation_fingerprints.clear()
         current_rows = await self._reader.list_documents_for_reconciliation(
             limit=_RECONCILIATION_MAX_FILES + 1,
         )
@@ -199,49 +268,128 @@ class DocumentService:
             not self._reconciliation_fingerprints
             or self._reconciliation_run_count % _RECONCILIATION_FULL_HASH_INTERVAL == 0
         )
-        entries: list[FolderUploadEntry] = []
+        path_fingerprints = {
+            path.relative_path: (path.size_bytes, path.modified_ns)
+            for path in [*paths, *reserved_paths]
+        }
+        if not full_hash_sweep and path_fingerprints.keys() == self._reconciliation_fingerprints.keys():
+            unchanged = all(
+                self._reconciliation_fingerprints[path][:2] == fingerprint
+                for path, fingerprint in path_fingerprints.items()
+            )
+            catalog_unchanged = all(
+                row["relative_path"] in path_fingerprints
+                and self._reconciliation_fingerprints[row["relative_path"]][2]
+                == row["content_hash"]
+                for row in current.values()
+            ) and all(
+                path in current
+                for path, fingerprint in self._reconciliation_fingerprints.items()
+                if fingerprint[2] is not None
+            )
+            if unchanged and catalog_unchanged:
+                return {
+                    "created": 0,
+                    "changed": 0,
+                    "deleted": 0,
+                    "excluded": sum(
+                        fingerprint[2] is None
+                        for fingerprint in self._reconciliation_fingerprints.values()
+                    ),
+                }
+
+        entries: list[FolderScanPathEntry] = []
         next_fingerprints: dict[str, tuple[int, int, str | None]] = {
             path.relative_path: (path.size_bytes, path.modified_ns, None)
             for path in reserved_paths
         }
+        direct_files: dict[str, tuple[Any, str, int]] = {}
+        oversized_paths = 0
+        pending_admissions = 0
         for path in paths:
-            if path.size_bytes > settings.max_document_size_bytes:
+            existing = current.get(path.relative_path)
+            direct = existing is not None and not existing.get("scan_managed", False)
+            max_bytes = MAX_DOCUMENT_SIZE if direct else settings.max_document_size_bytes
+            if path.size_bytes > max_bytes:
                 next_fingerprints[path.relative_path] = (
                     path.size_bytes,
                     path.modified_ns,
                     None,
                 )
+                oversized_paths += 1
                 continue
-            fingerprint = self._reconciliation_fingerprints.get(path.relative_path)
-            existing = current.get(path.relative_path)
-            if (
-                not full_hash_sweep
-                and fingerprint is not None
-                and fingerprint[:2] == (path.size_bytes, path.modified_ns)
-            ):
-                next_fingerprints[path.relative_path] = fingerprint
-                if (
-                    fingerprint[2] is not None
-                    and existing is not None
-                    and existing["content_hash"] == fingerprint[2]
-                ):
-                    current.pop(path.relative_path)
-                continue
-            content = await self._run_blocking(
-                filesystem.read_bytes,
-                path.relative_path,
-                max_bytes=settings.max_document_size_bytes,
-            )
+            if existing is None:
+                pending_hash = await self._run_blocking(
+                    filesystem.pending_admission_hash, path.relative_path
+                )
+                if pending_hash is not None:
+                    pending_content = await self._run_blocking(
+                        filesystem.read_bytes,
+                        path.relative_path,
+                        max_bytes=max_bytes,
+                    )
+                    if pending_hash == hashlib.sha256(pending_content).hexdigest():
+                        next_fingerprints[path.relative_path] = (
+                            path.size_bytes, path.modified_ns, None
+                        )
+                        pending_admissions += 1
+                        continue
+            if direct:
+                content = await self._run_blocking(
+                    filesystem.read_bytes,
+                    path.relative_path,
+                    max_bytes=max_bytes,
+                )
+                direct_files[path.relative_path] = (
+                    path, hashlib.sha256(content).hexdigest(), len(content)
+                )
+                # A directly uploaded .gitignore still defines rules for files
+                # discovered next to it, but is not subject to those rules.
+                if PurePosixPath(path.relative_path).name != ".gitignore":
+                    continue
             entries.append(
-                FolderUploadEntry(relative_path=path.relative_path, content=content)
+                FolderScanPathEntry(
+                    relative_path=path.relative_path, size_bytes=path.size_bytes
+                )
             )
-        preview = await self.preview_folder(
-            folder_name=self.project_id,
-            entries=entries,
-            settings=settings,
+        preview = await self._run_blocking(
+            build_folder_preview,
+            self.project_id,
+            entries,
+            settings,
+            [],
+            content_loader=lambda relative_path, _size: filesystem.read_bytes(
+                relative_path,
+                max_bytes=(
+                    MAX_DOCUMENT_SIZE
+                    if relative_path in direct_files
+                    else settings.max_document_size_bytes
+                ),
+            ),
         )
         desired = {entry.relative_path: entry for entry in preview.included}
+        for relative_path in direct_files:
+            desired.pop(relative_path, None)
+        created_rows: list[Dict[str, Any]] = []
+        changed_rows: list[Dict[str, Any]] = []
+        for relative_path, (path, content_hash, content_size) in direct_files.items():
+            existing = current.pop(relative_path)
+            next_fingerprints[relative_path] = (
+                path.size_bytes, path.modified_ns, content_hash
+            )
+            if existing["content_hash"] != content_hash:
+                changed_rows.append(
+                    {
+                        "document_id": str(existing["document_id"]),
+                        "original_name": existing["original_name"],
+                        "extension": existing["extension"],
+                        "size_bytes": content_size,
+                        "content_hash": content_hash,
+                    }
+                )
         for path in paths:
+            if path.relative_path in direct_files:
+                continue
             preview_entry = desired.get(path.relative_path)
             if preview_entry is not None:
                 next_fingerprints[path.relative_path] = (
@@ -256,8 +404,6 @@ class DocumentService:
                     None,
                 )
 
-        created_rows: list[Dict[str, Any]] = []
-        changed_rows: list[Dict[str, Any]] = []
         now = get_now_iso()
         for relative_path, preview_entry in desired.items():
             existing = current.pop(relative_path, None)
@@ -287,13 +433,48 @@ class DocumentService:
         deleted_document_ids = [
             str(document["document_id"]) for document in current.values()
         ]
-        await self._writer.apply_filesystem_reconciliation(
-            created=created_rows,
-            changed=changed_rows,
-            deleted_document_ids=deleted_document_ids,
-            updated_at=now,
+        async def apply_under_lease(active_lease: _MutationLease) -> bool:
+            current_generation = await self._run_blocking(
+                filesystem.get_mutation_generation, _lease=active_lease
+            )
+            if current_generation != scan_generation:
+                # The scan predates another file edit; let the next pass rescan.
+                self._reconciliation_fingerprints.clear()
+                return False
+            apply = asyncio.create_task(
+                self._writer.apply_filesystem_reconciliation(
+                    created=created_rows,
+                    changed=changed_rows,
+                    deleted_document_ids=deleted_document_ids,
+                    updated_at=now,
+                )
+            )
+            try:
+                await asyncio.shield(apply)
+            except asyncio.CancelledError:
+                try:
+                    await settle_owned_task(apply)
+                finally:
+                    self._reconciliation_fingerprints.clear()
+                raise
+            except Exception:
+                self._reconciliation_fingerprints.clear()
+                raise
+            self._reconciliation_fingerprints = next_fingerprints
+            self._reconciliation_settings = settings
+            return True
+
+        if lease is None:
+            async with self._owned_file_mutation(filesystem) as acquired_lease:
+                applied = await apply_under_lease(acquired_lease)
+        else:
+            applied = await apply_under_lease(lease)
+        excluded = (
+            preview.summary.excluded_count + len(reserved_paths)
+            + oversized_paths + pending_admissions
         )
-        self._reconciliation_fingerprints = next_fingerprints
+        if not applied:
+            return {"created": 0, "changed": 0, "deleted": 0, "excluded": excluded}
         created = len(created_rows)
         changed = len(changed_rows)
         deleted = len(deleted_document_ids)
@@ -303,7 +484,7 @@ class DocumentService:
             "created": created,
             "changed": changed,
             "deleted": deleted,
-            "excluded": preview.summary.excluded_count + len(reserved_paths),
+            "excluded": excluded,
         }
 
     async def _reconcile_owned_file_changes(
@@ -311,75 +492,154 @@ class DocumentService:
         *,
         upserts: Dict[str, bytes],
         removed_paths: Iterable[str] = (),
+        lease: _MutationLease,
     ) -> None:
-        """Update catalog rows for filesystem mutations already made by Knoggin."""
-        normalized_removed = {
-            normalize_relative_path(path, path) for path in removed_paths
-        }
+        """Apply the policy to edited paths without walking the whole tree."""
+        removed = {normalize_relative_path(path, path) for path in removed_paths}
+        affected = {*upserts, *removed}
+        for relative_path in affected:
+            self._reconciliation_fingerprints.pop(relative_path, None)
+        if any(PurePosixPath(path).name == ".gitignore" for path in affected):
+            # An ignore-rule edit can change the admission of any old path.
+            self._reconciliation_fingerprints.clear()
+            await self._reconcile_project_files(lease=lease)
+            return
+
         settings = await self.get_scan_settings()
-        entries = [
-            FolderUploadEntry(relative_path=path, content=content)
-            for path, content in upserts.items()
-        ]
+        current_rows = await self._reader.list_documents_for_reconciliation(
+            limit=_RECONCILIATION_MAX_FILES + 1
+        )
+        if len(current_rows) > _RECONCILIATION_MAX_FILES:
+            raise RuntimeError("document catalog reconciliation exceeds the file safety limit")
+        current = {row["relative_path"]: row for row in current_rows}
+
+        # Preview needs the relevant ignore files even when they were not edited.
+        rule_paths: set[str] = set()
+        if settings.respect_gitignore:
+            for path in upserts:
+                parts = PurePosixPath(path).parts[:-1]
+                rule_paths.add(".gitignore")
+                for depth in range(1, len(parts) + 1):
+                    rule_paths.add("/".join((*parts[:depth], ".gitignore")))
+        entries = [FolderUploadEntry(relative_path=path, content=content) for path, content in upserts.items()]
+        filesystem = self._require_filesystem()
+        for path in sorted(rule_paths - upserts.keys()):
+            try:
+                content = await self._run_blocking(
+                    filesystem.read_bytes, path, max_bytes=settings.max_document_size_bytes
+                )
+            except FileNotFoundError:
+                continue
+            entries.append(FolderUploadEntry(relative_path=path, content=content))
+
+        # The preview handles file-level and ignore rules. Existing scan rows
+        # consume the real count/byte budget below; rule-only entries do not.
+        preview_settings = settings.model_copy(
+            update={
+                "max_file_count": max(settings.max_file_count, len(entries)),
+                "max_total_size_bytes": max(
+                    settings.max_total_size_bytes,
+                    sum(len(entry.content) for entry in entries),
+                ),
+            }
+        )
         preview = await self.preview_folder(
-            folder_name=self.project_id,
-            entries=entries,
-            settings=settings,
+            folder_name=self.project_id, entries=entries, settings=preview_settings
         )
         included = {entry.relative_path: entry for entry in preview.included}
-        affected_paths = [*upserts, *normalized_removed]
-        current_rows = await self._reader.fetch_project_documents_for_paths(
-            relative_paths=affected_paths,
-        )
-        current = {row["relative_path"]: row for row in current_rows}
+        scan_rows = [
+            row for row in current_rows
+            if row.get("scan_managed", False) and row["relative_path"] not in affected
+        ]
+        accepted_count = len(scan_rows)
+        accepted_bytes = sum(row["size_bytes"] for row in scan_rows)
         created_rows: list[Dict[str, Any]] = []
         changed_rows: list[Dict[str, Any]] = []
         deleted_document_ids: list[str] = []
-
-        for relative_path in upserts:
-            existing = current.get(relative_path)
-            preview_entry = included.get(relative_path)
-            if preview_entry is None:
+        for path in sorted(upserts):
+            existing = current.get(path)
+            content = upserts[path]
+            if existing is not None and not existing.get("scan_managed", False):
+                content_hash = hashlib.sha256(content).hexdigest()
+                if existing["content_hash"] != content_hash:
+                    changed_rows.append(
+                        {
+                            "document_id": str(existing["document_id"]),
+                            "original_name": existing["original_name"],
+                            "extension": existing["extension"],
+                            "size_bytes": len(content),
+                            "content_hash": content_hash,
+                        }
+                    )
+                continue
+            entry = included.get(path)
+            if entry is not None and (
+                accepted_count >= settings.max_file_count
+                or accepted_bytes + len(content) > settings.max_total_size_bytes
+            ):
+                # Existing rows may include a later lexical path. Reevaluate
+                # the complete manifest so both routes choose the same winner.
+                self._reconciliation_fingerprints.clear()
+                await self._reconcile_project_files(lease=lease)
+                return
+            if entry is None:
                 if existing is not None:
                     deleted_document_ids.append(str(existing["document_id"]))
                 continue
+            accepted_count += 1
+            accepted_bytes += len(content)
             if existing is None:
                 created_rows.append(
                     {
                         "document_id": str(uuid.uuid4()),
-                        "original_name": preview_entry.original_name,
-                        "relative_path": relative_path,
-                        "extension": preview_entry.extension,
-                        "size_bytes": preview_entry.size_bytes,
-                        "content_hash": preview_entry.content_hash,
+                        "original_name": entry.original_name,
+                        "relative_path": path,
+                        "extension": entry.extension,
+                        "size_bytes": entry.size_bytes,
+                        "content_hash": entry.content_hash,
                     }
                 )
-            elif existing["content_hash"] != preview_entry.content_hash:
+            elif existing["content_hash"] != entry.content_hash:
                 changed_rows.append(
                     {
                         "document_id": str(existing["document_id"]),
-                        "original_name": preview_entry.original_name,
-                        "extension": preview_entry.extension,
-                        "size_bytes": preview_entry.size_bytes,
-                        "content_hash": preview_entry.content_hash,
+                        "original_name": entry.original_name,
+                        "extension": entry.extension,
+                        "size_bytes": entry.size_bytes,
+                        "content_hash": entry.content_hash,
                     }
                 )
-
-        for relative_path in normalized_removed:
-            existing = current.get(relative_path)
-            if existing is not None:
-                deleted_document_ids.append(str(existing["document_id"]))
-
+        deleted_document_ids.extend(
+            str(current[path]["document_id"])
+            for path in removed
+            if path in current
+        )
         await self._writer.apply_filesystem_reconciliation(
             created=created_rows,
             changed=changed_rows,
             deleted_document_ids=list(dict.fromkeys(deleted_document_ids)),
             updated_at=get_now_iso(),
         )
-        for relative_path in {*upserts, *normalized_removed}:
-            self._reconciliation_fingerprints.pop(relative_path, None)
         if created_rows or changed_rows or deleted_document_ids:
             self._indexer.wake_pending_indexes()
+
+    @staticmethod
+    async def _rollback_file_on_catalog_failure(
+        catalog_work: Awaitable[Any],
+        restore_file: Callable[[], Awaitable[Any]],
+    ) -> Any:
+        """Restore the source under its mutation lease if catalog work fails."""
+        try:
+            return await catalog_work
+        except (Exception, asyncio.CancelledError):
+            try:
+                await settle_owned_task(asyncio.create_task(restore_file()))
+            except Exception as restore_error:
+                logger.exception("Could not restore project file after catalog failure")
+                raise RuntimeError(
+                    "Document catalog update failed and source rollback failed"
+                ) from restore_error
+            raise
 
     async def list_project_files(
         self,
@@ -494,16 +754,31 @@ class DocumentService:
         except FileNotFoundError:
             return None
 
+    @_settle_file_operation
     async def create_project_file(self, path: str, content: str) -> Dict:
         """Create a text project file and update its document catalog row."""
         payload = self._validate_project_file_content(path, content)
         filesystem = self._require_filesystem()
         normalized_path = normalize_relative_path(path, path)
         self._require_unreserved_context_path(normalized_path)
-        await self._run_blocking(filesystem.write_bytes, normalized_path, payload)
-        await self._reconcile_owned_file_changes(upserts={normalized_path: payload})
-        return await self.read_project_file(normalized_path)
+        async with self._owned_file_mutation(filesystem) as lease:
+            await self._run_blocking(
+                filesystem.write_bytes, normalized_path, payload, _lease=lease
+            )
+            await self._rollback_file_on_catalog_failure(
+                self._reconcile_owned_file_changes(
+                    upserts={normalized_path: payload}, lease=lease
+                ),
+                lambda: self._run_blocking(
+                    filesystem.delete_file,
+                    normalized_path,
+                    expected_content_hash=hashlib.sha256(payload).hexdigest(),
+                    _lease=lease,
+                ),
+            )
+            return await self.read_project_file(normalized_path)
 
+    @_settle_file_operation
     async def update_project_file(
         self,
         path: str,
@@ -516,16 +791,33 @@ class DocumentService:
         filesystem = self._require_filesystem()
         normalized_path = normalize_relative_path(path, path)
         self._require_unreserved_context_path(normalized_path)
-        await self._run_blocking(
-            filesystem.write_bytes,
-            normalized_path,
-            payload,
-            overwrite=True,
-            expected_content_hash=expected_content_hash,
-        )
-        await self._reconcile_owned_file_changes(upserts={normalized_path: payload})
-        return await self.read_project_file(normalized_path)
+        async with self._owned_file_mutation(filesystem) as lease:
+            previous = await self._run_blocking(filesystem.read_bytes, normalized_path)
+            await self._run_blocking(
+                filesystem.write_bytes,
+                normalized_path,
+                payload,
+                overwrite=True,
+                expected_content_hash=expected_content_hash,
+                _lease=lease,
+            )
+            await self._rollback_file_on_catalog_failure(
+                self._reconcile_owned_file_changes(
+                    upserts={normalized_path: payload}, lease=lease
+                ),
+                lambda: self._run_blocking(
+                    filesystem.write_bytes,
+                    normalized_path,
+                    previous,
+                    overwrite=True,
+                    expected_content_hash=hashlib.sha256(payload).hexdigest(),
+                    _allow_empty=True,
+                    _lease=lease,
+                ),
+            )
+            return await self.read_project_file(normalized_path)
 
+    @_settle_file_operation
     async def append_project_file(
         self,
         path: str,
@@ -539,19 +831,35 @@ class DocumentService:
         filesystem = self._require_filesystem()
         normalized_path = normalize_relative_path(path, path)
         self._require_unreserved_context_path(normalized_path)
-        current = await self._run_blocking(filesystem.read_bytes, normalized_path)
-        payload = current + content.encode("utf-8")
-        self._validate_project_file_bytes(normalized_path, payload)
-        await self._run_blocking(
-            filesystem.write_bytes,
-            normalized_path,
-            payload,
-            overwrite=True,
-            expected_content_hash=expected_content_hash,
-        )
-        await self._reconcile_owned_file_changes(upserts={normalized_path: payload})
-        return await self.read_project_file(normalized_path)
+        async with self._owned_file_mutation(filesystem) as lease:
+            current = await self._run_blocking(filesystem.read_bytes, normalized_path)
+            payload = current + content.encode("utf-8")
+            self._validate_project_file_bytes(normalized_path, payload)
+            await self._run_blocking(
+                filesystem.write_bytes,
+                normalized_path,
+                payload,
+                overwrite=True,
+                expected_content_hash=expected_content_hash,
+                _lease=lease,
+            )
+            await self._rollback_file_on_catalog_failure(
+                self._reconcile_owned_file_changes(
+                    upserts={normalized_path: payload}, lease=lease
+                ),
+                lambda: self._run_blocking(
+                    filesystem.write_bytes,
+                    normalized_path,
+                    current,
+                    overwrite=True,
+                    expected_content_hash=hashlib.sha256(payload).hexdigest(),
+                    _allow_empty=True,
+                    _lease=lease,
+                ),
+            )
+            return await self.read_project_file(normalized_path)
 
+    @_settle_file_operation
     async def move_project_file(
         self,
         source_path: str,
@@ -566,22 +874,34 @@ class DocumentService:
         self._require_unreserved_context_path(source)
         self._require_unreserved_context_path(destination)
         self._validate_project_file_extension(destination)
-        await self._run_blocking(
-            filesystem.move_file,
-            source,
-            destination,
-            expected_content_hash=expected_content_hash,
-        )
-        moved_content = await self._run_blocking(
-            filesystem.read_bytes,
-            destination,
-        )
-        await self._reconcile_owned_file_changes(
-            upserts={destination: moved_content},
-            removed_paths=(source,),
-        )
-        return await self.read_project_file(destination)
+        async with self._owned_file_mutation(filesystem) as lease:
+            moved_content = await self._run_blocking(
+                filesystem.read_bytes, source, max_bytes=MAX_DOCUMENT_SIZE
+            )
+            await self._run_blocking(
+                filesystem.move_file,
+                source,
+                destination,
+                expected_content_hash=expected_content_hash,
+                _lease=lease,
+            )
+            await self._rollback_file_on_catalog_failure(
+                self._reconcile_owned_file_changes(
+                    upserts={destination: moved_content},
+                    removed_paths=(source,),
+                    lease=lease,
+                ),
+                lambda: self._run_blocking(
+                    filesystem.move_file,
+                    destination,
+                    source,
+                    expected_content_hash=hashlib.sha256(moved_content).hexdigest(),
+                    _lease=lease,
+                ),
+            )
+            return await self.read_project_file(destination)
 
+    @_settle_file_operation
     async def delete_project_file(
         self,
         path: str,
@@ -592,17 +912,31 @@ class DocumentService:
         filesystem = self._require_filesystem()
         normalized_path = normalize_relative_path(path, path)
         self._require_unreserved_context_path(normalized_path)
-        deleted = await self._run_blocking(
-            filesystem.delete_file,
-            normalized_path,
-            expected_content_hash=expected_content_hash,
-        )
-        await self._reconcile_owned_file_changes(removed_paths=(normalized_path,), upserts={})
-        return {
-            "relative_path": deleted.relative_path,
-            "content_hash": deleted.content_hash,
-            "deleted": True,
-        }
+        async with self._owned_file_mutation(filesystem) as lease:
+            previous = await self._run_blocking(filesystem.read_bytes, normalized_path)
+            deleted = await self._run_blocking(
+                filesystem.delete_file,
+                normalized_path,
+                expected_content_hash=expected_content_hash,
+                _lease=lease,
+            )
+            await self._rollback_file_on_catalog_failure(
+                self._reconcile_owned_file_changes(
+                    removed_paths=(normalized_path,), upserts={}, lease=lease
+                ),
+                lambda: self._run_blocking(
+                    filesystem.write_bytes,
+                    normalized_path,
+                    previous,
+                    _allow_empty=True,
+                    _lease=lease,
+                ),
+            )
+            return {
+                "relative_path": deleted.relative_path,
+                "content_hash": deleted.content_hash,
+                "deleted": True,
+            }
 
     async def create_project_folder(self, path: str) -> Dict:
         """Create an empty project directory without introducing catalog state."""
@@ -787,6 +1121,7 @@ class DocumentService:
                 if isinstance(region, dict) and region.get("extraction_method") in {
                     "native_text",
                     "ocr",
+                    "mixed",
                     "model_interpretation",
                     "unknown",
                 }:
@@ -1025,6 +1360,7 @@ class DocumentService:
         if result["start_line"] != start or result["end_line"] != end:
             raise ValueError("Selected passage is outside the current document range")
 
+    @_settle_file_operation
     async def delete_document(
         self,
         *,
@@ -1038,22 +1374,40 @@ class DocumentService:
             document_id=document_id,
             relative_path=None,
         )
-        filesystem = self._filesystem_for_document(document)
+        if document["project_id"] != self.project_id:
+            raise FileNotFoundError("Document not found")
+        filesystem = self._filesystem
         if filesystem is None:
             raise RuntimeError("Document source filesystem is not configured")
-        await self._run_blocking(
-            filesystem.delete_file,
-            document["relative_path"],
-            expected_content_hash=document["content_hash"],
-        )
-        row = await self._writer.delete_document(
-            document_id=document_id,
-        )
-        if row is None:
-            raise FileNotFoundError("Document not found")
-        deleted_metadata = self._public_metadata(row)
-        deleted_metadata["deleted"] = True
-        return deleted_metadata
+        async with self._owned_file_mutation(filesystem) as lease:
+            previous = await self._run_blocking(
+                filesystem.read_bytes, document["relative_path"]
+            )
+            await self._run_blocking(
+                filesystem.delete_file,
+                document["relative_path"],
+                expected_content_hash=document["content_hash"],
+                _lease=lease,
+            )
+            async def tombstone() -> Dict:
+                row = await self._writer.delete_document(document_id=document_id)
+                if row is None:
+                    raise FileNotFoundError("Document not found")
+                return row
+
+            row = await self._rollback_file_on_catalog_failure(
+                tombstone(),
+                lambda: self._run_blocking(
+                    filesystem.write_bytes,
+                    document["relative_path"],
+                    previous,
+                    _allow_empty=True,
+                    _lease=lease,
+                ),
+            )
+            deleted_metadata = self._public_metadata(row)
+            deleted_metadata["deleted"] = True
+            return deleted_metadata
 
     async def add_document(
         self,
@@ -1082,19 +1436,99 @@ class DocumentService:
             )
         normalized_path = normalize_relative_path(relative_path, original_name)
         self._require_unreserved_context_path(normalized_path)
+        if document_extension(normalized_path) != extension:
+            raise ValueError("relative_path and original_name must have the same file type")
         document_id = str(uuid.uuid4())
         content_hash = hashlib.sha256(content).hexdigest()
         created_at = get_now_iso()
         filesystem = self._filesystem
         if filesystem is None:
             raise RuntimeError("Document source filesystem is not configured")
-        await self._run_blocking(
-            filesystem.write_bytes,
-            normalized_path,
-            content,
+        async with self._owned_file_mutation(filesystem) as lease:
+            return await self._add_document_owned(
+                filesystem=filesystem,
+                lease=lease,
+                content=content,
+                original_name=original_name,
+                normalized_path=normalized_path,
+                extension=extension,
+                document_id=document_id,
+                content_hash=content_hash,
+                created_at=created_at,
+            )
+
+    async def _add_document_owned(
+        self,
+        *,
+        filesystem: ProjectFilesystem,
+        lease: _MutationLease,
+        content: bytes,
+        original_name: str,
+        normalized_path: str,
+        extension: str,
+        document_id: str,
+        content_hash: str,
+        created_at: str,
+    ) -> Dict:
+        marker_task = asyncio.create_task(
+            self._run_blocking(
+                filesystem.mark_pending_admission,
+                normalized_path,
+                content_hash,
+                _lease=lease,
+            )
         )
         try:
-            await self._writer.insert_document(
+            await asyncio.shield(marker_task)
+        except asyncio.CancelledError:
+            try:
+                await settle_owned_task(marker_task)
+            except Exception:
+                pass
+            else:
+                await settle_owned_task(
+                    asyncio.create_task(
+                        self._run_blocking(
+                            filesystem.clear_pending_admission,
+                            normalized_path,
+                            _lease=lease,
+                        )
+                    )
+                )
+            raise
+        write_task = asyncio.create_task(
+            self._run_blocking(
+                filesystem.write_bytes, normalized_path, content, _lease=lease
+            )
+        )
+        try:
+            await asyncio.shield(write_task)
+        except FileExistsError:
+            await settle_owned_task(
+                asyncio.create_task(
+                    self._run_blocking(
+                        filesystem.clear_pending_admission,
+                        normalized_path,
+                        _lease=lease,
+                    )
+                )
+            )
+            raise
+        except asyncio.CancelledError:
+            try:
+                await settle_owned_task(write_task)
+            except Exception:
+                pass  # The write failed before publishing owned bytes.
+            else:
+                await self._rollback_document_admission(
+                    filesystem=filesystem,
+                    relative_path=normalized_path,
+                    content_hash=content_hash,
+                    lease=lease,
+                )
+            raise
+        insert_task = asyncio.create_task(
+            self._writer.insert_document(
                 document_id=document_id,
                 original_name=original_name,
                 relative_path=normalized_path,
@@ -1103,18 +1537,49 @@ class DocumentService:
                 content_hash=content_hash,
                 created_at=created_at,
             )
-        except Exception:
+        )
+        try:
+            await asyncio.shield(insert_task)
+        except asyncio.CancelledError:
+            inserted = False
             try:
-                await self._run_blocking(
-                    filesystem.delete_file,
-                    normalized_path,
-                    expected_content_hash=content_hash,
-                )
+                await settle_owned_task(insert_task)
             except Exception:
-                logger.exception(
-                    "Could not roll back local document file after catalog failure"
-                )
+                pass
+            else:
+                inserted = True
+            await self._rollback_document_admission(
+                filesystem=filesystem,
+                relative_path=normalized_path,
+                content_hash=content_hash,
+                document_id=document_id if inserted else None,
+                lease=lease,
+            )
             raise
+        except Exception:
+            await self._rollback_document_admission(
+                filesystem=filesystem,
+                relative_path=normalized_path,
+                content_hash=content_hash,
+                lease=lease,
+            )
+            raise
+        clear_task = asyncio.create_task(
+            self._run_blocking(
+                filesystem.clear_pending_admission,
+                normalized_path,
+                _lease=lease,
+            )
+        )
+        try:
+            await asyncio.shield(clear_task)
+        except asyncio.CancelledError:
+            await settle_owned_task(clear_task)
+            raise
+        except Exception:
+            # A committed catalog row is authoritative; its stale marker is
+            # ignored by reconciliation and can be cleared on a later retry.
+            logger.exception("Could not clear accepted document admission marker")
         return {
             "document_id": document_id,
             "project_id": self.project_id,
@@ -1131,6 +1596,51 @@ class DocumentService:
             "updated_at": created_at,
             "chunk_count": 0,
         }
+
+    async def _rollback_document_admission(
+        self,
+        *,
+        filesystem: ProjectFilesystem,
+        relative_path: str,
+        content_hash: str,
+        document_id: str | None = None,
+        lease: _MutationLease | None = None,
+    ) -> None:
+        """Settle compensating work even if the caller is cancelled again."""
+
+        async def cleanup() -> None:
+            if document_id is not None:
+                try:
+                    await self._writer.delete_document(document_id=document_id)
+                except Exception:
+                    logger.exception(
+                        "Could not tombstone cancelled document admission"
+                    )
+                    return  # Keep source bytes while a live catalog row may exist.
+            try:
+                await self._run_blocking(
+                    filesystem.delete_file,
+                    relative_path,
+                    expected_content_hash=content_hash,
+                    _lease=lease,
+                )
+            except FileNotFoundError:
+                pass
+            except Exception:
+                logger.exception(
+                    "Could not roll back local document file after catalog failure"
+                )
+                return
+            try:
+                await self._run_blocking(
+                    filesystem.clear_pending_admission,
+                    relative_path,
+                    _lease=lease,
+                )
+            except Exception:
+                logger.exception("Could not clear rolled-back document admission marker")
+
+        await settle_owned_task(asyncio.create_task(cleanup()))
 
     @staticmethod
     def _require_unreserved_context_path(path: str) -> None:
@@ -1185,9 +1695,18 @@ class DocumentService:
             original_name=original_name,
             relative_path=relative_path,
         )
-        return await self.schedule_document_index(
-            document_id=document["document_id"],
-        )
+        try:
+            return await self.schedule_document_index(
+                document_id=document["document_id"],
+            )
+        except Exception:
+            # Source admission already committed. Return that durable identity
+            # with its current indexing state, even when inline derivation fails.
+            logger.exception(
+                "Document indexing failed after durable source admission {}",
+                document["document_id"],
+            )
+            return await self.get_document_info(document_id=document["document_id"])
 
     async def admit_user_source(
         self,
@@ -1253,6 +1772,9 @@ class DocumentService:
 
     async def pending_index_count(self) -> int:
         return await self._indexer.pending_index_count()
+
+    async def terminal_index_failure_count(self) -> int:
+        return await self._indexer.terminal_index_failure_count()
 
     def indexing_snapshot_for_health(self) -> dict[str, object]:
         """Return a bounded public projection of indexing metrics."""
@@ -1399,6 +1921,8 @@ class DocumentService:
             link_id=normalized_link_id,
             title=candidate.title,
             summary=candidate.summary,
+            update_title=title is not _UNSET_SAVED_WEB_LINK_FIELD,
+            update_summary=summary is not _UNSET_SAVED_WEB_LINK_FIELD,
             updated_at=updated_at,
         )
         if row is None:
@@ -1440,6 +1964,21 @@ class DocumentService:
         rows = await self._reader.list_documents(
             path_prefix=normalized_prefix,
             limit=limit,
+        )
+        return [self._public_metadata(row) for row in rows]
+
+    async def find_indexed_documents_by_name(
+        self,
+        document_name: str,
+        *,
+        path_prefix: Optional[str] = None,
+    ) -> List[Dict]:
+        """Resolve a name across all visible indexed documents, bounded to two."""
+        if not isinstance(document_name, str) or not document_name.strip():
+            raise ValueError("document_name must not be empty")
+        rows = await self._reader.find_indexed_documents_by_name(
+            document_name=document_name,
+            path_prefix=self._normalize_path_prefix(path_prefix),
         )
         return [self._public_metadata(row) for row in rows]
 

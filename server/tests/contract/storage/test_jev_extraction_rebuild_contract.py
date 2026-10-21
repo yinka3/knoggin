@@ -1,4 +1,4 @@
-"""Accepted supporting-only extraction survives rebuild and atomic storage."""
+"""Supporting-only names are not accepted or committed as context entities."""
 
 import pytest
 
@@ -31,7 +31,7 @@ from tests.unit.core.ingestion.test_context_entity_build import (
 
 @pytest.mark.storage
 @pytest.mark.requires_postgres
-async def test_supporting_extractions_commit_once_after_budget_exhaustion(
+async def test_supporting_only_names_do_not_commit_after_rebuild(
     real_postgres_client,
 ):
     await _seed_message(real_postgres_client)
@@ -85,14 +85,9 @@ async def test_supporting_extractions_commit_once_after_budget_exhaustion(
     budget = current.jev_work_budget
     budget.max_observations = 2
     await service.build(current)
-    assert budget.calls == budget.observations == len(jev.calls) == 2
-    assert len(current.trace.extraction_decisions) == 2
-    assert {
-        mention.block_ids for mention in current.mentions if mention.name == "Delta"
-    } == {
-        (first.block_id,),
-        (second.block_id,),
-    }
+    assert budget.calls == budget.observations == len(jev.calls) == 0
+    assert current.trace.extraction_decisions == []
+    assert not any(mention.name == "Delta" for mention in current.mentions)
     writer = SemanticCommitWriter(real_postgres_client)
     assert not (await writer.commit(current)).resumed
     assert (await writer.commit(current)).resumed
@@ -100,13 +95,7 @@ async def test_supporting_extractions_commit_once_after_budget_exhaustion(
     records = await reader.list_jev_extraction_decisions(
         window.window_id, user_name="ada", project_id="project-1"
     )
-    assert len(records) == 2
-    assert all(
-        item["accepted_entity_type"] == "Company"
-        and not item["has_context_offsets"]
-        and item["reused_for_pass"] == 2
-        for item in records
-    )
+    assert records == []
     assert (
         await reader.list_jev_extraction_decisions(
             window.window_id, user_name="other", project_id="project-1"

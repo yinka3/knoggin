@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 
 from loguru import logger
 
+from common.conf.relationship_config import normalize_relationship
 from common.schema.maintenance import (
     MaintenanceImpactPreview,
     OrphanedExchangeBlockage,
@@ -45,6 +46,7 @@ from core.knowledge.evidence_service import EvidenceService
 from core.knowledge.maintenance.maintenance_impact import MaintenanceImpactPlanner
 from core.knowledge.maintenance.maintenance_reviews import (
     MaintenanceReviewDetail,
+    RelationshipAdvisoryPlan,
     RelationshipInterpretationPlan,
 )
 from core.knowledge.relationship_advisories import (
@@ -312,9 +314,23 @@ class ProjectMaintenanceService:
                 project_id=project_id,
                 thresholds=thresholds,
             )
+            compiled_domain = domain.compile()
+            advisories = [
+                advisory
+                for advisory in advisories
+                if normalize_relationship(
+                    compiled_domain,
+                    advisory.observed_label,
+                    source_type=advisory.source_type,
+                    target_type=advisory.target_type,
+                ).domain_status == "unrecognized"
+            ]
             for advisory in advisories:
+                if advisory.disposition != "pending":
+                    continue
+                evidence_ids = self._relationship_advisory_writer.evidence_ids(advisory)
                 bundles = await self._require_knowledge_store().get_relationship_observations_evidence(
-                    list(advisory.observation_ids),
+                    list(evidence_ids),
                     user_name=self.user_name,
                     project_id=project_id,
                 )
@@ -428,6 +444,13 @@ class ProjectMaintenanceService:
 
         if status != "applied":
             await self._require_domain_project(project_id, allow_archived=True)
+            review = await self._maintenance_reviews.get(
+                review_id, user_name=self.user_name, project_id=project_id
+            )
+            if review is not None and isinstance(
+                review.proposed_plan, RelationshipAdvisoryPlan
+            ):
+                raise ValueError("Use a relationship advisory action for this review")
             return await self._maintenance_reviews.transition(
                 review_id=review_id,
                 user_name=self.user_name,
@@ -693,7 +716,7 @@ class ProjectMaintenanceService:
     async def apply_relationship_advisory_action(
         self,
         project_id: str,
-        pattern_key: str,
+        review_id: str,
         action: str,
         *,
         relationship_type: str | None = None,
@@ -704,11 +727,23 @@ class ProjectMaintenanceService:
 
         async with self._lock:
             await self._require_domain_project(project_id, allow_archived=True)
+            detail = await self.get_maintenance_review_detail(project_id, review_id)
+            review = detail.review
+            if not isinstance(review.proposed_plan, RelationshipAdvisoryPlan):
+                raise ValueError("Review is not a relationship advisory")
+            if review.status == "stale" or detail.evidence_state != "current":
+                raise ValueError("Relationship advisory evidence is stale")
+            expected_version = review.expected_state.get("domain_version")
+            if expected_version is not None:
+                domain = await self._domain_store.load(self.user_name, project_id)
+                if domain.version != self._validate_expected_domain_version(expected_version):
+                    raise ValueError("Relationship advisory domain version is stale")
             return await self._relationship_advisory_writer.apply_action(
                 user_name=self.user_name,
                 project_id=project_id,
-                pattern_key=pattern_key,
+                pattern_key=review.proposed_plan.pattern_key,
                 action=action,
+                expected_review_id=review_id,
                 relationship_type=relationship_type,
                 note=note,
                 decided_by=decided_by,

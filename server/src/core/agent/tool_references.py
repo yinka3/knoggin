@@ -31,6 +31,7 @@ _RESULT_UUID_FIELDS: Dict[str, Dict[str, str]] = {
         "episode_id": "ep",
         "evidence_episode_ids": "ep",
     },
+    "advise_entity_merge": {"evidence_episode_ids": "ep"},
 }
 
 _TOOL_ARGUMENT_UUID_FIELDS: Dict[str, Dict[str, str]] = {

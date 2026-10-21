@@ -7,7 +7,10 @@ import os
 import numpy as np
 import pytest
 
+from common.exceptions import DependencyError
+from core.knowledge.documents.extraction import extract_and_split_document
 from core.knowledge.services.embedding_service import EmbeddingService
+from tests.fixtures.documents import build_pdf_bytes
 from tests.unit.core.knowledge.test_retrieval_embedding_smoke import (
     load_local_embedding_service,
 )
@@ -16,8 +19,8 @@ from tests.unit.core.knowledge.test_retrieval_embedding_smoke import (
 @pytest.mark.slow
 @pytest.mark.model
 @pytest.mark.no_network
-async def test_cached_model_stack_concurrency_chunking_reload_and_classification():
-    service = await load_local_embedding_service(include_nli=True)
+async def test_cached_model_stack_concurrency_chunking_and_reload():
+    service = await load_local_embedding_service()
     try:
         assert isinstance(service, EmbeddingService)
         assert service.embedding_backend in {"onnx", "torch"}
@@ -66,27 +69,10 @@ async def test_cached_model_stack_concurrency_chunking_reload_and_classification
         assert len(rerank_scores) == 2
         assert all(math.isfinite(score) for score in rerank_scores)
 
-        judgments = await service.classify_text_pairs(
-            [
-                ("The cat sat on the mat.", "An animal sat on a mat."),
-                ("The cat sat on the mat.", "The cat was not on the mat."),
-            ]
-        )
-        assert len(judgments) == 2
-        assert {judgment.label for judgment in judgments} <= {
-            "entailment",
-            "contradiction",
-            "neutral",
-        }
-        for judgment in judgments:
-            assert judgment.scores
-            assert math.isclose(sum(judgment.scores.values()), 1.0, rel_tol=1e-5)
-
         provider = service.onnx_provider
         service.cleanup()
         assert service._embedder is None
         assert service._reranker is None
-        assert service._nli is None
 
         await service.load_models()
         assert service.embedding_dim == len(await service.encode_single(texts[0]))
@@ -94,3 +80,24 @@ async def test_cached_model_stack_concurrency_chunking_reload_and_classification
             assert service.onnx_provider == provider
     finally:
         service.cleanup()
+
+
+@pytest.mark.slow
+@pytest.mark.model
+@pytest.mark.no_network
+def test_cached_docling_pdf_conversion(monkeypatch):
+    """Parse a real PDF with cached Docling artifacts, not a mocked snapshot."""
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    try:
+        extraction = extract_and_split_document(
+            build_pdf_bytes("Cached PDF model smoke text."), ".pdf"
+        )
+    except DependencyError as exc:
+        if os.environ.get("KNOGGIN_REQUIRE_LOCAL_MODELS") == "1":
+            pytest.fail(f"Required Docling PDF models are unavailable: {exc}")
+        pytest.skip(f"Docling PDF models are unavailable: {exc}")
+
+    assert extraction.snapshot.parser_name == "docling"
+    assert extraction.snapshot.pages
+    assert "Cached PDF model smoke text" in extraction.snapshot.text
+    assert any("Cached PDF model smoke text" in chunk.content for chunk in extraction.chunks)

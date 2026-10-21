@@ -1,7 +1,9 @@
+import asyncio
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+import tiktoken
 
 from common.schema.context import ContextRevisionOrigin, ContextSnapshot
 from common.schema.settings import (
@@ -14,6 +16,8 @@ from core.ingestion.policy import IngestionPolicy
 from core.ingestion.project_semantic_processor import ProjectSemanticProcessor
 from core.ingestion.semantic_window_admission import SemanticWindowAdmission
 from infrastructure.job.base import JobContext
+from infrastructure.job.scheduler import Scheduler
+from infrastructure.llm_client import LLMService
 from tests.fixtures.factories import make_domain_config
 
 
@@ -80,6 +84,74 @@ def _policy(domain):
         entity_resolution=EntityResolutionSettings(),
         compiled_domain=domain,
     )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+@pytest.mark.parametrize("target", [1, 8, 30, 1000])
+async def test_batched_exact_prefixes_choose_the_same_first_crossing(target):
+    tokenizer = tiktoken.get_encoding("cl100k_base")
+    llm = object.__new__(LLMService)
+    llm._tokenizer = tokenizer
+    rows = [
+        _row(index, user_content=value, outcome="user_only", assistant_id=None)
+        for index, value in enumerate(
+            ["hello", " world", "🙂", "\n\nUSER:\n", "12345", "é", "a" * 80]
+            * 2,
+            start=1,
+        )
+    ]
+    scalar = SemanticWindowAdmission(
+        RecordingStore(rows),
+        IngestionSettings(semantic_window_tokens=target),
+        token_counter=llm.count_tokens,
+    )
+    batched = SemanticWindowAdmission(
+        RecordingStore(rows),
+        IngestionSettings(semantic_window_tokens=target),
+        token_counter=llm.count_tokens,
+        token_counter_batch=llm.count_tokens_batch,
+    )
+    domain = make_domain_config().compile()
+    original = await scalar.select(
+        user_name="ada", project_id="project-1", domain=domain, force_flush=True
+    )
+    optimized = await batched.select(
+        user_name="ada", project_id="project-1", domain=domain, force_flush=True
+    )
+
+    assert original is not None and optimized is not None
+    assert optimized.messages == original.messages
+    assert optimized.close_reason == original.close_reason
+    assert optimized.window.source_token_count == original.window.source_token_count
+    assert optimized.window.overfill_tokens == original.window.overfill_tokens
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_batch_failure_after_first_crossing_uses_scalar_boundary():
+    llm = object.__new__(LLMService)
+    llm._tokenizer = tiktoken.get_encoding("cl100k_base")
+    rows = [
+        _row(1, user_content="ordinary text", outcome="user_only"),
+        _row(2, user_content="<|endoftext|>", outcome="user_only"),
+    ]
+    admission = SemanticWindowAdmission(
+        RecordingStore(rows),
+        IngestionSettings(semantic_window_tokens=1),
+        token_counter=llm.count_tokens,
+        token_counter_batch=llm.count_tokens_batch,
+    )
+
+    selected = await admission.select(
+        user_name="ada",
+        project_id="project-1",
+        domain=make_domain_config().compile(),
+    )
+
+    assert selected is not None
+    assert [message.message_id for message in selected.messages] == [1]
+    assert selected.close_reason == "oversized_exchange"
 
 
 @pytest.mark.unit
@@ -453,6 +525,19 @@ class _SemanticEpisodeStore:
         return {"entities": 0, "relationships": 0}
 
     async def record_project_semantic_window_failure(self, **kwargs):
+        if kwargs["expected_stage"] != self.window.stage:
+            return None
+        if (
+            kwargs.get("expected_attempt_count") is not None
+            and kwargs["expected_attempt_count"] != self.window.attempt_count
+        ):
+            return None
+        if (
+            kwargs.get("expected_episode_result_recorded") is not None
+            and kwargs["expected_episode_result_recorded"]
+            != self.window.episode_result_recorded
+        ):
+            return None
         self.failures.append(kwargs)
         self.window = self.window.model_validate(
             self.window.model_dump()
@@ -506,6 +591,17 @@ class _FailTwiceThenZeroEpisodeGenerator(_ZeroEpisodeGenerator):
         if len(self.calls) <= 2:
             raise ConnectionError("temporary episode provider outage")
         return SimpleNamespace(final_episodes=[])
+
+
+class _BlockingEpisodeGenerator(_ZeroEpisodeGenerator):
+    def __init__(self):
+        super().__init__()
+        self.started = asyncio.Event()
+
+    async def generate(self, **kwargs):
+        self.calls.append(kwargs)
+        self.started.set()
+        await asyncio.Event().wait()
 
 
 class _NoopContextUpdater:
@@ -674,6 +770,140 @@ async def test_project_semantic_episode_failure_retries_the_same_claimed_window(
     assert len(generator.calls) == 2
     assert len(store.writes) == 1
     assert store.writes[0]["window_id"] == str(selected.window.window_id)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_scheduler_timeout_consumes_semantic_attempt_but_shutdown_does_not():
+    admission_store = RecordingStore([_row(1, user_content="x", assistant_content="x")])
+    settings = IngestionSettings.model_validate(
+        {
+            "semantic_window_tokens": 1,
+            "semantic_window_retry": {
+                "max_attempts": 2,
+                "initial_backoff_seconds": 30,
+                "max_backoff_seconds": 30,
+            },
+        }
+    )
+    admission = SemanticWindowAdmission(
+        admission_store,
+        settings,
+        token_counter=lambda text: text.count("x"),
+    )
+    domain = make_domain_config().compile()
+    selected = await admission.select(
+        user_name="ada",
+        project_id="project-1",
+        domain=domain,
+        ingestion_policy=_policy(domain),
+    )
+    assert selected is not None
+    store = _SemanticEpisodeStore(selected.window)
+    generator = _BlockingEpisodeGenerator()
+    now = [1_000]
+
+    async def capture_semantic_policy():
+        return _policy(domain)
+
+    job = _job(
+        admission,
+        store,
+        generator,
+        settings=settings,
+        capture_semantic_policy=capture_semantic_policy,
+        now_ms=lambda: now[0],
+    )
+    scheduler = Scheduler("ada", "project-1")
+    scheduler.JOB_EXECUTION_TIMEOUT = 0.01
+    context = JobContext(user_name="ada", project_id="project-1")
+
+    assert await scheduler._execute_job(job, context) is None
+    assert store.window.attempt_count == 1
+    assert store.window.next_retry_at_ms == 31_000
+    assert store.failures[0]["failure_code"] == "TimeoutError"
+    assert store.failures[0]["expected_attempt_count"] == 0
+    assert (await job.execute(context)).summary == "No semantic window stage is due"
+
+    now[0] = 31_000
+    assert await scheduler._execute_job(job, context) is None
+    assert store.window.attempt_count == 2
+    assert store.window.next_retry_at_ms is None
+    assert len(generator.calls) == 2
+    assert await job.should_run(context) is False
+
+    await store.retry_project_semantic_window(
+        window_id=str(selected.window.window_id),
+        user_name="ada",
+        project_id="project-1",
+    )
+    scheduler.JOB_EXECUTION_TIMEOUT = 300
+    generator.started.clear()
+    running = asyncio.create_task(scheduler._execute_job(job, context))
+    await asyncio.wait_for(generator.started.wait(), 1)
+    running.cancel()
+    await asyncio.gather(running, return_exceptions=True)
+    assert store.window.attempt_count == 0
+    assert len(store.failures) == 2
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_scheduler_timeout_after_episode_commit_does_not_charge_context_retry():
+    settings = IngestionSettings(semantic_window_tokens=1)
+    admission_store = RecordingStore([_row(1, user_content="x", assistant_content="x")])
+    admission = SemanticWindowAdmission(
+        admission_store,
+        settings,
+        token_counter=lambda text: text.count("x"),
+    )
+    domain = make_domain_config().compile()
+    selected = await admission.select(
+        user_name="ada",
+        project_id="project-1",
+        domain=domain,
+        ingestion_policy=_policy(domain),
+    )
+    assert selected is not None
+
+    class CommittedThenBlockedStore(_SemanticEpisodeStore):
+        def __init__(self, window):
+            super().__init__(window)
+            self.committed = asyncio.Event()
+
+        async def write_project_semantic_window_episodes(self, **kwargs):
+            await super().write_project_semantic_window_episodes(**kwargs)
+            self.committed.set()
+            await asyncio.Event().wait()
+
+    async def capture_semantic_policy():
+        return _policy(domain)
+
+    store = CommittedThenBlockedStore(selected.window)
+    generator = _ZeroEpisodeGenerator()
+    job = _job(
+        admission,
+        store,
+        generator,
+        settings=settings,
+        capture_semantic_policy=capture_semantic_policy,
+        now_ms=lambda: 1_000,
+    )
+    scheduler = Scheduler("ada", "project-1")
+    scheduler.JOB_EXECUTION_TIMEOUT = 0.25
+    context = JobContext(user_name="ada", project_id="project-1")
+
+    assert await scheduler._execute_job(job, context) is None
+    assert store.committed.is_set()
+    assert store.window.episode_result_recorded is True
+    assert store.window.attempt_count == 0
+    assert store.window.next_retry_at_ms is None
+    assert store.failures == []
+
+    resumed = await job.execute(context)
+    assert resumed.success is True
+    assert store.window.stage.value == "completed"
+    assert len(generator.calls) == 1
 
 
 @pytest.mark.unit

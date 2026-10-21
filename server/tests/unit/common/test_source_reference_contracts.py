@@ -321,6 +321,14 @@ def test_layout_locators_reject_invalid_geometry_and_partial_text_spans():
             extraction_method="ocr",
             bbox={"left": 10, "bottom": 0, "right": 10, "top": 20},
         )
+    for invalid in (float("nan"), float("inf"), -float("inf")):
+        with pytest.raises(ValidationError, match="finite coordinates"):
+            LayoutRegionLocator(
+                page=1,
+                element_type="table",
+                extraction_method="ocr",
+                bbox={"left": invalid, "bottom": 0, "right": 10, "top": 20},
+            )
     with pytest.raises(ValidationError, match="element_type must not be blank"):
         LayoutRegionLocator(page=1, element_type=" ", extraction_method="ocr")
     with pytest.raises(ValidationError, match="both boundaries"):

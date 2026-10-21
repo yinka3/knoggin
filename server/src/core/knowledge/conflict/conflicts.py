@@ -95,4 +95,4 @@ class LLMConflictCandidate(BaseModel):
 
 
 class LLMConflictDiscoveryResult(BaseModel):
-    candidates: list[LLMConflictCandidate] = Field(default_factory=list, max_length=32)
+    candidates: list[LLMConflictCandidate] = Field(max_length=32)

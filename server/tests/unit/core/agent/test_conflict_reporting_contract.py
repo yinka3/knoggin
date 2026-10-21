@@ -32,6 +32,15 @@ def test_merge_schema_requires_at_least_one_evidence_kind():
     assert validate_tool_arguments(schema, arguments) == []
 
 
+def test_merge_advisor_schema_requires_two_entity_ids():
+    schema = TOOL_SCHEMAS_BY_NAME["advise_entity_merge"]
+
+    assert validate_tool_arguments(schema, {"primary_id": 2})
+    assert validate_tool_arguments(
+        schema, {"primary_id": 2, "duplicate_id": 3}
+    ) == []
+
+
 class RecordingKnowledgeStore:
     def __init__(self) -> None:
         self.calls = []
@@ -73,6 +82,25 @@ class MaintenanceHarness(MaintenanceTools):
 
 
 @pytest.mark.no_network
+async def test_agent_merge_advice_uses_application_service_without_opening_review():
+    class EntityMaintenance:
+        def __init__(self):
+            self.calls = []
+
+        async def advise_merge(self, **kwargs):
+            self.calls.append(kwargs)
+            return {"verdict": "uncertain", "model_called": True}
+
+    service = EntityMaintenance()
+    result = await MaintenanceHarness(service).advise_entity_merge(2, 3)
+
+    assert result == {"verdict": "uncertain", "model_called": True}
+    assert service.calls == [
+        {"user_name": "ada", "survivor_entity_id": 2, "retired_entity_id": 3}
+    ]
+
+
+@pytest.mark.no_network
 async def test_agent_merge_proposal_uses_injected_application_service():
     class Plan:
         @staticmethod
@@ -100,12 +128,14 @@ async def test_agent_merge_proposal_uses_injected_application_service():
         duplicate_id=3,
         reasoning="The cited evidence identifies one entity.",
         evidence_message_ids=[7],
+        expected_state_hash="a" * 64,
     )
 
     assert result["review_id"] == "review-1"
     assert result["policy_result"] == "confirmation_required"
     assert service.calls[0]["survivor_entity_id"] == 2
     assert service.calls[0]["retired_entity_id"] == 3
+    assert service.calls[0]["expected_state_hash"] == "a" * 64
 
 
 @pytest.mark.no_network

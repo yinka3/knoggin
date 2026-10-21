@@ -480,6 +480,36 @@ async def test_semantic_episode_result_is_idempotent_and_has_no_legacy_side_effe
         "last_error_summary": None,
         "next_retry_at_ms": None,
     }
+    # The timeout callback may have read the old claimed checkpoint before
+    # the Episode transaction committed. Its stale failure must not charge
+    # the newly committed Context stage.
+    assert await store.record_project_semantic_window_failure(
+        window_id=str(window.window_id),
+        user_name="ada",
+        project_id="project-1",
+        expected_stage=SemanticWindowStage.CLAIMED,
+        expected_attempt_count=0,
+        expected_episode_result_recorded=False,
+        failure_stage="episode",
+        failure_code="TimeoutError",
+        error_summary="stale scheduler timeout",
+        failed_at_ms=2_000,
+        next_retry_at_ms=32_000,
+    ) is None
+    assert await real_postgres_client.fetch_one(
+        """
+        SELECT episode_result_recorded, attempt_count, last_failure_code,
+               next_retry_at_ms
+        FROM public.project_semantic_windows
+        WHERE window_id = %s
+        """,
+        (window.window_id,),
+    ) == {
+        "episode_result_recorded": True,
+        "attempt_count": 0,
+        "last_failure_code": None,
+        "next_retry_at_ms": None,
+    }
 
     zero_window = _window(project_id="project-2")
     assert (
@@ -719,6 +749,10 @@ async def test_window_local_episodes_reach_notebook_synthesis_with_reversal_hist
             return self.outputs.pop(0)
 
     class EpisodeEmbeddings:
+        @staticmethod
+        def split_for_embedding(text):
+            return [text]
+
         async def encode(self, texts):
             return [[0.25] * 1024 for _ in texts]
 
@@ -903,6 +937,23 @@ async def test_semantic_window_stage_cas_and_failures_keep_the_last_successful_s
     )
     assert claimed_failure is not None
     assert claimed_failure.attempt_count == 1
+    assert await window_writer.record_failure(
+        window_id=window.window_id,
+        user_name="ada",
+        project_id="project-1",
+        expected_stage=SemanticWindowStage.CLAIMED,
+        expected_attempt_count=0,
+        failure_stage="episode",
+        failure_code="TimeoutError",
+        error_summary="stale scheduler timeout",
+        failed_at_ms=2_000,
+        next_retry_at_ms=32_000,
+    ) is None
+    assert (
+        await window_reader.get_window(
+            window.window_id, user_name="ada", project_id="project-1"
+        )
+    ).attempt_count == 1
     assert await window_writer.advance_stage(
         window_id=window.window_id,
         user_name="ada",
@@ -956,6 +1007,8 @@ async def test_semantic_window_stage_cas_and_failures_keep_the_last_successful_s
     )
     assert exhausted_health["failed_count"] == 1
     assert exhausted_health["exhausted_count"] == 1
+    assert exhausted_health["due_count"] == 0
+    assert exhausted_health["oldest_due_progress_ms"] is None
 
     retried = await window_writer.retry_window(
         window_id=window.window_id,
@@ -978,8 +1031,67 @@ async def test_semantic_window_stage_cas_and_failures_keep_the_last_successful_s
     assert retried_health["claimed_count"] == 0
     assert retried_health["failed_count"] == 0
     assert retried_health["exhausted_count"] == 0
+    assert retried_health["due_count"] == 1
+    assert retried_health["oldest_due_progress_ms"] is not None
     assert retried_health["oldest_pending_ms"] is not None
     assert retried_health["last_processed_ms"] is None
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_retry_reopens_a_legacy_context_checkpoint_with_wrong_domain_version(
+    real_postgres_client,
+):
+    await _seed_messages(real_postgres_client)
+    context_writer = ProjectContextWriter(real_postgres_client)
+    window_writer = SemanticWindowWriter(real_postgres_client)
+    await context_writer.ensure_context(user_name="ada", project_id="project-1")
+    old_context = await context_writer.commit_revision(
+        user_name="ada",
+        project_id="project-1",
+        expected_parent_revision_id=None,
+        window_id=None,
+        origin=ContextRevisionOrigin.CONVERSATION,
+        domain_version=1,
+        edit_summary="Existing Context before domain activation",
+        materialization=_materialization(),
+    )
+    window = _window().model_copy(
+        update={"domain_version": 2, "episode_result_recorded": True}
+    )
+    assert (await window_writer.claim_window(window, _membership())).claimed
+    assert await window_writer.advance_stage(
+        window_id=window.window_id,
+        user_name="ada",
+        project_id="project-1",
+        expected_stage=SemanticWindowStage.CLAIMED,
+        next_stage=SemanticWindowStage.CONTEXT_COMMITTED,
+        context_revision_id=old_context.revision_id,
+    )
+    assert await window_writer.record_failure(
+        window_id=window.window_id,
+        user_name="ada",
+        project_id="project-1",
+        expected_stage=SemanticWindowStage.CONTEXT_COMMITTED,
+        failure_stage="knowledge_reconciliation",
+        failure_code="domain_version_mismatch",
+        error_summary="legacy Context checkpoint uses the previous domain version",
+        failed_at_ms=1_000,
+        next_retry_at_ms=None,
+    ) is not None
+
+    retried = await window_writer.retry_window(
+        window_id=window.window_id,
+        user_name="ada",
+        project_id="project-1",
+    )
+
+    assert retried is not None
+    assert retried.stage is SemanticWindowStage.CLAIMED
+    assert retried.context_revision_id is None
+    assert retried.episode_result_recorded is True
+    assert retried.attempt_count == 0
 
 
 @pytest.mark.storage
@@ -1301,6 +1413,54 @@ async def test_stale_projection_checkpoint_keeps_the_newest_written_revision(
     assert state is not None
     assert state.projection_pending_revision_id == third.revision_id
     assert state.projection_pending_hash == "3" * 64
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_context_writer_creates_zero_impact_revision_for_domain_version_only_change(
+    real_postgres_client,
+):
+    writer = ProjectContextWriter(real_postgres_client)
+    reader = ProjectContextReader(real_postgres_client)
+    await writer.ensure_context(user_name="ada", project_id="project-1")
+    block = _context_block("Stable Context across domain revisions.")
+    first = await writer.commit_revision(
+        user_name="ada",
+        project_id="project-1",
+        expected_parent_revision_id=None,
+        window_id=None,
+        origin=ContextRevisionOrigin.CONVERSATION,
+        domain_version=1,
+        edit_summary="Initial Context",
+        materialization=_materialization(block),
+    )
+    next_domain = DomainConfig(version=2, topics=(), entity_types=()).compile()
+    bridge = await writer.commit_revision(
+        user_name="ada",
+        project_id="project-1",
+        expected_parent_revision_id=first.revision_id,
+        window_id=None,
+        origin=ContextRevisionOrigin.CONVERSATION,
+        domain_version=2,
+        edit_summary="Context rules updated; no block changes",
+        materialization=ContextMaterialization(
+            blocks=tuple(first.blocks),
+            content_hash=context_document_hash(first.blocks, next_domain),
+            new_block_ids=frozenset(),
+            impacted_block_ids=frozenset(),
+        ),
+    )
+
+    assert bridge.revision_id != first.revision_id
+    assert bridge.revision_number == first.revision_number + 1
+    assert bridge.domain_version == 2
+    assert bridge.blocks == first.blocks
+    assert await reader.get_revision_impact_block_ids(
+        bridge.revision_id,
+        user_name="ada",
+        project_id="project-1",
+    ) == frozenset()
 
 
 @pytest.mark.storage

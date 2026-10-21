@@ -25,6 +25,10 @@ class DomainConfigConflict(RuntimeError):
         )
 
 
+class DomainConfigSectionRemovalConflict(ValueError):
+    """Raised when an activation would orphan live or in-flight Context blocks."""
+
+
 @dataclass(frozen=True, slots=True)
 class DomainActivation:
     config: DomainConfig
@@ -42,7 +46,7 @@ def _decode_config(raw: Any) -> DomainConfig:
         raw = safe_json_loads(raw, None)
     if not isinstance(raw, Mapping):
         raise ValueError("Persisted domain configuration must be an object")
-    return DomainConfig.from_mapping(raw)
+    return DomainConfig.from_persisted_mapping(raw)
 
 
 class DomainConfigStore:
@@ -102,6 +106,9 @@ class DomainConfigStore:
         candidate = parse_candidate(candidate)
 
         async with self.postgres.transaction() as cur:
+            # Project deletion and window claims lock the project row first.
+            # Keep that order here, then take the Context root lock shared with
+            # Context commits so the section-removal check cannot race a write.
             await cur.execute(
                 """
                 SELECT domain_config
@@ -120,6 +127,87 @@ class DomainConfigStore:
             previous_version = current.version
             if previous_version != expected_version:
                 raise DomainConfigConflict(expected_version, previous_version)
+
+            await cur.execute(
+                """
+                INSERT INTO public.project_contexts (project_id, user_name)
+                SELECT project_id, user_name
+                FROM public.projects
+                WHERE user_name = %(user_name)s AND project_id = %(project_id)s
+                ON CONFLICT (project_id) DO NOTHING
+                """,
+                {"user_name": user_name, "project_id": project_id},
+            )
+            await cur.execute(
+                """
+                SELECT current_revision_id
+                FROM public.project_contexts
+                WHERE user_name = %(user_name)s AND project_id = %(project_id)s
+                FOR UPDATE
+                """,
+                {"user_name": user_name, "project_id": project_id},
+            )
+            context_root = await cur.fetchone()
+
+            if context_root is None:
+                raise ValueError(
+                    f"Project not found while activating domain: {project_id}"
+                )
+
+            current_section_keys = {
+                section.key for section in current.context_sections
+            }
+            candidate_section_keys = {
+                section.key for section in candidate.context_sections
+            }
+            removed_section_keys = sorted(
+                current_section_keys - candidate_section_keys
+            )
+            if removed_section_keys:
+                revision_id = context_root["current_revision_id"]
+                if revision_id is not None:
+                    await cur.execute(
+                        """
+                        SELECT block.section_key
+                        FROM public.project_context_revision_blocks AS membership
+                        JOIN public.project_context_blocks AS block
+                          ON block.block_id = membership.block_id
+                         AND block.project_id = membership.project_id
+                        WHERE membership.revision_id = %s
+                          AND membership.project_id = %s
+                          AND block.section_key = ANY(%s)
+                        LIMIT 1
+                        """,
+                        (revision_id, project_id, removed_section_keys),
+                    )
+                    live_block = await cur.fetchone()
+                    if live_block is not None:
+                        raise DomainConfigSectionRemovalConflict(
+                            "Cannot remove Context section(s) with live blocks: "
+                            + ", ".join(removed_section_keys)
+                            + ". Move or delete those blocks first."
+                        )
+
+                # An active window may still need an operator retry. Wait for
+                # it to finish before removing a section so a retry cannot
+                # reopen Context under the old frozen domain afterward.
+                await cur.execute(
+                    """
+                    SELECT window_id
+                    FROM public.project_semantic_windows
+                    WHERE user_name = %s AND project_id = %s
+                      AND stage <> 'completed'
+                    LIMIT 1
+                    """,
+                    (user_name, project_id),
+                )
+                if await cur.fetchone() is not None:
+                    raise DomainConfigSectionRemovalConflict(
+                        "Cannot remove Context section(s) while a semantic window "
+                        "is active: "
+                        + ", ".join(removed_section_keys)
+                        + ". Let all active windows finish, then retry."
+                    )
 
             activated = candidate.with_version(previous_version + 1)
             compiled = activated.compile()

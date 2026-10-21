@@ -51,6 +51,7 @@ class Scheduler:
         self._last_successful_runs: dict[str, float] = {}
         self._job_runs: dict[str, dict[str, object]] = {}
         self._recent_outcomes: deque[dict[str, object]] = deque(maxlen=20)
+        self._check_failures: dict[str, int] = {}
         self._wake_event = asyncio.Event()
         self._requested_jobs: set[str] = set()
 
@@ -200,8 +201,12 @@ class Scheduler:
         for job_name, job in self._jobs.items():
             try:
                 await self._schedule_if_due(job_name, job, ctx)
+                self._check_failures.pop(job_name, None)
             except Exception as exc:
-                logger.exception("Job {} check failed: {}", job_name, exc)
+                self._check_failures[job_name] = min(
+                    self._check_failures.get(job_name, 0) + 1, 100
+                )
+                logger.error("Job {} check failed: {}", job_name, type(exc).__name__)
 
     async def _monitor_loop(self) -> None:
         while self._is_running:
@@ -218,7 +223,7 @@ class Scheduler:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.exception("Scheduler monitor loop error: {}", exc)
+                logger.error("Scheduler monitor loop error: {}", type(exc).__name__)
 
     async def _schedule_if_due(
         self,
@@ -311,9 +316,10 @@ class Scheduler:
     ) -> JobResult | None:
         logger.info("Executing job: {}", job.name)
         self._mark_job_running(job.name, policy)
+        deadline: asyncio.Timeout | None = None
         try:
             await self._safe_emit(ctx.project_id, "job", "started", {"name": job.name})
-            async with asyncio.timeout(policy.execution_timeout_seconds):
+            async with asyncio.timeout(policy.execution_timeout_seconds) as deadline:
                 result = await job.execute(ctx)
             if result.success:
                 self._record_cadence_success(job)
@@ -329,11 +335,24 @@ class Scheduler:
                     "summary": result.summary,
                 },
             )
-            if result.summary:
-                logger.info("Job {}: {}", job.name, result.summary)
+            logger.info("Job {} finished with success={}", job.name, result.success)
             return result
         except TimeoutError:
+            if deadline is None or not deadline.expired():
+                self._finish_job_run(job.name, "failed")
+                logger.error("Job {} raised a timeout before its scheduler deadline", job.name)
+                await self._safe_emit(
+                    ctx.project_id,
+                    "job",
+                    "failed",
+                    {"name": job.name, "error_type": "TimeoutError"},
+                )
+                return None
             self._finish_job_run(job.name, "timed_out")
+            try:
+                await job.on_timeout(ctx)
+            except Exception as exc:
+                logger.error("Job {} timeout recovery failed: {}", job.name, type(exc).__name__)
             logger.error(
                 "Job {} timed out after {}s",
                 job.name,
@@ -351,9 +370,9 @@ class Scheduler:
                 ctx.project_id,
                 "job",
                 "failed",
-                {"name": job.name, "error": str(exc)},
+                {"name": job.name, "error_type": type(exc).__name__},
             )
-            logger.exception("Job {} execution failed: {}", job.name, exc)
+            logger.error("Job {} execution failed: {}", job.name, type(exc).__name__)
         return None
 
     def _mark_job_running(
@@ -477,6 +496,10 @@ class Scheduler:
                 outcome.get("state") in {"failed", "timed_out"}
                 for outcome in self._recent_outcomes
             ),
+            "check_failures_by_job": {
+                name[:100]: count
+                for name, count in sorted(self._check_failures.items())[:100]
+            },
             "last_successful_job_at": max(successful) if successful else None,
         }
 
@@ -518,7 +541,7 @@ class Scheduler:
                 "Failed to emit scheduler event '{}' for {}: {}",
                 event,
                 scope_id,
-                exc,
+                type(exc).__name__,
             )
 
     def _cleanup_task(self, job_name: str, task: asyncio.Task) -> None:
@@ -529,7 +552,9 @@ class Scheduler:
             try:
                 error = task.exception()
             except Exception as exc:
-                logger.error("Could not inspect job task {}: {}", job_name, exc)
+                logger.error(
+                    "Could not inspect job task {}: {}", job_name, type(exc).__name__
+                )
             else:
                 if error is not None:
                     if not run or run.get("state") not in {
@@ -538,7 +563,11 @@ class Scheduler:
                         "cancelled",
                     }:
                         self._finish_job_run(job_name, "failed")
-                    logger.error("Unhandled job task failure for {}: {}", job_name, error)
+                    logger.error(
+                        "Unhandled job task failure for {}: {}",
+                        job_name,
+                        type(error).__name__,
+                    )
         elif not run or run.get("state") not in {
             "failed",
             "timed_out",

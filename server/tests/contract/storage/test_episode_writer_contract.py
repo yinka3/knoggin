@@ -10,16 +10,25 @@ from tests.fixtures.fakes import RecordingPostgresClient
 
 
 class RecordingEmbeddingService:
-    def __init__(self, vector=None, error=None):
+    def __init__(self, vector=None, error=None, chunk_limit=None):
         self.vector = vector if vector is not None else [0.25] * 1024
         self.error = error
         self.calls = []
+        self.chunk_limit = chunk_limit
+
+    def split_for_embedding(self, text):
+        if self.chunk_limit is None:
+            return [text]
+        return [
+            text[index : index + self.chunk_limit]
+            for index in range(0, len(text), self.chunk_limit)
+        ]
 
     async def encode(self, texts):
         self.calls.append(list(texts))
         if self.error is not None:
             raise self.error
-        return [self.vector]
+        return [self.vector for _ in texts]
 
 
 _INITIAL_UPDATED_AT = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -100,6 +109,28 @@ async def test_store_edit_generates_the_canonical_vector_before_the_atomic_write
         _INITIAL_UPDATED_AT,
         "ada",
     )
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_store_edit_preserves_long_narrative_across_embedding_chunks():
+    client = RecordingPostgresClient(
+        fetch_one_results=[{"updated_at": _EDITED_UPDATED_AT}]
+    )
+    embedding = RecordingEmbeddingService(chunk_limit=400)
+    store = KnowledgeStore(client, embedding)
+    summary = "Episode detail remains available. " * 110
+
+    await store.edit_episode(**_store_edit_arguments(summary=summary))
+
+    assert len(embedding.calls) == 1
+    assert len(embedding.calls[0]) > 1
+    assert "".join(embedding.calls[0]) == "Summary:\n" + summary.strip() + (
+        "\n\nNew developments:\n- The vector follows the narrative."
+        "\n\nUpdates:\n- The writer persists both together."
+    )
+    assert client.calls[0][2][0] == summary.strip()
+    assert len(json.loads(client.calls[0][2][4])) == 1024
 
 
 @pytest.mark.storage

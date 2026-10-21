@@ -1,5 +1,6 @@
 """Regression contracts for the frozen GLiNER2.5 VP-01 benchmark."""
 
+import sys
 from dataclasses import replace
 
 import pytest
@@ -74,7 +75,11 @@ def test_gliner25_vp01_benchmark_uses_frozen_context_and_reports_regression_metr
     assert report.fallback_count == 0
     assert report.fallback_rate == 0.0
     assert report.vp02_path == "llm_required_outside_vp01_benchmark"
-    assert report.peak_rss_kib is not None
+    if sys.platform == "win32":
+        assert report.peak_rss_kib is None
+        assert report.peak_rss_delta_kib is None
+    else:
+        assert report.peak_rss_kib is not None
     assert [result.fixture_id for result in report.cases] == [
         "selected_provider",
         "lowercase_common_words",
@@ -99,7 +104,11 @@ def test_gliner25_vp01_benchmark_uses_frozen_context_and_reports_regression_metr
             minimum_precision=1.0,
             minimum_recall=1.0,
             maximum_mean_latency_ms=1_000,
-            maximum_peak_rss_delta_kib=(report.peak_rss_delta_kib or 0) + 1,
+            maximum_peak_rss_delta_kib=(
+                report.peak_rss_delta_kib + 1
+                if report.peak_rss_delta_kib is not None
+                else None
+            ),
         ),
     )
 
@@ -128,5 +137,10 @@ def test_gliner25_vp01_benchmark_gates_quality_and_resource_regressions():
     with pytest.raises(AssertionError, match="peak RSS delta"):
         assert_vp01_regression_gates(
             replace(report, peak_rss_delta_kib=32),
+            VP01BenchmarkGates(maximum_peak_rss_delta_kib=1),
+        )
+    with pytest.raises(AssertionError, match="peak RSS delta unavailable"):
+        assert_vp01_regression_gates(
+            replace(report, peak_rss_delta_kib=None),
             VP01BenchmarkGates(maximum_peak_rss_delta_kib=1),
         )
