@@ -63,11 +63,21 @@ def pause_project_replace(monkeypatch, root, entered, release, *, once):
 
     real_replace = os.replace
 
-    def pause(source, destination):
-        if destination == root / "notes.md" and (not once or not entered.is_set()):
+    def pause(source, destination, *args, **kwargs):
+        parent_fd = kwargs.get("dst_dir_fd")
+        relative_project_file = (
+            destination == "notes.md"
+            and parent_fd is not None
+            and (os.fstat(parent_fd).st_dev, os.fstat(parent_fd).st_ino)
+            == (root.stat().st_dev, root.stat().st_ino)
+        )
+        if (
+            (destination == root / "notes.md" or relative_project_file)
+            and (not once or not entered.is_set())
+        ):
             entered.set()
             assert release.wait(10)
-        return real_replace(source, destination)
+        return real_replace(source, destination, *args, **kwargs)
 
     monkeypatch.setattr(os, "replace", pause)
 
