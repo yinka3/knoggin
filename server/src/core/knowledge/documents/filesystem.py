@@ -5,9 +5,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import os
-import shutil
 import stat
-import tempfile
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -39,6 +37,38 @@ def _assert_real_ancestors(path: Path, *, label: str) -> None:
     for ancestor in path.parents:
         if _is_link_or_reparse_path(ancestor):
             raise ValueError(f"{label} ancestor must be a real directory")
+
+
+def _opened_windows_path(descriptor: int) -> str:
+    """Resolve the opened handle, rather than checking the path a second time."""
+    import ctypes
+    import msvcrt
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_path = kernel32.GetFinalPathNameByHandleW
+    get_path.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32]
+    get_path.restype = ctypes.c_uint32
+    handle = msvcrt.get_osfhandle(descriptor)
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = get_path(handle, buffer, len(buffer), 0)
+    if length == 0 or length >= len(buffer):
+        raise OSError(ctypes.get_last_error(), "Could not resolve opened project file")
+    result = buffer.value
+    return result[4:] if result.startswith("\\\\?\\") else result
+
+
+def _open_posix_file_without_links(path: Path) -> int:
+    """Walk from the filesystem root using pinned directory descriptors."""
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    directory = os.open(path.anchor, directory_flags)
+    try:
+        for part in path.parts[1:-1]:
+            child = os.open(part, directory_flags, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        return os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+    finally:
+        os.close(directory)
 
 
 class ProjectFilesystemConflictError(WorkspaceConflictError):
@@ -98,37 +128,31 @@ class ProjectFilesystem:
         return normalize_relative_path(relative_path, relative_path)
 
     def ensure_root(self) -> None:
-        if _is_link_or_reparse_path(self._root.parent):
-            raise ValueError("project_root parent must be a real directory")
-        if _is_link_or_reparse_path(self._root):
-            raise ValueError("project_root must be a real directory")
-        _assert_real_ancestors(self._root.parent, label="project_root")
-        self._root.mkdir(parents=True, exist_ok=True)
-        if _is_link_or_reparse_path(self._root) or not self._root.is_dir():
-            raise ValueError("project_root must be a real directory")
+        if os.name == "nt":
+            from core.knowledge.documents.io.windows_handle_io import (
+                open_directory_chain,
+            )
+        else:
+            from core.knowledge.documents.io.posix_handle_io import open_directory_chain
+
+        with open_directory_chain(self._root, create=True):
+            pass
 
     def _lock_key(self) -> str:
-        return os.path.normcase(os.path.realpath(self._root))
+        return os.path.normcase(os.path.abspath(self._root))
 
     def acquire_mutation_lease(self) -> _MutationLease:
         """Hold the project mutation lock across filesystem and catalog work."""
-        if _is_link_or_reparse_path(self._root.parent):
-            raise ValueError("project_root parent must be a real directory")
-        _assert_real_ancestors(self._root.parent, label="project_root")
-        # Keep coordination files outside the project tree scanned for documents.
-        lock_directory = self._root.parent / ".knoggin-file-locks"
-        if _is_link_or_reparse_path(lock_directory):
-            raise ValueError("project file lock directory must be a real directory")
-        lock_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if _is_link_or_reparse_path(lock_directory) or not lock_directory.is_dir():
-            raise ValueError("project file lock directory must be a real directory")
         root_key = self._lock_key()
         lock_name = hashlib.sha256(os.fsencode(root_key)).hexdigest() + ".lock"
-        lock_path = lock_directory / lock_name
-        if _is_link_or_reparse_path(lock_path):
-            raise ValueError("project file lock must not be a symlink or reparse point")
-        flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(lock_path, flags, 0o600)
+        if os.name == "nt":
+            from core.knowledge.documents.io.windows_handle_io import (
+                open_lock_descriptor,
+            )
+        else:
+            from core.knowledge.documents.io.posix_handle_io import open_lock_descriptor
+
+        descriptor = open_lock_descriptor(self._root.parent, lock_name)
         try:
             if not stat.S_ISREG(os.fstat(descriptor).st_mode):
                 raise ValueError("project file lock must be a regular file")
@@ -185,14 +209,11 @@ class ProjectFilesystem:
         with self._mutation_lock(_lease) as lease:
             return self._read_mutation_generation(lease.descriptor)
 
-    def _pending_admission_marker(self, relative_path: str) -> Path:
+    def _pending_admission_marker_name(self, relative_path: str) -> str:
         normalized = self.normalize_path(relative_path)
-        lock_directory = self._root.parent / ".knoggin-file-locks"
-        if _is_link_or_reparse_path(lock_directory) or not lock_directory.is_dir():
-            raise ValueError("project file lock directory must be a real directory")
         root_key = hashlib.sha256(os.fsencode(self._lock_key())).hexdigest()
         path_key = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-        return lock_directory / f"{root_key}.upload-{path_key}.pending"
+        return f"{root_key}.upload-{path_key}.pending"
 
     def mark_pending_admission(
         self, relative_path: str, content_hash: str, *, _lease: _MutationLease
@@ -200,53 +221,60 @@ class ProjectFilesystem:
         """Journal an upload before its source enters the scanned tree."""
         if len(content_hash) != 64 or any(char not in "0123456789abcdef" for char in content_hash):
             raise ValueError("content_hash must be a SHA-256 hex digest")
-        with self._mutation_lock(_lease) as lease:
-            marker = self._pending_admission_marker(relative_path)
-            if marker.exists():
-                # A failed upload may have been removed outside the catalog.
-                # Only reclaim its marker after the source is gone.
-                source = self._path_for_write(self.normalize_path(relative_path))
-                if source.exists() or _is_link_or_reparse_path(source):
-                    raise FileExistsError(f"project file already exists: {relative_path}")
-                marker.unlink()
-            descriptor, temporary_name = tempfile.mkstemp(
-                prefix=".knoggin-admission-", suffix=".tmp", dir=marker.parent
+        if os.name == "nt":
+            from core.knowledge.documents.io.windows_handle_io import (
+                delete_pending_marker,
+                project_source_exists,
+                read_pending_marker,
+                write_pending_marker,
             )
-            try:
-                with os.fdopen(descriptor, "wb") as temporary_file:
-                    temporary_file.write(content_hash.encode("ascii"))
-                    temporary_file.flush()
-                    os.fsync(temporary_file.fileno())
-                if _is_link_or_reparse_path(marker):
-                    raise ValueError("pending admission marker must not be a link")
-                # An earlier failed upload may still own this path. Never
-                # replace its exclusion marker with a later upload attempt.
-                os.link(temporary_name, marker)
-                self._bump_mutation_generation(lease)
-            finally:
-                if os.path.exists(temporary_name):
-                    os.unlink(temporary_name)
+        else:
+            from core.knowledge.documents.io.posix_handle_io import (
+                delete_pending_marker,
+                project_source_exists,
+                read_pending_marker,
+                write_pending_marker,
+            )
+
+        with self._mutation_lock(_lease) as lease:
+            marker_name = self._pending_admission_marker_name(relative_path)
+            if read_pending_marker(self._root.parent, marker_name) is not None:
+                if project_source_exists(self._root, self.normalize_path(relative_path)):
+                    raise FileExistsError(f"project file already exists: {relative_path}")
+                delete_pending_marker(self._root.parent, marker_name)
+            write_pending_marker(self._root.parent, marker_name, content_hash)
+            self._bump_mutation_generation(lease)
 
     def pending_admission_hash(self, relative_path: str) -> str | None:
         """Return the failed/pending upload hash without reading source bytes."""
-        marker = self._pending_admission_marker(relative_path)
-        if _is_link_or_reparse_path(marker):
-            raise ValueError("pending admission marker must not be a link")
-        try:
-            return marker.read_text(encoding="ascii")
-        except FileNotFoundError:
-            return None
+        if os.name == "nt":
+            from core.knowledge.documents.io.windows_handle_io import (
+                read_pending_marker,
+            )
+        else:
+            from core.knowledge.documents.io.posix_handle_io import read_pending_marker
+
+        return read_pending_marker(
+            self._root.parent, self._pending_admission_marker_name(relative_path)
+        )
 
     def clear_pending_admission(
         self, relative_path: str, *, _lease: _MutationLease
     ) -> None:
+        if os.name == "nt":
+            from core.knowledge.documents.io.windows_handle_io import (
+                delete_pending_marker,
+            )
+        else:
+            from core.knowledge.documents.io.posix_handle_io import (
+                delete_pending_marker,
+            )
+
         with self._mutation_lock(_lease) as lease:
-            marker = self._pending_admission_marker(relative_path)
-            try:
-                marker.unlink()
-            except FileNotFoundError:
-                return
-            self._bump_mutation_generation(lease)
+            if delete_pending_marker(
+                self._root.parent, self._pending_admission_marker_name(relative_path)
+            ):
+                self._bump_mutation_generation(lease)
 
     @staticmethod
     def _acquire_file_lock(descriptor: int) -> None:
@@ -287,13 +315,30 @@ class ProjectFilesystem:
         if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes < 1:
             raise ValueError("max_bytes must be a positive integer")
         path = self._path_for_read(relative_path)
-        size = path.stat().st_size
-        if size > max_bytes:
-            raise ValueError(f"file exceeds the {max_bytes}-byte read limit")
-        content = path.read_bytes()
-        if len(content) > max_bytes:
-            raise ValueError(f"file exceeds the {max_bytes}-byte read limit")
-        return content
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = (
+            os.open(path, flags)
+            if os.name == "nt"
+            else _open_posix_file_without_links(path)
+        )
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode) or _is_link_or_reparse_point(metadata):
+                raise ValueError("project file must be a regular file")
+            if os.name == "nt":
+                actual = os.path.normcase(os.path.abspath(_opened_windows_path(descriptor)))
+                expected_root = os.path.normcase(os.path.abspath(self._root))
+                if os.path.commonpath((actual, expected_root)) != expected_root:
+                    raise ValueError("project file resolved outside its root")
+            if metadata.st_size > max_bytes:
+                raise ValueError(f"file exceeds the {max_bytes}-byte read limit")
+            with os.fdopen(descriptor, "rb", closefd=False) as opened:
+                content = opened.read(max_bytes + 1)
+            if len(content) > max_bytes:
+                raise ValueError(f"file exceeds the {max_bytes}-byte read limit")
+            return content
+        finally:
+            os.close(descriptor)
 
     def read_file(
         self,
@@ -337,75 +382,46 @@ class ProjectFilesystem:
             raise ValueError("expected_content_hash must be a non-empty string")
 
         normalized = self.normalize_path(relative_path)
-        path = self._path_for_write(normalized)
-        self._check_write_precondition(
-            path,
-            normalized,
-            overwrite=overwrite,
-            expected_content_hash=expected_content_hash,
-        )
+        if os.name == "nt":
+            from core.knowledge.documents.io.windows_handle_io import (
+                WindowsFileConflictError,
+                write_project_file,
+            )
 
-        file_descriptor, temporary_name = tempfile.mkstemp(
-            prefix=".knoggin-",
-            suffix=".tmp",
-            dir=path.parent,
-        )
-        try:
-            with os.fdopen(file_descriptor, "wb") as temporary_file:
-                temporary_file.write(content)
-                temporary_file.flush()
-                os.fsync(temporary_file.fileno())
+            self.ensure_root()
             with self._mutation_lock(_lease) as lease:
-                path = self._path_for_write(normalized)
-                self._check_write_precondition(
-                    path,
-                    normalized,
-                    overwrite=overwrite,
-                    expected_content_hash=expected_content_hash,
-                )
-                if overwrite:
-                    os.replace(temporary_name, path)
-                    self._bump_mutation_generation(lease)
-                else:
-                    # Publish complete bytes only if the destination is absent.
-                    os.link(temporary_name, path)
-                    self._bump_mutation_generation(lease)
-                    os.unlink(temporary_name)
-        except BaseException:
-            try:
-                os.unlink(temporary_name)
-            except FileNotFoundError:
-                pass
-            raise
+                try:
+                    write_project_file(
+                        self._root, normalized, content,
+                        overwrite=overwrite, expected_hash=expected_content_hash,
+                    )
+                except WindowsFileConflictError as exc:
+                    raise ProjectFilesystemConflictError(str(exc)) from exc
+                self._bump_mutation_generation(lease)
+            return ProjectFile(
+                relative_path=normalized,
+                size_bytes=len(content),
+                content_hash=self._content_hash(content),
+            )
+        from core.knowledge.documents.io.posix_handle_io import (
+            PosixFileConflictError,
+            write_project_file,
+        )
 
+        self.ensure_root()
+        with self._mutation_lock(_lease) as lease:
+            try:
+                write_project_file(
+                    self._root, normalized, content,
+                    overwrite=overwrite, expected_hash=expected_content_hash,
+                )
+            except PosixFileConflictError as exc:
+                raise ProjectFilesystemConflictError(str(exc)) from exc
+            self._bump_mutation_generation(lease)
         return ProjectFile(
             relative_path=normalized,
-            size_bytes=len(content),
-            content_hash=self._content_hash(content),
+            size_bytes=len(content), content_hash=self._content_hash(content),
         )
-
-    def _check_write_precondition(
-        self,
-        path: Path,
-        normalized: str,
-        *,
-        overwrite: bool,
-        expected_content_hash: str | None,
-    ) -> None:
-        is_link = _is_link_or_reparse_path(path)
-        exists = path.exists() or is_link
-        if is_link:
-            raise ValueError("project file path must not be a symlink or reparse point")
-        if exists and not path.is_file():
-            raise IsADirectoryError(f"project path is not a regular file: {normalized}")
-        if exists and not overwrite:
-            raise FileExistsError(f"project file already exists: {normalized}")
-        if expected_content_hash is not None:
-            if not exists:
-                raise FileNotFoundError(f"project file not found: {normalized}")
-            current_hash = self._content_hash(path.read_bytes())
-            if current_hash != expected_content_hash:
-                raise ProjectFilesystemConflictError("project file changed")
 
     def delete_file(
         self,
@@ -415,18 +431,42 @@ class ProjectFilesystem:
         _lease: _MutationLease | None = None,
     ) -> ProjectFile:
         """Remove one regular file, optionally only when its hash is current."""
+        if os.name == "nt":
+            from core.knowledge.documents.io.windows_handle_io import (
+                WindowsFileConflictError,
+                delete_project_file,
+            )
+
+            with self._mutation_lock(_lease) as lease:
+                try:
+                    content = delete_project_file(
+                        self._root, self.normalize_path(relative_path),
+                        expected_hash=expected_content_hash,
+                    )
+                except WindowsFileConflictError as exc:
+                    raise ProjectFilesystemConflictError(str(exc)) from exc
+                self._bump_mutation_generation(lease)
+            return ProjectFile(
+                relative_path=self.normalize_path(relative_path),
+                size_bytes=len(content), content_hash=self._content_hash(content),
+            )
+        from core.knowledge.documents.io.posix_handle_io import (
+            PosixFileConflictError,
+            delete_project_file,
+        )
+
+        normalized = self.normalize_path(relative_path)
         with self._mutation_lock(_lease) as lease:
-            path = self._path_for_read(relative_path)
-            content = path.read_bytes()
-            content_hash = self._content_hash(content)
-            if expected_content_hash is not None and content_hash != expected_content_hash:
-                raise ProjectFilesystemConflictError("project file changed")
-            path.unlink()
+            try:
+                content = delete_project_file(
+                    self._root, normalized, expected_hash=expected_content_hash,
+                )
+            except PosixFileConflictError as exc:
+                raise ProjectFilesystemConflictError(str(exc)) from exc
             self._bump_mutation_generation(lease)
         return ProjectFile(
-            relative_path=self.normalize_path(relative_path),
-            size_bytes=len(content),
-            content_hash=content_hash,
+            relative_path=normalized,
+            size_bytes=len(content), content_hash=self._content_hash(content),
         )
 
     def move_file(
@@ -439,37 +479,58 @@ class ProjectFilesystem:
     ) -> ProjectFile:
         """Atomically move a regular project file to an unused relative path."""
         destination_normalized = self.normalize_path(destination_path)
+        if os.name == "nt":
+            from core.knowledge.documents.io.windows_handle_io import (
+                WindowsFileConflictError,
+                move_project_file,
+            )
+
+            with self._mutation_lock(_lease) as lease:
+                try:
+                    content = move_project_file(
+                        self._root, self.normalize_path(source_path),
+                        destination_normalized, expected_hash=expected_content_hash,
+                    )
+                except WindowsFileConflictError as exc:
+                    raise ProjectFilesystemConflictError(str(exc)) from exc
+                self._bump_mutation_generation(lease)
+            return ProjectFile(
+                relative_path=destination_normalized,
+                size_bytes=len(content), content_hash=self._content_hash(content),
+            )
+        from core.knowledge.documents.io.posix_handle_io import (
+            PosixFileConflictError,
+            move_project_file,
+        )
+
         with self._mutation_lock(_lease) as lease:
-            source = self._path_for_read(source_path)
-            content = source.read_bytes()
-            content_hash = self._content_hash(content)
-            if expected_content_hash is not None and content_hash != expected_content_hash:
-                raise ProjectFilesystemConflictError("project file changed")
-            destination = self._path_for_write(destination_normalized)
-            if destination.exists() or _is_link_or_reparse_path(destination):
-                raise FileExistsError(
-                    f"project file already exists: {destination_normalized}"
+            try:
+                content = move_project_file(
+                    self._root, self.normalize_path(source_path), destination_normalized,
+                    expected_hash=expected_content_hash,
                 )
-            os.replace(source, destination)
+            except PosixFileConflictError as exc:
+                raise ProjectFilesystemConflictError(str(exc)) from exc
             self._bump_mutation_generation(lease)
         return ProjectFile(
             relative_path=destination_normalized,
-            size_bytes=len(content),
-            content_hash=content_hash,
+            size_bytes=len(content), content_hash=self._content_hash(content),
         )
 
     def create_folder(self, relative_path: str) -> str:
         """Create an empty project-relative directory without accepting links."""
         normalized = self.normalize_path(relative_path)
         self.ensure_root()
-        folder = self._root.joinpath(*PurePosixPath(normalized).parts)
-        self._ensure_real_parent_directories(folder.parent)
-        is_link = _is_link_or_reparse_path(folder)
-        if folder.exists() or is_link:
-            if is_link or not folder.is_dir():
-                raise FileExistsError(f"project path already exists: {normalized}")
+        if os.name == "nt":
+            from core.knowledge.documents.io.windows_handle_io import (
+                create_project_folder,
+            )
+
+            create_project_folder(self._root, normalized)
             return normalized
-        folder.mkdir()
+        from core.knowledge.documents.io.posix_handle_io import create_project_folder
+
+        create_project_folder(self._root, normalized)
         return normalized
 
     def iter_files(self, *, limit: int | None = None) -> Iterator[ProjectFile]:
@@ -483,51 +544,28 @@ class ProjectFilesystem:
             not isinstance(limit, int) or isinstance(limit, bool) or limit < 1
         ):
             raise ValueError("limit must be a positive integer")
-        if _is_link_or_reparse_path(self._root):
-            raise ValueError("project_root must be a real directory")
+        if os.name == "nt":
+            from core.knowledge.documents.io.windows_handle_io import iter_project_paths
+
+            if not self._root.exists():
+                return
+            for index, (relative_path, size_bytes, modified_ns) in enumerate(
+                iter_project_paths(self._root), start=1
+            ):
+                yield ProjectFilePath(relative_path, size_bytes, modified_ns)
+                if limit is not None and index >= limit:
+                    return
+            return
+        from core.knowledge.documents.io.posix_handle_io import iter_project_paths
+
         if not self._root.exists():
             return
-        self.ensure_root()
-
-        # A directory sorts as "name/" so its descendants keep the same order
-        # as sorting complete relative paths (including names like a.txt, a/).
-        pending: list[Path | ProjectFilePath] = [self._root]
-        yielded = 0
-        while pending:
-            item = pending.pop()
-            if isinstance(item, ProjectFilePath):
-                yield item
-                yielded += 1
-                if limit is not None and yielded >= limit:
-                    return
-                continue
-            with os.scandir(item) as scan:
-                entries = list(scan)
-            children: list[tuple[str, Path | ProjectFilePath]] = []
-            for entry in entries:
-                metadata = entry.stat(follow_symlinks=False)
-                if _is_link_or_reparse_point(metadata):
-                    continue
-                entry_path = Path(entry.path)
-                if stat.S_ISDIR(metadata.st_mode):
-                    children.append((entry.name + "/", entry_path))
-                    continue
-                if not stat.S_ISREG(metadata.st_mode):
-                    continue
-                relative_path = entry_path.relative_to(self._root).as_posix()
-                children.append(
-                    (
-                        entry.name,
-                        ProjectFilePath(
-                            relative_path=relative_path,
-                            size_bytes=metadata.st_size,
-                            modified_ns=metadata.st_mtime_ns,
-                        ),
-                    )
-                )
-            pending.extend(
-                child for _, child in sorted(children, key=lambda pair: pair[0], reverse=True)
-            )
+        for index, (relative_path, size_bytes, modified_ns) in enumerate(
+            iter_project_paths(self._root), start=1
+        ):
+            yield ProjectFilePath(relative_path, size_bytes, modified_ns)
+            if limit is not None and index >= limit:
+                return
 
     def _path_for_read(self, relative_path: str) -> Path:
         normalized = self.normalize_path(relative_path)
@@ -537,26 +575,6 @@ class ProjectFilesystem:
         if not path.is_file():
             raise FileNotFoundError(f"project file not found: {normalized}")
         return path
-
-    def _path_for_write(self, normalized_path: str) -> Path:
-        self.ensure_root()
-        path = self._root.joinpath(*PurePosixPath(normalized_path).parts)
-        self._ensure_real_parent_directories(path.parent)
-        return path
-
-    def _ensure_real_parent_directories(self, parent: Path) -> None:
-        relative_parent = parent.relative_to(self._root)
-        current = self._root
-        for part in relative_parent.parts:
-            current = current / part
-            is_link = _is_link_or_reparse_path(current)
-            if current.exists() or is_link:
-                if is_link or not current.is_dir():
-                    raise ValueError(
-                        "project path contains a non-directory, symlink, or reparse point"
-                    )
-                continue
-            current.mkdir()
 
     def _assert_no_symlink_components(self, path: Path) -> None:
         relative_path = path.relative_to(self._root)
@@ -607,28 +625,6 @@ class ProjectFilesystemFactory:
             & stat.FILE_ATTRIBUTE_REPARSE_POINT
         )
 
-    @classmethod
-    def _remove_windows_directory(cls, directory: Path) -> None:
-        """Remove a tree without descending into Windows links or junctions."""
-        metadata = directory.lstat()
-        if cls._is_windows_reparse_point(metadata) or not stat.S_ISDIR(metadata.st_mode):
-            raise RuntimeError("project directory changed during file cleanup")
-        with os.scandir(directory) as scan:
-            entries = list(scan)
-        for entry in entries:
-            child = Path(entry.path)
-            metadata = entry.stat(follow_symlinks=False)
-            if cls._is_windows_reparse_point(metadata):
-                if child.is_junction():
-                    child.rmdir()
-                else:
-                    child.unlink()
-            elif stat.S_ISDIR(metadata.st_mode):
-                cls._remove_windows_directory(child)
-            else:
-                child.unlink()
-        directory.rmdir()
-
     def remove_project_directory(
         self, project_id: str, *, _lease: _MutationLease | None = None
     ) -> bool:
@@ -652,54 +648,46 @@ class ProjectFilesystemFactory:
             or root.is_symlink()
             or not stat.S_ISDIR(metadata.st_mode)
         ):
-            removed = self._remove_project_directory_locked(project_id)
+            removed = self._remove_project_directory_locked(
+                project_id, expected_file_id=metadata.st_ino
+            )
             self._remove_pending_admission_markers(root)
             return removed
         filesystem = self.for_project(project_id)
         with filesystem._mutation_lock(_lease):
-            removed = self._remove_project_directory_locked(project_id)
+            removed = self._remove_project_directory_locked(
+                project_id, expected_file_id=(metadata.st_ino if metadata else None)
+            )
             self._remove_pending_admission_markers(root)
             return removed
 
     @staticmethod
     def _remove_pending_admission_markers(root: Path) -> None:
-        lock_directory = root.parent / ".knoggin-file-locks"
-        if _is_link_or_reparse_path(lock_directory):
-            raise ValueError("project file lock directory must be a real directory")
-        if not lock_directory.exists():
-            return
+        if os.name == "nt":
+            from core.knowledge.documents.io.windows_handle_io import (
+                delete_pending_markers_for_project,
+            )
+        else:
+            from core.knowledge.documents.io.posix_handle_io import (
+                delete_pending_markers_for_project,
+            )
+
         root_key = os.path.normcase(os.path.abspath(root))
         prefix = hashlib.sha256(os.fsencode(root_key)).hexdigest()
-        for marker in lock_directory.glob(f"{prefix}.upload-*.pending"):
-            marker.unlink()
+        delete_pending_markers_for_project(root.parent, f"{prefix}.upload-")
 
-    def _remove_project_directory_locked(self, project_id: str) -> bool:
+    def _remove_project_directory_locked(
+        self, project_id: str, *, expected_file_id: int | None = None
+    ) -> bool:
         """Remove a project tree while its shared mutation lease is held."""
 
-        root = self._project_root(project_id)
-        try:
-            metadata = root.lstat()
-        except FileNotFoundError:
-            return False
-
-        if os.name == "nt" and self._is_windows_reparse_point(metadata):
-            if root.is_junction():
-                root.rmdir()
-            else:
-                root.unlink()
-            return True
-
-        if root.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
-            try:
-                root.unlink()
-            except FileNotFoundError:
-                return False
-            return True
-
         if os.name == "nt":
-            self._remove_windows_directory(root)
-            return True
-        if not shutil.rmtree.avoids_symlink_attacks:
-            raise RuntimeError("safe project-directory removal is unavailable")
-        shutil.rmtree(root)
-        return True
+            from core.knowledge.documents.io.windows_handle_io import (
+                remove_project_tree,
+            )
+        else:
+            from core.knowledge.documents.io.posix_handle_io import remove_project_tree
+
+        return remove_project_tree(
+            self._library_root, project_id, expected_file_id=expected_file_id
+        )

@@ -42,6 +42,35 @@ from core.project.project_files import CONTEXT_FILE_PATH
 from infrastructure.background_work import BackgroundWorkRejected
 from runtime.api_port import ApplicationRuntimePort
 
+if os.name == "nt":
+    from core.knowledge.documents.io import (
+        windows_handle_io as windows_handle_io_module,
+    )
+
+
+def pause_project_replace(monkeypatch, root, entered, release, *, once):
+    if os.name == "nt":
+        real_rename = windows_handle_io_module._rename
+
+        def pause(handle, parent, name, *, replace):
+            if name == "notes.md" and (not once or not entered.is_set()):
+                entered.set()
+                assert release.wait(10)
+            return real_rename(handle, parent, name, replace=replace)
+
+        monkeypatch.setattr(windows_handle_io_module, "_rename", pause)
+        return
+
+    real_replace = os.replace
+
+    def pause(source, destination):
+        if destination == root / "notes.md" and (not once or not entered.is_set()):
+            entered.set()
+            assert release.wait(10)
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", pause)
+
 
 async def run_inline(function, *args, **kwargs):
     return function(*args, **kwargs)
@@ -1991,15 +2020,9 @@ async def test_concurrent_project_file_edits_reject_stale_hash_and_preserve_cata
     service._run_blocking = asyncio.to_thread
     entered_replace = threading.Event()
     release_replace = threading.Event()
-    real_replace = os.replace
-
-    def pause_first_replace(source, destination):
-        if destination == filesystem.root / "notes.md" and not entered_replace.is_set():
-            entered_replace.set()
-            assert release_replace.wait(10)
-        return real_replace(source, destination)
-
-    monkeypatch.setattr(os, "replace", pause_first_replace)
+    pause_project_replace(
+        monkeypatch, filesystem.root, entered_replace, release_replace, once=True
+    )
     winner = asyncio.create_task(
         service.update_project_file(
             "notes.md", "winner", expected_content_hash=created["content_hash"]
@@ -2086,15 +2109,9 @@ async def test_cancelled_project_file_edit_finishes_file_and_catalog(
     service._run_blocking = asyncio.to_thread
     entered_replace = threading.Event()
     release_replace = threading.Event()
-    real_replace = os.replace
-
-    def pause_replace(source, destination):
-        if destination == filesystem.root / "notes.md":
-            entered_replace.set()
-            assert release_replace.wait(10)
-        return real_replace(source, destination)
-
-    monkeypatch.setattr(os, "replace", pause_replace)
+    pause_project_replace(
+        monkeypatch, filesystem.root, entered_replace, release_replace, once=False
+    )
     operation = asyncio.create_task(
         service.update_project_file(
             "notes.md", "edited", expected_content_hash=created["content_hash"]
