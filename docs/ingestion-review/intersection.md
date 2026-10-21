@@ -1,5 +1,7 @@
 # Extraction and Knowledge handoff
 
+> Current verification (2026-10-19): see [verification status](verification-status.md) for the passing PostgreSQL runs, remaining coverage limits, and planned full Docling ingestion on Linux. Older database-unavailable statements below describe earlier runs.
+
 Working notes based on source and tests (2026-10-08). The root README is treated as background; paths below are the source of truth for this review.
 
 ## Pipeline map

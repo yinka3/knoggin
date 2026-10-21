@@ -1,5 +1,7 @@
 # General ingestion and health intersections
 
+> Current verification (2026-10-19): see [verification status](verification-status.md) for the passing PostgreSQL runs, remaining coverage limits, and planned full Docling ingestion on Linux. Older database-unavailable statements below describe earlier runs.
+
 Code-backed working notes, 2026-10-08. This pass reads the current worktree and the tests' actual assertions; it does not treat a passing test as proof of an untested boundary. No production code was changed in this pass.
 
 ## Boundary map

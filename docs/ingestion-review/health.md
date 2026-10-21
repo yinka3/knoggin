@@ -1,5 +1,7 @@
 # Health layer scan
 
+> Current verification (2026-10-19): see [verification status](verification-status.md) for the passing PostgreSQL runs, remaining coverage limits, and planned full Docling ingestion on Linux. Older database-unavailable statements below describe earlier runs.
+
 Working notebook, 2026-10-08. Source code and actual test assertions are the authority here; the README may be stale. This is a read-only scan. “Healthy” below means the health service's status, not proof that extracted knowledge is correct.
 
 ## Boundaries and flow

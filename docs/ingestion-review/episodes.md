@@ -1,5 +1,7 @@
 # Episode subsystem review
 
+> Current verification (2026-10-19): see [verification status](verification-status.md) for the passing PostgreSQL runs, remaining coverage limits, and planned full Docling ingestion on Linux. Older database-unavailable statements below describe earlier runs.
+
 Review started 2026-10-17. Source code and assertions are the authority; older README material may be stale. This pass covers Episode generation, policy, embedding, persistence, enrichment, retrieval, and the immediate semantic-window boundary. Project, session, and agent behavior is included only where it changes an Episode outcome. Findings below are review results, not fixes.
 
 ## Live path and system rules

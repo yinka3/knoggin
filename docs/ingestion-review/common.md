@@ -1,5 +1,7 @@
 # Common layer review
 
+> Current verification (2026-10-19): see [verification status](verification-status.md) for the passing PostgreSQL runs, remaining coverage limits, and planned full Docling ingestion on Linux. Older database-unavailable statements below describe earlier runs.
+
 Working notebook, 2026-10-11. Read source and assertions as the authority; the root README and older review notes may describe earlier code. This pass covers `server/src/common` and follows its contracts into the subsystems already reviewed.
 
 Implementation status and new compatibility findings are recorded in [common-layer remediation](common-remediation.md). The numbered findings below preserve the original scan evidence.

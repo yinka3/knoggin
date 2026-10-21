@@ -1,5 +1,7 @@
 # Document service review
 
+> Current verification (2026-10-19): see [verification status](verification-status.md) for the passing PostgreSQL runs, remaining coverage limits, and planned full Docling ingestion on Linux. Older database-unavailable statements below describe earlier runs.
+
 First-pass review, 2026-10-12. Source code is the authority; older README material may be stale. This review covers the document service and its associated structures, including branches already visited during the general ingestion and common-layer reviews. Findings are review results, not fixes.
 
 Implementation and verification are tracked in [document-service-remediation.md](document-service-remediation.md).

@@ -1,5 +1,7 @@
 # Ingestion remediation completion audit
 
+> Current verification (2026-10-19): see [verification status](verification-status.md) for the passing PostgreSQL runs, remaining coverage limits, and planned full Docling ingestion on Linux. Older database-unavailable statements below describe earlier runs.
+
 Reviewed 2026-10-10, with the project-file follow-up completed 2026-10-11. This audit compares current code with the original extraction, Knowledge, general ingestion, health, and intersection notes and the assertions in affected tests. Earlier notebooks describe the code at scan time; this page records what is complete now. Passing fake-backed tests do not establish PostgreSQL behavior.
 
 ## Defect checklist
@@ -7,7 +9,7 @@ Reviewed 2026-10-10, with the project-file follow-up completed 2026-10-11. This 
 | Proposed defect | Current state | Remaining evidence or work |
 | --- | --- | --- |
 | Domain activation could strand a no-op Context/Knowledge window; section removal could invalidate live blocks. | Code fixed: version bridge, writer guard, section checks, and legacy retry repair. | Full activation → no-op Context → Knowledge → next-window Postgres flow has not run locally. |
-| Relationship observations collapsed distinct labels or independent support sets; retirement/reclassification could remove surviving evidence or use stale evidence. | Code fixed through support-set identity, targeted retirement, and stale-review guards. | Storage contract and one-time upgrade against an existing Postgres database remain unverified locally. |
+| Relationship observations collapsed distinct labels or independent support sets; retirement/reclassification could remove surviving evidence or use stale evidence. | Code fixed through support-set identity, targeted retirement, and stale-review guards. | Semantic commit storage contracts passed on 2026-10-19. The one-time upgrade against an existing database remains unverified. |
 | Merge shortlist ranked after its limit, and proposals accepted unsupported or stale evidence. | Code fixed. Explicit `advise_entity_merge` tool calls `merge_model` and keeps review/application separate. | Real Postgres candidate/evidence reads and hosted model behavior remain unrun locally. |
 | NLI linked names present only in supporting messages. | NLI machinery removed; source-only candidates remain unresolved after local reference/quote checks. | The issue is transient within one build. A durable proposal queue was deferred, not left half wired. |
 | JEV candidate preparation scanned past its useful cap. | Work bound and profile-fetch filter fixed. | Large-catalog alias × gap latency benchmark remains open. |
@@ -19,7 +21,7 @@ Reviewed 2026-10-10, with the project-file follow-up completed 2026-10-11. This 
 | Missing Docling artifacts were classified as bad content; exhausted PDFs lacked a verified recovery path. | Dependency classification, explicit reindex recovery test, and real cached PDF conversion smoke pass. | Release CI model lane has not been observed in this local audit. |
 | Inline indexing failure made a saved upload look rejected. | Public single/batch responses return saved identity and current indexing state after admission. | Postgres-backed public-flow verification remains open. |
 | Terminal document-index failures, unavailable maintenance repair reads, scheduler check failures, and unrelated work could each leave a false-green health result. | All four code paths now degrade the relevant snapshot; targeted producer-to-health tests pass. | Most tests use fake storage or runtime components; durable Postgres health joins remain unrun. |
-| Due windows and unclaimed/FIFO backlog were absent from semantic health. | Due/retry-aware and payload-free admission aggregates feed ingestion health. The FIFO age now uses the oldest blocked closed exchange. | Storage contract for SQL semantics collects but has not run locally. Query cost must be measured on a long history. |
+| Due windows and unclaimed/FIFO backlog were absent from semantic health. | Due/retry-aware and payload-free admission aggregates feed ingestion health. The FIFO age now uses the oldest blocked closed exchange. | Context-window and admission storage contracts passed on 2026-10-19. Query cost on a long history remains unmeasured. |
 | Windows project deletion left native files pending. | Windows walker and junction/symlink tests pass. | Concurrent hostile directory-entry replacement remains a documented platform limit. |
 
 ## Additional findings from this audit

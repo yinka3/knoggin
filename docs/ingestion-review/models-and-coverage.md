@@ -1,5 +1,7 @@
 # Model routing and coverage notes
 
+> Current verification (2026-10-19): see [verification status](verification-status.md) for the passing PostgreSQL runs, remaining coverage limits, and planned full Docling ingestion on Linux. Older database-unavailable statements below describe earlier runs.
+
 Read on 2026-10-08. These are the actual call paths found in Python source, not an assumption from model names or the root README.
 
 ## Which model does what

@@ -1,5 +1,7 @@
 # Common-layer remediation
 
+> Current verification (2026-10-19): see [verification status](verification-status.md) for the passing PostgreSQL runs, remaining coverage limits, and planned full Docling ingestion on Linux. Older database-unavailable statements below describe earlier runs.
+
 Working record, 2026-10-11. The [common scan](common.md) and [cross-layer traces](common-intersections.md) hold the original evidence. This record tracks changes made against every numbered finding, including the compatibility cases found during implementation.
 
 ## Implemented

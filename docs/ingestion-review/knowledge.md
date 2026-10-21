@@ -1,5 +1,7 @@
 # Knowledge scan notes
 
+> Current verification (2026-10-19): see [verification status](verification-status.md) for the passing PostgreSQL runs, remaining coverage limits, and planned full Docling ingestion on Linux. Older database-unavailable statements below describe earlier runs.
+
 Read on 2026-10-08 from source and focused tests. This page covers the Knowledge side of semantic ingestion and its boundary with document indexing. It is a code review notebook, not a change proposal.
 
 ## How Knowledge is built

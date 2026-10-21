@@ -1,9 +1,12 @@
 # Ingestion code scan
 
+> Current verification (2026-10-19): see [verification status](verification-status.md) for the passing PostgreSQL runs, remaining coverage limits, and planned full Docling ingestion on Linux. Older database-unavailable statements below describe earlier runs.
+
 Working notebook, 2026-10-08. This review follows source code and test assertions; the root README may be stale. It records how the system behaves today and which behavior has not been verified.
 
 ## Notes
 
+- [Current verification](verification-status.md): latest executed tests, remaining coverage limits, and the planned Linux full-document ingestion check.
 - [Extraction](extraction.md): local and hosted model paths, entity and relationship validation, and evidence loss in relationship deduplication.
 - [Knowledge](knowledge.md): Context, persistence, retrieval, and neighboring document ingestion.
 - [Model routing and coverage](models-and-coverage.md): configured models, actual call sites, and what tests really assert.

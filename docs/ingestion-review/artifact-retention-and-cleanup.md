@@ -1,5 +1,7 @@
 # Artifact retention and cleanup
 
+> Current verification (2026-10-19): see [verification status](verification-status.md) for the passing PostgreSQL runs, remaining coverage limits, and planned full Docling ingestion on Linux. Older database-unavailable statements below describe earlier runs.
+
 Working review, 2026-10-18. This traces artifact expiry, project file removal, and the document cleanup branches that intersect ingestion. The findings record the original defects; remediation status is below.
 
 ## Code path and rules

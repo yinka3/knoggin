@@ -1,5 +1,7 @@
 # Common-layer intersections
 
+> Current verification (2026-10-19): see [verification status](verification-status.md) for the passing PostgreSQL runs, remaining coverage limits, and planned full Docling ingestion on Linux. Older database-unavailable statements below describe earlier runs.
+
 Working notebook, 2026-10-11. These paths start in `common` and continue into previously reviewed ingestion, extraction, Knowledge, or health code. Findings below preserve the original observations; [common-layer remediation](common-remediation.md) records the fixes and remaining verification limits.
 
 ## Domain relationship lookup can change the meaning of extraction output

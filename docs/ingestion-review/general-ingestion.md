@@ -1,5 +1,7 @@
 # General ingestion scan
 
+> Current verification (2026-10-19): see [verification status](verification-status.md) for the passing PostgreSQL runs, remaining coverage limits, and planned full Docling ingestion on Linux. Older database-unavailable statements below describe earlier runs.
+
 Working notes, 2026-10-08. This follows the live code and test assertions; the README is background only. The earlier [Extraction](extraction.md), [Knowledge](knowledge.md), and [handoff](intersection.md) notes cover the deeper semantic stages.
 
 ## Live path

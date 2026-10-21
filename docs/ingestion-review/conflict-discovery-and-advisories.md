@@ -1,5 +1,7 @@
 # Conflict discovery and relationship advisories
 
+> Current verification (2026-10-19): see [verification status](verification-status.md) for the passing PostgreSQL runs, remaining coverage limits, and planned full Docling ingestion on Linux. Older database-unavailable statements below describe earlier runs.
+
 Working review, 2026-10-18. This follows the current source and test assertions, including the handoff from Knowledge observations and entity merge. The findings record the original defects; remediation status is below.
 
 ## Code path and rules

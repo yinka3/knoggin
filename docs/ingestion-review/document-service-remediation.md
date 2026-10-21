@@ -1,5 +1,7 @@
 # Document service remediation
 
+> Current verification (2026-10-19): see [verification status](verification-status.md) for the passing PostgreSQL runs, remaining coverage limits, and planned full Docling ingestion on Linux. Older database-unavailable statements below describe earlier runs.
+
 Work started 2026-10-16. The findings and their code paths are in [document-service.md](document-service.md). This note tracks fixes, verification, and any new defects discovered during implementation. Use the smallest change that closes each behavior and test the full affected path where possible.
 
 | Finding | Work area | Status |
@@ -41,7 +43,7 @@ Work started 2026-10-16. The findings and their code paths are in [document-serv
 
 - Periodic reconciliation now evaluates a complete folder manifest when source metadata changes or during the scheduled full hash sweep. This reads more file bytes after a change, but keeps idle passes cheap and applies `.gitignore` and cumulative limits correctly. Ordinary native file edits retain targeted reconciliation; only removal or movement of a `.gitignore` file forces a full tree pass.
 - File compensation covers ordinary exceptions after a completed local mutation. A process crash between filesystem and database writes, or a separate local process changing the file during rollback, can still leave divergence; periodic reconciliation is the repair path. The rollback uses expected hashes where the filesystem provides them.
-- The Windows reparse checks close the identified junction paths, but a hostile local process could still swap a path component between validation and use. This separate check/use race is not claimed as solved.
+- Project file operations now open path components through verified directory handles. A process that can rename an already opened directory may still move that directory outside the configured tree; the operation can then fail after the move, and periodic reconciliation remains the repair path for any catalog mismatch.
 
 ## Follow-up branch review (2026-10-17)
 
@@ -62,8 +64,15 @@ Open coverage and design work:
 - The full folder reconciliation memory issue was fixed on 2026-10-18. It now retains paths and metadata and loads one candidate file at a time while applying scan rules and quota. A 24-file/512-KB test checks admitted rows and a bounded peak memory use; the 10,000-path safety limit still applies.
 - The direct and scan-managed database contracts have run against PostgreSQL. The mixed `document_index` table case still needs a real PDF example; current targeted tests use controlled parser objects. The Stella token-limit guard has fake-model tests, but has not been checked at the real Torch and ONNX 511/512/513-token boundary.
 - On 2026-10-18, the affected PostgreSQL document and adjacent storage contract run passed **60 tests**. A new contract confirms an overlong document chunk encodes every bounded part and stores one complete source chunk with a 1,024-dimensional vector. The splitter's cached real Stella tokenizer test covers token counts, while a full-weight Torch/ONNX boundary and retrieval-quality check remain for the Linux machine.
-- Already indexed notebooks retain old snapshot text and cell-relative chunk ranges. They need `reindex_document` to get the new global locators; the indexer does not currently auto-reindex indexed rows when the parser format changes. The same applies to historical mixed-PDF provenance labels.
-- The filesystem path checks still have a check/use race if a hostile local process swaps a directory between validation and opening it.
+- Historical notebook and PDF locator repairs now queue automatically on indexer startup when the stored parser fingerprint is old. Current snapshots remain readable until replacement indexing publishes.
+- Project file and lock operations now use handle-relative access on Windows and directory descriptors on POSIX. The race checks below cover concurrent junction swaps.
+
+## Locator and filesystem follow-up (2026-10-19)
+
+- Startup recovery now queues indexed PDF and notebook snapshots whose parser fingerprint predates the locator repairs. Their existing snapshots remain available until a replacement publishes. A notebook recovery regression and a PostgreSQL queue/preservation contract pass. Terminal failures still follow the normal bounded index retry policy.
+- Project file reads validate the opened descriptor. Windows reads check the handle's final path stays inside the configured project root; POSIX reads walk directory descriptors without following links.
+- Writes, moves, deletes, folder creation, project removal, scans, lock files, and upload markers now use handle-relative operations on Windows and directory descriptors on POSIX. Windows tests swap a parent directory for a junction during each mutation and check that the outside target is untouched. POSIX tests exercise the native helper and `ProjectFilesystem` wrapper in Linux.
+- Verification after the final root-creation change: 198 affected Windows unit and PostgreSQL contract tests passed; 5 POSIX tests passed in the local Linux image. Ruff and `git diff --check` passed. The remaining moved-open-directory caveat is recorded under Limits and tradeoffs.
 
 ## Real PDF sample on Windows (2026-10-17)
 

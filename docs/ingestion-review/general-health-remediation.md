@@ -1,5 +1,7 @@
 # General ingestion and health remediation
 
+> Current verification (2026-10-19): see [verification status](verification-status.md) for the passing PostgreSQL runs, remaining coverage limits, and planned full Docling ingestion on Linux. Older database-unavailable statements below describe earlier runs.
+
 Working plan, 2026-10-10. Source and persisted outcomes take priority over test names or old README text. The [general ingestion](general-ingestion.md), [health](health.md), and [intersection](general-health-intersections.md) scans hold the original evidence.
 
 The [completion audit](remediation-completion-audit.md) records current status across all four reviewed layers, including later findings and verification limits.

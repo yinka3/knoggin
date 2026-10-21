@@ -1,5 +1,7 @@
 # Ingestion remediation plan
 
+> Current verification (2026-10-19): see [verification status](verification-status.md) for the passing PostgreSQL runs, remaining coverage limits, and planned full Docling ingestion on Linux. Older database-unavailable statements below describe earlier runs.
+
 Prepared 2026-10-08 from the [code scan](README.md). This is an implementation order and a set of acceptance checks, not a claim that the defects are already reproduced in Postgres.
 
 ## Progress
