@@ -286,6 +286,47 @@ def test_project_filesystem_uses_atomic_replace_and_hash_preconditions(tmp_path)
     assert not list((tmp_path / "project").rglob(".knoggin-*.tmp"))
 
 
+def test_mutation_lease_rejects_reuse_and_another_project(tmp_path):
+    first = ProjectFilesystem(tmp_path / "first")
+    second = ProjectFilesystem(tmp_path / "second")
+    lease = first.acquire_mutation_lease()
+    try:
+        with pytest.raises(ValueError, match="another root"):
+            second.write_bytes("notes.md", b"wrong project", _lease=lease)
+        assert not second.root.joinpath("notes.md").exists()
+    finally:
+        first.release_mutation_lease(lease)
+
+    with pytest.raises(ValueError, match="not active"):
+        first.release_mutation_lease(lease)
+    with pytest.raises(ValueError, match="not active"):
+        first.write_bytes("notes.md", b"after release", _lease=lease)
+
+
+def test_pending_marker_rejects_invalid_digest_and_only_counts_real_changes(tmp_path):
+    filesystem = ProjectFilesystem(tmp_path / "project")
+    before = filesystem.get_mutation_generation()
+    with filesystem._mutation_lock() as lease:
+        with pytest.raises(ValueError, match="SHA-256"):
+            filesystem.mark_pending_admission("notes.md", "not-a-hash", _lease=lease)
+        filesystem.clear_pending_admission("notes.md", _lease=lease)
+        assert filesystem.get_mutation_generation(_lease=lease) == before
+        filesystem.mark_pending_admission("notes.md", "a" * 64, _lease=lease)
+        assert filesystem.get_mutation_generation(_lease=lease) == before + 1
+        filesystem.clear_pending_admission("notes.md", _lease=lease)
+        assert filesystem.get_mutation_generation(_lease=lease) == before + 2
+    assert filesystem.pending_admission_hash("notes.md") is None
+
+
+def test_project_file_rejects_empty_bytes_and_directory_reads(tmp_path):
+    filesystem = ProjectFilesystem(tmp_path / "project")
+    with pytest.raises(ValueError, match="must not be empty"):
+        filesystem.write_bytes("empty.md", b"")
+    filesystem.create_folder("folder")
+    with pytest.raises((ValueError, PermissionError, OSError)):
+        filesystem.read_bytes("folder")
+
+
 def test_project_removal_waits_for_the_shared_mutation_lease(tmp_path):
     factory = ProjectFilesystemFactory(tmp_path / "projects")
     filesystem = factory.for_project("project-1")

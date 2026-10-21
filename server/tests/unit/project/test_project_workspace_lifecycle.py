@@ -1,4 +1,5 @@
 import asyncio
+import os
 import threading
 from contextlib import asynccontextmanager
 
@@ -225,6 +226,116 @@ async def test_cancelled_project_cleanup_waits_for_file_worker(tmp_path, monkeyp
         with pytest.raises(asyncio.CancelledError):
             await cleanup
     assert not filesystem.root.exists()
+
+
+@pytest.mark.asyncio
+async def test_project_cleanup_keeps_retry_pending_after_filesystem_failure(
+    tmp_path, monkeypatch
+):
+    factory = ProjectFilesystemFactory(tmp_path / "projects")
+    filesystem = factory.for_project("project-1")
+    filesystem.write_bytes("notes.md", b"owned")
+    manager = ProjectManager(
+        resources=Resources(RecordingPostgres()),
+        user_name="ada",
+        filesystem_factory=factory,
+    )
+
+    def unavailable_removal(_project_id, **_kwargs):
+        raise OSError("storage unavailable")
+
+    monkeypatch.setattr(factory, "remove_project_directory", unavailable_removal)
+    assert await manager._finish_project_file_cleanup("project-1") == "pending"
+    assert filesystem.root.joinpath("notes.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_project_cleanup_keeps_retry_pending_after_completion_failure(
+    tmp_path, monkeypatch
+):
+    factory = ProjectFilesystemFactory(tmp_path / "projects")
+    filesystem = factory.for_project("project-1")
+    filesystem.write_bytes("notes.md", b"owned")
+    manager = ProjectManager(
+        resources=Resources(RecordingPostgres()),
+        user_name="ada",
+        filesystem_factory=factory,
+    )
+
+    async def unavailable_completion(**_kwargs):
+        raise RuntimeError("catalog unavailable")
+
+    monkeypatch.setattr(
+        manager._project_deletion_writer,
+        "complete_file_cleanup",
+        unavailable_completion,
+    )
+    assert await manager._finish_project_file_cleanup("project-1") == "pending"
+    assert not filesystem.root.exists()
+
+
+@pytest.mark.asyncio
+async def test_project_cleanup_retry_processes_pending_ids(tmp_path, monkeypatch):
+    manager = ProjectManager(
+        resources=Resources(RecordingPostgres()),
+        user_name="ada",
+        filesystem_factory=ProjectFilesystemFactory(tmp_path / "projects"),
+    )
+    attempts = []
+
+    async def pending_ids(**_kwargs):
+        return ["project-1", "project-2"]
+
+    async def finish(project_id):
+        attempts.append(project_id)
+        return "complete"
+
+    monkeypatch.setattr(
+        manager._project_deletion_writer,
+        "list_pending_file_cleanup_project_ids",
+        pending_ids,
+    )
+    monkeypatch.setattr(manager, "_finish_project_file_cleanup", finish)
+    await manager.retry_pending_project_file_cleanup()
+    assert attempts == ["project-1", "project-2"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink root")
+async def test_project_file_lease_skips_a_linked_project_root(tmp_path):
+    library = tmp_path / "projects"
+    library.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.md").write_bytes(b"private")
+    (library / "project-1").symlink_to(outside, target_is_directory=True)
+    manager = ProjectManager(
+        resources=Resources(RecordingPostgres()),
+        user_name="ada",
+        filesystem_factory=ProjectFilesystemFactory(library),
+    )
+
+    async with manager._project_file_lease("project-1") as lease:
+        assert lease is None
+    assert (outside / "keep.md").read_bytes() == b"private"
+
+
+@pytest.mark.asyncio
+async def test_failed_creation_cleanup_does_not_hide_original_error(
+    tmp_path, monkeypatch
+):
+    factory = ProjectFilesystemFactory(tmp_path / "projects")
+    manager = ProjectManager(
+        resources=Resources(RecordingPostgres()),
+        user_name="ada",
+        filesystem_factory=factory,
+    )
+
+    def unavailable_removal(_project_id):
+        raise OSError("storage unavailable")
+
+    monkeypatch.setattr(factory, "remove_project_directory", unavailable_removal)
+    await manager._remove_failed_project_directory("project-1")
 
 
 def test_project_markdown_seed_contains_trusted_metadata_and_is_utf8():

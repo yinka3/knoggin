@@ -1529,6 +1529,106 @@ async def test_cancelled_upload_tombstones_completed_catalog_insert(
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_cancelled_admission_keeps_source_when_catalog_tombstone_fails(
+    document_harness, monkeypatch
+):
+    service, _ = document_harness
+    filesystem = service._filesystem
+    assert filesystem is not None
+    created = filesystem.write_bytes("pending.md", b"keep until catalog is repaired")
+
+    async def unavailable_tombstone(*, document_id):
+        raise RuntimeError(f"catalog unavailable for {document_id}")
+
+    monkeypatch.setattr(service._writer, "delete_document", unavailable_tombstone)
+    await service._rollback_document_admission(
+        filesystem=filesystem,
+        relative_path="pending.md",
+        content_hash=created.content_hash,
+        document_id="pending-document",
+    )
+
+    assert filesystem.read_bytes("pending.md") == b"keep until catalog is repaired"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_cancelled_admission_clears_marker_when_source_is_already_absent(
+    document_harness
+):
+    service, _ = document_harness
+    filesystem = service._filesystem
+    assert filesystem is not None
+    with filesystem._mutation_lock() as lease:
+        filesystem.mark_pending_admission("missing.md", "a" * 64, _lease=lease)
+
+    await service._rollback_document_admission(
+        filesystem=filesystem,
+        relative_path="missing.md",
+        content_hash="a" * 64,
+    )
+
+    assert filesystem.pending_admission_hash("missing.md") is None
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+@pytest.mark.parametrize("marker_fails", [False, True])
+async def test_cancelled_upload_settles_pending_marker_before_returning(
+    document_harness, marker_fails
+):
+    service, postgres = document_harness
+    filesystem = service._filesystem
+    assert filesystem is not None
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original_run = service._run_blocking
+
+    async def delayed_marker(function, *args, **kwargs):
+        if function.__name__ == "mark_pending_admission":
+            entered.set()
+            await release.wait()
+            if marker_fails:
+                raise OSError("marker unavailable")
+        return await original_run(function, *args, **kwargs)
+
+    service._run_blocking = delayed_marker
+    upload = asyncio.create_task(
+        service.add_document(content=b"cancelled", original_name="pending.md")
+    )
+    await asyncio.wait_for(entered.wait(), 5)
+    upload.cancel()
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await upload
+    assert filesystem.pending_admission_hash("pending.md") is None
+    assert not filesystem.root.joinpath("pending.md").exists()
+    assert postgres.rows == []
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_accepted_upload_survives_marker_cleanup_failure(
+    document_harness, monkeypatch
+):
+    service, postgres = document_harness
+    filesystem = service._filesystem
+    assert filesystem is not None
+
+    def unavailable_marker_cleanup(*_args, **_kwargs):
+        raise OSError("marker cleanup unavailable")
+
+    monkeypatch.setattr(filesystem, "clear_pending_admission", unavailable_marker_cleanup)
+    uploaded = await service.add_document(content=b"accepted", original_name="notes.md")
+
+    assert uploaded["status"] == "queued"
+    assert filesystem.read_bytes("notes.md") == b"accepted"
+    assert postgres.rows[0]["document_id"] == uploaded["document_id"]
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_manual_project_documents_read_and_index_from_the_local_file(
     document_harness,
 ):
@@ -3400,6 +3500,52 @@ async def test_index_document_embeds_every_part_of_an_overlong_chunk(document_ha
     vector = json.loads(postgres.chunks[0]["embedding"])
     assert len(vector) == 1024
     assert math.isclose(math.sqrt(sum(value * value for value in vector)), 1.0)
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("parts", "message"),
+    [
+        ([], "part budget"),
+        (["s"] * 65, "part budget"),
+        (["different"], "lost source text"),
+    ],
+)
+async def test_document_embedding_rejects_invalid_text_parts(
+    document_harness, parts, message
+):
+    service, _ = document_harness
+    service._embedding.split_for_embedding = lambda _value: parts
+
+    with pytest.raises(ValueError, match=message):
+        await service.indexer._encode_embeddings(
+            ["source"], policy=DocumentIndexPolicy.capture()
+        )
+    assert service._embedding.calls == []
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("vectors", "message"),
+    [
+        ([[1.0], [1.0, 2.0]], "inconsistent dimensions"),
+        ([[0.0, 0.0], [1.0, 0.0]], "require finite vectors"),
+        ([[1.0, 0.0], [-1.0, 0.0]], "cannot be pooled"),
+    ],
+)
+async def test_document_embedding_rejects_unusable_part_vectors(
+    document_harness, vectors, message
+):
+    service, _ = document_harness
+    service._embedding.split_for_embedding = lambda _value: ["a", "b"]
+    service._embedding.embeddings = vectors
+
+    with pytest.raises(DependencyError, match=message):
+        await service.indexer._encode_embeddings(
+            ["ab"], policy=DocumentIndexPolicy.capture()
+        )
 
 
 @pytest.mark.storage

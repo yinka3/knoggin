@@ -23,6 +23,56 @@ from tests.fixtures.documents import (
 
 @pytest.mark.unit
 @pytest.mark.no_network
+def test_document_index_ignores_malformed_parser_regions_and_keeps_new_ocr_cells():
+    valid_box = {"l": 1, "b": 2, "r": 3, "t": 4}
+    structure = {
+        "texts": [
+            {"label": "document_index", "prov": "invalid"},
+            {"label": "document_index", "prov": [None, {"page_no": 0, "bbox": valid_box}]},
+            {"label": "document_index", "prov": [{"page_no": 1, "bbox": valid_box}]},
+            {"label": "document_index", "prov": [{"page_no": 1, "bbox": {**valid_box, "r": float("inf")}}]},
+        ],
+        "tables": [
+            {"label": "document_index", "prov": "invalid"},
+            {"label": "document_index", "prov": [{"page_no": 2}], "data": {}},
+            {
+                "label": "document_index",
+                "prov": [{"page_no": 1}],
+                "data": {"table_cells": [None, {"text": " "}, {"text": "Known"}, {"text": "New OCR cell"}]},
+            },
+        ],
+    }
+
+    assert extraction_module._document_index_boxes(structure) == {
+        1: ((1.0, 2.0, 3.0, 4.0),)
+    }
+    assert extraction_module._missing_index_cell_text(structure, 1, "Known") == "New OCR cell"
+    assert extraction_module._missing_index_cell_text({"tables": None}, 1, "") == ""
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("serialized", "message"),
+    [
+        ("not a notebook cell", "no recognizable cells"),
+        (
+            "[[KNOGGIN_NOTEBOOK_CELL index=1 type=code length=100]]\nprint(1)",
+            "content is incomplete",
+        ),
+        (
+            "[[KNOGGIN_NOTEBOOK_CELL index=1 type=code length=8]]\nprint(1)next",
+            "separator is invalid",
+        ),
+    ],
+)
+def test_notebook_split_rejects_incomplete_serialized_cells(serialized, message):
+    with pytest.raises(ValueError, match=message):
+        extraction_module._split_notebook(serialized)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 def test_pdf_extraction_preserves_captured_page_boundaries(monkeypatch):
     snapshot = DocumentParseSnapshot(
         text="Alpha page.\n\nBeta page.",

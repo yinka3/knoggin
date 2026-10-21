@@ -287,6 +287,61 @@ def test_episode_split_keeps_every_character_and_each_chunk_within_token_limit()
 
 
 @pytest.mark.no_network
+def test_embedding_split_requires_a_usable_tokenizer_limit():
+    service = EmbeddingService(embedding_backend="torch")
+    assert not service.has_token_limit
+    with pytest.raises(RuntimeError, match="not loaded"):
+        service.split_for_embedding("text")
+
+    service._embedder = SimpleNamespace(tokenizer=None, max_seq_length=4)
+    assert not service.has_token_limit
+    with pytest.raises(RuntimeError, match="tokenizer limit"):
+        service.split_for_embedding("text")
+
+
+@pytest.mark.no_network
+def test_embedding_split_rejects_a_character_larger_than_the_model_limit():
+    class FakeTokenizer:
+        def encode(self, value, *, add_special_tokens, truncation):
+            return [0] * (len(value) + 2)
+
+    service = EmbeddingService(embedding_backend="torch")
+    service._embedder = SimpleNamespace(tokenizer=FakeTokenizer(), max_seq_length=2)
+    assert service.has_token_limit
+    assert service.split_for_embedding("") == [""]
+    with pytest.raises(ValueError, match="One character exceeds"):
+        service.split_for_embedding("x")
+
+
+@pytest.mark.no_network
+async def test_embedding_short_ascii_input_uses_safe_token_bound(
+    inline_fake_model_work,
+):
+    class FakeTokenizer:
+        def __init__(self):
+            self.calls = []
+
+        def num_special_tokens_to_add(self, *, pair):
+            return 2
+
+        def encode(self, value, *, add_special_tokens, truncation):
+            self.calls.append(value)
+            return [0] * (len(value) + 2)
+
+    tokenizer = FakeTokenizer()
+    service = EmbeddingService(embedding_backend="torch")
+    service._embedder = SimpleNamespace(
+        tokenizer=tokenizer,
+        max_seq_length=6,
+        encode=lambda values: np.asarray([[1.0] for _ in values]),
+    )
+
+    await service.encode(["abc", "abcd"])
+
+    assert tokenizer.calls == []
+
+
+@pytest.mark.no_network
 def test_cached_stella_tokenizer_splits_policy_valid_episode_without_truncation(
     monkeypatch,
 ):

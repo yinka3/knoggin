@@ -5,10 +5,14 @@ from dataclasses import replace
 
 import pytest
 
-from common.schema.ingestion.contracts import UnknownEndpointDiagnostic
+from common.schema.ingestion.contracts import (
+    ContextBlockMention,
+    UnknownEndpointDiagnostic,
+)
 from common.schema.jev import JevPolicy
 from core.ingestion.context_entity_build import ContextEntityBuildService
 from core.ingestion.text_processor import _ContextBlockText, _FallbackGap
+from core.knowledge.entity.profile import EntityProfile
 from infrastructure.jev_client import JevWorkBudget
 from tests.unit.core.ingestion.test_context_entity_build import (
     BudgetedExtractionJev,
@@ -245,6 +249,92 @@ async def test_exhausted_budget_replays_alias_after_earlier_diagnostics(alias):
         ("Zephyr Dynamics", "known_alias_gap")
     ]
     assert current.jev_work_budget.observations == 1
+
+
+async def test_exhausted_budget_replays_only_literal_candidates_in_current_gaps():
+    current_block = block("Acme works with Vega.")
+    removed_block = block("Ghost was removed.")
+    current = build(blocks=(current_block, removed_block), compiled_domain=domain())
+    current.jev_work_budget = JevWorkBudget(
+        max_calls=1, max_observations=1, observations=1
+    )
+    current.set_unknown_endpoint_diagnostics(
+        (
+            UnknownEndpointDiagnostic(block_id=removed_block.block_id, name="Ghost", entity_type="Company"),
+            UnknownEndpointDiagnostic(block_id=current_block.block_id, name="Vega", entity_type="Company"),
+        )
+    )
+    proc = processor(FakeVP01([]))
+    proc.get_known_aliases = lambda: {"Acme": 701, "Missing": 702}
+    proc.get_profile = lambda _entity_id: _async_value(
+        EntityProfile(
+            canonical_name="Acme",
+            entity_type="Company",
+            topic="Work",
+            project_id="project-1",
+        )
+    )
+    acceptances = [
+        {
+            "candidate_name": name,
+            "evidence_origin": origin,
+            "record": {"evidence_block_ids": [str(block_id)]},
+        }
+        for name, origin, block_id in (
+            ("Ghost", "unknown_relationship_endpoint", removed_block.block_id),
+            ("Vega", "unknown_relationship_endpoint", current_block.block_id),
+            ("Acme", "known_alias_gap", current_block.block_id),
+            ("Missing", "known_alias_gap", current_block.block_id),
+        )
+    ]
+
+    candidates = await proc._prepare_jev_extraction_candidates(
+        current,
+        assembled=_ContextBlockText.from_blocks((current_block, removed_block)),
+        gaps=[_FallbackGap(current_block, ("known_alias_missing_from_extraction",), "")],
+        mentions=[],
+        previous_acceptances=acceptances,
+    )
+
+    assert {(item.name, item.evidence_origin) for item in candidates} == {
+        ("Vega", "unknown_relationship_endpoint"),
+        ("Acme", "known_alias_gap"),
+    }
+    assert next(item for item in candidates if item.name == "Acme").proposed_type == "Company"
+
+
+async def test_fresh_candidate_scan_skips_represented_and_nonliteral_endpoints():
+    current_block = block("Acme works with Vega.")
+    current = build(blocks=(current_block,), compiled_domain=domain())
+    current.jev_work_budget = JevWorkBudget(max_calls=1, max_observations=1)
+    current.set_unknown_endpoint_diagnostics(
+        tuple(
+            UnknownEndpointDiagnostic(block_id=current_block.block_id, name=name, entity_type="Company")
+            for name in ("Acme", "Absent", "Vega")
+        )
+    )
+    proc = processor(FakeVP01([]))
+    proc.get_known_aliases = lambda: {"Acme": 701}
+    represented = ContextBlockMention(
+        block_ids=(current_block.block_id,),
+        name="Acme",
+        entity_type="Company",
+        topic="Work",
+        origin="vp01",
+        source_start=0,
+        source_end=4,
+    )
+
+    candidates = await proc._prepare_jev_extraction_candidates(
+        current,
+        assembled=_ContextBlockText.from_blocks((current_block,)),
+        gaps=[_FallbackGap(current_block, ("unknown_relationship_endpoint",), "")],
+        mentions=[represented],
+    )
+
+    assert [(item.name, item.evidence_origin) for item in candidates] == [
+        ("Vega", "unknown_relationship_endpoint")
+    ]
 
 
 @pytest.mark.parametrize("changed", [None, "evidence", "policy", "removed_gap"])
