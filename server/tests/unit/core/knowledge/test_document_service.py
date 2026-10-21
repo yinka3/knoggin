@@ -453,6 +453,26 @@ class MemoryCursor:
             raise self.postgres.write_error
         normalized = " ".join(query.split())
 
+        if normalized.startswith("UPDATE public.project_documents AS document") and "snapshot.parser_fingerprint" in normalized:
+            project_id, pdf_fingerprint, notebook_fingerprint = params
+            updated = []
+            for row in self.postgres.rows:
+                snapshot = self.postgres.parse_snapshots.get(row.get("current_snapshot_id"))
+                if (
+                    row["project_id"] == project_id
+                    and row["status"] == "indexed"
+                    and snapshot is not None
+                    and snapshot["source_content_hash"] == row["content_hash"]
+                    and (
+                        (row["extension"] == ".pdf" and snapshot["parser_fingerprint"] != pdf_fingerprint)
+                        or (row["extension"] == ".ipynb" and snapshot["parser_fingerprint"] != notebook_fingerprint)
+                    )
+                ):
+                    row.update(status="queued", index_attempt_count=0, next_index_retry_at=None, last_index_failure_kind=None, error_message=None)
+                    updated.append({"document_id": row["document_id"]})
+            self.result = updated
+            return
+
 
         if (
             normalized.startswith("SELECT document_id, content_hash")
@@ -3701,6 +3721,25 @@ async def test_read_document_reports_csv_data_rows_not_physical_file_lines(
         "end_row": 2,
     }
     assert selection["content"] == "1: alpha,1\n2: beta,2"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_recovery_reindexes_legacy_notebook_locator_snapshot(document_harness):
+    service, postgres = document_harness
+    notebook = b'{"cells":[{"cell_type":"markdown","source":["first cell"]}],"metadata":{},"nbformat":4,"nbformat_minor":5}'
+    uploaded = await service.add_document(content=notebook, original_name="notes.ipynb")
+    indexed = await service.index_document(document_id=uploaded["document_id"])
+    old_snapshot_id = indexed["current_snapshot_id"]
+    postgres.parse_snapshots[old_snapshot_id]["parser_fingerprint"] = "0" * 64
+
+    assert await service.indexer.recover_pending_indexes() == 1
+    refreshed = postgres.rows[0]
+    assert refreshed["status"] == "indexed"
+    assert refreshed["current_snapshot_id"] != old_snapshot_id
+    assert old_snapshot_id in postgres.parse_snapshots
+    assert postgres.parse_snapshots[refreshed["current_snapshot_id"]]["parser_fingerprint"] == extraction_module.locator_repair_fingerprints()[".ipynb"]
+    assert await service.indexer.recover_pending_indexes() == 0
 
 
 @pytest.mark.storage

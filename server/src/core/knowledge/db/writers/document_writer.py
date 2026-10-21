@@ -19,6 +19,30 @@ class DocumentWriter:
         self._client = client
         self._project_id = project_id
 
+    async def queue_legacy_locator_reindex(
+        self, *, pdf_fingerprint: str, notebook_fingerprint: str
+    ) -> int:
+        """Queue old indexed snapshots while preserving them until replacement."""
+        async with self._client.transaction() as cur:
+            await cur.execute(
+                """
+                UPDATE public.project_documents AS document
+                SET status = 'queued', index_attempt_count = 0,
+                    next_index_retry_at = NULL, last_index_failure_kind = NULL,
+                    error_message = NULL, updated_at = now()
+                FROM public.document_parse_snapshots AS snapshot
+                WHERE document.project_id = %s
+                  AND document.status = 'indexed'
+                  AND document.current_snapshot_id = snapshot.snapshot_id
+                  AND snapshot.source_content_hash = document.content_hash
+                  AND ((document.extension = '.pdf' AND snapshot.parser_fingerprint <> %s)
+                    OR (document.extension = '.ipynb' AND snapshot.parser_fingerprint <> %s))
+                RETURNING document.document_id
+                """,
+                (self._project_id, pdf_fingerprint, notebook_fingerprint),
+            )
+            return len(await cur.fetchall())
+
     @staticmethod
     def _validate_chunk_embeddings(
         chunks: List[Union["DocumentChunk", str]],

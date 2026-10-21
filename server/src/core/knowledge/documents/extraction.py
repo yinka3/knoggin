@@ -199,6 +199,7 @@ _MARKDOWN_HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 _TEXT_CHUNK_TARGET_CHARS = CHUNK_SIZE_TOKENS * 4
 _DOCLING_CONVERSION_LOCK = threading.RLock()
 _DOCLING_PARSER_CONFIGURATION = {
+    "knoggin_projection_revision": 2,
     "accelerator": "cpu",
     "do_ocr": True,
     "do_table_structure": True,
@@ -218,6 +219,16 @@ def _fingerprint(value: Dict[str, Any]) -> str:
 
 
 _DOCLING_PARSER_FINGERPRINT = _fingerprint(_DOCLING_PARSER_CONFIGURATION)
+
+
+def locator_repair_fingerprints() -> dict[str, str]:
+    """Parser identities that include the notebook and PDF locator repairs."""
+    return {
+        ".pdf": _DOCLING_PARSER_FINGERPRINT,
+        ".ipynb": _fingerprint(
+            {"format": ".ipynb", "mode": "exact_text", "knoggin_projection_revision": 2}
+        ),
+    }
 
 def _dockerfile_language() -> Optional[Language]:
     """Load the Dockerfile grammar while isolating its legacy handle warning."""
@@ -798,6 +809,8 @@ def _extract_docling_snapshot(content: bytes, extension: str) -> DocumentParseSn
 
 def _exact_text_snapshot(text: str, extension: str) -> DocumentParseSnapshot:
     configuration = {"format": extension.lower(), "mode": "exact_text"}
+    if extension.lower() == ".ipynb":
+        configuration["knoggin_projection_revision"] = 2
     return DocumentParseSnapshot(
         text=text,
         structure=configuration,

@@ -28,6 +28,7 @@ from core.knowledge.documents.extraction import (
     DocumentChunk,
     embedding_text,
     extract_and_split_document,
+    locator_repair_fingerprints,
 )
 from core.knowledge.documents.filesystem import ProjectFilesystem
 from core.knowledge.documents.policy import DocumentIndexPolicy
@@ -602,6 +603,11 @@ class DocumentIndexer:
 
     async def recover_pending_indexes(self, limit: int = 16) -> int:
         """Resume durable queued work and repair claims left by a stopped runtime."""
+        fingerprints = locator_repair_fingerprints()
+        await self._writer.queue_legacy_locator_reindex(
+            pdf_fingerprint=fingerprints[".pdf"],
+            notebook_fingerprint=fingerprints[".ipynb"],
+        )
         self._last_recovery_requeued = await self._writer.requeue_interrupted_indexes(
             updated_at=get_now_iso()
         )
