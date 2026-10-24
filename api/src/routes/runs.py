@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from pydantic import ValidationError
-from starlette.responses import StreamingResponse
+from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
 from common.exceptions import (
@@ -19,7 +19,7 @@ from common.schema.document import DocumentSelection, create_document_focus
 from common.schema.source.references import SourceConsulted
 from common.utils.streams import ClosingAsyncIterator
 
-from contracts.sessions import StartRun
+from contracts.sessions import StartRun, SteerRun
 from routes.project_settings import _error, _json
 
 
@@ -56,6 +56,8 @@ async def _events(raw: AsyncIterator, run_id: str, *, runtime=None, session=None
                 data = {}
             if name == "token":
                 event, public = "message_delta", {"content": str(data.get("content", ""))}
+            elif name == "steer_applied":
+                event, public = "steer_applied", {"steer_id": data["steer_id"]}
             elif name in {"tool_start", "tool_end", "tool_error"}:
                 event = "tool"
                 public = {"name": str(data.get("tool", "")), "state": name}
@@ -148,11 +150,13 @@ async def start_run(request):
     try:
         session = await runtime.sessions.get_or_resume_session(session_id)
         focus = await _request_focus(session, body)
+        run_id = str(uuid4())
         raw = await session.open_agent_run_stream(
             Message(content=body.query), model=body.model, agent_id=body.agent_id,
             enabled_tools=body.enabled_tools, document_focus=focus,
             idempotency_key=body.idempotency_key,
             research_mode=body.research_mode,
+            run_id=run_id,
         )
     except SessionBusyError:
         return _error("session_busy", "This session already has an active run", 409)
@@ -162,10 +166,56 @@ async def start_run(request):
         return _error("request_in_progress", "This request is already in progress", 409)
     except ValueError:
         return _error("invalid_run", "Invalid run request", 422)
-    run_id = str(uuid4())
     return OwnedStreamResponse(ClosingAsyncIterator(
         _events(raw, run_id, runtime=runtime, session=session), raw,
     ))
+
+
+async def _active_session(request):
+    runtime = request.app.state.runtime
+    session_id = request.path_params["session_id"]
+    if session_id not in await runtime.sessions.list_sessions():
+        return None
+    return runtime.sessions.get_runtime_session(session_id)
+
+
+async def get_run(request):
+    session = await _active_session(request)
+    if session is None:
+        return _error("run_not_found", "Run not found", 404)
+    status = await session.get_run_status(request.path_params["run_id"])
+    if status is None:
+        return _error("run_not_found", "Run not found", 404)
+    return JSONResponse(status)
+
+
+async def steer_run(request):
+    try:
+        body = SteerRun.model_validate(await _json(request))
+    except ValidationError:
+        return _error("invalid_steer", "Invalid run instruction", 422)
+    session = await _active_session(request)
+    if session is None:
+        return _error("run_not_found", "Run not found", 404)
+    try:
+        result = await session.submit_steer(request.path_params["run_id"], body.instruction)
+    except SessionBusyError:
+        return _error("steer_exists", "This run already has an instruction", 409)
+    if result is None:
+        return _error("run_not_active", "Run is no longer active", 409)
+    return JSONResponse(result, status_code=202)
+
+
+async def stop_run(request):
+    session = await _active_session(request)
+    if session is None:
+        return _error("run_not_found", "Run not found", 404)
+    if not await session.cancel_active_agent_run(run_id=request.path_params["run_id"]):
+        return _error("run_not_active", "Run is no longer active", 409)
+    status = await session.get_run_status(request.path_params["run_id"])
+    if status is None:
+        return _error("run_not_found", "Run not found", 404)
+    return JSONResponse(status)
 
 
 async def _request_focus(session, body):
@@ -192,4 +242,7 @@ async def _request_focus(session, body):
 
 routes = [
     Route("/v1/sessions/{session_id}/runs", start_run, methods=["POST"]),
+    Route("/v1/sessions/{session_id}/runs/{run_id}", get_run, methods=["GET"]),
+    Route("/v1/sessions/{session_id}/runs/{run_id}", stop_run, methods=["DELETE"]),
+    Route("/v1/sessions/{session_id}/runs/{run_id}/steers", steer_run, methods=["POST"]),
 ]

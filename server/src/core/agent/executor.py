@@ -148,12 +148,14 @@ class AgentExecutor:
         *,
         on_successful_completion: Callable[[str], Awaitable[object]] | None = None,
         aac_budget: object | None = None,
+        take_steer: Callable[[], Awaitable[dict | None]] | None = None,
     ):
         self.ctx = ctx
         self.llm = llm
         self.tools = tools
         self._on_successful_completion = on_successful_completion
         self._aac_budget = aac_budget
+        self._take_steer = take_steer
         token_counter = getattr(llm, "count_tokens", None)
         if callable(token_counter):
             ctx.notebook.set_token_counter(token_counter)
@@ -263,6 +265,12 @@ class AgentExecutor:
 
             # Monitoring/Emits
             await self._emit_llm_call(current_model, current_reasoning)
+
+            if self._take_steer is not None:
+                steer = await self._take_steer()
+                if steer is not None:
+                    self.ctx.user_query += "\n\n**User instruction during this run:** " + steer["instruction"]
+                    yield {"event": "steer_applied", "data": {"steer_id": steer["steer_id"]}}
 
             # Call LLM for this step
             pending_tool_calls: List[_ToolCall] = []

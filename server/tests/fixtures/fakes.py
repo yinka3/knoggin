@@ -427,9 +427,21 @@ class FakeKnowledgeStore:
         self.embedding_rebuild_calls = []
         self.accepted_message_ids = {}
         self.closed_exchanges = []
+        self.run_steers = {}
 
     async def get_session_history(self, **kwargs):
         return []
+
+    async def record_run_steer(self, *, message_id, steer, expected_state=None, **kwargs):
+        del kwargs
+        current = self.run_steers.get(message_id)
+        if expected_state is None:
+            if current is not None:
+                return False
+        elif current is None or current["steer_id"] != steer["steer_id"] or current["state"] != expected_state:
+            return False
+        self.run_steers[message_id] = dict(steer)
+        return True
 
     async def allocate_entity_id(self):
         entity_id = self.next_entity_id

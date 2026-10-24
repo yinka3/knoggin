@@ -39,6 +39,20 @@ class StartRun(SessionPreferences):
         return value
 
 
+class SteerRun(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    instruction: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("instruction")
+    @classmethod
+    def nonblank_instruction(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("blank instruction")
+        return value
+
+
 class DocumentFocus(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

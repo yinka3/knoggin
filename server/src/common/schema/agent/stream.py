@@ -176,6 +176,15 @@ class ErrorEvent(_StrictStreamDict):
     data: ErrorData
 
 
+class SteerAppliedData(_StrictStreamDict):
+    steer_id: str
+
+
+class SteerAppliedEvent(_StrictStreamDict):
+    event: Literal["steer_applied"]
+    data: SteerAppliedData
+
+
 # These events are engine-internal. API routes translate them into public
 # HTTP/SSE events rather than serializing this union directly.
 AgentExecutionEvent = Union[
@@ -187,6 +196,7 @@ AgentExecutionEvent = Union[
     ResponseEvent,
     ClarificationEvent,
     ErrorEvent,
+    SteerAppliedEvent,
 ]
 
 AgentStreamEvent = Union[InternalAgentStreamEvent, AgentExecutionEvent]

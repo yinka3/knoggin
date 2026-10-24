@@ -113,3 +113,53 @@ def test_run_stream_emits_scoped_sources_before_completion():
         assert complete["artifact"]["artifact_id"] == "artifact-1"
 
     asyncio.run(exercise())
+
+
+def test_run_steer_and_stop_routes_target_only_the_active_run(monkeypatch, tmp_path):
+    import httpx
+    from app import create_app
+
+    class Session:
+        stopped = False
+
+        async def get_run_status(self, run_id):
+            return {"run_id": run_id, "state": "cancelled" if self.stopped else "running", "steer": None} if run_id == "run-1" else None
+
+        async def submit_steer(self, run_id, instruction):
+            return {"steer_id": "steer-1", "state": "pending"} if run_id == "run-1" else None
+
+        async def cancel_active_agent_run(self, *, run_id):
+            if run_id != "run-1":
+                return False
+            self.stopped = True
+            return True
+
+    class Sessions:
+        session = Session()
+
+        async def list_sessions(self):
+            return {"session-1": {"project_id": "project-1"}}
+
+        def get_runtime_session(self, session_id):
+            return self.session if session_id == "session-1" else None
+
+    async def start(**_kwargs):
+        async def shutdown():
+            pass
+        return SimpleNamespace(sessions=Sessions(), shutdown=shutdown)
+
+    monkeypatch.setattr("app.ApplicationRuntime.start", start)
+    app = create_app(user_name="ada", config_dir=tmp_path)
+
+    async def exercise():
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+                base = "/v1/sessions/session-1/runs/run-1"
+                assert (await client.get(base)).json()["state"] == "running"
+                assert (await client.post(base + "/steers", json={"instruction": "  Focus  "})).status_code == 202
+                assert (await client.post(base + "/steers", json={"instruction": " "})).status_code == 422
+                assert (await client.delete(base)).json()["state"] == "cancelled"
+                assert (await client.get("/v1/sessions/other/runs/run-1")).status_code == 404
+                assert (await client.post("/v1/sessions/session-1/runs/old/steers", json={"instruction": "now"})).status_code == 409
+
+    asyncio.run(exercise())

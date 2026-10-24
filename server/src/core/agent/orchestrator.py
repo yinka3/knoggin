@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, AsyncGenerator, Dict, List, Optional
 
 from loguru import logger
@@ -68,6 +69,8 @@ class AgentOrchestrator:
         request_document_focus: Optional[DocumentFocus] = None,
         research_mode: ResearchMode = "normal",
         run_settings=None,
+        run_id: str | None = None,
+        take_steer: Callable[[], Awaitable[dict | None]] | None = None,
     ) -> AsyncGenerator[AgentExecutionEvent, None]:
         """
         Main entry point for agent execution. Uses modular helpers for initialization.
@@ -75,7 +78,7 @@ class AgentOrchestrator:
         tools = None
         try:
             incoming_user_query = user_query
-            run_id = str(uuid.uuid4())
+            run_id = run_id or str(uuid.uuid4())
             if request_document_focus is not None:
                 request_document_focus = parse_document_focus(request_document_focus)
 
@@ -163,6 +166,7 @@ class AgentOrchestrator:
                 run,
                 context.llm,
                 tools,
+                **({"take_steer": take_steer} if take_steer is not None else {}),
             )
 
             async for event in executor.execute(user_timezone=user_timezone):

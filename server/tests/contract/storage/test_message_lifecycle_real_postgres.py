@@ -24,6 +24,53 @@ async def _seed_session(client, session_id: str) -> None:
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
+async def test_run_steer_follows_owning_exchange(real_postgres_client):
+    client = real_postgres_client
+    await _seed_session(client, "session-steer")
+    writer = MessageLifecycleWriter(client, MessageWriter(client))
+    scope = dict(user_name="ada", project_id="project-1", session_id="session-steer")
+    await writer.create_editable_user_message(
+        {**scope, "id": 903, "role": "user", "content": "Question", "timestamp": 1000,
+         "metadata": {}, "acceptance_key": "content:steer"},
+        edit_window_seconds=600,
+    )
+    pending = {"steer_id": "steer-1", "instruction": "Focus on recovery", "state": "pending"}
+    assert await writer.record_run_steer(**scope, message_id=903, steer=pending)
+    assert not await writer.record_run_steer(**scope, message_id=903, steer=pending)
+    applied = {**pending, "state": "applied"}
+    assert await writer.record_run_steer(
+        **scope, message_id=903, steer=applied, expected_state="pending"
+    )
+    assert not await writer.record_run_steer(
+        **scope, message_id=903, steer=applied, expected_state="pending"
+    )
+    row = await client.fetch_one(
+        "SELECT metadata FROM public.messages WHERE session_id = %s AND message_id = %s",
+        ("session-steer", 903),
+    )
+    assert row["metadata"]["run_steer"] == applied
+    await writer.create_editable_user_message(
+        {**scope, "id": 904, "role": "user", "content": "Another question", "timestamp": 1001,
+         "metadata": {}, "acceptance_key": "content:late-steer"},
+        edit_window_seconds=600,
+    )
+    late = {"steer_id": "steer-2", "instruction": "Too late", "state": "pending"}
+    assert await writer.record_run_steer(**scope, message_id=904, steer=late)
+    await writer.close_user_exchange(**scope, user_message_id=904, outcome="cancelled")
+    assert await writer.record_run_steer(
+        **scope, message_id=904, steer={**late, "state": "undelivered"},
+        expected_state="pending",
+    )
+    closed = await client.fetch_one(
+        "SELECT metadata FROM public.messages WHERE session_id = %s AND message_id = %s",
+        ("session-steer", 904),
+    )
+    assert closed["metadata"]["run_steer"]["state"] == "undelivered"
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
 async def test_acceptance_updates_activity_but_replay_does_not(real_postgres_client):
     client = real_postgres_client
     await _seed_session(client, "session-activity")

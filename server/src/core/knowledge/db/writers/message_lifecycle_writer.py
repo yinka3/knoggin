@@ -45,6 +45,35 @@ class MessageLifecycleWriter:
     def _now_ms() -> int:
         return int(time() * 1000)
 
+    async def record_run_steer(
+        self, *, user_name: str, project_id: str, session_id: str,
+        message_id: int, steer: dict[str, str], expected_state: str | None = None,
+    ) -> bool:
+        """Attach one steer to its open user exchange or advance its state."""
+        scope = (*self._edit_scope(user_name, project_id, session_id, message_id), message_id)
+        if expected_state is None:
+            assignment = "jsonb_set(metadata, '{run_steer}', %s::jsonb, true)"
+            condition = "NOT (metadata ? 'run_steer')"
+            values = (json.dumps(steer), *scope)
+        else:
+            assignment = "jsonb_set(metadata, '{run_steer,state}', to_jsonb(%s::text), true)"
+            condition = "metadata -> 'run_steer' ->> 'steer_id' = %s AND metadata -> 'run_steer' ->> 'state' = %s"
+            values = (steer["state"], *scope, steer["steer_id"], expected_state)
+        exchange_condition = "" if steer["state"] == "undelivered" else "AND exchange_state = 'open'"
+        async with self.client.transaction() as cur:
+            await cur.execute(
+                f"""
+                UPDATE public.messages
+                SET metadata = {assignment}
+                WHERE user_name = %s AND project_id = %s AND session_id = %s
+                  AND message_id = %s AND role = 'user'
+                  {exchange_condition} AND {condition}
+                RETURNING message_id
+                """,
+                values,
+            )
+            return await cur.fetchone() is not None
+
     async def create_editable_user_message(
         self, message: Dict[str, Any], *, edit_window_seconds: int
     ) -> MessageAcceptance:

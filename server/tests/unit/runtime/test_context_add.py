@@ -107,6 +107,7 @@ async def test_unconsumed_admission_has_an_explicit_cleanup_owner(
     ctx, resources = context
     stream = await ctx.open_agent_run_stream(Message(content="never consumed"))
     assert ctx._agent_run_reserved
+    assert (await ctx.get_run_status(stream.run_id))["state"] == "accepted"
 
     if close_method == "aclose":
         await stream.aclose()
@@ -187,6 +188,128 @@ async def test_admitted_defaults_do_not_change_before_stream_iteration(context):
 
 @pytest.mark.runtime
 @pytest.mark.no_network
+async def test_run_steer_applies_to_active_run_and_reports_completion(context):
+    ctx, resources = context
+    waiting = asyncio.Event()
+    resume = asyncio.Event()
+
+    async def handler(kwargs):
+        yield {"event": "token", "data": {"content": "working"}}
+        waiting.set()
+        await resume.wait()
+        steer = await kwargs["take_steer"]()
+        assert steer["instruction"] == "Focus on recovery"
+        yield {"event": "steer_applied", "data": {"steer_id": steer["steer_id"]}}
+        yield _response_event("Answer")
+
+    stream = await ctx.open_agent_run_stream(
+        Message(content="Question"), orchestrator=_FakeTurnOrchestrator(handler), run_id="run-1"
+    )
+    events = []
+
+    async def consume():
+        async for event in stream:
+            events.append(event)
+
+    task = asyncio.create_task(consume())
+    await waiting.wait()
+    pending = await ctx.submit_steer("run-1", "Focus on recovery")
+    assert pending["state"] == "pending"
+    assert (await ctx.get_run_status("run-1"))["steer"]["state"] == "pending"
+    resume.set()
+    await task
+    assert [event["event"] for event in events] == ["token", "steer_applied", "response"]
+    assert (await ctx.get_run_status("run-1"))["steer"]["state"] == "applied"
+    assert (await ctx.get_run_status("run-1"))["state"] == "assistant_final"
+    assert next(iter(resources.knowledge_store.run_steers.values()))["state"] == "applied"
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_run_steer_is_undelivered_if_run_finishes_first(context):
+    ctx, resources = context
+    waiting = asyncio.Event()
+    resume = asyncio.Event()
+
+    async def handler(_kwargs):
+        yield {"event": "token", "data": {"content": "working"}}
+        waiting.set()
+        await resume.wait()
+        yield _response_event("Answer")
+
+    stream = await ctx.open_agent_run_stream(
+        Message(content="Question"), orchestrator=_FakeTurnOrchestrator(handler), run_id="run-1"
+    )
+    task = asyncio.create_task(_consume(stream))
+    await waiting.wait()
+    await ctx.submit_steer("run-1", "Too late")
+    resume.set()
+    await task
+    assert (await ctx.get_run_status("run-1"))["steer"]["state"] == "undelivered"
+    assert next(iter(resources.knowledge_store.run_steers.values()))["state"] == "undelivered"
+    assert await ctx.submit_steer("run-1", "Another") is None
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_pending_steer_becomes_undelivered_on_disconnect(context):
+    ctx, resources = context
+    waiting = asyncio.Event()
+
+    async def handler(_kwargs):
+        yield {"event": "token", "data": {"content": "working"}}
+        waiting.set()
+        await asyncio.sleep(100)
+
+    stream = await ctx.open_agent_run_stream(
+        Message(content="Question"), orchestrator=_FakeTurnOrchestrator(handler), run_id="run-1"
+    )
+    task = asyncio.create_task(_consume(stream))
+    await waiting.wait()
+    await ctx.submit_steer("run-1", "Use another source")
+    await stream.aclose()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    status = await ctx.get_run_status("run-1")
+    assert status["state"] == "cancelled"
+    assert status["steer"]["state"] == "undelivered"
+    assert resources.knowledge_store.closed_exchanges[-1]["outcome"] == "cancelled"
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_only_one_concurrent_steer_is_accepted(context):
+    ctx, _ = context
+    waiting = asyncio.Event()
+
+    async def handler(_kwargs):
+        yield {"event": "token", "data": {"content": "working"}}
+        waiting.set()
+        await asyncio.sleep(100)
+
+    stream = await ctx.open_agent_run_stream(
+        Message(content="Question"), orchestrator=_FakeTurnOrchestrator(handler), run_id="run-1"
+    )
+    task = asyncio.create_task(_consume(stream))
+    await waiting.wait()
+    outcomes = await asyncio.gather(
+        ctx.submit_steer("run-1", "First"),
+        ctx.submit_steer("run-1", "Second"),
+        return_exceptions=True,
+    )
+    assert sum(isinstance(item, SessionBusyError) for item in outcomes) == 1
+    assert sum(isinstance(item, dict) for item in outcomes) == 1
+    await stream.aclose()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def _consume(stream):
+    return [event async for event in stream]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
 async def test_terminal_error_is_durable_before_the_first_error_is_consumed(context):
     ctx, resources = context
 
@@ -256,6 +379,25 @@ async def test_conversation_history_can_exclude_the_current_first_message():
     _, query, params = resources.postgres.calls[-1]
     assert "message_id <= %(up_to_msg_id)s" in query
     assert params["up_to_msg_id"] == 0
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_applied_steer_is_visible_to_later_agent_context(context):
+    ctx, resources = context
+
+    async def history(**kwargs):
+        del kwargs
+        return [{"role": "user", "content": "Original request", "timestamp": 1000,
+                 "metadata": {"run_steer": {"state": "applied", "instruction": "Focus on recovery"}}},
+                {"role": "user", "content": "Next request", "timestamp": 2000,
+                 "metadata": {"run_steer": {"state": "undelivered", "instruction": "Ignore"}}}]
+
+    resources.knowledge_store.get_session_history = history
+    turns = await ctx.get_conversation_context(2)
+    assert turns[0]["message"] == "Original request\n\nUser instruction during this run: Focus on recovery"
+    assert turns[0]["content"] == turns[0]["message"]
+    assert turns[1]["message"] == "Next request"
 
 
 @pytest.mark.runtime

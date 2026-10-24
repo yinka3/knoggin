@@ -141,6 +141,9 @@ class KnowledgeStore:
             message, edit_window_seconds=edit_window_seconds
         )
 
+    async def record_run_steer(self, **kwargs) -> bool:
+        return await self._message_lifecycle_writer.record_run_steer(**kwargs)
+
     async def get_user_agent_exchange(
         self,
         user_message_id: int,

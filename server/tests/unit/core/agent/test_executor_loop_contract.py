@@ -75,6 +75,29 @@ class ScriptedLLM:
         return "A concise evidence summary."
 
 
+@pytest.mark.no_network
+async def test_steer_enters_the_next_model_prompt_after_an_active_step():
+    llm = ScriptedLLM([
+        [{"event": "step_error", "data": {"kind": "provider", "message": "retry"}}],
+        [tool_call_event("submit_answer", '{"content":"done"}', "submit-1"), completed_event()],
+    ])
+    run = make_run(user_query="Original request")
+    calls = 0
+
+    async def take_steer():
+        nonlocal calls
+        calls += 1
+        return None if calls == 1 else {"steer_id": "steer-1", "instruction": "Focus on recovery"}
+
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None), take_steer=take_steer)
+    events = [event async for event in executor._execute_run()]
+
+    assert len(llm.calls) == 2
+    assert "Focus on recovery" not in llm.calls[0]["user"]
+    assert "Focus on recovery" in llm.calls[1]["user"]
+    assert [event["event"] for event in events][-2:] == ["steer_applied", "response"]
+
+
 def tool_call_event(name, arguments, call_id):
     return tool_calls_event([(name, arguments, call_id)])
 

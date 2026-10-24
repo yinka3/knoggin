@@ -7,6 +7,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Dict, List, Optional
+from uuid import uuid4
 
 from loguru import logger
 
@@ -49,6 +50,7 @@ class _AdmittedAgentStream:
     def __init__(self, session, accepted, **kwargs):
         self.session = session
         self.accepted = accepted
+        self.run_id = kwargs["run_id"]
         self.stream = session._run_admitted_agent_stream(accepted, **kwargs)
         self.started = False
         self.closed = False
@@ -153,6 +155,11 @@ class SessionRuntime:
         self._active_agent_stream: _AdmittedAgentStream | None = None
         self._active_idempotency_key: str | None = None
         self._active_request_fingerprint: str | None = None
+        self._active_run_id: str | None = None
+        self._active_user_message_id: int | None = None
+        self._last_run_status: dict[str, Any] | None = None
+        self._active_run_state: str | None = None
+        self._active_steer: dict[str, str] | None = None
         self._agent_runs_closed = False
         self._closed = False
         self._shutdown_event_emitted = False
@@ -169,10 +176,12 @@ class SessionRuntime:
     def llm(self):
         return self.resources.llm_service
 
-    async def cancel_active_agent_run(self) -> bool:
+    async def cancel_active_agent_run(self, *, run_id: str | None = None) -> bool:
         """Cancel only this session's active agent execution, if any."""
 
         async with self._agent_run_lock:
+            if run_id is not None and run_id != self._active_run_id:
+                return False
             task = self._active_agent_task
             stream = self._active_agent_stream
         if stream is not None and not stream.closed:
@@ -188,6 +197,57 @@ class SessionRuntime:
             pass
         return True
 
+    async def get_run_status(self, run_id: str) -> dict[str, Any] | None:
+        async with self._agent_run_lock:
+            if run_id == self._active_run_id:
+                return self._run_status_unlocked()
+            if self._last_run_status and run_id == self._last_run_status["run_id"]:
+                return deepcopy(self._last_run_status)
+            return None
+
+    def _run_status_unlocked(self) -> dict[str, Any]:
+        return {
+            "run_id": self._active_run_id,
+            "state": self._active_run_state,
+            "steer": deepcopy(self._active_steer),
+        }
+
+    async def submit_steer(self, run_id: str, instruction: str) -> dict[str, str] | None:
+        if not instruction or not instruction.strip() or len(instruction) > 4000:
+            raise ValueError("Steer instruction must contain 1 to 4000 characters")
+        async with self._agent_run_lock:
+            if run_id != self._active_run_id or self._active_run_state != "running":
+                return None
+            if self._active_steer is not None:
+                raise SessionBusyError()
+            steer = {
+                "steer_id": str(uuid4()),
+                "instruction": instruction.strip(),
+                "state": "pending",
+            }
+            if self._active_user_message_id is None or not await self.knowledge_store.record_run_steer(
+                user_name=self.user_name, project_id=self.project_id,
+                session_id=self.session_id, message_id=self._active_user_message_id,
+                steer=steer,
+            ):
+                return None
+            self._active_steer = steer
+            return {"steer_id": steer["steer_id"], "state": "pending"}
+
+    async def _take_steer(self) -> dict[str, str] | None:
+        async with self._agent_run_lock:
+            steer = self._active_steer
+            if steer is None or steer["state"] != "pending":
+                return None
+            if not await self.knowledge_store.record_run_steer(
+                user_name=self.user_name, project_id=self.project_id,
+                session_id=self.session_id, message_id=self._active_user_message_id,
+                steer={**steer, "state": "applied"}, expected_state="pending",
+            ):
+                raise RuntimeError("Steer could not be recorded before delivery")
+            steer["state"] = "applied"
+            return {"steer_id": steer["steer_id"], "instruction": steer["instruction"]}
+
     async def open_agent_run_stream(
         self,
         message: Message,
@@ -201,6 +261,7 @@ class SessionRuntime:
         pasted_text_spans: Optional[List[Dict]] = None,
         idempotency_key: Optional[str] = None,
         research_mode: ResearchMode = "normal",
+        run_id: str | None = None,
     ) -> AsyncGenerator[AgentExecutionEvent, None]:
         """Admit and persist a run before returning its event stream.
 
@@ -270,6 +331,10 @@ class SessionRuntime:
             document_focus = deepcopy(document_focus)
             pasted_text_spans = deepcopy(pasted_text_spans)
             self._agent_run_reserved = True
+            self._active_run_id = run_id or str(uuid4())
+            self._active_run_state = "admitting"
+            self._active_steer = None
+            self._active_user_message_id = None
             self._active_idempotency_key = normalized_idempotency_key
             self._active_request_fingerprint = request_fingerprint
             self._active_agent_task = asyncio.current_task()
@@ -331,9 +396,12 @@ class SessionRuntime:
             pasted_text_spans=pasted_text_spans,
             research_mode=research_mode,
             run_settings=run_settings,
+            run_id=self._active_run_id,
         )
         self._active_agent_stream = stream
         self._active_agent_task = None
+        self._active_run_state = "accepted"
+        self._active_user_message_id = accepted.id
         return stream
 
     def _require_message_ingestion_ready(self) -> None:
@@ -356,6 +424,7 @@ class SessionRuntime:
         pasted_text_spans: Optional[List[Dict]],
         research_mode: ResearchMode,
         run_settings: SessionRunSettings,
+        run_id: str,
     ) -> AsyncGenerator[AgentExecutionEvent, None]:
         """Execute one already-persisted, exclusively admitted run."""
 
@@ -376,6 +445,7 @@ class SessionRuntime:
         async with self._agent_run_lock:
             shutting_down = self._agent_runs_closed
             self._active_agent_task = task
+            self._active_run_state = "running"
 
         try:
             if shutting_down:
@@ -402,6 +472,8 @@ class SessionRuntime:
                 pasted_text_spans=pasted_text_spans,
                 research_mode=research_mode,
                 run_settings=run_settings,
+                run_id=run_id,
+                take_steer=self._take_steer,
             ):
                 if event["event"] == "response":
                     if response_seen:
@@ -488,6 +560,8 @@ class SessionRuntime:
                 },
             }
         finally:
+            async with self._agent_run_lock:
+                self._active_run_state = exchange_outcome
             try:
                 if exchange_outcome not in {"assistant_final", "clarification"}:
                     await self._close_user_exchange(
@@ -513,7 +587,25 @@ class SessionRuntime:
                 return
             if task is None or self._active_agent_task is task:
                 self._active_agent_task = None
+            if self._active_run_id is not None:
+                if self._active_steer is not None and self._active_steer["state"] == "pending":
+                    self._active_steer["state"] = "undelivered"
+                    try:
+                        await self.knowledge_store.record_run_steer(
+                            user_name=self.user_name, project_id=self.project_id,
+                            session_id=self.session_id, message_id=self._active_user_message_id,
+                            steer=self._active_steer, expected_state="pending",
+                        )
+                    except Exception:
+                        logger.exception("Failed to record undelivered steer for {}", self.session_id)
+                if self._active_run_state in {"admitting", "accepted", "running"}:
+                    self._active_run_state = "cancelled"
+                self._last_run_status = self._run_status_unlocked()
             self._agent_run_reserved = False
+            self._active_run_id = None
+            self._active_user_message_id = None
+            self._active_run_state = None
+            self._active_steer = None
             self._active_idempotency_key = None
             self._active_request_fingerprint = None
             self._active_agent_stream = None
@@ -978,14 +1070,21 @@ class SessionRuntime:
 
         results = []
         for turn in turns:
+            content = turn["content"]
+            steer = (turn.get("metadata") or {}).get("run_steer")
+            if (turn["role"] == "user" and isinstance(steer, dict)
+                    and steer.get("state") == "applied"
+                    and isinstance(steer.get("instruction"), str)):
+                content = f"{content}\n\nUser instruction during this run: {steer['instruction']}"
             role_label = "USER" if turn["role"] == "user" else "AGENT"
             ts = datetime.fromtimestamp(turn["timestamp"] / 1000, tz=timezone.utc)
             date_str = ts.strftime("%Y-%m-%d %H:%M")
             results.append(
                 {
                     **turn,
+                    "content": content,
                     "timestamp": ts.isoformat(),
-                    "message": turn["content"],
+                    "message": content,
                     "role_label": role_label,
                     "relative": f"[{date_str}]",
                 }
