@@ -229,13 +229,3 @@ class ApplicationRuntime:
             raise error from failures[0].error
         self._shutdown_error = None
         self._shutdown_complete = True
-
-    def application_port(self, *, default_domain_config=None):
-        """Return the public application adapter for this live runtime."""
-
-        from runtime.api_port import ApplicationRuntimePort
-
-        return ApplicationRuntimePort(
-            self,
-            default_domain_config=default_domain_config,
-        )

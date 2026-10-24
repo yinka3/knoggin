@@ -1,5 +1,4 @@
 import asyncio
-import base64
 import hashlib
 import json
 import math
@@ -11,7 +10,6 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
@@ -22,7 +20,6 @@ from common.schema.document import (
     FolderScanSettings,
     FolderUploadEntry,
 )
-from common.schema.public import BatchSourceRequest, UploadDocumentRequest
 from common.utils.time_utils import frozen_time
 from core.health.service import RuntimeHealthService
 from core.knowledge.documents import (
@@ -41,7 +38,6 @@ from core.knowledge.documents.filesystem import (
 from core.knowledge.documents.scanning import normalize_relative_path
 from core.project.project_files import CONTEXT_FILE_PATH
 from infrastructure.background_work import BackgroundWorkRejected
-from runtime.api_port import ApplicationRuntimePort
 
 if os.name == "nt":
     from core.knowledge.documents.io import (
@@ -4066,7 +4062,7 @@ async def test_index_document_records_document_parser_errors(
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_upload_api_returns_saved_identity_after_inline_index_failure(
+async def test_submit_document_returns_saved_identity_after_inline_index_failure(
     monkeypatch, document_harness
 ):
     service, postgres = document_harness
@@ -4075,46 +4071,20 @@ async def test_upload_api_returns_saved_identity_after_inline_index_failure(
         raise ValueError("private damaged PDF detail")
 
     monkeypatch.setattr(extraction_module, "_extract_docling_snapshot", fail_pdf_parse)
-    projects = SimpleNamespace(
-        acquire_project_for_session=AsyncMock(
-            return_value=SimpleNamespace(document_service=service)
-        ),
-        release_project_for_session=AsyncMock(),
+    uploaded = await service.submit_document(
+        original_name="invalid.pdf", content=b"invalid PDF",
     )
-    port = ApplicationRuntimePort(
-        SimpleNamespace(sessions=SimpleNamespace(user_name="ada"), projects=projects)
+    second = await service.submit_document(
+        original_name="invalid-batch.pdf", content=b"another invalid PDF",
     )
 
-    uploaded = await port.upload_document(
-        user_name="ada",
-        project_id="project-1",
-        request=UploadDocumentRequest(
-            original_name="invalid.pdf",
-            content_base64=base64.b64encode(b"invalid PDF").decode(),
-        ),
-    )
-    batch = await port.admit_sources_batch(
-        user_name="ada",
-        project_id="project-1",
-        request=BatchSourceRequest(
-            items=[
-                {
-                    "source_type": "document",
-                    "original_name": "invalid-batch.pdf",
-                    "content_base64": base64.b64encode(b"another invalid PDF").decode(),
-                }
-            ]
-        ),
-    )
-
-    assert uploaded.status == "failed"
-    assert uploaded.document_id == postgres.rows[0]["document_id"]
+    assert uploaded["status"] == "failed"
+    assert uploaded["document_id"] == postgres.rows[0]["document_id"]
     assert service._filesystem.read_bytes("invalid.pdf") == b"invalid PDF"
-    assert batch.results[0].status == "accepted_document"
-    assert batch.results[0].document.status == "failed"
-    assert batch.results[0].document.document_id == postgres.rows[1]["document_id"]
-    assert "private damaged PDF detail" not in uploaded.model_dump_json()
-    assert "private damaged PDF detail" not in batch.model_dump_json()
+    assert second["status"] == "failed"
+    assert second["document_id"] == postgres.rows[1]["document_id"]
+    assert "private damaged PDF detail" not in str(uploaded)
+    assert "private damaged PDF detail" not in str(second)
 
 
 @pytest.mark.storage

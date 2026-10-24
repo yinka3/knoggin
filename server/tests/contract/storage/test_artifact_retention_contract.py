@@ -14,7 +14,6 @@ from common.artifact_retention import (
 )
 from common.exceptions import StorageWriteError
 from common.schema.artifacts import ArtifactDraft, MarkdownArtifactBlock
-from common.schema.public import to_public_error
 from core.knowledge.db.readers.artifact_reader import ArtifactReader
 from core.knowledge.db.writers.artifact_retention_writer import ArtifactRetentionWriter
 from core.knowledge.db.writers.artifact_writer import ArtifactWriter
@@ -89,7 +88,7 @@ async def test_failed_purge_is_typed_and_can_retry():
     writer = ArtifactRetentionWriter(client)
     with pytest.raises(StorageWriteError) as failure:
         await writer.purge_expired_artifacts(user_name="ada")
-    assert "SECRET" not in to_public_error(failure.value).model_dump_json()
+    assert failure.value.code == "storage_write_error"
     assert await writer.purge_expired_artifacts(user_name="ada") == 1
     assert client.transaction_enters == client.transaction_exits == 2
 

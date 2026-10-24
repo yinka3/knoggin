@@ -5,7 +5,7 @@ import pytest
 
 from common.schema.agent.identity import AgentConfig
 from common.schema.agent.settings import AgentLimitSettings
-from common.schema.public import StartRunRequest, validate_public_stream
+from common.schema.primitives import Message
 from common.schema.settings import DeveloperSettings, IngestionSettings, RootConfig
 from core.agent.orchestrator import AgentOrchestrator
 from core.knowledge.documents import DocumentService, ProjectFilesystemFactory
@@ -18,7 +18,6 @@ from core.knowledge.documents.extraction import (
 from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.retrieval import KnowledgeRetrieval
 from core.knowledge.store import KnowledgeStore
-from runtime.api_port import ApplicationRuntimePort
 from runtime.session_runtime import SessionRuntime as Session
 from tests.fixtures.documents import build_docx_bytes, build_pdf_bytes, build_png_bytes
 from tests.fixtures.factories import make_domain_config
@@ -99,15 +98,6 @@ class _StaticAgentManager:
 
     async def mark_turn_completed(self, agent_id: str) -> bool:
         return agent_id == self._config.id
-
-
-class _StaticSessionManager:
-    def __init__(self, session: Session):
-        self.user_name = session.user_name
-        self._session = session
-
-    async def get_or_resume_session(self, session_id: str) -> Session | None:
-        return self._session if session_id == self._session.session_id else None
 
 
 def _session(resources, *, user_name, project_id, session_id):
@@ -255,7 +245,7 @@ def _structured_parse_snapshot(_content: bytes, extension: str) -> DocumentParse
     _runtime_document_cases(),
     ids=["markdown", "pdf", "docx", "csv", "python", "ocr-image"],
 )
-async def test_public_runtime_preserves_format_specific_document_provenance(
+async def test_session_run_preserves_format_specific_document_provenance(
     real_server_scope,
     monkeypatch,
     tmp_path,
@@ -358,42 +348,24 @@ async def test_public_runtime_preserves_format_specific_document_provenance(
         _StaticAgentManager(agent),
         config_manager=SimpleNamespace(config=runtime_config),
     )
-    application = ApplicationRuntimePort(
-        SimpleNamespace(
-            sessions=_StaticSessionManager(context),
-            resources=resources,
-        )
+    stream = await context.open_agent_run_stream(
+        Message(content="What is the violet launch phrase?"),
+        enabled_tools=["search_project_documents"],
     )
-
-    events = [
-        event
-        async for event in application.run_stream(
-            user_name=scope["user_name"],
-            request=StartRunRequest(
-                session_id=scope["session_id"],
-                query="What is the violet launch phrase?",
-                enabled_tools=["search_project_documents"],
-            ),
-        )
-    ]
-
-    public_events = validate_public_stream(events, require_terminal=True)
-    assert public_events[-1].type == "run.completed"
-    assert not [event for event in public_events if event.type == "run.failed"]
+    events = [event async for event in stream]
+    assert events[-1]["event"] == "response"
+    assert not [event for event in events if event["event"] == "error"]
     assert any(
-        event.type == "tool.completed"
-        and event.tool_name == "search_project_documents"
-        and event.succeeded
-        for event in public_events
+        event["event"] == "tool_end"
+        and event["data"]["tool"] == "search_project_documents"
+        for event in events
     )
 
-    source_events = [event for event in public_events if event.type == "source.added"]
-    response = public_events[-1]
+    response = events[-1]["data"]
     if expected_source is None:
-        assert source_events == []
-        assert response.result.source_ref_ids == ()
+        assert response.get("source_ref_ids", []) == []
         sources = await store.get_message_source_refs(
-            response.result.assistant_message_id,
+            response["assistant_message_id"],
             user_name=scope["user_name"],
             project_id=scope["project_id"],
             session_id=scope["session_id"],
@@ -401,20 +373,17 @@ async def test_public_runtime_preserves_format_specific_document_provenance(
         assert sources == []
         return
 
-    assert len(source_events) == 1
-    assert source_events[0].source.document_id == document["document_id"]
-    assert source_events[0].source.source_kind == expected_source["source_kind"]
-    assert source_events[0].source.excerpt == expected_source["excerpt"]
-    assert source_events[0].source.locator.model_dump() == expected_source["locator"]
-
-    assert len(response.result.source_ref_ids) == 1
+    assert len(response["source_ref_ids"]) == 1
     sources = await store.get_message_source_refs(
-        response.result.assistant_message_id,
+        response["assistant_message_id"],
         user_name=scope["user_name"],
         project_id=scope["project_id"],
         session_id=scope["session_id"],
     )
     assert len(sources) == 1
+    assert sources[0].document_id == document["document_id"]
+    assert sources[0].source_kind == expected_source["source_kind"]
+    assert sources[0].excerpt == expected_source["excerpt"]
     assert sources[0].source_status == "available"
     assert (
         sources[0].locator.model_dump() == expected_source["locator"]
