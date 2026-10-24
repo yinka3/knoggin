@@ -334,6 +334,7 @@ class AgentRun:
     history: List[Dict] = field(default_factory=list)
     document_focus: Optional[DocumentFocus] = None
     document_selection_context: Optional[Dict[str, Any]] = None
+    selected_notebook: Optional[Dict[str, Any]] = None
     project_briefing: ProjectBriefing = field(
         default_factory=lambda: ProjectBriefing(
             mode="adaptive",
@@ -389,6 +390,7 @@ class AgentRun:
         history: Optional[List[Dict]] = None,
         document_focus: Optional[DocumentFocus] = None,
         document_selection_context: Optional[Dict[str, Any]] = None,
+        selected_notebook: Optional[Dict[str, Any]] = None,
         notebook: Optional[RunNotebook] = None,
         is_community: bool = False,
         current_participants: Optional[List[str]] = None,
@@ -454,6 +456,7 @@ class AgentRun:
             history=list(history or []),
             document_focus=document_focus,
             document_selection_context=document_selection_context,
+            selected_notebook=selected_notebook,
             project_briefing=ProjectBriefing.for_run(
                 mode=limits.project_briefing_mode,
                 user_query=user_query,
@@ -824,6 +827,7 @@ class AgentRun:
         self.short_uuid_references.clear()
         self.history.clear()
         self.initial_source_candidates.clear()
+        self.selected_notebook = None
         self.project_briefing.clear_content()
         self.notebook.clear()
         self.source_candidates.clear()

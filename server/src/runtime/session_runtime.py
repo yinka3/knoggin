@@ -261,6 +261,7 @@ class SessionRuntime:
         pasted_text_spans: Optional[List[Dict]] = None,
         idempotency_key: Optional[str] = None,
         research_mode: ResearchMode = "normal",
+        selected_notebook: dict | None = None,
         run_id: str | None = None,
     ) -> AsyncGenerator[AgentExecutionEvent, None]:
         """Admit and persist a run before returning its event stream.
@@ -293,6 +294,7 @@ class SessionRuntime:
                 document_focus=document_focus,
                 pasted_text_spans=pasted_text_spans,
                 research_mode=research_mode,
+                selected_notebook=selected_notebook,
             )
             if normalized_idempotency_key is not None
             else None
@@ -302,6 +304,14 @@ class SessionRuntime:
                 **message.metadata,
                 "idempotency_key": normalized_idempotency_key,
                 _REQUEST_FINGERPRINT_METADATA_KEY: request_fingerprint,
+            }
+        if selected_notebook is not None:
+            message.metadata = {
+                **message.metadata,
+                "selected_notebook": {
+                    "notebook_id": selected_notebook["notebook_id"],
+                    "revision": selected_notebook["revision"],
+                },
             }
 
         async with self._agent_run_lock:
@@ -330,6 +340,7 @@ class SessionRuntime:
             enabled_tools = list(enabled_tools) if enabled_tools is not None else None
             document_focus = deepcopy(document_focus)
             pasted_text_spans = deepcopy(pasted_text_spans)
+            selected_notebook = deepcopy(selected_notebook)
             self._agent_run_reserved = True
             self._active_run_id = run_id or str(uuid4())
             self._active_run_state = "admitting"
@@ -395,6 +406,7 @@ class SessionRuntime:
             document_focus=document_focus,
             pasted_text_spans=pasted_text_spans,
             research_mode=research_mode,
+            selected_notebook=selected_notebook,
             run_settings=run_settings,
             run_id=self._active_run_id,
         )
@@ -423,6 +435,7 @@ class SessionRuntime:
         document_focus: Optional[DocumentFocus],
         pasted_text_spans: Optional[List[Dict]],
         research_mode: ResearchMode,
+        selected_notebook: dict | None,
         run_settings: SessionRunSettings,
         run_id: str,
     ) -> AsyncGenerator[AgentExecutionEvent, None]:
@@ -471,6 +484,7 @@ class SessionRuntime:
                 user_message_id=accepted.id,
                 pasted_text_spans=pasted_text_spans,
                 research_mode=research_mode,
+                selected_notebook=selected_notebook,
                 run_settings=run_settings,
                 run_id=run_id,
                 take_steer=self._take_steer,
@@ -753,6 +767,7 @@ class SessionRuntime:
         document_focus: DocumentFocus | None,
         pasted_text_spans: list[dict] | None,
         research_mode: ResearchMode,
+        selected_notebook: dict | None = None,
     ) -> str:
         """Hash the caller-controlled inputs for one logical submission."""
 
@@ -783,6 +798,11 @@ class SessionRuntime:
             "document_focus": focus,
             "pasted_text_spans": pasted_text_spans,
             "research_mode": research_mode,
+            "selected_notebook": (
+                {"notebook_id": selected_notebook["notebook_id"],
+                 "revision": selected_notebook["revision"]}
+                if selected_notebook is not None else None
+            ),
         }
         encoded = json.dumps(
             payload,

@@ -5,7 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from routes.runs import OwnedStreamResponse, _events, _request_focus
+from routes.runs import OwnedStreamResponse, _events, _request_focus, start_run
+from routes.runs import _selected_notebook
 from common.utils.streams import ClosingAsyncIterator
 
 
@@ -65,6 +66,89 @@ def test_run_focus_is_resolved_before_admission():
         assert focus.mode == "request"
         assert focus.document_id == "doc-1"
         assert calls == [{"document_id": "doc-1", "path_prefix": None}]
+
+    asyncio.run(exercise())
+
+
+def test_selected_notebook_snapshot_is_bounded_and_withholds_changed_passages():
+    notebook_id = "00000000-0000-0000-0000-000000000001"
+    entries = [
+        {"entry_id": "one", "note": "Compare these"},
+        {"entry_id": "two", "note": None},
+    ]
+    view = {"notebook": {"revision": 3, "entries": entries}, "items": [
+        {"entry_id": "one", "kind": "source_ref", "target_id": "ref-1", "status": "current",
+         "source": {"title": "Report", "excerpt": "Observed text", "locator": {"page": 2}}},
+        {"entry_id": "two", "kind": "source_ref", "target_id": "ref-2", "status": "changed",
+         "source": {"title": "Old report", "excerpt": "Unverified text"}},
+    ]}
+
+    class Store:
+        async def get(self, project_id, requested_id):
+            assert (project_id, requested_id) == ("project-1", notebook_id)
+            return {"view": "source_desk"}
+
+        async def source_desk(self, project_id, requested_id):
+            return view
+
+    runtime = SimpleNamespace(projects=SimpleNamespace(notebooks=Store()))
+    selected = asyncio.run(_selected_notebook(runtime, "project-1", notebook_id))
+    assert selected["revision"] == 3
+    assert "Observed text" in selected["context"]
+    assert "Unverified text" not in selected["context"]
+    assert '"status": "changed"' in selected["context"]
+
+
+def test_start_run_passes_selected_notebook_without_changing_query():
+    notebook_id = "00000000-0000-0000-0000-000000000002"
+    calls = []
+
+    class Session:
+        async def open_agent_run_stream(self, message, **kwargs):
+            calls.append((message, kwargs))
+
+            async def events():
+                yield {"event": "response", "data": {"content": "Done"}}
+
+            return events()
+
+    class Notebooks:
+        async def get(self, project_id, requested_id):
+            return {"view": "source_desk"}
+
+        async def source_desk(self, project_id, requested_id):
+            return {"notebook": {"revision": 2, "entries": []}, "items": []}
+
+    class Projects:
+        notebooks = Notebooks()
+
+        async def get_project(self, project_id):
+            return {"status": "active"}
+
+    class Sessions:
+        async def list_sessions(self):
+            return {"session-1": {"project_id": "project-1"}}
+
+        async def get_or_resume_session(self, session_id):
+            return Session()
+
+    class Request:
+        path_params = {"session_id": "session-1"}
+        app = SimpleNamespace(state=SimpleNamespace(runtime=SimpleNamespace(
+            projects=Projects(), sessions=Sessions(),
+        )))
+
+        async def json(self):
+            return {"query": "What changed?", "notebook_id": notebook_id}
+
+    async def exercise():
+        response = await start_run(Request())
+        assert isinstance(response, OwnedStreamResponse)
+        assert calls[0][0].content == "What changed?"
+        assert calls[0][1]["selected_notebook"] == {
+            "notebook_id": notebook_id, "revision": 2, "context": "",
+        }
+        await response.owned_stream.aclose()
 
     asyncio.run(exercise())
 

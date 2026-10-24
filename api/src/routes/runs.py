@@ -18,6 +18,7 @@ from common.schema.primitives import Message
 from common.schema.document import DocumentSelection, create_document_focus
 from common.schema.source.references import SourceConsulted
 from common.utils.streams import ClosingAsyncIterator
+from core.project.notebook_store import NotebookConflict
 
 from contracts.sessions import StartRun, SteerRun
 from routes.project_settings import _error, _json
@@ -41,9 +42,15 @@ def _frame(event: str, data: dict) -> bytes:
     return f"event: {event}\ndata: {json.dumps(data, separators=(',', ':'))}\n\n".encode()
 
 
-async def _events(raw: AsyncIterator, run_id: str, *, runtime=None, session=None):
+async def _events(raw: AsyncIterator, run_id: str, *, runtime=None, session=None, selected_notebook=None):
     sequence = 0
-    yield _frame("run_started", {"run_id": run_id, "sequence": sequence})
+    started = {"run_id": run_id, "sequence": sequence}
+    if selected_notebook is not None:
+        started["selected_notebook"] = {
+            "notebook_id": selected_notebook["notebook_id"],
+            "revision": selected_notebook["revision"],
+        }
+    yield _frame("run_started", started)
     sequence += 1
     terminal = False
     try:
@@ -150,12 +157,16 @@ async def start_run(request):
     try:
         session = await runtime.sessions.get_or_resume_session(session_id)
         focus = await _request_focus(session, body)
+        selected_notebook = await _selected_notebook(runtime, metadata["project_id"], body.notebook_id)
+        if body.notebook_id is not None and selected_notebook is None:
+            return _error("notebook_not_found", "Notebook not found", 404)
         run_id = str(uuid4())
         raw = await session.open_agent_run_stream(
             Message(content=body.query), model=body.model, agent_id=body.agent_id,
             enabled_tools=body.enabled_tools, document_focus=focus,
             idempotency_key=body.idempotency_key,
             research_mode=body.research_mode,
+            selected_notebook=selected_notebook,
             run_id=run_id,
         )
     except SessionBusyError:
@@ -164,11 +175,61 @@ async def start_run(request):
         return _error("idempotency_conflict", "This request key has different content", 409)
     except RequestInProgressError:
         return _error("request_in_progress", "This request is already in progress", 409)
+    except NotebookConflict:
+        return _error("notebook_conflict", "Notebook changed while starting the run", 409)
     except ValueError:
         return _error("invalid_run", "Invalid run request", 422)
     return OwnedStreamResponse(ClosingAsyncIterator(
-        _events(raw, run_id, runtime=runtime, session=session), raw,
+        _events(raw, run_id, runtime=runtime, session=session, selected_notebook=selected_notebook), raw,
     ))
+
+
+async def _selected_notebook(runtime, project_id, notebook_id):
+    if notebook_id is None:
+        return None
+    store = runtime.projects.notebooks
+    row = await store.get(project_id, str(notebook_id))
+    if row is None:
+        return None
+    view = await (
+        store.source_desk(project_id, str(notebook_id)) if row["view"] == "source_desk"
+        else store.timeline(project_id, str(notebook_id))
+    )
+    if view is None:
+        return None
+    entries = {entry["entry_id"]: entry for entry in view["notebook"]["entries"]}
+    lines = []
+    length = 0
+    for item in view["items"]:
+        entry = entries[item["entry_id"]]
+        source = item["source"] or {}
+        line = {
+            "kind": item["kind"], "target_id": item["target_id"],
+            "status": item["status"],
+            "title": str(source.get("title") or "")[:200],
+            "note": str(entry.get("note") or "")[:400],
+        }
+        if item["status"] == "current":
+            for key in ("url", "excerpt", "summary", "locator", "source_kind"):
+                if key in source:
+                    line[key] = source[key]
+            if "excerpt" in line:
+                line["excerpt"] = str(line["excerpt"])[:1000]
+            if "summary" in line:
+                line["summary"] = str(line["summary"])[:500]
+        if row["view"] == "timeline":
+            line["time"] = item["time"]
+            line["time_kind"] = item["time_kind"]
+        encoded = json.dumps(line, ensure_ascii=False, default=str)
+        if length + len(encoded) + len(lines) > 10_000:
+            lines.append("[Additional notebook entries omitted due to context limit]")
+            break
+        lines.append(encoded)
+        length += len(encoded)
+    return {
+        "notebook_id": str(notebook_id), "revision": view["notebook"]["revision"],
+        "context": "\n".join(lines),
+    }
 
 
 async def _active_session(request):

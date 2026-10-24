@@ -68,6 +68,7 @@ class AgentOrchestrator:
         pasted_text_spans: Optional[List[Dict]] = None,
         request_document_focus: Optional[DocumentFocus] = None,
         research_mode: ResearchMode = "normal",
+        selected_notebook: dict | None = None,
         run_settings=None,
         run_id: str | None = None,
         take_steer: Callable[[], Awaitable[dict | None]] | None = None,
@@ -151,6 +152,7 @@ class AgentOrchestrator:
                 history=conversation_history or [],
                 document_focus=effective_document_focus,
                 document_selection_context=document_selection_context,
+                selected_notebook=selected_notebook,
                 initial_source_candidates=self._initial_source_candidates(
                     context=context,
                     run_id=run_id,

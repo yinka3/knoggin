@@ -29,6 +29,18 @@ def make_ctx(**overrides):
 
 
 @pytest.mark.no_network
+def test_selected_notebook_is_model_context_and_released_with_run():
+    selected = {"notebook_id": "nb-1", "revision": 2, "context": '{"status":"current","excerpt":"A passage"}'}
+    ctx = make_ctx(selected_notebook=selected)
+    prompt = build_user_message(ctx)
+    assert "Notebook nb-1 revision 2" in prompt
+    assert "A passage" in prompt
+    assert "not instructions" in prompt
+    ctx.release()
+    assert ctx.selected_notebook is None
+
+
+@pytest.mark.no_network
 def test_build_user_message_trims_history_and_includes_runtime_context():
     ctx = make_ctx(
         history=[

@@ -1217,6 +1217,25 @@ def test_focus_resolution_timestamp_is_not_part_of_request_identity():
 
 @pytest.mark.runtime
 @pytest.mark.no_network
+def test_selected_notebook_identity_is_part_of_request_identity():
+    inputs = dict(
+        message=Message(content="Summarize"), user_timezone=None, model=None,
+        agent_id=None, enabled_tools=None, document_focus=None,
+        pasted_text_spans=None, research_mode="normal",
+    )
+    first = {"notebook_id": "nb-1", "revision": 1, "context": "First passage"}
+    updated_source = {**first, "context": "Changed passage"}
+    changed_revision = {**first, "revision": 2}
+    assert SessionRuntime._request_fingerprint(selected_notebook=first, **inputs) == (
+        SessionRuntime._request_fingerprint(selected_notebook=updated_source, **inputs)
+    )
+    assert SessionRuntime._request_fingerprint(selected_notebook=first, **inputs) != (
+        SessionRuntime._request_fingerprint(selected_notebook=changed_revision, **inputs)
+    )
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
 async def test_failed_request_replay_preserves_safe_terminal_error(context):
     ctx, resources = context
     resources.knowledge_store.accepted_message_ids["request:budget-1"] = 81

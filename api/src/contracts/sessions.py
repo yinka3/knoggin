@@ -1,6 +1,7 @@
 """Durable session preferences and run input."""
 
 from typing import Annotated, Literal, Union
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
@@ -26,6 +27,7 @@ class StartRun(SessionPreferences):
     query: str = Field(min_length=1, max_length=100_000)
     research_mode: Literal["normal", "research", "deep_research"] = "normal"
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
+    notebook_id: UUID | None = None
     document_focus: Annotated[
         Union["RunDocumentFocus", "RunSubtreeFocus"], Field(discriminator="target_type")
     ] | None = None

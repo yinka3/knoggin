@@ -79,7 +79,10 @@ For an existing project, replace `{project_id}` in these routes:
   recent messages. `GET/PUT/DELETE /v1/sessions/{session_id}/document-focus`
   reads, pins, and clears a document or subtree focus.
 - `POST /v1/sessions/{session_id}/runs` accepts `{"query":"..."}` plus optional
-  model, agent, tool, research mode, document focus, and idempotency choices.
+  model, agent, tool, research mode, document focus, notebook, and idempotency choices.
+  Set `notebook_id` to a project notebook UUID to pass its current, bounded
+  snapshot to this run. Missing or changed sources are marked; changed passages
+  are withheld until verified. The saved user query remains unchanged.
   It returns an SSE stream with `run_started`, `message_delta`, `tool`,
   `source_added`, `usage_updated`, `steer_applied`, `run_completed`, and `run_failed` events.
   Closing the HTTP stream closes the owned engine run.
