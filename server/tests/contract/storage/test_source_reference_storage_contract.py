@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import pytest
 from psycopg.errors import CheckViolation
 
+from common.exceptions import SavedWebLinkAlreadyExistsError
 from common.schema.source.references import SourceReferenceCandidate
 from core.knowledge.db.readers.source_reference_reader import SourceReferenceReader
 from core.knowledge.db.writers.document_writer import DocumentWriter
@@ -12,6 +13,26 @@ from core.knowledge.db.writers.session_deletion_writer import SessionDeletionWri
 from core.knowledge.db.writers.source_reference_writer import SourceReferenceWriter
 from core.knowledge.documents import DocumentService
 from tests.fixtures.fakes import RecordingPostgresClient
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_real_postgres_saved_link_duplicate_has_domain_error(real_postgres_client):
+    await _seed_scope(real_postgres_client)
+    service = DocumentService.__new__(DocumentService)
+    service.project_id = "project-1"
+    service._writer = DocumentWriter(real_postgres_client, "project-1")
+
+    first = await service.save_web_link(url="HTTPS://Example.test:443/release")
+    with pytest.raises(SavedWebLinkAlreadyExistsError):
+        await service.save_web_link(url="https://example.test/release")
+
+    assert first["url"] == "https://example.test/release"
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM public.saved_web_links WHERE project_id = %s",
+        ("project-1",),
+    ) == {"count": 1}
 
 DOCUMENT_ID = "00000000-0000-0000-0000-000000000101"
 TEXT_DOCUMENT_ID = "00000000-0000-0000-0000-000000000102"

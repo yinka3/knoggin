@@ -9,6 +9,7 @@ from common.exceptions import (
     LLMBudgetExceededError,
     NotFoundError,
     RequestInProgressError,
+    SavedWebLinkAlreadyExistsError,
     SessionBusyError,
     StorageError,
     WorkspaceConflictError,
@@ -26,6 +27,8 @@ async def handle_error(_request, error: Exception) -> JSONResponse:
         status, code, message = 409, "idempotency_conflict", "Request key conflicts"
     elif isinstance(error, RequestInProgressError):
         status, code, message = 409, "request_in_progress", "Request is in progress"
+    elif isinstance(error, SavedWebLinkAlreadyExistsError):
+        status, code, message = 409, "link_exists", "Web link already saved"
     elif isinstance(error, WorkspaceConflictError):
         status, code, message = 409, "workspace_conflict", "Workspace changed"
     elif isinstance(error, LLMBudgetExceededError):

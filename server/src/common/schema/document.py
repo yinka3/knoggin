@@ -3,7 +3,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Annotated, Dict, List, Literal, Optional, Set, Union
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
 
 from pydantic import (
@@ -50,10 +50,26 @@ class SavedWebLink(BaseModel):
     @classmethod
     def _require_http_url(cls, value: str) -> str:
         normalized = value.strip()
-        parsed = urlsplit(normalized)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        if len(normalized) > 2048 or any(char.isspace() or ord(char) < 32 for char in normalized):
             raise ValueError("saved web link url must be an absolute HTTP(S) URL")
-        return normalized
+        try:
+            parsed = urlsplit(normalized)
+            host = parsed.hostname
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError("saved web link url must be an absolute HTTP(S) URL") from exc
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not host
+            or parsed.username is not None
+            or parsed.password is not None
+            or (port is not None and port < 1)
+        ):
+            raise ValueError("saved web link url must be an absolute HTTP(S) URL")
+        authority = f"[{host}]" if ":" in host else host
+        if port is not None and (parsed.scheme, port) not in {("http", 80), ("https", 443)}:
+            authority += f":{port}"
+        return urlunsplit((parsed.scheme, authority, parsed.path, parsed.query, parsed.fragment))
 
     @field_validator("title", "summary")
     @classmethod

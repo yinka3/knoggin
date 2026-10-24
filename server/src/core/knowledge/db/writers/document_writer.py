@@ -5,6 +5,7 @@ import uuid
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
+from common.exceptions import SavedWebLinkAlreadyExistsError
 from common.utils.time_utils import parse_iso_time
 from infrastructure.postgres_client import PostgresClient
 
@@ -782,6 +783,7 @@ class DocumentWriter:
                     updated_at
                 )
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (project_id, url) DO NOTHING
                 RETURNING
                     link_id,
                     project_id,
@@ -803,7 +805,7 @@ class DocumentWriter:
             )
             row = await cur.fetchone()
         if row is None:
-            raise RuntimeError("Saved web link insert did not return a row")
+            raise SavedWebLinkAlreadyExistsError()
         return dict(row)
 
     async def update_saved_web_link(

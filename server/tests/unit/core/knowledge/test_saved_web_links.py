@@ -5,6 +5,7 @@ from uuid import UUID
 
 import pytest
 
+from common.exceptions import SavedWebLinkAlreadyExistsError
 from core.knowledge.documents import DocumentService
 
 
@@ -30,7 +31,8 @@ class BookmarkCursor:
                 row["project_id"] == project_id and row["url"] == url
                 for row in self._store.rows
             ):
-                raise ValueError("duplicate saved web link")
+                self._result = None
+                return
             row = {
                 "link_id": link_id,
                 "project_id": project_id,
@@ -163,6 +165,28 @@ async def test_saved_web_link_projects_postgres_uuid_identifier_as_text():
     database_row = {**store.rows[0], "link_id": UUID(saved["link_id"])}
 
     assert service._public_saved_web_link(database_row) == saved
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_saved_link_normalizes_host_and_reports_duplicate():
+    store = BookmarkStore()
+    service = make_service(store)
+    saved = await service.save_web_link(url="HTTPS://Example.COM:443/research")
+
+    assert saved["url"] == "https://example.com/research"
+    with pytest.raises(SavedWebLinkAlreadyExistsError):
+        await service.save_web_link(url="https://example.com/research")
+    assert len(store.rows) == 1
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_saved_link_rejects_malformed_authority():
+    service = make_service(BookmarkStore())
+    for url in ("https://@/path", "https://user@example.com", "https://example.com:abc", "https://example.com/a b"):
+        with pytest.raises(ValueError):
+            await service.save_web_link(url=url)
 
 
 @pytest.mark.unit

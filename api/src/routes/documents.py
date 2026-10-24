@@ -11,6 +11,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from common.document_limits import MAX_DOCUMENT_BASE64_LENGTH, MAX_DOCUMENT_SIZE
+from common.exceptions import SavedWebLinkAlreadyExistsError
 
 from contracts.documents import (
     BatchDocument, BatchSources, OcrPreflight, PromoteSource, SaveWebLink, UpdateWebLink,
@@ -243,6 +244,8 @@ async def save_link(request):
     async with project_documents(request.app.state.runtime, request.path_params["project_id"]) as service:
         try:
             row = await service.save_web_link(**body.model_dump())
+        except SavedWebLinkAlreadyExistsError:
+            return _error("link_exists", "Web link already saved", 409)
         except (ValidationError, ValueError):
             return _error("invalid_link", "Invalid web link", 422)
     return JSONResponse(_public(row, LINK_FIELDS), status_code=201)
@@ -296,9 +299,14 @@ async def promote_source(request):
         )
         if source is None:
             return _error("source_not_found", "Source not found", 404)
-        row = await project.document_service.promote_source(
-            source, title=body.title, summary=body.summary,
-        )
+        try:
+            row = await project.document_service.promote_source(
+                source, title=body.title, summary=body.summary,
+            )
+        except SavedWebLinkAlreadyExistsError:
+            return _error("link_exists", "Web link already saved", 409)
+        except (ValidationError, ValueError):
+            return _error("invalid_source", "Invalid source", 422)
     return JSONResponse(_public(row, LINK_FIELDS), status_code=201)
 
 

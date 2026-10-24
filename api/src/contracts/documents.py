@@ -21,7 +21,7 @@ class UploadDocument(BaseModel):
 class SaveWebLink(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    url: str = Field(min_length=1)
+    url: str = Field(min_length=1, max_length=2048)
     title: str | None = Field(default=None, max_length=512)
     summary: str | None = Field(default=None, max_length=4000)
 

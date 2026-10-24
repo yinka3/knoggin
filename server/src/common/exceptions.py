@@ -49,6 +49,13 @@ class SessionBusyError(EngineError):
         )
 
 
+class SavedWebLinkAlreadyExistsError(EngineError):
+    """A project already contains the normalized bookmark URL."""
+
+    def __init__(self):
+        super().__init__("This project already has this web link", code="link_exists")
+
+
 class IdempotencyConflictError(EngineError):
     """Raised when one request key is reused for a different submission."""
 
