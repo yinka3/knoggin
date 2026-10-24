@@ -118,6 +118,10 @@ CORS currently permits `localhost:3000` and `127.0.0.1:3000`.
   `expected_revision`; a stale revision returns 409. Entries are ordered and
   point to sources in the same project. Archived projects remain readable but
   cannot be edited.
+- `GET /v1/projects/{project_id}/notebooks/{notebook_id}/source-desk`
+  resolves the ordered sources with `current`, `changed`, or `missing` status.
+  A `source_ref` contains a captured passage and its locator. A saved web link
+  contains only its saved URL and summary; it does not imply the page was read.
 
 ## Other API routes in progress
 

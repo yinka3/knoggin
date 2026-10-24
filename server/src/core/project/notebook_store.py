@@ -32,7 +32,7 @@ class ProjectNotebookStore:
             raise NotebookConflict("Notebook edits require an active project")
 
     async def _source(self, cursor, project_id: str, kind: str, target_id: str):
-        if kind in {"document", "saved_link", "artifact"}:
+        if kind in {"document", "saved_link", "artifact", "source_ref"}:
             try:
                 UUID(target_id)
             except ValueError as exc:
@@ -40,24 +40,30 @@ class ProjectNotebookStore:
         if kind == "message":
             if not target_id.isdecimal():
                 raise NotebookReferenceUnavailable("Invalid message ID")
-            query = """SELECT selected_revision::text AS version
+            query = """SELECT selected_revision::text AS version,
+                              left(content, 2000) AS excerpt,
+                              'Message ' || message_id::text AS title
                        FROM public.messages WHERE user_name = %s AND project_id = %s
                          AND message_id = %s AND lifecycle_state <> 'superseded'"""
             args = (self.user_name, project_id, int(target_id))
         elif kind == "document":
-            query = """SELECT content_hash AS version FROM public.project_documents
+            query = """SELECT content_hash AS version, original_name AS title
+                       FROM public.project_documents
                        WHERE project_id = %s AND document_id = %s AND status <> 'deleted'"""
             args = (project_id, target_id)
         elif kind == "saved_link":
-            query = """SELECT updated_at::text AS version FROM public.saved_web_links
+            query = """SELECT updated_at::text AS version, title, url, summary
+                       FROM public.saved_web_links
                        WHERE project_id = %s AND link_id = %s"""
             args = (project_id, target_id)
         elif kind == "episode":
-            query = """SELECT updated_at::text AS version FROM public.episodes
+            query = """SELECT updated_at::text AS version, left(summary, 2000) AS excerpt,
+                              'Episode ' || episode_id AS title
+                       FROM public.episodes
                        WHERE project_id = %s AND episode_id = %s"""
             args = (project_id, target_id)
         elif kind == "artifact":
-            query = """SELECT artifact.current_revision::text AS version
+            query = """SELECT artifact.current_revision::text AS version, artifact.title
                        FROM public.project_artifacts AS artifact
                        JOIN public.sessions AS session
                          ON session.session_id = artifact.session_id
@@ -68,6 +74,28 @@ class ProjectNotebookStore:
                               (session.status = 'deleted' AND
                                session.deleted_at > statement_timestamp() - %s::interval))"""
             args = (self.user_name, project_id, target_id, self.user_name, ARTIFACT_RETENTION_PERIOD)
+        elif kind == "source_ref":
+            query = """SELECT ref.content_hash AS version,
+                              coalesce(ref.metadata ->> 'document_name', ref.metadata ->> 'title', ref.canonical_url,
+                                       'Captured source passage') AS title,
+                              left(ref.excerpt, 2000) AS excerpt,
+                              ref.canonical_url AS url, ref.locator,
+                              ref.source_kind,
+                              CASE WHEN ref.document_id IS NOT NULL AND
+                                  (document.document_id IS NULL OR document.status = 'deleted' OR
+                                   document.current_snapshot_id IS DISTINCT FROM ref.parse_snapshot_id)
+                              THEN true ELSE false END AS source_stale
+                       FROM public.message_source_refs AS ref
+                       JOIN public.messages AS message
+                         ON message.message_id = ref.message_id
+                        AND message.project_id = ref.project_id
+                        AND message.session_id = ref.session_id
+                       LEFT JOIN public.project_documents AS document
+                         ON document.document_id = ref.document_id
+                        AND document.project_id = ref.source_project_id
+                       WHERE ref.source_ref_id = %s AND ref.project_id = %s
+                         AND message.user_name = %s AND message.role = 'assistant'"""
+            args = (target_id, project_id, self.user_name)
         else:
             raise NotebookReferenceUnavailable("Unknown source kind")
         await cursor.execute(query, args)
@@ -140,6 +168,33 @@ class ProjectNotebookStore:
             (project_id, notebook_id, self.user_name, self.user_name),
         )
         return self._row(row)
+
+    async def source_desk(self, project_id: str, notebook_id: str):
+        notebook = await self.get(project_id, notebook_id)
+        if notebook is None:
+            return None
+        if notebook["view"] != "source_desk":
+            raise NotebookConflict("Notebook is not a source desk")
+        items = []
+        async with self.client.transaction() as cursor:
+            for entry in notebook["entries"]:
+                source = await self._source(
+                    cursor, project_id, entry["kind"], entry["target_id"]
+                )
+                status = (
+                    "missing" if source is None else
+                    "changed" if source["version"] != entry["source_version"]
+                    or source.get("source_stale") else "current"
+                )
+                items.append({
+                    "entry_id": entry["entry_id"],
+                    "status": status,
+                    "saved_version": entry["source_version"],
+                    "current_version": source["version"] if source else None,
+                    "source": {key: value for key, value in source.items()
+                               if key not in {"version", "source_stale"}} if source else None,
+                })
+        return {"notebook": notebook, "items": items}
 
     async def replace(self, project_id: str, notebook_id: str, body):
         async with self.client.transaction() as cursor:

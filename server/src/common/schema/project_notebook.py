@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from datetime import datetime
 from typing import Literal
 from uuid import UUID
@@ -10,7 +9,9 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 NotebookView = Literal["source_desk", "timeline"]
-NotebookSourceKind = Literal["document", "saved_link", "message", "episode", "artifact"]
+NotebookSourceKind = Literal[
+    "document", "saved_link", "message", "episode", "artifact", "source_ref"
+]
 
 
 class NotebookEntryInput(BaseModel):
@@ -19,7 +20,6 @@ class NotebookEntryInput(BaseModel):
     entry_id: UUID | None = None
     kind: NotebookSourceKind
     target_id: str = Field(min_length=1, max_length=200)
-    locator: dict | None = None
     note: str | None = Field(default=None, max_length=4000)
     event_at: datetime | None = None
 
@@ -38,16 +38,9 @@ class NotebookEntryInput(BaseModel):
             raise ValueError("event_at must include a time zone")
         return value
 
-    @field_validator("locator")
-    @classmethod
-    def bounded_locator(cls, value: dict | None) -> dict | None:
-        if value is not None and len(json.dumps(value, ensure_ascii=False)) > 4096:
-            raise ValueError("locator is too large")
-        return value
-
     @model_validator(mode="after")
     def canonical_target(self):
-        if self.kind in {"document", "saved_link", "artifact"}:
+        if self.kind in {"document", "saved_link", "artifact", "source_ref"}:
             self.target_id = str(UUID(self.target_id))
         elif self.kind == "message":
             number = int(self.target_id)
