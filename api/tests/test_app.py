@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from api.app import create_app
+from app import create_app
 
 
 def test_one_runtime_owns_http_lifespan(monkeypatch, tmp_path):
@@ -19,7 +19,7 @@ def test_one_runtime_owns_http_lifespan(monkeypatch, tmp_path):
 
         return SimpleNamespace(shutdown=shutdown)
 
-    monkeypatch.setattr("api.app.ApplicationRuntime.start", start)
+    monkeypatch.setattr("app.ApplicationRuntime.start", start)
     app = create_app(user_name=" ada ", config_dir=tmp_path)
 
     async def exercise():
@@ -53,7 +53,7 @@ def test_start_failure_does_not_publish_runtime(monkeypatch, tmp_path):
         assert (user_name, config_dir) == ("ada", Path(tmp_path))
         raise RuntimeError("startup failed")
 
-    monkeypatch.setattr("api.app.ApplicationRuntime.start", start)
+    monkeypatch.setattr("app.ApplicationRuntime.start", start)
     app = create_app(user_name="ada", config_dir=tmp_path)
     async def exercise():
         async with app.router.lifespan_context(app):

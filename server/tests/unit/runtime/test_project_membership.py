@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -130,6 +131,109 @@ async def test_project_runtime_releases_its_exact_final_lease():
     assert manager._project_leases == {}
     assert manager.active_projects == {}
     assert shutdowns == ["project-1"]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_final_lease_release_allows_scheduler_job_to_finish_under_maintenance_lock():
+    manager = make_manager(RecordingPostgres())
+    finished = asyncio.Event()
+
+    async def shutdown():
+        async def running_job():
+            async with manager.maintenance_service.lock:
+                finished.set()
+
+        await asyncio.wait_for(asyncio.create_task(running_job()), timeout=0.2)
+
+    manager.active_projects["project-1"] = SimpleNamespace(shutdown=shutdown)
+    manager._project_leases["project-1"] = {"session-1"}
+
+    await asyncio.wait_for(
+        manager.release_project_for_session("project-1", "session-1"),
+        timeout=0.3,
+    )
+    assert finished.is_set()
+    assert manager.active_projects == {}
+    assert manager._project_leases == {}
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_new_lease_waits_for_final_runtime_shutdown():
+    manager = make_manager(RecordingPostgres())
+    shutting_down = asyncio.Event()
+    finish_shutdown = asyncio.Event()
+
+    async def old_shutdown():
+        shutting_down.set()
+        await finish_shutdown.wait()
+
+    async def new_shutdown():
+        pass
+
+    old_state = SimpleNamespace(shutdown=old_shutdown)
+    new_state = SimpleNamespace(shutdown=new_shutdown)
+    manager.active_projects["project-1"] = old_state
+    manager._project_leases["project-1"] = {"session-1"}
+
+    async def get_project(_project_id):
+        return {"status": ProjectStatus.ACTIVE.value}
+
+    async def readable_projects(_project_id, *, project_metadata):
+        return ["project-1"]
+
+    async def create_project_runtime(**_kwargs):
+        return new_state
+
+    manager.get_project = get_project
+    manager.get_readable_project_ids = readable_projects
+    manager.project_factory.create = create_project_runtime
+
+    release = asyncio.create_task(
+        manager.release_project_for_session("project-1", "session-1")
+    )
+    await shutting_down.wait()
+    acquire = asyncio.create_task(
+        manager.acquire_project_for_session("project-1", "session-2")
+    )
+    await asyncio.sleep(0)
+    assert not acquire.done()
+    assert manager.active_projects["project-1"] is old_state
+
+    finish_shutdown.set()
+    await release
+    assert await acquire is new_state
+    assert manager._project_leases["project-1"] == {"session-2"}
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_cancelled_final_release_still_settles_shutdown():
+    manager = make_manager(RecordingPostgres())
+    shutting_down = asyncio.Event()
+    finish_shutdown = asyncio.Event()
+
+    async def shutdown():
+        shutting_down.set()
+        await finish_shutdown.wait()
+
+    manager.active_projects["project-1"] = SimpleNamespace(shutdown=shutdown)
+    manager._project_leases["project-1"] = {"session-1"}
+    release = asyncio.create_task(
+        manager.release_project_for_session("project-1", "session-1")
+    )
+    await shutting_down.wait()
+    release.cancel()
+    await asyncio.sleep(0)
+    assert not release.done()
+    assert manager._project_leases["project-1"] == {"session-1"}
+
+    finish_shutdown.set()
+    with pytest.raises(asyncio.CancelledError):
+        await release
+    assert manager._project_leases == {}
+    assert manager.active_projects == {}
 
 
 @pytest.mark.runtime

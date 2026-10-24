@@ -11,11 +11,12 @@ from loguru import logger
 from common.conf.domain_config import DomainConfig
 from common.conf.manager import ConfigManager
 from common.exceptions import WorkspaceConflictError
+from common.schema.document import FolderScanSettings
 from common.scoping import build_readable_project_ids
 from common.utils.lifecycle import settle_owned_task
 from core.knowledge.db.writers.artifact_retention_writer import ArtifactRetentionWriter
 from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
-from core.knowledge.documents.filesystem import ProjectFilesystemFactory
+from core.knowledge.documents import DocumentService, ProjectFilesystemFactory
 from core.knowledge.entity.maintenance_service import EntityMaintenanceService
 from core.knowledge.jobs.application_maintenance_scheduler import (
     ApplicationMaintenanceScheduler,
@@ -100,6 +101,7 @@ class ProjectManager:
         self._project_deletion_writer = ProjectDeletionWriter(self.pg)
         self.active_projects: Dict[str, ProjectRuntime] = {}
         self._project_leases: Dict[str, set[str]] = {}
+        self._project_shutdown_tasks: Dict[str, asyncio.Task[None]] = {}
         self.maintenance_service = ProjectMaintenanceService(
             resources=resources,
             user_name=user_name,
@@ -575,6 +577,10 @@ class ProjectManager:
         async with self.maintenance_service.lock:
             if self._closed:
                 raise RuntimeError("ProjectManager is shutting down")
+            if project_id in self._project_shutdown_tasks:
+                raise WorkspaceConflictError(
+                    f"Project '{project_id}' is finishing runtime shutdown"
+                )
             await self._require_domain_project(project_id, allow_archived=False)
             active_state = self.active_projects.get(project_id)
             if active_state is not None:
@@ -589,6 +595,37 @@ class ProjectManager:
                 candidate=parsed,
                 expected_version=expected_version,
             )
+
+    async def _scan_settings_service(self, project_id: str) -> DocumentService:
+        if project_id in self._project_shutdown_tasks:
+            raise WorkspaceConflictError(
+                f"Project '{project_id}' is finishing runtime shutdown"
+            )
+        project = await self.get_project(project_id)
+        if project is None or project["status"] != ProjectStatus.ACTIVE.value:
+            raise ValueError("Scan settings require an active project")
+        active = self.active_projects.get(project_id)
+        if active is not None:
+            return active.document_service
+        # Scan settings need storage, not a running indexer or project scheduler.
+        return DocumentService(project_id, self.pg, self.resources.embedding)
+
+    async def get_document_scan_settings(self, project_id: str) -> FolderScanSettings:
+        async with self.maintenance_service.lock:
+            service = await self._scan_settings_service(project_id)
+            return await service.get_scan_settings()
+
+    async def save_document_scan_settings(
+        self, project_id: str, settings: FolderScanSettings
+    ) -> FolderScanSettings:
+        async with self.maintenance_service.lock:
+            service = await self._scan_settings_service(project_id)
+            return await service.save_scan_settings(settings)
+
+    async def reset_document_scan_settings(self, project_id: str) -> FolderScanSettings:
+        async with self.maintenance_service.lock:
+            service = await self._scan_settings_service(project_id)
+            return await service.reset_scan_settings()
 
     async def get_readable_project_ids(
         self,
@@ -974,13 +1011,18 @@ class ProjectManager:
         self, project_id: str, session_id: str
     ) -> ProjectRuntime:
         """Acquire one exact session lease on a live project runtime."""
-        async with self.maintenance_service.lock:
-            if self._closed:
-                raise RuntimeError("ProjectManager is shutting down")
-            return await self._acquire_project_for_session(
-                project_id,
-                session_id,
-            )
+        while True:
+            async with self.maintenance_service.lock:
+                if self._closed:
+                    raise RuntimeError("ProjectManager is shutting down")
+                stopping = self._project_shutdown_tasks.get(project_id)
+                if stopping is None:
+                    return await self._acquire_project_for_session(
+                        project_id, session_id,
+                    )
+            # The last lease is settling outside the maintenance lock so jobs
+            # can finish their own maintenance work before scheduler shutdown.
+            await asyncio.shield(stopping)
 
     async def _acquire_project_for_session(
         self, project_id: str, session_id: str
@@ -1041,17 +1083,43 @@ class ProjectManager:
                 raise RuntimeError(
                     f"Session '{session_id}' does not hold a lease for project '{project_id}'"
                 )
-            if len(leases) > 1:
+            stopping = self._project_shutdown_tasks.get(project_id)
+            if stopping is None and len(leases) > 1:
                 leases.remove(session_id)
                 return
+            if stopping is None:
+                state = self.active_projects.get(project_id)
+                if state is None:
+                    leases.remove(session_id)
+                    self._project_leases.pop(project_id, None)
+                    return
+                stopping = asyncio.create_task(
+                    self._finish_final_project_release(project_id, session_id, state)
+                )
+                self._project_shutdown_tasks[project_id] = stopping
+        try:
+            await asyncio.shield(stopping)
+        except asyncio.CancelledError:
+            await settle_owned_task(stopping)
+            raise
 
-            state = self.active_projects.get(project_id)
-            if state is not None:
-                await state.shutdown()
-                self.active_projects.pop(project_id, None)
-                logger.info(f"Released ProjectRuntime for project_id: {project_id}")
-            leases.remove(session_id)
-            self._project_leases.pop(project_id, None)
+    async def _finish_final_project_release(
+        self, project_id: str, session_id: str, state: ProjectRuntime
+    ) -> None:
+        completed = False
+        try:
+            await state.shutdown()
+            completed = True
+        finally:
+            async with self.maintenance_service.lock:
+                if completed:
+                    if self.active_projects.get(project_id) is state:
+                        self.active_projects.pop(project_id, None)
+                    leases = self._project_leases[project_id]
+                    leases.remove(session_id)
+                    self._project_leases.pop(project_id, None)
+                    logger.info(f"Released ProjectRuntime for project_id: {project_id}")
+                self._project_shutdown_tasks.pop(project_id, None)
 
     async def shutdown(self) -> None:
         """Stop every remaining project runtime before shared resources close."""
@@ -1062,6 +1130,12 @@ class ProjectManager:
             if self._closed and not self.active_projects:
                 return
             self._closed = True
+            pending_releases = tuple(self._project_shutdown_tasks.values())
+
+        if pending_releases:
+            await asyncio.gather(*pending_releases, return_exceptions=True)
+
+        async with self.maintenance_service.lock:
             states = list(self.active_projects.items())
 
         results = await asyncio.gather(
