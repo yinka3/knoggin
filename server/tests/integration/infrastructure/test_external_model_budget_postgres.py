@@ -27,7 +27,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.requires_postgres]
 @pytest.fixture(scope="module")
 def budget_database_url():
     configured = os.environ.get(
-        "KNOGGIN_TEST_DATABASE_URL",
+        "TEST_DATABASE_URL",
         "postgresql://knoggin:knoggin@localhost:5432/knoggin_db",
     )
     params = conninfo_to_dict(configured)

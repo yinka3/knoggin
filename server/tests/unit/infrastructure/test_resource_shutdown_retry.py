@@ -69,7 +69,7 @@ def test_explicit_worker_count_rejects_invalid_values(workers):
     from common.exceptions import ConfigurationError
 
     with pytest.raises(ConfigurationError, match="positive integer"):
-        RuntimeResources()._configure_startup(num_workers=workers)
+        RuntimeResources()._configure_startup(thread_workers=workers)
 
 
 async def test_cancelled_root_waits_until_cleanup_settles():

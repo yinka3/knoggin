@@ -9,7 +9,7 @@ import pytest
 
 from common.exceptions import DependencyError
 from core.knowledge.documents.extraction import extract_and_split_document
-from core.knowledge.services.embedding_service import EmbeddingService
+from core.knowledge.embedding_service import EmbeddingService
 from tests.fixtures.documents import build_pdf_bytes
 from tests.unit.core.knowledge.test_retrieval_embedding_smoke import (
     load_local_embedding_service,
@@ -27,7 +27,7 @@ async def test_cached_model_stack_concurrency_chunking_and_reload():
         if service.embedding_backend == "onnx":
             assert service.onnx_provider
             expected_provider = os.environ.get(
-                "KNOGGIN_SEMANTIC_SMOKE_EXPECTED_PROVIDER"
+                "SEMANTIC_SMOKE_EXPECTED_PROVIDER"
             )
             if expected_provider:
                 assert service.onnx_provider == expected_provider
@@ -93,7 +93,7 @@ def test_cached_docling_pdf_conversion(monkeypatch):
             build_pdf_bytes("Cached PDF model smoke text."), ".pdf"
         )
     except DependencyError as exc:
-        if os.environ.get("KNOGGIN_REQUIRE_LOCAL_MODELS") == "1":
+        if os.environ.get("REQUIRE_LOCAL_MODELS") == "1":
             pytest.fail(f"Required Docling PDF models are unavailable: {exc}")
         pytest.skip(f"Docling PDF models are unavailable: {exc}")
 

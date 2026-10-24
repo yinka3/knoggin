@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from time import perf_counter
 from typing import Awaitable, Callable, TypeVar
 
-from common.exceptions import KnogginError
+from common.exceptions import EngineError
 from common.schema.health import sanitize_health_details
 
 ResultT = TypeVar("ResultT")
@@ -26,7 +26,7 @@ class QueuedBackgroundWork:
     coalesce_key: str | None = None
 
 
-class BackgroundWorkRejected(KnogginError):
+class BackgroundWorkRejected(EngineError):
     """Raised when the bounded global queue cannot admit more work."""
 
     def __init__(

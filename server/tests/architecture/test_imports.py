@@ -10,7 +10,7 @@ def test_server_package_imports():
     modules = [
         import_module("core"),
         import_module("core.session"),
-        import_module("core.agent.services.agent_manager"),
+        import_module("core.agent.agent_manager"),
     ]
 
     assert all(module is not None for module in modules)

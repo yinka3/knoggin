@@ -8,6 +8,7 @@ import pytest
 from common.exceptions import NotFoundError
 from common.schema.artifacts import ArtifactReference
 from common.schema.health import HealthActivity, HealthSnapshot
+from common.schema.jev import JevSettings
 from common.schema.public import (
     CreateProjectRequest,
     CreateSessionRequest,
@@ -18,6 +19,7 @@ from common.schema.public import (
     StartRunRequest,
     validate_public_stream,
 )
+from common.schema.settings import RootConfig
 from core.knowledge.maintenance.maintenance_impact import MaintenanceImpactPlanner
 from core.knowledge.maintenance.maintenance_reviews import (
     EntityMergePlan,
@@ -353,6 +355,39 @@ def port():
         resources=SimpleNamespace(knowledge_store=FakeKnowledgeStore(artifact)),
     )
     return ApplicationRuntimePort(runtime), runtime, session
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_settings_read_and_status_show_jev_and_pending_restart_without_secrets(port):
+    application, runtime, _ = port
+    startup = RootConfig()
+    changed = RootConfig.model_validate(startup.model_dump())
+    changed.jev = JevSettings(api_key="private-jev-key", identity_mode="observe")
+    changed.user_aliases = ["Ada"]
+    changed.developer_settings.documents.rerank_enabled = False
+    changed.developer_settings.search.fts_limit = 80
+    runtime.startup_config = startup
+    runtime.config_manager = SimpleNamespace(
+        config=changed,
+        last_apply_status=SimpleNamespace(
+            generation=2, persisted=True, activated=True,
+            failed_subscriptions=(), pending_subscriptions=(), fully_applied=True,
+        ),
+    )
+
+    settings = await application.get_settings(user_name="ada")
+    status = await application.get_settings_status(user_name="ada")
+
+    assert settings.jev.policy.identity_mode == "observe"
+    assert settings.jev.api_key_configured is True
+    assert "private-jev-key" not in settings.model_dump_json()
+    assert status.restart_required_fields == (
+        "user_aliases",
+        "developer_settings.documents.rerank_enabled",
+        "developer_settings.search",
+    )
+    assert status.fully_applied is False
 
 
 @pytest.mark.runtime

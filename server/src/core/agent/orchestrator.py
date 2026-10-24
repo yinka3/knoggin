@@ -18,9 +18,9 @@ from common.schema.document import (
     parse_document_focus,
 )
 from common.schema.source.references import SourceReferenceCandidate
+from core.agent.agent_manager import AgentManager
 from core.agent.executor import AgentExecutor
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
-from core.agent.services.agent_manager import AgentManager
 from core.agent.sources.document_selection import build_document_selection_candidate
 from core.agent.sources.pasted_text import build_pasted_text_candidates
 from core.agent.tools.registry import Tools

@@ -1,8 +1,4 @@
-"""Internal agent execution-event contracts.
-
-The application facade owns the SDK contract; FastAPI owns the UI HTTP
-and SSE projection.
-"""
+"""Internal agent execution-event contracts, independent of API transport."""
 
 from typing import (
     Annotated,
@@ -180,9 +176,8 @@ class ErrorEvent(_StrictStreamDict):
     data: ErrorData
 
 
-# These events are engine-internal. The application facade wraps them in
-# SDK events, and FastAPI projects browser-safe HTTP/SSE events. Neither
-# boundary serializes this union directly.
+# These events are engine-internal. API routes translate them into public
+# HTTP/SSE events rather than serializing this union directly.
 AgentExecutionEvent = Union[
     TokenEvent,
     ThinkingEvent,

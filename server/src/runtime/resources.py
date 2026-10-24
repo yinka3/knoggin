@@ -22,7 +22,7 @@ from common.utils.coordination_log import configure_coordination_log
 from common.utils.lifecycle import settle_owned_task
 from core.ingestion.vp01 import GLiNER25VP01Adapter
 from core.knowledge.db.embedding_rebuilder import EmbeddingRebuilder
-from core.knowledge.services.embedding_service import EmbeddingService
+from core.knowledge.embedding_service import EmbeddingService
 from core.knowledge.store import KnowledgeStore
 from infrastructure.background_work import BackgroundWorkCoordinator
 from infrastructure.jev_client import JevClient
@@ -94,14 +94,14 @@ class RuntimeResources:
         self._shutdown_error: RuntimeResourcesShutdownError | None = None
 
     @classmethod
-    async def create(cls, num_workers: int | None = None, *, config_manager=None) -> "RuntimeResources":
+    async def create(cls, thread_workers: int | None = None, *, config_manager=None) -> "RuntimeResources":
         """Create fully initialized resources without registering global state."""
 
         instance = cls()
         instance._config_manager = config_manager
         instance._startup_config = deepcopy(config_manager.config) if config_manager is not None else None
         try:
-            await instance._start(num_workers=num_workers)
+            await instance._start(thread_workers=thread_workers)
         except BaseException as exc:
             logger.error(f"Runtime resource initialization failed: {exc}")
             cleanup = asyncio.create_task(instance._teardown(wait=True))
@@ -128,8 +128,8 @@ class RuntimeResources:
         logger.info("Runtime resources initialized")
         return instance
 
-    async def _start(self, *, num_workers: int | None) -> None:
-        device = self._configure_startup(num_workers=num_workers)
+    async def _start(self, *, thread_workers: int | None) -> None:
+        device = self._configure_startup(thread_workers=thread_workers)
         await self._start_work_coordinators()
         await self._connect_datastores()
         self._construct_shared_services(device=device)
@@ -176,21 +176,21 @@ class RuntimeResources:
             logger.info("Loaded GLiNER2.5 {} VP-01 model", language)
             return model
 
-    def _configure_startup(self, *, num_workers: int | None) -> torch.device:
+    def _configure_startup(self, *, thread_workers: int | None) -> torch.device:
         load_dotenv()
         resource_profile = ResourceProfile.from_environment()
-        if num_workers is not None:
-            if isinstance(num_workers, bool) or not isinstance(num_workers, int) or num_workers < 1:
-                raise ConfigurationError("num_workers must be a positive integer")
-            resource_profile = replace(resource_profile, worker_count=num_workers)
+        if thread_workers is not None:
+            if isinstance(thread_workers, bool) or not isinstance(thread_workers, int) or thread_workers < 1:
+                raise ConfigurationError("thread_workers must be a positive integer")
+            resource_profile = replace(resource_profile, thread_workers=thread_workers)
         self.resource_profile = resource_profile
 
-        use_gpu = os.getenv("KNOGGIN_GPU", "false").lower() == "true"
-        if use_gpu and torch.cuda.is_available():
+        prefer_gpu = os.getenv("PREFER_GPU", "false").lower() == "true"
+        if prefer_gpu and torch.cuda.is_available():
             logger.info("GPU enabled — CUDA")
             return torch.device("cuda")
         if (
-            use_gpu
+            prefer_gpu
             and hasattr(torch.backends, "mps")
             and torch.backends.mps.is_available()
         ):
@@ -202,10 +202,10 @@ class RuntimeResources:
         if self.resource_profile is None:
             raise RuntimeError("Runtime resource profile was not initialized")
 
-        self.executor = ThreadPoolExecutor(max_workers=self.resource_profile.worker_count)
+        self.executor = ThreadPoolExecutor(max_workers=self.resource_profile.thread_workers)
         self.background_work = BackgroundWorkCoordinator(
             max_concurrency=self.resource_profile.background_job_workers,
-            max_queued_global=int(os.getenv("KNOGGIN_BACKGROUND_QUEUE_GLOBAL", "64")),
+            max_queued_global=int(os.getenv("BACKGROUND_JOB_QUEUE_LIMIT", "64")),
         )
         await self.background_work.start()
         self.model_work = ModelWorkCoordinator(
@@ -213,13 +213,13 @@ class RuntimeResources:
             foreground_concurrency=self.resource_profile.foreground_model_workers,
             background_concurrency=self.resource_profile.background_model_workers,
             max_queued_foreground=int(
-                os.getenv("KNOGGIN_MODEL_QUEUE_FOREGROUND", "32")
+                os.getenv("FOREGROUND_MODEL_QUEUE_LIMIT", "32")
             ),
             max_queued_background=int(
-                os.getenv("KNOGGIN_MODEL_QUEUE_BACKGROUND", "64")
+                os.getenv("BACKGROUND_MODEL_QUEUE_LIMIT", "64")
             ),
             foreground_timeout_seconds=float(
-                os.getenv("KNOGGIN_FOREGROUND_MODEL_TIMEOUT_SECONDS", "30")
+                os.getenv("FOREGROUND_MODEL_TIMEOUT_SECONDS", "30")
             ),
         )
         await self.model_work.start()
@@ -256,7 +256,7 @@ class RuntimeResources:
         llm_config = config.llm
         trace_logger = (
             get_trace_logger()
-            if os.getenv("KNOGGIN_LLM_TRACE", "false").lower() == "true"
+            if os.getenv("TRACE_LLM_CALLS", "false").lower() == "true"
             else None
         )
         self.llm_service = LLMService(
@@ -280,8 +280,8 @@ class RuntimeResources:
             config_manager.subscribe(self.jev_client.update_settings, "jev")
         )
         self.embedding = EmbeddingService(
-            embedding_model=os.getenv("KNOGGIN_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
-            reranker_model=os.getenv("KNOGGIN_RERANKER_MODEL", DEFAULT_RERANKER_MODEL),
+            embedding_model=os.getenv("EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
+            reranker_model=os.getenv("RERANKER_MODEL", DEFAULT_RERANKER_MODEL),
             device=device,
             batch_size=self.resource_profile.embedding_batch_size,
             model_work=self.model_work,

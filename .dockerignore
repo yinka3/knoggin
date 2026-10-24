@@ -12,6 +12,7 @@ config/
 .vscode/
 *.md
 !README.md
+!server/README.md
 test*.py
 Dockerfile
 docker-compose.yml

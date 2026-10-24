@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from core.agent.services.agent_manager import AgentManager
+from core.agent.agent_manager import AgentManager
 from core.community.aac_store import AACStore
 from core.community.read_context import AACReadContext
 from core.community.seeding import AACSeeder, SeedDecision

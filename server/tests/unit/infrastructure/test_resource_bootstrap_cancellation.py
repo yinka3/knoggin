@@ -13,7 +13,7 @@ async def test_cancelled_bootstrap_settles_cleanup_before_propagating(monkeypatc
     entered, cleaned = asyncio.Event(), asyncio.Event()
     owner = None
 
-    async def start(self, *, num_workers):
+    async def start(self, *, thread_workers):
         nonlocal owner
         owner = self
         self.postgres = SimpleNamespace(close=AsyncMock(side_effect=lambda: cleaned.set()))
@@ -31,7 +31,7 @@ async def test_cancelled_bootstrap_settles_cleanup_before_propagating(monkeypatc
 
 
 async def test_failed_bootstrap_retains_failed_cleanup_owner(monkeypatch):
-    async def start(self, *, num_workers):
+    async def start(self, *, thread_workers):
         self.postgres = SimpleNamespace(close=AsyncMock(side_effect=[RuntimeError("close"), None]))
         raise DependencyError("primary")
 

@@ -2,7 +2,7 @@
 
 The server's workflow objects and the existing agent stream dictionaries are
 internal implementation details.  This module is the small, deliberately
-boring boundary that an HTTP, SSE, or SDK adapter can depend on.  It does not
+boring boundary that an HTTP or SSE adapter can depend on.  It does not
 instantiate a session or know about persistence; adapters translate to and
 from these models.
 """
@@ -51,36 +51,17 @@ from common.schema.document import (
     DocumentSelection,
 )
 from common.schema.evidence import EvidenceBundle, EvidencePointer, EvidenceSnapshot
+from common.schema.jev import JevPolicy
 from common.schema.maintenance import MaintenanceImpactPreview
+from common.schema.session_input import (
+    normalise_enabled_tools as _normalise_enabled_tools,
+)
 from common.schema.settings import DeveloperSettings, LLMSpendingBudgetSettings
 from common.schema.source.locators import DocumentLocator
 from common.schema.source.references import SourceConsulted
 
 PUBLIC_CONTRACT_VERSION = "1"
 EnabledToolsUpdateMode = Literal["omitted", "inherit", "disable_all", "allowlist"]
-
-
-def _normalise_enabled_tools(value: list[str] | None) -> list[str] | None:
-    """Validate and canonicalise the public tool allow-list.
-
-    ``None`` means inherit/default and ``[]`` intentionally means disable all.
-    The application layer performs registration checks after it resolves the
-    target agent; this boundary only guarantees a deterministic shape.
-    """
-
-    if value is None:
-        return None
-    result: list[str] = []
-    seen: set[str] = set()
-    for name in value:
-        if not isinstance(name, str) or not name.strip():
-            raise ValueError("enabled_tools must contain non-blank names")
-        canonical = name.strip().lower()
-        if canonical in seen:
-            raise ValueError(f"enabled_tools contains duplicate tool: {canonical}")
-        seen.add(canonical)
-        result.append(canonical)
-    return result
 
 
 class PublicModel(BaseModel):
@@ -222,10 +203,17 @@ class PublicSearchSettings(PublicModel):
     tavily_api_key_configured: bool
 
 
+class PublicJevSettings(PublicModel):
+    policy: JevPolicy
+    endpoint: str
+    api_key_configured: bool
+
+
 class SettingsResponse(PublicModel):
     user_aliases: tuple[str, ...]
     llm: PublicLLMSettings
     search: PublicSearchSettings
+    jev: PublicJevSettings
     developer_settings: DeveloperSettings
 
 
@@ -235,6 +223,7 @@ class SettingsApplyStatusResponse(PublicModel):
     activated: bool
     failed_subscriptions: tuple[int, ...]
     pending_subscriptions: tuple[int, ...]
+    restart_required_fields: tuple[str, ...]
     fully_applied: bool
 
 
@@ -844,7 +833,7 @@ def to_public_error(
         )
     else:
         code, message, retryable = projection
-    # KnogginError.details may contain SQL, URLs, credentials, or raw model
+    # EngineError.details may contain SQL, URLs, credentials, or raw model
     # output.  Public adapters may add an explicitly safe request identifier,
     # but never forward internal exception details by default.
     return PublicError(

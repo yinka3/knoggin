@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from core.agent.services.agent_manager import (
+from core.agent.agent_manager import (
     AgentBrainRevisionConflictError,
     AgentManager,
 )

@@ -19,8 +19,8 @@ from common.schema.ingestion.contracts import (
 from common.schema.ingestion.extraction import ContextEntityExtraction
 from common.schema.jev import JevDecisionRecord, JevResult
 from common.schema.settings import TextProcessorSettings
-from common.utils.core_utils import validate_entity
 from core.ingestion.batch import SemanticWindowBuild
+from core.ingestion.entity_validation import validate_entity
 from core.ingestion.jev_extraction import (
     ExtractionCandidate,
     accepted_extraction_type,

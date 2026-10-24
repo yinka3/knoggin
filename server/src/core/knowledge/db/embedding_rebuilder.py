@@ -7,11 +7,11 @@ import math
 
 from common.embedding_contract import EMBEDDING_DIMENSION
 from core.knowledge.documents.extraction import DocumentChunk, embedding_text
+from core.knowledge.embedding_service import EmbeddingService
 from core.knowledge.episodes.embedding import (
     build_episode_embedding_text_from_fields,
     encode_episode_embedding_texts,
 )
-from core.knowledge.services.embedding_service import EmbeddingService
 from infrastructure.postgres_client import PostgresClient
 
 

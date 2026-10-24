@@ -146,13 +146,13 @@ class EmbeddingService:
         self._lock = threading.Lock()
 
         self._backend = (
-            (embedding_backend or os.getenv("KNOGGIN_EMBEDDING_BACKEND", "onnx"))
+            (embedding_backend or os.getenv("EMBEDDING_BACKEND", "onnx"))
             .strip()
             .lower()
         )
         if self._backend not in {"torch", "onnx"}:
             raise ValueError(
-                "KNOGGIN_EMBEDDING_BACKEND must be either 'torch' or 'onnx'"
+                "EMBEDDING_BACKEND must be either 'torch' or 'onnx'"
             )
 
         self._embedder = None
@@ -164,7 +164,7 @@ class EmbeddingService:
             self._config_kwargs["unpad_inputs"] = False
         self._torch_model_kwargs = {"torch_dtype": torch.float32}
         self._onnx_provider = (
-            self._resolve_onnx_provider(os.getenv("KNOGGIN_ONNX_PROVIDER", "auto"))
+            self._resolve_onnx_provider(os.getenv("ONNX_PROVIDER", "auto"))
             if self._backend == "onnx"
             else None
         )
@@ -174,7 +174,7 @@ class EmbeddingService:
             else self._torch_model_kwargs
         )
         self._cross_encoder_model_kwargs = self._embedding_model_kwargs
-        self._embedding_revision = os.getenv("KNOGGIN_EMBEDDING_REVISION")
+        self._embedding_revision = os.getenv("EMBEDDING_MODEL_REVISION")
         self._embedding_model = embedding_model
         self._reranker_model = reranker_model
         self._model_work = model_work
@@ -190,7 +190,7 @@ class EmbeddingService:
         """Choose an installed execution provider, honoring explicit choices."""
         requested = requested_provider.strip()
         if not requested:
-            raise ValueError("KNOGGIN_ONNX_PROVIDER must not be empty")
+            raise ValueError("ONNX_PROVIDER must not be empty")
         available = set(ort.get_available_providers())
         if requested.lower() == "auto":
             if sys.platform == "darwin":
@@ -226,7 +226,7 @@ class EmbeddingService:
         provider = cls._ONNX_PROVIDER_ALIASES.get(requested.lower(), requested)
         if provider not in available:
             raise ValueError(
-                f"KNOGGIN_ONNX_PROVIDER={provider!r} is unavailable; "
+                f"ONNX_PROVIDER={provider!r} is unavailable; "
                 f"available providers: {sorted(available)}"
             )
         return provider

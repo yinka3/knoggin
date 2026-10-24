@@ -19,16 +19,16 @@ from common.embedding_contract import (  # noqa: E402
     DEFAULT_RERANKER_MODEL,
 )
 from core.ingestion.vp01 import GLiNER25VP01Adapter  # noqa: E402
-from core.knowledge.services.embedding_service import EmbeddingService  # noqa: E402
+from core.knowledge.embedding_service import EmbeddingService  # noqa: E402
 from infrastructure.model_work import ModelWorkPriority  # noqa: E402
 from infrastructure.resource_profile import ResourceProfile  # noqa: E402
 
 
 def _device() -> torch.device:
-    use_gpu = os.getenv("KNOGGIN_GPU", "false").lower() == "true"
-    if use_gpu and torch.cuda.is_available():
+    prefer_gpu = os.getenv("PREFER_GPU", "false").lower() == "true"
+    if prefer_gpu and torch.cuda.is_available():
         return torch.device("cuda")
-    if use_gpu and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+    if prefer_gpu and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
 
@@ -39,8 +39,8 @@ async def prefetch_models() -> None:
     profile = ResourceProfile.from_environment()
     device = _device()
     embedding = EmbeddingService(
-        embedding_model=os.getenv("KNOGGIN_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
-        reranker_model=os.getenv("KNOGGIN_RERANKER_MODEL", DEFAULT_RERANKER_MODEL),
+        embedding_model=os.getenv("EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
+        reranker_model=os.getenv("RERANKER_MODEL", DEFAULT_RERANKER_MODEL),
         device=device,
         batch_size=profile.embedding_batch_size,
     )

@@ -14,11 +14,11 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 # Copy workspace configuration
 COPY pyproject.toml uv.lock ./
 COPY server/pyproject.toml ./server/
-COPY sdk/pyproject.toml ./sdk/
+COPY api/pyproject.toml ./api/
 
 # Install dependencies for server
 # Using uv sync with --frozen to ensure reproducible builds from the lockfile
-RUN uv sync --frozen --no-dev --package server
+RUN uv sync --frozen --no-dev --package server --no-install-workspace
 
 # Use the virtual environment created by uv
 ENV PATH="/app/.venv/bin:$PATH"
@@ -37,6 +37,7 @@ RUN docling-tools models download layout tableformer rapidocr --quiet
 
 # Copy the entire workspace source
 COPY . .
+RUN uv sync --frozen --no-dev --package server
 
 # Ensure local persistence directories exist
 RUN mkdir -p /app/config /app/data/files
@@ -44,7 +45,4 @@ RUN mkdir -p /app/config /app/data/files
 # Use the virtual environment created by uv
 ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONPATH="/app/server/src"
-ENV KNOGGIN_CONFIG_DIR="/app/config"
-
-# server currently ships as an engine package. An API entry point should
-# be supplied by the embedding application rather than this image.
+ENV SETTINGS_DIR="/app/config"

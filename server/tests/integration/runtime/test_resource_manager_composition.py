@@ -26,7 +26,7 @@ def _local_snapshot(
             **kwargs,
         )
     except Exception as exc:
-        if os.environ.get("KNOGGIN_REQUIRE_LOCAL_MODELS") == "1":
+        if os.environ.get("REQUIRE_LOCAL_MODELS") == "1":
             pytest.fail(
                 f"Required runtime model artifact {model_name!r} is unavailable: {exc}"
             )
@@ -39,46 +39,46 @@ async def real_resource_manager(monkeypatch):
     embedding_model = _local_snapshot(
         huggingface_hub,
         os.environ.get(
-            "KNOGGIN_SEMANTIC_SMOKE_MODEL",
-            os.environ.get("KNOGGIN_EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5"),
+            "SEMANTIC_SMOKE_MODEL",
+            os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5"),
         ),
-        revision_env="KNOGGIN_SEMANTIC_SMOKE_MODEL_REVISION",
+        revision_env="SEMANTIC_SMOKE_MODEL_REVISION",
     )
     reranker_model = _local_snapshot(
         huggingface_hub,
         os.environ.get(
-            "KNOGGIN_SEMANTIC_SMOKE_RERANKER_MODEL",
-            os.environ.get("KNOGGIN_RERANKER_MODEL", "BAAI/bge-reranker-base"),
+            "SEMANTIC_SMOKE_RERANKER_MODEL",
+            os.environ.get("RERANKER_MODEL", "BAAI/bge-reranker-base"),
         ),
-        revision_env="KNOGGIN_SEMANTIC_SMOKE_RERANKER_REVISION",
+        revision_env="SEMANTIC_SMOKE_RERANKER_REVISION",
     )
     vp01_model = _local_snapshot(
         huggingface_hub,
-        os.environ.get("KNOGGIN_VP01_MODEL", "fastino/gliner2.5-base-v1"),
-        revision_env="KNOGGIN_VP01_REVISION",
+        os.environ.get("VP01_MODEL", "fastino/gliner2.5-base-v1"),
+        revision_env="VP01_REVISION",
     )
     monkeypatch.setattr(vp01, "GLINER25_ENGLISH_MODEL", vp01_model)
 
     monkeypatch.setenv(
         "DATABASE_URL",
         os.environ.get(
-            "KNOGGIN_TEST_DATABASE_URL",
+            "TEST_DATABASE_URL",
             "postgresql://knoggin:knoggin@localhost:5432/knoggin_db",
         ),
     )
-    monkeypatch.setenv("KNOGGIN_EMBEDDING_MODEL", embedding_model)
-    monkeypatch.setenv("KNOGGIN_RERANKER_MODEL", reranker_model)
+    monkeypatch.setenv("EMBEDDING_MODEL", embedding_model)
+    monkeypatch.setenv("RERANKER_MODEL", reranker_model)
     monkeypatch.setenv(
-        "KNOGGIN_EMBEDDING_BACKEND",
-        os.environ.get("KNOGGIN_EMBEDDING_BACKEND", "onnx"),
+        "EMBEDDING_BACKEND",
+        os.environ.get("EMBEDDING_BACKEND", "onnx"),
     )
     monkeypatch.setenv(
-        "KNOGGIN_ONNX_PROVIDER",
-        os.environ.get("KNOGGIN_ONNX_PROVIDER", "CPUExecutionProvider"),
+        "ONNX_PROVIDER",
+        os.environ.get("ONNX_PROVIDER", "CPUExecutionProvider"),
     )
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
 
-    manager = await RuntimeResources.create(num_workers=2)
+    manager = await RuntimeResources.create(thread_workers=2)
     try:
         yield manager
     finally:

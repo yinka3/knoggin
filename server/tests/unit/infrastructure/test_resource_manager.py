@@ -155,10 +155,10 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
 
     fake_config = FakeConfigManager()
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
-    monkeypatch.setenv("KNOGGIN_GPU", "false")
-    monkeypatch.setenv("KNOGGIN_EMBEDDING_MODEL", "custom/embedder")
-    monkeypatch.setenv("KNOGGIN_RERANKER_MODEL", "custom/reranker")
-    monkeypatch.delenv("KNOGGIN_LLM_TRACE", raising=False)
+    monkeypatch.setenv("PREFER_GPU", "false")
+    monkeypatch.setenv("EMBEDDING_MODEL", "custom/embedder")
+    monkeypatch.setenv("RERANKER_MODEL", "custom/reranker")
+    monkeypatch.delenv("TRACE_LLM_CALLS", raising=False)
     monkeypatch.setattr(
         resources_module.ConfigManager, "get", staticmethod(lambda: fake_config)
     )
@@ -317,7 +317,7 @@ async def test_resource_manager_cleans_up_when_postgres_startup_fails(monkeypatc
 
     fake_config = FakeConfigManager()
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
-    monkeypatch.setenv("KNOGGIN_GPU", "false")
+    monkeypatch.setenv("PREFER_GPU", "false")
     monkeypatch.setattr(
         resources_module.ConfigManager,
         "get",
@@ -396,7 +396,7 @@ async def test_resource_manager_resolves_gpu_cuda(monkeypatch, tmp_path):
             return MagicMock()
 
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
-    monkeypatch.setenv("KNOGGIN_GPU", "true")
+    monkeypatch.setenv("PREFER_GPU", "true")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
 
     monkeypatch.setattr(
@@ -467,7 +467,7 @@ async def test_resource_manager_resolves_gpu_mps(monkeypatch, tmp_path):
             return MagicMock()
 
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
-    monkeypatch.setenv("KNOGGIN_GPU", "true")
+    monkeypatch.setenv("PREFER_GPU", "true")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
 
     # Mock torch.backends.mps.is_available
@@ -555,7 +555,7 @@ async def test_resource_manager_resolves_cpu_when_gpu_false(monkeypatch, tmp_pat
             return MagicMock()
 
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
-    monkeypatch.setenv("KNOGGIN_GPU", "false")
+    monkeypatch.setenv("PREFER_GPU", "false")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)  # Should ignore this
 
     monkeypatch.setattr(

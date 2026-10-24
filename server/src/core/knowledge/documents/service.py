@@ -42,7 +42,7 @@ from common.utils.lifecycle import settle_owned_task
 from common.utils.time_utils import get_now_iso
 from core.knowledge.db.readers.document_reader import DocumentReader
 from core.knowledge.db.writers.document_writer import DocumentWriter
-from core.knowledge.services.embedding_service import EmbeddingService
+from core.knowledge.embedding_service import EmbeddingService
 from core.project.project_files import (
     CONTEXT_FILE_PATH,
     PROJECT_FILE_PATH,

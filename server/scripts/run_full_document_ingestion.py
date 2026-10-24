@@ -158,25 +158,25 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("pdf", type=Path, help="PDF to ingest in full")
     parser.add_argument(
         "--database-url",
-        default=os.getenv("KNOGGIN_TEST_DATABASE_URL", DEFAULT_DATABASE_URL),
+        default=os.getenv("TEST_DATABASE_URL", DEFAULT_DATABASE_URL),
         help="PostgreSQL server used to create the isolated database",
     )
     parser.add_argument(
         "--embedding-model",
-        default=os.getenv("KNOGGIN_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
+        default=os.getenv("EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
     )
     parser.add_argument(
         "--reranker-model",
-        default=os.getenv("KNOGGIN_RERANKER_MODEL", DEFAULT_RERANKER_MODEL),
+        default=os.getenv("RERANKER_MODEL", DEFAULT_RERANKER_MODEL),
     )
     parser.add_argument(
         "--embedding-backend",
         choices=("onnx", "torch"),
-        default=os.getenv("KNOGGIN_EMBEDDING_BACKEND", "onnx"),
+        default=os.getenv("EMBEDDING_BACKEND", "onnx"),
     )
     parser.add_argument(
         "--onnx-provider",
-        default=os.getenv("KNOGGIN_ONNX_PROVIDER", "auto"),
+        default=os.getenv("ONNX_PROVIDER", "auto"),
     )
     parser.add_argument(
         "--extraction-mode",
@@ -296,11 +296,11 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
     from core.knowledge.db.embedding_rebuilder import EmbeddingRebuilder
     from core.knowledge.documents import DocumentService, ProjectFilesystemFactory
     from core.knowledge.documents.extraction import inspect_pdf_ocr_need
-    from core.knowledge.services.embedding_service import EmbeddingService
+    from core.knowledge.embedding_service import EmbeddingService
     from infrastructure.postgres_client import PostgresClient
 
     _configure_model_downloads(allowed=args.allow_model_downloads)
-    os.environ["KNOGGIN_ONNX_PROVIDER"] = args.onnx_provider
+    os.environ["ONNX_PROVIDER"] = args.onnx_provider
 
     database = f"knoggin_full_ingestion_{uuid4().hex[:12]}"
     project_id = f"full-ingestion-{uuid4().hex[:12]}"

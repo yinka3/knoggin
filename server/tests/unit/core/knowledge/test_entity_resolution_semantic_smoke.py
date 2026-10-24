@@ -3,7 +3,7 @@ import os
 import numpy as np
 import pytest
 
-from core.knowledge.services.embedding_service import EmbeddingService
+from core.knowledge.embedding_service import EmbeddingService
 
 
 def cosine(vec_a, vec_b):
@@ -21,16 +21,16 @@ def cosine(vec_a, vec_b):
 async def test_local_embedding_service_similarity_ordering_smoke():
     huggingface_hub = pytest.importorskip("huggingface_hub")
     embedding_model_name = os.environ.get(
-        "KNOGGIN_SEMANTIC_SMOKE_MODEL",
-        os.environ.get("KNOGGIN_EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5"),
+        "SEMANTIC_SMOKE_MODEL",
+        os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5"),
     )
     reranker_model_name = os.environ.get(
-        "KNOGGIN_SEMANTIC_SMOKE_RERANKER_MODEL",
-        os.environ.get("KNOGGIN_RERANKER_MODEL", "BAAI/bge-reranker-base"),
+        "SEMANTIC_SMOKE_RERANKER_MODEL",
+        os.environ.get("RERANKER_MODEL", "BAAI/bge-reranker-base"),
     )
-    embedding_revision = os.environ.get("KNOGGIN_SEMANTIC_SMOKE_MODEL_REVISION")
+    embedding_revision = os.environ.get("SEMANTIC_SMOKE_MODEL_REVISION")
     reranker_revision = os.environ.get(
-        "KNOGGIN_SEMANTIC_SMOKE_RERANKER_REVISION"
+        "SEMANTIC_SMOKE_RERANKER_REVISION"
     )
 
     try:
@@ -45,7 +45,7 @@ async def test_local_embedding_service_similarity_ordering_smoke():
             revision=reranker_revision,
         )
     except Exception as exc:
-        if os.environ.get("KNOGGIN_REQUIRE_LOCAL_MODELS") == "1":
+        if os.environ.get("REQUIRE_LOCAL_MODELS") == "1":
             pytest.fail(
                 "Required local embedding smoke artifacts are unavailable: "
                 f"{exc}"
@@ -55,7 +55,7 @@ async def test_local_embedding_service_similarity_ordering_smoke():
     service = EmbeddingService(
         embedding_model=embedding_model_path,
         reranker_model=reranker_model_path,
-        device=os.environ.get("KNOGGIN_SEMANTIC_SMOKE_DEVICE", "cpu"),
+        device=os.environ.get("SEMANTIC_SMOKE_DEVICE", "cpu"),
         batch_size=8,
     )
 

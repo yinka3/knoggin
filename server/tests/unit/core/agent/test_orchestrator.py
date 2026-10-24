@@ -5,8 +5,8 @@ import pytest
 from common.conf.domain_config import DomainConfig
 from common.exceptions import LLMBudgetExceededError, WorkspaceConflictError
 from common.schema.agent.identity import AgentConfig
+from core.agent.agent_manager import AgentManager
 from core.agent.orchestrator import AgentOrchestrator
-from core.agent.services.agent_manager import AgentManager
 from tests.fixtures.fakes import FakeResources
 
 FAKE_RESPONSE_EVENT = {

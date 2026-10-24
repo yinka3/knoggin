@@ -14,6 +14,7 @@ resolution-markers = [
 
 [manifest]
 members = [
+    "api",
     "server",
 ]
 
@@ -4139,6 +4140,23 @@ wheels = [
 [package.optional-dependencies]
 onnx = [
     { name = "optimum-onnx", extra = ["onnxruntime"] },
+]
+
+[[package]]
+name = "api"
+version = "0.1.0"
+source = { editable = "api" }
+dependencies = [
+    { name = "server" },
+    { name = "starlette" },
+    { name = "uvicorn" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "server", editable = "server" },
+    { name = "starlette", specifier = ">=0.52.1,<1" },
+    { name = "uvicorn", specifier = ">=0.41.0,<1" },
 ]
 
 [[package]]

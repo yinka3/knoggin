@@ -5,7 +5,7 @@ import os
 import numpy as np
 import pytest
 
-from core.knowledge.services.embedding_service import EmbeddingService
+from core.knowledge.embedding_service import EmbeddingService
 
 
 def cosine(vec_a, vec_b):
@@ -21,12 +21,12 @@ async def load_local_embedding_service():
     """Load configured local embedding and reranker artifacts or skip the smoke test."""
     huggingface_hub = pytest.importorskip("huggingface_hub")
     embedding_model_name = os.environ.get(
-        "KNOGGIN_SEMANTIC_SMOKE_MODEL",
-        os.environ.get("KNOGGIN_EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5"),
+        "SEMANTIC_SMOKE_MODEL",
+        os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5"),
     )
     reranker_model_name = os.environ.get(
-        "KNOGGIN_SEMANTIC_SMOKE_RERANKER_MODEL",
-        os.environ.get("KNOGGIN_RERANKER_MODEL", "BAAI/bge-reranker-base"),
+        "SEMANTIC_SMOKE_RERANKER_MODEL",
+        os.environ.get("RERANKER_MODEL", "BAAI/bge-reranker-base"),
     )
 
     def download_local(model_name: str, revision_env: str) -> str:
@@ -39,14 +39,14 @@ async def load_local_embedding_service():
     try:
         embedding_model_path = download_local(
             embedding_model_name,
-            "KNOGGIN_SEMANTIC_SMOKE_MODEL_REVISION",
+            "SEMANTIC_SMOKE_MODEL_REVISION",
         )
         reranker_model_path = download_local(
             reranker_model_name,
-            "KNOGGIN_SEMANTIC_SMOKE_RERANKER_REVISION",
+            "SEMANTIC_SMOKE_RERANKER_REVISION",
         )
     except Exception as exc:
-        if os.environ.get("KNOGGIN_REQUIRE_LOCAL_MODELS") == "1":
+        if os.environ.get("REQUIRE_LOCAL_MODELS") == "1":
             pytest.fail(
                 f"Required local embedding smoke artifacts are unavailable: {exc}"
             )
@@ -55,7 +55,7 @@ async def load_local_embedding_service():
     service = EmbeddingService(
         embedding_model=embedding_model_path,
         reranker_model=reranker_model_path,
-        device=os.environ.get("KNOGGIN_SEMANTIC_SMOKE_DEVICE", "cpu"),
+        device=os.environ.get("SEMANTIC_SMOKE_DEVICE", "cpu"),
         batch_size=4,
     )
 

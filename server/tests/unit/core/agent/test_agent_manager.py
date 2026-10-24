@@ -5,7 +5,7 @@ import pytest
 
 from common.schema.agent.identity import AgentConfig
 from common.utils.agent_identity import MAX_BRAIN_CHARS, MAX_BRAIN_SECTION_CHARS
-from core.agent.services.agent_manager import (
+from core.agent.agent_manager import (
     AgentBrainRevisionConflictError,
     AgentManager,
 )

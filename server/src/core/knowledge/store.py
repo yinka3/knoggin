@@ -62,12 +62,12 @@ from core.knowledge.db.writers.semantic_commit_writer import (
 )
 from core.knowledge.db.writers.semantic_window_writer import SemanticWindowWriter
 from core.knowledge.db.writers.source_reference_writer import SourceReferenceWriter
+from core.knowledge.embedding_service import EmbeddingService
 from core.knowledge.episodes.embedding import (
     build_episode_embedding_text_from_fields,
     encode_episode_embedding_texts,
 )
 from core.knowledge.evidence_service import EvidenceService
-from core.knowledge.services.embedding_service import EmbeddingService
 from infrastructure.postgres_client import PostgresClient
 
 

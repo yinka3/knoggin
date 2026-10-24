@@ -238,10 +238,10 @@ _DOCLING_CPU_THREADS = 4
 _DOCLING_PROCESS_POLL_SECONDS = 0.1
 _DOCLING_PROCESS_STOP_SECONDS = 5.0
 _DOCLING_PROCESS_TIMEOUT_SECONDS = float(
-    os.getenv("KNOGGIN_DOCLING_TIMEOUT_SECONDS", str(3 * 60 * 60))
+    os.getenv("DOCLING_TIMEOUT_SECONDS", str(3 * 60 * 60))
 )
 _DOCLING_PAGE_GROUP_TARGET = int(
-    os.getenv("KNOGGIN_DOCLING_PAGE_GROUP_PAGES", "100")
+    os.getenv("DOCLING_PAGE_GROUP_SIZE", "100")
 )
 _OCR_PREFLIGHT_MAX_NATIVE_CHARACTERS = 50
 _OCR_PREFLIGHT_MIN_SCANNED_RATIO = 0.60
@@ -1233,9 +1233,9 @@ async def extract_and_split_docling_document(
     if extraction_strategy not in {"auto", "full", "bounded"}:
         raise ValueError("Unsupported document extraction strategy")
     if _DOCLING_PROCESS_TIMEOUT_SECONDS <= 0:
-        raise ValueError("KNOGGIN_DOCLING_TIMEOUT_SECONDS must be positive")
+        raise ValueError("DOCLING_TIMEOUT_SECONDS must be positive")
     if _DOCLING_PAGE_GROUP_TARGET <= 0:
-        raise ValueError("KNOGGIN_DOCLING_PAGE_GROUP_PAGES must be positive")
+        raise ValueError("DOCLING_PAGE_GROUP_SIZE must be positive")
 
     async with _DOCLING_PROCESS_LOCK:
         if normalized_extension == ".pdf":

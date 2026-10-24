@@ -9,7 +9,7 @@ class ResourceProfile:
     """Resolved startup limits for local model and indexing work."""
 
     name: str
-    worker_count: int
+    thread_workers: int
     embedding_batch_size: int
     background_job_workers: int
     foreground_model_workers: int
@@ -18,11 +18,11 @@ class ResourceProfile:
     @classmethod
     def from_environment(cls) -> "ResourceProfile":
         """Resolve a named profile, with explicit environment overrides."""
-        name = os.getenv("KNOGGIN_RESOURCE_PROFILE", "balanced").strip().lower()
+        name = os.getenv("RESOURCE_PROFILE", "balanced").strip().lower()
         profiles = {
             "conservative": cls(
                 name="conservative",
-                worker_count=2,
+                thread_workers=2,
                 embedding_batch_size=8,
                 background_job_workers=1,
                 foreground_model_workers=1,
@@ -30,7 +30,7 @@ class ResourceProfile:
             ),
             "balanced": cls(
                 name="balanced",
-                worker_count=4,
+                thread_workers=4,
                 embedding_batch_size=32,
                 background_job_workers=1,
                 foreground_model_workers=1,
@@ -38,7 +38,7 @@ class ResourceProfile:
             ),
             "performance": cls(
                 name="performance",
-                worker_count=8,
+                thread_workers=8,
                 embedding_batch_size=64,
                 background_job_workers=2,
                 foreground_model_workers=1,
@@ -47,26 +47,26 @@ class ResourceProfile:
         }
         if name not in profiles:
             raise ValueError(
-                "KNOGGIN_RESOURCE_PROFILE must be one of: "
+                "RESOURCE_PROFILE must be one of: "
                 + ", ".join(sorted(profiles))
             )
         profile = profiles[name]
         return replace(
             profile,
-            worker_count=_positive_int("KNOGGIN_WORKERS", profile.worker_count),
+            thread_workers=_positive_int("THREAD_WORKERS", profile.thread_workers),
             embedding_batch_size=_positive_int(
-                "KNOGGIN_EMBEDDING_BATCH_SIZE", profile.embedding_batch_size
+                "EMBEDDING_BATCH_SIZE", profile.embedding_batch_size
             ),
             background_job_workers=_positive_int(
-                "KNOGGIN_BACKGROUND_JOB_WORKERS",
+                "BACKGROUND_JOB_WORKERS",
                 profile.background_job_workers,
             ),
             foreground_model_workers=_positive_int(
-                "KNOGGIN_FOREGROUND_MODEL_WORKERS",
+                "FOREGROUND_MODEL_WORKERS",
                 profile.foreground_model_workers,
             ),
             background_model_workers=_positive_int(
-                "KNOGGIN_BACKGROUND_MODEL_WORKERS",
+                "BACKGROUND_MODEL_WORKERS",
                 profile.background_model_workers,
             ),
         )

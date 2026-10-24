@@ -10,10 +10,11 @@ from pathlib import Path
 from loguru import logger
 
 from common.conf.manager import ConfigManager
+from common.schema.settings import RootConfig
 from common.utils.lifecycle import settle_owned_task
 from common.utils.time_utils import get_now
+from core.agent.agent_manager import AgentManager
 from core.agent.orchestrator import AgentOrchestrator
-from core.agent.services.agent_manager import AgentManager
 from core.community.runtime import AACRuntime
 from core.health.service import RuntimeHealthService
 from core.knowledge.documents import ProjectFilesystemFactory
@@ -79,6 +80,7 @@ class ApplicationRuntime:
     agent_manager: AgentManager
     agent_orchestrator: AgentOrchestrator
     aac_runtime: AACRuntime
+    startup_config: RootConfig | None = None
     health_service: RuntimeHealthService = field(init=False)
     started_at: datetime = field(init=False)
     _shutdown_complete: bool = field(init=False, default=False, repr=False)
@@ -106,12 +108,13 @@ class ApplicationRuntime:
         *,
         user_name: str,
         config_dir: str | Path,
-        num_workers: int | None = None,
+        thread_workers: int | None = None,
     ) -> "ApplicationRuntime":
         """Build the canonical runtime whose shutdown owns every live layer."""
 
         config_manager = ConfigManager.initialize(config_dir)
-        resources = await RuntimeResources.create(num_workers=num_workers, config_manager=config_manager)
+        startup_config = config_manager.config
+        resources = await RuntimeResources.create(thread_workers=thread_workers, config_manager=config_manager)
         startup_cleanup = _StartupCleanup(resources)
         try:
             knowledge_store = resources.knowledge_store
@@ -165,6 +168,7 @@ class ApplicationRuntime:
                 agent_manager=agent_manager,
                 agent_orchestrator=agent_orchestrator,
                 aac_runtime=aac_runtime,
+                startup_config=startup_config,
             )
         except BaseException as exc:
             cleanup = asyncio.create_task(startup_cleanup.shutdown())

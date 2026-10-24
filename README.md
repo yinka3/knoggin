@@ -54,10 +54,11 @@ Document search is a separate path. It combines text and embedding matches over 
 ## Repository layout
 
 - `server/` contains the Python engine, runtime, storage, and tests. See [server/README.md](server/README.md).
-- `app/` contains an early React frontend. Its API integration is still in progress.
+- `api/` contains the local HTTP service. See [api/README.md](api/README.md).
+- `app/` contains the Next.js configuration; its frontend source and API integration are in progress.
 - `docker/` contains the local Postgres image and initialization scripts.
 
-The engine runs inside an application and does not start an HTTP service on its own. Docker Compose starts the database only.
+The engine runs inside an application and does not start an HTTP service on its own. The `api/` package hosts the HTTP service; Docker Compose starts the database only.
 
 ## Local setup
 

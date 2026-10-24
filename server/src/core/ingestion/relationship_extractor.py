@@ -15,11 +15,11 @@ from common.schema.ingestion.contracts import (
 )
 from common.schema.ingestion.extraction import ContextRelationshipExtraction
 from common.scoping import IDENTITY_ENTITY_ID
-from common.utils.core_utils import format_context_vp02_input
 from common.utils.events import emit
 from common.utils.local_references import build_local_id_maps
 from core.ingestion.batch import SemanticWindowBuild
 from core.ingestion.prompts import get_context_connection_reasoning_prompt
+from core.ingestion.relationship_prompt import format_context_vp02_input
 from core.knowledge.entity.resolver import EntityResolver
 from infrastructure.llm_client import LLMService
 

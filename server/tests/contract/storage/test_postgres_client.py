@@ -12,7 +12,7 @@ from infrastructure.postgres_client import (
 )
 
 DB_URL = os.environ.get(
-    "KNOGGIN_TEST_DATABASE_URL",
+    "TEST_DATABASE_URL",
     "postgresql://knoggin:knoggin@localhost:5432/knoggin_db",
 )
 

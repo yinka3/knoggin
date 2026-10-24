@@ -33,7 +33,7 @@ from core.knowledge.documents.extraction import (
 )
 from core.knowledge.documents.filesystem import ProjectFilesystem
 from core.knowledge.documents.policy import DocumentIndexPolicy
-from core.knowledge.services.embedding_service import EmbeddingService
+from core.knowledge.embedding_service import EmbeddingService
 from infrastructure.background_work import (
     BackgroundWorkCoordinator,
     BackgroundWorkRejected,

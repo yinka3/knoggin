@@ -13,7 +13,7 @@ from common.schema.document import (
     dump_document_focus,
     parse_document_focus,
 )
-from common.schema.public import CreateSessionRequest
+from common.schema.session_input import SessionMetadataInput
 from common.utils.json_utils import safe_json_loads
 from common.utils.time_utils import get_now_iso
 from core.knowledge.db.writers.session_deletion_writer import SessionDeletionWriter
@@ -495,7 +495,7 @@ class SessionManager:
 
     @staticmethod
     def _normalize_metadata(values: dict) -> dict:
-        request = CreateSessionRequest(project_id="validation", **values)
+        request = SessionMetadataInput(**values)
         result = request.model_dump(include=set(values))
         names = result.get("enabled_tools")
         if names is not None:

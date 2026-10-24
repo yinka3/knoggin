@@ -42,7 +42,7 @@ from core.knowledge.documents import (  # noqa: E402
     ProjectFilesystemFactory,
 )
 from core.knowledge.documents.extraction import split_document  # noqa: E402
-from core.knowledge.services.embedding_service import EmbeddingService  # noqa: E402
+from core.knowledge.embedding_service import EmbeddingService  # noqa: E402
 from infrastructure.postgres_client import PostgresClient  # noqa: E402
 
 DEFAULT_QUERIES = (
@@ -66,24 +66,24 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("source", type=Path)
     parser.add_argument(
         "--database-url",
-        default=os.getenv("KNOGGIN_TEST_DATABASE_URL", DEFAULT_DATABASE_URL),
+        default=os.getenv("TEST_DATABASE_URL", DEFAULT_DATABASE_URL),
     )
     parser.add_argument(
         "--embedding-model",
-        default=os.getenv("KNOGGIN_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
+        default=os.getenv("EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
     )
     parser.add_argument(
         "--reranker-model",
-        default=os.getenv("KNOGGIN_RERANKER_MODEL", DEFAULT_RERANKER_MODEL),
+        default=os.getenv("RERANKER_MODEL", DEFAULT_RERANKER_MODEL),
     )
     parser.add_argument(
         "--embedding-backend",
         choices=("onnx", "torch"),
-        default=os.getenv("KNOGGIN_EMBEDDING_BACKEND", "onnx"),
+        default=os.getenv("EMBEDDING_BACKEND", "onnx"),
     )
     parser.add_argument(
         "--onnx-provider",
-        default=os.getenv("KNOGGIN_ONNX_PROVIDER", "auto"),
+        default=os.getenv("ONNX_PROVIDER", "auto"),
     )
     parser.add_argument("--query", action="append", dest="queries")
     parser.add_argument(
@@ -131,7 +131,7 @@ def _result(row: dict[str, Any]) -> dict[str, Any]:
 
 async def _run(args: argparse.Namespace) -> dict[str, Any]:
     _configure_model_downloads(allowed=args.allow_model_downloads)
-    os.environ["KNOGGIN_ONNX_PROVIDER"] = args.onnx_provider
+    os.environ["ONNX_PROVIDER"] = args.onnx_provider
     database = f"knoggin_code_retrieval_{uuid4().hex[:12]}"
     project_id = f"code-retrieval-{uuid4().hex[:12]}"
     user_name = "code_retrieval_runner"

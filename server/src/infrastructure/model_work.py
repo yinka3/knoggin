@@ -8,7 +8,7 @@ from enum import IntEnum
 from time import perf_counter
 from typing import Awaitable, Callable, Optional, TypeVar
 
-from common.exceptions import KnogginError
+from common.exceptions import EngineError
 from common.schema.health import sanitize_health_details
 from infrastructure.work_record import WorkRecord
 
@@ -22,7 +22,7 @@ class ModelWorkPriority(IntEnum):
     BACKGROUND = 10
 
 
-class ModelWorkRejected(KnogginError):
+class ModelWorkRejected(EngineError):
     """Raised when a model-work lane reaches its bounded queue limit."""
 
     def __init__(self, *, priority: ModelWorkPriority, name: str, limit: int, queued: int):

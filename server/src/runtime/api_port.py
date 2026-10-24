@@ -69,6 +69,7 @@ from common.schema.public import (
     ProjectResponse,
     PromoteSourceRequest,
     PublicError,
+    PublicJevSettings,
     PublicLLMSettings,
     PublicSearchSettings,
     RelationshipAdvisoryActionRequest,
@@ -213,16 +214,50 @@ class ApplicationRuntimePort:
             search=PublicSearchSettings(provider=config.search.provider,
                 brave_api_key_configured=bool(config.search.brave_api_key),
                 tavily_api_key_configured=bool(config.search.tavily_api_key)),
+            jev=PublicJevSettings(
+                policy=config.jev.capture_policy(), endpoint=config.jev.endpoint,
+                api_key_configured=bool(config.jev.api_key),
+            ),
             developer_settings=config.developer_settings,
         )
 
     async def get_settings_status(self, *, user_name: str) -> SettingsApplyStatusResponse:
         self._require_user(user_name)
         status = self.runtime.config_manager.last_apply_status
+        startup = self.runtime.startup_config
+        current = self.runtime.config_manager.config
+        restart_fields = ()
+        if startup is not None:
+            compared = (
+                ("user_aliases", startup.user_aliases, current.user_aliases),
+                (
+                    "developer_settings.documents.project_library_root",
+                    startup.developer_settings.documents.project_library_root,
+                    current.developer_settings.documents.project_library_root,
+                ),
+                (
+                    "developer_settings.documents.rerank_enabled",
+                    startup.developer_settings.documents.rerank_enabled,
+                    current.developer_settings.documents.rerank_enabled,
+                ),
+                (
+                    "developer_settings.documents.rerank_candidates",
+                    startup.developer_settings.documents.rerank_candidates,
+                    current.developer_settings.documents.rerank_candidates,
+                ),
+                (
+                    "developer_settings.jobs.document_indexing.reconciliation_interval_seconds",
+                    startup.developer_settings.jobs.document_indexing.reconciliation_interval_seconds,
+                    current.developer_settings.jobs.document_indexing.reconciliation_interval_seconds,
+                ),
+                ("developer_settings.search", startup.developer_settings.search, current.developer_settings.search),
+            )
+            restart_fields = tuple(path for path, before, after in compared if before != after)
         return SettingsApplyStatusResponse(
             generation=status.generation, persisted=status.persisted, activated=status.activated,
             failed_subscriptions=status.failed_subscriptions, pending_subscriptions=status.pending_subscriptions,
-            fully_applied=status.fully_applied,
+            restart_required_fields=restart_fields,
+            fully_applied=status.fully_applied and not restart_fields,
         )
 
     async def update_settings(self, *, user_name: str, request: SettingsUpdateRequest) -> SettingsOperationResponse:

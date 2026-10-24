@@ -7,8 +7,8 @@ import pytest
 from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
 
-import core.knowledge.services.embedding_service as embedding_module
-from core.knowledge.services.embedding_service import EmbeddingService
+import core.knowledge.embedding_service as embedding_module
+from core.knowledge.embedding_service import EmbeddingService
 
 
 class FakeCrossEncoder:
@@ -78,7 +78,7 @@ def test_embedding_service_rejects_unavailable_explicit_onnx_provider(monkeypatc
         "get_available_providers",
         lambda: ["CPUExecutionProvider"],
     )
-    monkeypatch.setenv("KNOGGIN_ONNX_PROVIDER", "CoreMLExecutionProvider")
+    monkeypatch.setenv("ONNX_PROVIDER", "CoreMLExecutionProvider")
 
     with pytest.raises(ValueError, match="is unavailable"):
         EmbeddingService(embedding_backend="onnx")

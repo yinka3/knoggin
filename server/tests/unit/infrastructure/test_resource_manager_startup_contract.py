@@ -156,7 +156,7 @@ async def test_resource_manager_cleans_every_partial_startup_stage(
         ),
     )
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
-    monkeypatch.setenv("KNOGGIN_GPU", "false")
+    monkeypatch.setenv("PREFER_GPU", "false")
     monkeypatch.setattr(
         resources_module.ConfigManager,
         "get",
@@ -176,7 +176,7 @@ async def test_resource_manager_cleans_every_partial_startup_stage(
         FakeGLiNER25VP01Adapter,
     )
     with pytest.raises(DependencyError, match=failure):
-        await resources_module.RuntimeResources.create(num_workers=2)
+        await resources_module.RuntimeResources.create(thread_workers=2)
 
     assert all(resource.shutdown_calls for resource in created.background)
     assert all(resource.shutdown_calls for resource in created.model_work)
@@ -190,7 +190,7 @@ async def test_resource_manager_cleans_every_partial_startup_stage(
 async def test_runtime_resources_preserves_startup_error_when_cleanup_also_fails(
     monkeypatch,
 ):
-    async def fail_start(self, *, num_workers):
+    async def fail_start(self, *, thread_workers):
         raise DependencyError("primary startup failure")
 
     async def fail_teardown(self, *, wait):

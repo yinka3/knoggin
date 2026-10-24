@@ -12,7 +12,7 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from infrastructure.postgres_client import PostgresClient
 
 DB_URL = os.environ.get(
-    "KNOGGIN_TEST_DATABASE_URL",
+    "TEST_DATABASE_URL",
     "postgresql://knoggin:knoggin@127.0.0.1:5432/knoggin_db",
 )
 SCHEMA_SQL = (
