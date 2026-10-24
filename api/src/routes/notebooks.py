@@ -81,6 +81,23 @@ async def source_desk(request):
     return JSONResponse({"notebook": _public(result["notebook"]), "items": result["items"]})
 
 
+async def timeline(request):
+    runtime = request.app.state.runtime
+    project_id = request.path_params["project_id"]
+    if error := await _project_error(runtime, project_id, write=False):
+        return error
+    notebook_id = _notebook_id(request)
+    if notebook_id is None:
+        return _error("notebook_not_found", "Notebook not found", 404)
+    try:
+        result = await runtime.projects.notebooks.timeline(project_id, notebook_id)
+    except NotebookConflict:
+        return _error("wrong_notebook_view", "Notebook uses another view", 409)
+    if result is None:
+        return _error("notebook_not_found", "Notebook not found", 404)
+    return JSONResponse({"notebook": _public(result["notebook"]), "items": result["items"]})
+
+
 async def replace_notebook(request):
     runtime = request.app.state.runtime
     project_id = request.path_params["project_id"]
@@ -132,6 +149,7 @@ routes = [
     Route("/v1/projects/{project_id}/notebooks", create_notebook, methods=["POST"]),
     Route("/v1/projects/{project_id}/notebooks/{notebook_id}", get_notebook, methods=["GET"]),
     Route("/v1/projects/{project_id}/notebooks/{notebook_id}/source-desk", source_desk, methods=["GET"]),
+    Route("/v1/projects/{project_id}/notebooks/{notebook_id}/timeline", timeline, methods=["GET"]),
     Route("/v1/projects/{project_id}/notebooks/{notebook_id}", replace_notebook, methods=["PUT"]),
     Route("/v1/projects/{project_id}/notebooks/{notebook_id}", delete_notebook, methods=["DELETE"]),
 ]

@@ -138,3 +138,31 @@ async def test_source_desk_distinguishes_saved_links_and_captured_passages(real_
     await client.execute("DELETE FROM public.saved_web_links WHERE link_id = %s", (link_id,))
     missing = await store.source_desk("project-1", notebook["notebook_id"])
     assert missing["items"][0]["status"] == "missing"
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_timeline_orders_event_time_and_marks_record_time(real_postgres_client):
+    client = real_postgres_client
+    store = ProjectNotebookStore(client, "ada")
+    await client.execute(
+        "INSERT INTO public.sessions (session_id, project_id, user_name) VALUES ('time-session', 'project-1', 'ada')"
+    )
+    await client.execute(
+        """INSERT INTO public.messages
+           (user_name, session_id, project_id, message_id, role, content, timestamp_ms)
+           VALUES ('ada', 'time-session', 'project-1', 9920, 'user', 'First', 1893456000000),
+                  ('ada', 'time-session', 'project-1', 9921, 'user', 'Second', 1893542400000)"""
+    )
+    notebook = await store.create("project-1", NotebookWrite(
+        title="Events", view="timeline", entries=[
+            NotebookEntryInput(kind="message", target_id="9921"),
+            NotebookEntryInput(kind="message", target_id="9920", event_at="2029-01-01T00:00:00Z"),
+        ],
+    ))
+    result = await store.timeline("project-1", notebook["notebook_id"])
+    assert [item["target_id"] for item in result["items"]] == ["9920", "9921"]
+    assert [item["time_kind"] for item in result["items"]] == ["user_event", "recorded"]
+    assert result["items"][0]["recorded_at"] != result["items"][0]["time"]
+    assert result["items"][1]["recorded_at"] == result["items"][1]["time"]

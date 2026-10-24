@@ -122,6 +122,9 @@ CORS currently permits `localhost:3000` and `127.0.0.1:3000`.
   resolves the ordered sources with `current`, `changed`, or `missing` status.
   A `source_ref` contains a captured passage and its locator. A saved web link
   contains only its saved URL and summary; it does not imply the page was read.
+- `GET /v1/projects/{project_id}/notebooks/{notebook_id}/timeline`
+  orders entries by time. Each item labels `user_event`, `source_event`,
+  `recorded`, or `unknown` time and includes `recorded_at` separately.
 
 ## Other API routes in progress
 

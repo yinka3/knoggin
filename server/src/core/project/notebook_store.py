@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from common.artifact_retention import ARTIFACT_RETENTION_PERIOD
@@ -42,28 +43,34 @@ class ProjectNotebookStore:
                 raise NotebookReferenceUnavailable("Invalid message ID")
             query = """SELECT selected_revision::text AS version,
                               left(content, 2000) AS excerpt,
-                              'Message ' || message_id::text AS title
+                              'Message ' || message_id::text AS title,
+                              to_timestamp(timestamp_ms / 1000.0)::text AS recorded_at
                        FROM public.messages WHERE user_name = %s AND project_id = %s
                          AND message_id = %s AND lifecycle_state <> 'superseded'"""
             args = (self.user_name, project_id, int(target_id))
         elif kind == "document":
-            query = """SELECT content_hash AS version, original_name AS title
+            query = """SELECT content_hash AS version, original_name AS title,
+                              created_at::text AS recorded_at
                        FROM public.project_documents
                        WHERE project_id = %s AND document_id = %s AND status <> 'deleted'"""
             args = (project_id, target_id)
         elif kind == "saved_link":
-            query = """SELECT updated_at::text AS version, title, url, summary
+            query = """SELECT updated_at::text AS version, title, url, summary,
+                              created_at::text AS recorded_at
                        FROM public.saved_web_links
                        WHERE project_id = %s AND link_id = %s"""
             args = (project_id, target_id)
         elif kind == "episode":
             query = """SELECT updated_at::text AS version, left(summary, 2000) AS excerpt,
-                              'Episode ' || episode_id AS title
+                              'Episode ' || episode_id AS title,
+                              created_at::text AS recorded_at,
+                              first_message_at::text AS source_event_at
                        FROM public.episodes
                        WHERE project_id = %s AND episode_id = %s"""
             args = (project_id, target_id)
         elif kind == "artifact":
-            query = """SELECT artifact.current_revision::text AS version, artifact.title
+            query = """SELECT artifact.current_revision::text AS version, artifact.title,
+                              artifact.created_at::text AS recorded_at
                        FROM public.project_artifacts AS artifact
                        JOIN public.sessions AS session
                          ON session.session_id = artifact.session_id
@@ -80,7 +87,7 @@ class ProjectNotebookStore:
                                        'Captured source passage') AS title,
                               left(ref.excerpt, 2000) AS excerpt,
                               ref.canonical_url AS url, ref.locator,
-                              ref.source_kind,
+                              ref.source_kind, ref.created_at::text AS recorded_at,
                               CASE WHEN ref.document_id IS NOT NULL AND
                                   (document.document_id IS NULL OR document.status = 'deleted' OR
                                    document.current_snapshot_id IS DISTINCT FROM ref.parse_snapshot_id)
@@ -175,6 +182,10 @@ class ProjectNotebookStore:
             return None
         if notebook["view"] != "source_desk":
             raise NotebookConflict("Notebook is not a source desk")
+        items = await self._resolved_items(project_id, notebook)
+        return {"notebook": notebook, "items": items}
+
+    async def _resolved_items(self, project_id: str, notebook):
         items = []
         async with self.client.transaction() as cursor:
             for entry in notebook["entries"]:
@@ -188,12 +199,44 @@ class ProjectNotebookStore:
                 )
                 items.append({
                     "entry_id": entry["entry_id"],
+                    "kind": entry["kind"],
+                    "target_id": entry["target_id"],
                     "status": status,
                     "saved_version": entry["source_version"],
                     "current_version": source["version"] if source else None,
                     "source": {key: value for key, value in source.items()
                                if key not in {"version", "source_stale"}} if source else None,
                 })
+        return items
+
+    async def timeline(self, project_id: str, notebook_id: str):
+        notebook = await self.get(project_id, notebook_id)
+        if notebook is None:
+            return None
+        if notebook["view"] != "timeline":
+            raise NotebookConflict("Notebook is not a timeline")
+        entries = {entry["entry_id"]: entry for entry in notebook["entries"]}
+        items = await self._resolved_items(project_id, notebook)
+        for order, item in enumerate(items):
+            entry = entries[item["entry_id"]]
+            source = item["source"] or {}
+            item["order"] = order
+            recorded = source.get("recorded_at")
+            event = entry.get("event_at") or source.get("source_event_at")
+            item["recorded_at"] = recorded
+            item["time"] = event or recorded
+            item["time_kind"] = (
+                "user_event" if entry.get("event_at") else
+                "source_event" if source.get("source_event_at") else
+                "recorded" if source.get("recorded_at") else "unknown"
+            )
+        def sort_key(item):
+            value = item["time"]
+            if value is None:
+                return (True, datetime.max.replace(tzinfo=timezone.utc), item["order"])
+            return (False, datetime.fromisoformat(value.replace("Z", "+00:00")), item["order"])
+
+        items.sort(key=sort_key)
         return {"notebook": notebook, "items": items}
 
     async def replace(self, project_id: str, notebook_id: str, body):
