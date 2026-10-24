@@ -38,6 +38,7 @@ from core.project.domain_config_store import (
     DomainConfigStore,
 )
 from core.project.maintenance_service import ProjectMaintenanceService
+from core.project.notebook_store import ProjectNotebookStore
 from core.project.project_files import PROJECT_FILE_PATH, build_project_markdown
 from runtime.project_factory import ProjectRuntimeFactory
 from runtime.project_runtime import ProjectRuntime
@@ -99,6 +100,7 @@ class ProjectManager:
         self._filesystem_factory = filesystem_factory
         self._config_manager = config_manager
         self._project_deletion_writer = ProjectDeletionWriter(self.pg)
+        self.notebooks = ProjectNotebookStore(self.pg, user_name)
         self.active_projects: Dict[str, ProjectRuntime] = {}
         self._project_leases: Dict[str, set[str]] = {}
         self._project_shutdown_tasks: Dict[str, asyncio.Task[None]] = {}

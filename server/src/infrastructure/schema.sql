@@ -723,6 +723,21 @@ CREATE TABLE public.project_documents (
     CONSTRAINT project_documents_extraction_strategy_check CHECK ((extraction_strategy = ANY (ARRAY['auto'::text, 'full'::text, 'bounded'::text]))),
     CONSTRAINT project_documents_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'indexing'::text, 'indexed'::text, 'failed'::text, 'deleted'::text])))
 );
+CREATE TABLE public.project_notebooks (
+    notebook_id uuid NOT NULL,
+    project_id text NOT NULL,
+    user_name text NOT NULL,
+    title text NOT NULL,
+    view text NOT NULL,
+    entries jsonb DEFAULT '[]'::jsonb NOT NULL,
+    revision integer DEFAULT 1 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT project_notebooks_title_check CHECK ((length(btrim(title)) > 0) AND (length(title) <= 200)),
+    CONSTRAINT project_notebooks_view_check CHECK (view IN ('source_desk', 'timeline')),
+    CONSTRAINT project_notebooks_entries_check CHECK (jsonb_typeof(entries) = 'array' AND jsonb_array_length(entries) <= 100),
+    CONSTRAINT project_notebooks_revision_check CHECK (revision >= 1)
+);
 CREATE TABLE public.project_file_cleanup_tasks (
     project_id text NOT NULL,
     user_name text NOT NULL,
@@ -1178,6 +1193,8 @@ ALTER TABLE ONLY public.project_documents
     ADD CONSTRAINT project_documents_id_project_key UNIQUE (document_id, project_id);
 ALTER TABLE ONLY public.project_documents
     ADD CONSTRAINT project_documents_pkey PRIMARY KEY (document_id);
+ALTER TABLE ONLY public.project_notebooks
+    ADD CONSTRAINT project_notebooks_pkey PRIMARY KEY (notebook_id);
 ALTER TABLE ONLY public.project_file_cleanup_tasks
     ADD CONSTRAINT project_file_cleanup_tasks_pkey PRIMARY KEY (project_id);
 ALTER TABLE ONLY public.project_contexts
@@ -1464,6 +1481,8 @@ ALTER TABLE ONLY public.project_document_scan_settings
     ADD CONSTRAINT project_document_scan_settings_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(project_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.project_documents
     ADD CONSTRAINT project_documents_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_notebooks
+    ADD CONSTRAINT project_notebooks_project_scope_fk FOREIGN KEY (user_name, project_id) REFERENCES public.projects(user_name, project_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.project_documents
     ADD CONSTRAINT project_documents_current_snapshot_id_fkey FOREIGN KEY (current_snapshot_id) REFERENCES public.document_parse_snapshots(snapshot_id) ON DELETE SET NULL;
 ALTER TABLE ONLY public.project_entity_contexts

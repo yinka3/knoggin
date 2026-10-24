@@ -110,6 +110,15 @@ CORS currently permits `localhost:3000` and `127.0.0.1:3000`.
   or policy. The response contains only retry status fields, not its internal
   policy snapshot.
 
+## Project notebooks
+
+- `GET/POST /v1/projects/{project_id}/notebooks` lists and creates project-owned
+  notebooks. `GET/PUT/DELETE /v1/projects/{project_id}/notebooks/{notebook_id}`
+  reads, replaces, and deletes one notebook. Replacements and deletions require
+  `expected_revision`; a stale revision returns 409. Entries are ordered and
+  point to sources in the same project. Archived projects remain readable but
+  cannot be edited.
+
 ## Other API routes in progress
 
 - `GET /v1/health/engine` and `GET /v1/projects/{project_id}/health/{kind}`
