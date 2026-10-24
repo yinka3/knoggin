@@ -66,7 +66,8 @@ For an existing project, replace `{project_id}` in these routes:
 
 - `GET/POST /v1/projects` lists and creates projects. `GET/PATCH/DELETE
   /v1/projects/{project_id}` reads, edits, and deletes one project.
-  `POST /v1/projects/{project_id}/archive` archives it. Deletion reports file
+  `POST /v1/projects/{project_id}/archive` archives it; `POST
+  /v1/projects/{project_id}/reactivate` restores an archived project. Deletion reports file
   cleanup status; an active session can block archive or deletion.
 - `GET/POST /v1/agents` lists and creates agents. `GET/PATCH/DELETE
   /v1/agents/{agent_id}` manages editable preferences. `POST
@@ -80,10 +81,34 @@ For an existing project, replace `{project_id}` in these routes:
 - `POST /v1/sessions/{session_id}/runs` accepts `{"query":"..."}` plus optional
   model, agent, tool, research mode, document focus, and idempotency choices.
   It returns an SSE stream with `run_started`, `message_delta`, `tool`,
-  `source_added`, `usage_updated`, `run_completed`, and `run_failed` events.
+  `source_added`, `usage_updated`, `steer_applied`, `run_completed`, and `run_failed` events.
   Closing the HTTP stream closes the owned engine run.
+- `GET /v1/sessions/{session_id}/runs/{run_id}` reads the active or most recent
+  run status while its session runtime remains loaded. `POST .../steers` accepts
+  `{"instruction":"..."}` for one active run and returns `pending`; the next
+  model step applies it and emits `steer_applied`. If the run finishes first,
+  the status becomes `undelivered`. These live statuses do not survive a
+  process restart. The owning user message records the steer and its delivery
+  state; applied instructions appear in later agent context.
+  `DELETE /v1/sessions/{session_id}/runs/{run_id}` stops that
+  active run.
 
 CORS currently permits `localhost:3000` and `127.0.0.1:3000`.
+
+## Project control
+
+- `GET /v1/projects/{project_id}/control` combines project status, session
+  participation, a bounded blocked-window list, the open review count, and a
+  brief ingestion-health summary.
+- `GET/PUT /v1/projects/{project_id}/semantic-participation` reads or selects
+  the sessions that contribute to future semantic processing. `PUT` accepts
+  `{"session_ids":["..."]}`; switching participation does not retroactively
+  admit earlier messages.
+- `GET /v1/projects/{project_id}/maintenance/semantic-windows/blocked` lists
+  failed windows. `POST /v1/projects/{project_id}/maintenance/semantic-windows/{window_id}/retry`
+  retries one eligible failed window without replacing its captured membership
+  or policy. The response contains only retry status fields, not its internal
+  policy snapshot.
 
 ## Other API routes in progress
 
@@ -99,7 +124,9 @@ CORS currently permits `localhost:3000` and `127.0.0.1:3000`.
   `POST /v1/projects/{project_id}/sources/batch` admits up to 20 documents or
   web links and reports each result. `POST /v1/projects/{project_id}/sources/promote`
   saves a cited source as a link. Saved links support list, create, update, and
-  delete. Artifact routes support list, metadata, and revision reads.
+  delete. Links normalize the HTTP(S) host and default port; a duplicate URL
+  in the same project returns `link_exists` (409). Artifact routes support
+  list, metadata, and revision reads.
 - `GET/PUT /v1/projects/{project_id}/episodes/{episode_id}` reads and edits an
   episode narrative. Edits require `expected_updated_at` and return a conflict
   when the episode changed.
