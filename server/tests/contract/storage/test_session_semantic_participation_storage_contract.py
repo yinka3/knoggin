@@ -102,3 +102,23 @@ async def test_session_semantic_participation_tracks_boundaries_and_scope(
             await manager.set_session_semantic_participation(
                 "project-1", [unavailable_session_id]
             )
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_archived_project_cannot_change_semantic_participation(real_postgres_client):
+    await real_postgres_client.execute(
+        "INSERT INTO public.sessions (session_id, user_name, project_id, status) "
+        "VALUES ('session-a', 'ada', 'project-1', 'open')"
+    )
+    await real_postgres_client.execute(
+        "UPDATE public.projects SET status = 'archived' WHERE project_id = 'project-1'"
+    )
+    with pytest.raises(ValueError, match="active project"):
+        await _manager(real_postgres_client).set_session_semantic_participation(
+            "project-1", ["session-a"]
+        )
+    assert await real_postgres_client.fetch_one(
+        "SELECT semantic_participation_enabled FROM public.sessions WHERE session_id = 'session-a'"
+    ) == {"semantic_participation_enabled": True}

@@ -6,9 +6,10 @@ from core.project.project_manager import ProjectManager
 
 
 class _Cursor:
-    def __init__(self, rows):
+    def __init__(self, rows, project_status="active"):
         self.calls = []
         self.rows = rows
+        self.project_status = project_status
 
     async def execute(self, query, params):
         self.calls.append((query, params))
@@ -16,10 +17,13 @@ class _Cursor:
     async def fetchall(self):
         return self.rows
 
+    async def fetchone(self):
+        return None if self.project_status is None else {"status": self.project_status}
+
 
 class _Postgres:
-    def __init__(self, *, locked_rows, listed_rows):
-        self.cursor = _Cursor(locked_rows)
+    def __init__(self, *, locked_rows, listed_rows, project_status="active"):
+        self.cursor = _Cursor(locked_rows, project_status)
         self.listed_rows = listed_rows
 
     @asynccontextmanager
@@ -30,10 +34,10 @@ class _Postgres:
         return self.listed_rows
 
 
-def _manager(*, locked_rows, listed_rows):
+def _manager(*, locked_rows, listed_rows, project_status="active"):
     manager = object.__new__(ProjectManager)
     manager.user_name = "user"
-    manager.pg = _Postgres(locked_rows=locked_rows, listed_rows=listed_rows)
+    manager.pg = _Postgres(locked_rows=locked_rows, listed_rows=listed_rows, project_status=project_status)
     manager.active_projects = {}
     return manager
 
@@ -112,5 +116,13 @@ async def test_participation_rejects_sessions_unavailable_to_the_project(
 
     queries = [query for query, _ in manager.pg.cursor.calls]
     assert "project_id = %s" in queries[0]
-    assert "status <> 'deleted'" in queries[0]
+    assert "status <> 'deleted'" in queries[1]
     assert not any("UPDATE public.sessions" in query for query in queries)
+
+
+@pytest.mark.parametrize("status", ["archived", "deleted", None])
+async def test_participation_refuses_inactive_project_before_session_changes(status):
+    manager = _manager(locked_rows=[], listed_rows=[], project_status=status)
+    with pytest.raises(ValueError, match="active project"):
+        await manager.set_session_semantic_participation("project", [])
+    assert len(manager.pg.cursor.calls) == 1

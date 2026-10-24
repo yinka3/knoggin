@@ -100,6 +100,15 @@ async def archive_project(request):
     return JSONResponse(_public(row))
 
 
+async def reactivate_project(request):
+    project_id = request.path_params["project_id"]
+    project = await request.app.state.runtime.projects.get_project(project_id)
+    if project is None or project["status"] == "deleted":
+        return _error("project_not_found", "Project not found", 404)
+    row = await request.app.state.runtime.projects.reactivate_project(project_id)
+    return JSONResponse(_public(row))
+
+
 async def delete_project(request):
     project_id = request.path_params["project_id"]
     # The owner also retries pending file cleanup for an already-deleted row.
@@ -121,5 +130,6 @@ routes = [
     Route("/v1/projects/{project_id}", get_project, methods=["GET"]),
     Route("/v1/projects/{project_id}", update_project, methods=["PATCH"]),
     Route("/v1/projects/{project_id}/archive", archive_project, methods=["POST"]),
+    Route("/v1/projects/{project_id}/reactivate", reactivate_project, methods=["POST"]),
     Route("/v1/projects/{project_id}", delete_project, methods=["DELETE"]),
 ]

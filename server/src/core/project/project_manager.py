@@ -710,6 +710,17 @@ class ProjectManager:
         async with self.pg.transaction() as cur:
             await cur.execute(
                 """
+                SELECT status FROM public.projects
+                WHERE user_name = %s AND project_id = %s
+                FOR UPDATE
+                """,
+                (self.user_name, project_id),
+            )
+            project = await cur.fetchone()
+            if project is None or project["status"] != ProjectStatus.ACTIVE.value:
+                raise ValueError("Semantic participation requires an active project")
+            await cur.execute(
+                """
                 SELECT session_id, semantic_participation_enabled
                 FROM public.sessions
                 WHERE user_name = %s
