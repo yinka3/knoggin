@@ -969,7 +969,7 @@ class KnowledgeStore:
             validated = Episode.validate_embedding(embedding)
         except (TypeError, ValueError) as exc:
             raise RuntimeError(
-                "Episode edit embedding must be a finite 1024-dimensional vector"
+                "Episode edit embedding must match the finite canonical vector dimension"
             ) from exc
         if validated is None:
             raise RuntimeError("Episode edit embedding result is missing")

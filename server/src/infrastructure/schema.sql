@@ -240,7 +240,7 @@ CREATE TABLE public.document_chunks (
     chunk_index integer NOT NULL,
     content text NOT NULL,
     relative_path text NOT NULL,
-    embedding public.vector(1024) NOT NULL,
+    embedding public.vector(768) NOT NULL,
     language text,
     chunk_kind text DEFAULT 'text'::text NOT NULL,
     symbol_name text,
@@ -379,7 +379,7 @@ CREATE TABLE public.episodes (
     source_message_count integer DEFAULT 0 NOT NULL,
     first_message_at timestamp with time zone,
     last_message_at timestamp with time zone,
-    embedding public.vector(1024),
+    embedding public.vector(768),
     generator_metadata jsonb DEFAULT '{}'::jsonb NOT NULL,
     user_modified boolean DEFAULT false NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -702,6 +702,8 @@ CREATE TABLE public.project_documents (
     extension text DEFAULT ''::text NOT NULL,
     size_bytes bigint NOT NULL,
     content_hash text NOT NULL,
+    extraction_mode text DEFAULT 'standard'::text NOT NULL,
+    extraction_strategy text DEFAULT 'auto'::text NOT NULL,
     scan_managed boolean DEFAULT false NOT NULL,
     current_snapshot_id uuid,
     status text DEFAULT 'queued'::text NOT NULL,
@@ -717,6 +719,8 @@ CREATE TABLE public.project_documents (
     CONSTRAINT project_documents_size_check CHECK ((size_bytes >= 0)),
     CONSTRAINT project_documents_index_attempt_count_check CHECK ((index_attempt_count >= 0)),
     CONSTRAINT project_documents_index_failure_kind_check CHECK (((last_index_failure_kind IS NULL) OR (last_index_failure_kind = ANY (ARRAY['transient_dependency'::text, 'invalid_content'::text])))),
+    CONSTRAINT project_documents_extraction_mode_check CHECK ((extraction_mode = ANY (ARRAY['standard'::text, 'ocr'::text]))),
+    CONSTRAINT project_documents_extraction_strategy_check CHECK ((extraction_strategy = ANY (ARRAY['auto'::text, 'full'::text, 'bounded'::text]))),
     CONSTRAINT project_documents_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'indexing'::text, 'indexed'::text, 'failed'::text, 'deleted'::text])))
 );
 CREATE TABLE public.project_file_cleanup_tasks (

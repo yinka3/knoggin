@@ -55,7 +55,8 @@ class FakeDocumentService:
         self.calls.append(("list", {"limit": limit}))
         return [dict(document_id="document-1", project_id="project-1", original_name="notes.md",
                      relative_path="notes.md", extension=".md", size_bytes=4,
-                     content_hash="a" * 64, status="indexed", error_message="private-token")]
+                     content_hash="a" * 64, extraction_mode="standard",
+                     status="indexed", error_message="private-token")]
 
 
 class FakeSession:
@@ -533,6 +534,39 @@ async def test_decoded_upload_over_limit_is_rejected_before_project_lease(port, 
     assert runtime.projects.calls == before
     with pytest.raises(NotFoundError):
         await application.get_resource_health(user_name="ada", project_id="missing")
+
+
+async def test_ocr_preflight_does_not_acquire_or_mutate_project(port, monkeypatch):
+    import base64
+
+    from common.schema.public import DocumentOcrPreflightRequest
+    from core.knowledge.documents import extraction as extraction_module
+
+    application, runtime, _session = port
+    before = list(runtime.projects.calls)
+    monkeypatch.setattr(
+        extraction_module,
+        "inspect_pdf_ocr_need",
+        lambda _content: extraction_module.PdfOcrPreflight(
+            page_count=6,
+            low_text_page_count=6,
+            scanned_page_count=6,
+            ocr_recommended=True,
+            reason="scanned",
+        ),
+    )
+
+    result = await application.inspect_document_ocr(
+        user_name="ada",
+        request=DocumentOcrPreflightRequest(
+            original_name="scan.pdf",
+            content_base64=base64.b64encode(b"pdf").decode(),
+        ),
+    )
+
+    assert result.ocr_recommended is True
+    assert result.scanned_page_count == 6
+    assert runtime.projects.calls == before
 
 
 @pytest.mark.runtime

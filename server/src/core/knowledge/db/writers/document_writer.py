@@ -20,7 +20,11 @@ class DocumentWriter:
         self._project_id = project_id
 
     async def queue_legacy_locator_reindex(
-        self, *, pdf_fingerprint: str, notebook_fingerprint: str
+        self,
+        *,
+        standard_pdf_fingerprint: str,
+        ocr_pdf_fingerprint: str,
+        notebook_fingerprint: str,
     ) -> int:
         """Queue old indexed snapshots while preserving them until replacement."""
         async with self._client.transaction() as cur:
@@ -35,11 +39,20 @@ class DocumentWriter:
                   AND document.status = 'indexed'
                   AND document.current_snapshot_id = snapshot.snapshot_id
                   AND snapshot.source_content_hash = document.content_hash
-                  AND ((document.extension = '.pdf' AND snapshot.parser_fingerprint <> %s)
+                  AND ((document.extension = '.pdf' AND snapshot.parser_fingerprint <>
+                        CASE document.extraction_mode
+                            WHEN 'ocr' THEN %s
+                            ELSE %s
+                        END)
                     OR (document.extension = '.ipynb' AND snapshot.parser_fingerprint <> %s))
                 RETURNING document.document_id
                 """,
-                (self._project_id, pdf_fingerprint, notebook_fingerprint),
+                (
+                    self._project_id,
+                    ocr_pdf_fingerprint,
+                    standard_pdf_fingerprint,
+                    notebook_fingerprint,
+                ),
             )
             return len(await cur.fetchall())
 
@@ -138,6 +151,8 @@ class DocumentWriter:
         extension: str,
         size_bytes: int,
         content_hash: str,
+        extraction_mode: str,
+        extraction_strategy: str,
         created_at: str,
     ) -> None:
         """
@@ -154,6 +169,8 @@ class DocumentWriter:
                     extension,
                     size_bytes,
                     content_hash,
+                    extraction_mode,
+                    extraction_strategy,
                     scan_managed,
                     status,
                     created_at,
@@ -161,7 +178,7 @@ class DocumentWriter:
                 )
                 VALUES (
                     %s, %s,
-                    %s, %s, %s, %s, %s, false, 'queued', %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, false, 'queued', %s, %s
                 )
                 """,
                 (
@@ -172,6 +189,8 @@ class DocumentWriter:
                     extension,
                     size_bytes,
                     content_hash,
+                    extraction_mode,
+                    extraction_strategy,
                     created_at,
                     created_at,
                 ),
@@ -318,6 +337,8 @@ class DocumentWriter:
                 extension,
                 size_bytes,
                 content_hash,
+                extraction_mode,
+                extraction_strategy,
                 current_snapshot_id,
                 status,
                 index_attempt_count,
@@ -386,6 +407,8 @@ class DocumentWriter:
                     extension,
                     size_bytes,
                     content_hash,
+                    extraction_mode,
+                    extraction_strategy,
                     current_snapshot_id,
                     status,
                     index_attempt_count,
@@ -487,6 +510,8 @@ class DocumentWriter:
                     extension,
                     size_bytes,
                     content_hash,
+                    extraction_mode,
+                    extraction_strategy,
                     current_snapshot_id,
                     status,
                     index_attempt_count,
@@ -586,6 +611,8 @@ class DocumentWriter:
                     extension,
                     size_bytes,
                     content_hash,
+                    extraction_mode,
+                    extraction_strategy,
                     current_snapshot_id,
                     status,
                     index_attempt_count,

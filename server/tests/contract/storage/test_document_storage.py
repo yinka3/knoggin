@@ -12,13 +12,18 @@ from core.knowledge.documents.extraction import (
 )
 
 
-def _snapshot(text: str, *, parser_version: str = "test") -> DocumentParseSnapshot:
+def _snapshot(
+    text: str,
+    *,
+    parser_version: str = "test",
+    parser_fingerprint: str = "a" * 64,
+) -> DocumentParseSnapshot:
     return DocumentParseSnapshot(
         text=text,
         structure={"format": "test"},
         parser_name="test-parser",
         parser_version=parser_version,
-        parser_fingerprint="a" * 64,
+        parser_fingerprint=parser_fingerprint,
     )
 
 
@@ -49,9 +54,10 @@ async def _insert_snapshot(
     content_hash: str,
     snapshot_id: str | None = None,
     text: str = "hello",
+    parser_fingerprint: str = "a" * 64,
 ) -> str:
     snapshot_id = snapshot_id or str(uuid.uuid4())
-    parse_snapshot = _snapshot(text)
+    parse_snapshot = _snapshot(text, parser_fingerprint=parser_fingerprint)
     await client.execute(
         """
         INSERT INTO public.document_parse_snapshots (
@@ -83,6 +89,7 @@ async def _insert_snapshot(
 @pytest.mark.no_network
 async def test_legacy_locator_reindex_queues_once_and_preserves_snapshot(real_postgres_client):
     notebook_id = str(uuid.uuid4())
+    ocr_pdf_id = str(uuid.uuid4())
     await _insert_document(
         real_postgres_client, document_id=notebook_id, status="indexed"
     )
@@ -105,10 +112,26 @@ async def test_legacy_locator_reindex_queues_once_and_preserves_snapshot(real_po
         real_postgres_client, document_id=pdf_id, content_hash="a" * 64
     )
     fingerprints = locator_repair_fingerprints()
+    await _insert_document(
+        real_postgres_client,
+        document_id=ocr_pdf_id,
+        status="indexed",
+    )
+    await real_postgres_client.execute(
+        "UPDATE public.project_documents SET extension = '.pdf', relative_path = 'scan.pdf', extraction_mode = 'ocr' WHERE document_id = %s",
+        (ocr_pdf_id,),
+    )
+    await _insert_snapshot(
+        real_postgres_client,
+        document_id=ocr_pdf_id,
+        content_hash="a" * 64,
+        parser_fingerprint=fingerprints[".pdf:ocr"],
+    )
     writer = DocumentWriter(real_postgres_client, "project-1")
 
     assert await writer.queue_legacy_locator_reindex(
-        pdf_fingerprint=fingerprints[".pdf"],
+        standard_pdf_fingerprint=fingerprints[".pdf"],
+        ocr_pdf_fingerprint=fingerprints[".pdf:ocr"],
         notebook_fingerprint=fingerprints[".ipynb"],
     ) == 2
     rows = await real_postgres_client.fetch_all(
@@ -121,8 +144,14 @@ async def test_legacy_locator_reindex_queues_once_and_preserves_snapshot(real_po
     assert {str(row["current_snapshot_id"]) for row in rows} == {
         notebook_snapshot, pdf_snapshot,
     }
+    ocr_pdf = await real_postgres_client.fetch_one(
+        "SELECT status FROM public.project_documents WHERE document_id = %s",
+        (ocr_pdf_id,),
+    )
+    assert ocr_pdf["status"] == "indexed"
     assert await writer.queue_legacy_locator_reindex(
-        pdf_fingerprint=fingerprints[".pdf"],
+        standard_pdf_fingerprint=fingerprints[".pdf"],
+        ocr_pdf_fingerprint=fingerprints[".pdf:ocr"],
         notebook_fingerprint=fingerprints[".ipynb"],
     ) == 0
 
@@ -145,6 +174,7 @@ async def test_document_catalog_records_direct_and_scan_admission(real_postgres_
         extension=".png",
         size_bytes=5,
         content_hash="a" * 64,
+        extraction_mode="standard",
         created_at="2026-10-16T00:00:00+00:00",
     )
     await writer.apply_filesystem_reconciliation(
@@ -217,7 +247,7 @@ async def test_document_chunks_are_deleted_with_a_hard_deleted_parent_document(
     document_id = str(uuid.uuid4())
     snapshot_id = str(uuid.uuid4())
     chunk_id = str(uuid.uuid4())
-    embedding = "[" + ",".join(["0"] * 1024) + "]"
+    embedding = "[" + ",".join(["0"] * 768) + "]"
     await _insert_document(real_postgres_client, document_id=document_id)
     await _insert_snapshot(
         real_postgres_client,
@@ -306,7 +336,7 @@ async def test_document_tombstone_keeps_the_snapshot_and_removes_current_chunks(
     document_id = str(uuid.uuid4())
     snapshot_id = str(uuid.uuid4())
     chunk_id = str(uuid.uuid4())
-    embedding = "[" + ",".join(["0"] * 1024) + "]"
+    embedding = "[" + ",".join(["0"] * 768) + "]"
     await _insert_document(
         real_postgres_client,
         document_id=document_id,
@@ -376,7 +406,7 @@ async def test_document_publication_binds_chunks_to_the_snapshot_of_read_bytes(
     rejected = await writer.persist_indexed_chunks(
         document_id=document_id,
         chunks=["alpha"],
-        embeddings=[[0.0] * 1024],
+        embeddings=[[0.0] * 768],
         parse_snapshot=_snapshot("alpha"),
         indexed_at="2026-09-11T00:00:00+00:00",
         read_content_hash="b" * 64,
@@ -399,7 +429,7 @@ async def test_document_publication_binds_chunks_to_the_snapshot_of_read_bytes(
     published = await writer.persist_indexed_chunks(
         document_id=document_id,
         chunks=["alpha"],
-        embeddings=[[0.0] * 1024],
+        embeddings=[[0.0] * 768],
         parse_snapshot=_snapshot("alpha"),
         indexed_at="2026-09-11T00:00:00+00:00",
         read_content_hash=read_content_hash,
@@ -531,7 +561,7 @@ async def test_reindex_keeps_an_earlier_snapshot_for_historical_evidence(
     first = await writer.persist_indexed_chunks(
         document_id=document_id,
         chunks=["first parse"],
-        embeddings=[[0.0] * 1024],
+        embeddings=[[0.0] * 768],
         parse_snapshot=_snapshot("first parse", parser_version="one"),
         indexed_at="2026-09-11T00:00:00+00:00",
         read_content_hash=content_hash,
@@ -549,7 +579,7 @@ async def test_reindex_keeps_an_earlier_snapshot_for_historical_evidence(
     second = await writer.persist_indexed_chunks(
         document_id=document_id,
         chunks=["second parse"],
-        embeddings=[[0.0] * 1024],
+        embeddings=[[0.0] * 768],
         parse_snapshot=_snapshot("second parse", parser_version="two"),
         indexed_at="2026-09-11T00:02:00+00:00",
         read_content_hash=content_hash,

@@ -27,10 +27,10 @@ from tests.fixtures.factories import make_domain_config
 class _DeterministicEmbeddingService:
     async def encode(self, texts):
         assert len(texts) == 1
-        return [[0.25] * 1024]
+        return [[0.25] * 768]
 
     async def encode_single(self, _text):
-        return [0.25] * 1024
+        return [0.25] * 768
 
     async def encode_query(self, text):
         return await self.encode_single(text)

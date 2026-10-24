@@ -311,11 +311,11 @@ async def test_episode_check_combines_semantic_and_lexical_matches():
     class FakeEmbeddingService:
         async def encode_query(self, query):
             assert query == "How will we find related memories?"
-            return [0.1] * 1024
+            return [0.1] * 768
 
     class FakeKnowledgeStore(EpisodeStore):
         async def search_project_episodes_by_embedding(self, embedding, **scope):
-            assert embedding == [0.1] * 1024
+            assert embedding == [0.1] * 768
             return [(episode_card("episode-semantic"), 0.91)]
 
         async def search_project_episodes(self, query, **scope):

@@ -5,6 +5,7 @@ publication, stage checkpoints, Knowledge commit, finalization, and Context
 projection all use their production implementations.
 """
 
+import asyncio
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -58,6 +59,7 @@ from core.knowledge.store import KnowledgeStore
 from core.project.domain_config_store import DomainConfigStore
 from core.project.project_manager import ProjectManager
 from infrastructure.job.base import JobContext
+from infrastructure.job.scheduler import Scheduler
 from runtime.project_runtime import ProjectRuntime
 
 
@@ -105,6 +107,30 @@ class _ZeroEpisodeGenerator:
         return type("EpisodeBuild", (), {"final_episodes": []})()
 
 
+class _BlockingEpisodeGenerator:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+
+    async def generate(self, **_kwargs):
+        self.started.set()
+        await asyncio.Event().wait()
+
+
+class _NoopContextModel:
+    async def generate_structured(self, **_kwargs):
+        return LLMContextUpdate(operations=[], edit_summary="No Context changes")
+
+
+class _UnexpectedKnowledgeBuilder:
+    async def build(self, _build):
+        raise AssertionError("a no-op Context revision has no Knowledge input")
+
+
+class _UnexpectedRelationshipExtractor:
+    async def extract(self, _build):
+        raise AssertionError("a no-op Context revision has no relationships")
+
+
 class _OneEpisodeGenerator:
     async def generate(self, *, project_id, messages, policy, **_kwargs):
         build = ProjectEpisodeBuild(
@@ -124,7 +150,7 @@ class _OneEpisodeGenerator:
             )
         )
         build.create_episodes()
-        build.attach_embeddings([[0.25] * 1024])
+        build.attach_embeddings([[0.25] * 768])
         return build
 
 
@@ -388,11 +414,11 @@ class _Stage2Embedding:
     async def encode(self, values, **_kwargs):
         materialized = tuple(values)
         self.batch_calls.append(materialized)
-        return [[0.25] * 1024 for _ in materialized]
+        return [[0.25] * 768 for _ in materialized]
 
     async def encode_single(self, value):
         self.single_calls.append(value)
-        return [0.25] * 1024
+        return [0.25] * 768
 
 
 class _Stage2VP01:
@@ -1764,6 +1790,250 @@ async def test_project_semantic_processor_preserves_correction_history_through_n
         """,
         (project_id,),
     ) == {"total": 3, "completed": 3, "episode_results": 3}
+
+
+@pytest.mark.integration
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_semantic_timeout_retry_survives_processor_restart(
+    real_server_scope,
+    tmp_path,
+):
+    """A scheduler timeout must be durable before a fresh processor resumes it."""
+
+    scope = real_server_scope
+    postgres = scope["postgres"]
+    user_name = scope["user_name"]
+    project_id = scope["project_id"]
+    session_id = scope["session_id"]
+    await postgres.execute(
+        """
+        INSERT INTO public.messages (
+            user_name, session_id, message_id, project_id, role, content,
+            timestamp_ms, lifecycle_state, exchange_state, exchange_outcome,
+            exchange_closed_at_ms
+        ) VALUES (%s, %s, 401, %s, 'user', 'Persist this retry.',
+                  1, 'sealed', 'closed', 'user_only', 1)
+        """,
+        (user_name, session_id, project_id),
+    )
+    domain = _domain()
+    settings = IngestionSettings.model_validate(
+        {
+            "semantic_window_tokens": 1,
+            "semantic_window_retry": {
+                "max_attempts": 2,
+                "initial_backoff_seconds": 30,
+                "max_backoff_seconds": 30,
+            },
+        }
+    )
+    policy = IngestionPolicy.capture(
+        text_processor=TextProcessorSettings(),
+        entity_resolution=EntityResolutionSettings(),
+        compiled_domain=domain,
+    )
+    store = KnowledgeStore(postgres, object())
+
+    async def capture_semantic_policy():
+        return policy
+
+    def new_job(generator, now_ms):
+        return ProjectSemanticProcessor(
+            SemanticWindowAdmission(
+                store,
+                settings,
+                token_counter=lambda text: max(1, len(text.split())),
+                now_ms=now_ms,
+            ),
+            store,
+            generator,
+            settings=settings,
+            capture_semantic_policy=capture_semantic_policy,
+            context_updater=ContextUpdater(llm=_NoopContextModel()),
+            context_projection=ContextProjection(
+                reader=ProjectContextReader(postgres),
+                writer=ProjectContextWriter(postgres),
+                filesystem=ProjectFilesystem(tmp_path / project_id),
+            ),
+            context_entity_builder=_UnexpectedKnowledgeBuilder(),
+            context_relationship_extractor=_UnexpectedRelationshipExtractor(),
+            publish_committed_entity_ids=_publish_nothing,
+            now_ms=now_ms,
+        )
+
+    now = [1_000]
+    blocking = _BlockingEpisodeGenerator()
+    scheduler = Scheduler(user_name, project_id)
+    scheduler.JOB_EXECUTION_TIMEOUT = 0.01
+    context = JobContext(user_name=user_name, project_id=project_id)
+
+    await scheduler._execute_job(new_job(blocking, lambda: now[0]), context)
+    timed_out = await store.get_active_project_semantic_window(
+        user_name=user_name,
+        project_id=project_id,
+    )
+    assert blocking.started.is_set()
+    assert timed_out is not None
+    assert timed_out.stage is SemanticWindowStage.CLAIMED
+    assert timed_out.attempt_count == 1
+    assert timed_out.last_failure_stage == "episode"
+    assert timed_out.last_failure_code == "TimeoutError"
+    assert timed_out.next_retry_at_ms == 31_000
+
+    now[0] = 31_000
+    restarted = new_job(_ZeroEpisodeGenerator(), lambda: now[0])
+    completed = await restarted.execute(context)
+
+    assert completed.success is True
+    assert await store.get_active_project_semantic_window(
+        user_name=user_name,
+        project_id=project_id,
+    ) is None
+    durable = await postgres.fetch_one(
+        """
+        SELECT stage, attempt_count, last_failure_stage, last_failure_code,
+               next_retry_at_ms
+        FROM public.project_semantic_windows
+        WHERE project_id = %s
+        """,
+        (project_id,),
+    )
+    assert durable == {
+        "stage": "completed",
+        "attempt_count": 0,
+        "last_failure_stage": None,
+        "last_failure_code": None,
+        "next_retry_at_ms": None,
+    }
+
+
+@pytest.mark.integration
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_domain_activation_noop_bridge_completes_knowledge_and_following_window(
+    real_server_scope,
+    tmp_path,
+):
+    """Compose the version bridge and its next window through real storage."""
+
+    scope = real_server_scope
+    postgres = scope["postgres"]
+    user_name = scope["user_name"]
+    project_id = scope["project_id"]
+    session_id = scope["session_id"]
+    settings = IngestionSettings(semantic_window_tokens=1)
+    store = KnowledgeStore(postgres, object())
+    domain_store = DomainConfigStore(postgres)
+    initial_domain = await domain_store.load(user_name, project_id)
+    runtime = ProjectRuntime(
+        project_id=project_id,
+        entities=object(),
+        knowledge_retrieval=object(),
+        text_processor=SimpleNamespace(
+            gliner_threshold=0.42,
+            llm_ner_mode="fallback",
+        ),
+        scheduler=None,
+        user_name=user_name,
+        readable_project_ids=[project_id],
+        domain_config=initial_domain,
+        compiled_domain=initial_domain.compile(),
+        document_service=SimpleNamespace(),
+        domain_config_store=domain_store,
+        config_manager=SimpleNamespace(
+            config=RootConfig(developer_settings=DeveloperSettings()),
+        ),
+    )
+    projection = ContextProjection(
+        reader=ProjectContextReader(postgres),
+        writer=ProjectContextWriter(postgres),
+        filesystem=ProjectFilesystem(tmp_path / project_id),
+    )
+
+    def new_job():
+        return ProjectSemanticProcessor(
+            SemanticWindowAdmission(
+                store,
+                settings,
+                token_counter=lambda text: max(1, len(text.split())),
+                now_ms=lambda: 1_000_000,
+            ),
+            store,
+            _ZeroEpisodeGenerator(),
+            settings=settings,
+            capture_semantic_policy=runtime.capture_semantic_policy,
+            context_updater=ContextUpdater(llm=_NoopContextModel()),
+            context_projection=projection,
+            context_entity_builder=_UnexpectedKnowledgeBuilder(),
+            context_relationship_extractor=_UnexpectedRelationshipExtractor(),
+            publish_committed_entity_ids=_publish_nothing,
+        )
+
+    async def add_and_complete(message_id: int, content: str):
+        await postgres.execute(
+            """
+            INSERT INTO public.messages (
+                user_name, session_id, message_id, project_id, role, content,
+                timestamp_ms, lifecycle_state, exchange_state, exchange_outcome,
+                exchange_closed_at_ms
+            ) VALUES (%s, %s, %s, %s, 'user', %s, %s,
+                      'sealed', 'closed', 'user_only', %s)
+            """,
+            (
+                user_name,
+                session_id,
+                message_id,
+                project_id,
+                content,
+                message_id,
+                message_id,
+            ),
+        )
+        result = await new_job().execute(
+            JobContext(user_name=user_name, project_id=project_id)
+        )
+        assert result.success is True
+
+    await add_and_complete(501, "Establish the original Context version.")
+    before_activation = await ProjectContextReader(postgres).get_current_revision(
+        user_name=user_name,
+        project_id=project_id,
+    )
+    assert before_activation is not None
+    assert before_activation.domain_version == initial_domain.version
+
+    activation = await runtime.activate_domain_config(
+        initial_domain.with_version(0),
+        expected_version=initial_domain.version,
+    )
+    await add_and_complete(502, "No Context change after activation.")
+    bridge = await ProjectContextReader(postgres).get_current_revision(
+        user_name=user_name,
+        project_id=project_id,
+    )
+    assert bridge is not None
+    assert bridge.revision_id != before_activation.revision_id
+    assert bridge.domain_version == activation.config.version
+    assert bridge.content_hash == before_activation.content_hash
+
+    await add_and_complete(503, "The following window is also a no-op.")
+    following = await ProjectContextReader(postgres).get_current_revision(
+        user_name=user_name,
+        project_id=project_id,
+    )
+    assert following is not None
+    assert following.revision_id == bridge.revision_id
+    assert await postgres.fetch_one(
+        """
+        SELECT count(*) AS total,
+               count(*) FILTER (WHERE stage = 'completed') AS completed,
+               count(*) FILTER (WHERE context_revision_id = %s) AS bridged
+        FROM public.project_semantic_windows
+        WHERE project_id = %s
+        """,
+        (bridge.revision_id, project_id),
+    ) == {"total": 3, "completed": 3, "bridged": 2}
 
 
 @pytest.mark.integration

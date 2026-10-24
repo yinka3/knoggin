@@ -27,6 +27,7 @@ from core.knowledge.documents.constants import (
 from core.knowledge.documents.extraction import (
     DocumentChunk,
     embedding_text,
+    extract_and_split_docling_document,
     extract_and_split_document,
     locator_repair_fingerprints,
 )
@@ -152,11 +153,20 @@ class DocumentIndexer:
                 read_content_hash = hashlib.sha256(raw_bytes).hexdigest()
                 if read_content_hash != claimed["content_hash"]:
                     return await self._reconcile_stale_claim(claimed)
-                extraction = await self._run_blocking(
-                    extract_and_split_document,
-                    raw_bytes,
-                    claimed["extension"],
-                )
+                if claimed["extension"] in {".pdf", ".docx"}:
+                    extraction = await extract_and_split_docling_document(
+                        raw_bytes,
+                        claimed["extension"],
+                        claimed["extraction_mode"],
+                        claimed["extraction_strategy"],
+                    )
+                else:
+                    extraction = await self._run_blocking(
+                        extract_and_split_document,
+                        raw_bytes,
+                        claimed["extension"],
+                        claimed["extraction_mode"],
+                    )
                 chunks = extraction.chunks
                 embeddings = await self._encode_embeddings(
                     [
@@ -605,7 +615,8 @@ class DocumentIndexer:
         """Resume durable queued work and repair claims left by a stopped runtime."""
         fingerprints = locator_repair_fingerprints()
         await self._writer.queue_legacy_locator_reindex(
-            pdf_fingerprint=fingerprints[".pdf"],
+            standard_pdf_fingerprint=fingerprints[".pdf"],
+            ocr_pdf_fingerprint=fingerprints[".pdf:ocr"],
             notebook_fingerprint=fingerprints[".ipynb"],
         )
         self._last_recovery_requeued = await self._writer.requeue_interrupted_indexes(

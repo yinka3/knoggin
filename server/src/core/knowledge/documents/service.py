@@ -21,6 +21,8 @@ from loguru import logger
 from pydantic import TypeAdapter
 
 from common.schema.document import (
+    DocumentExtractionMode,
+    DocumentExtractionStrategy,
     DocumentSelection,
     FolderPreview,
     FolderScanSettings,
@@ -1415,6 +1417,8 @@ class DocumentService:
         content: bytes,
         original_name: str,
         relative_path: Optional[str] = None,
+        extraction_mode: DocumentExtractionMode = "standard",
+        extraction_strategy: DocumentExtractionStrategy = "auto",
     ) -> Dict:
         """Store a project document as durable queued indexing work."""
         if not isinstance(content, bytes):
@@ -1428,12 +1432,20 @@ class DocumentService:
             raise ValueError("original_name must not be empty")
         if "\x00" in original_name:
             raise ValueError("original_name contains an invalid null byte")
+        if extraction_mode not in {"standard", "ocr"}:
+            raise ValueError("Unsupported document extraction mode")
+        if extraction_strategy not in {"auto", "full", "bounded"}:
+            raise ValueError("Unsupported document extraction strategy")
         extension = document_extension(original_name)
         if extension not in ACCEPTED_EXTENSIONS:
             raise ValueError(
                 f"Unsupported file type '{extension}'. "
                 f"Accepted types include PDF, DOCX, plain text, source code, and images."
             )
+        if extraction_mode == "ocr" and extension != ".pdf":
+            raise ValueError("OCR extraction mode is only supported for PDF documents")
+        if extraction_strategy != "auto" and extension != ".pdf":
+            raise ValueError("Extraction strategies are only supported for PDF documents")
         normalized_path = normalize_relative_path(relative_path, original_name)
         self._require_unreserved_context_path(normalized_path)
         if document_extension(normalized_path) != extension:
@@ -1454,6 +1466,8 @@ class DocumentService:
                 extension=extension,
                 document_id=document_id,
                 content_hash=content_hash,
+                extraction_mode=extraction_mode,
+                extraction_strategy=extraction_strategy,
                 created_at=created_at,
             )
 
@@ -1468,6 +1482,8 @@ class DocumentService:
         extension: str,
         document_id: str,
         content_hash: str,
+        extraction_mode: DocumentExtractionMode,
+        extraction_strategy: DocumentExtractionStrategy,
         created_at: str,
     ) -> Dict:
         marker_task = asyncio.create_task(
@@ -1535,6 +1551,8 @@ class DocumentService:
                 extension=extension,
                 size_bytes=len(content),
                 content_hash=content_hash,
+                extraction_mode=extraction_mode,
+                extraction_strategy=extraction_strategy,
                 created_at=created_at,
             )
         )
@@ -1588,6 +1606,8 @@ class DocumentService:
             "extension": extension,
             "size_bytes": len(content),
             "content_hash": content_hash,
+            "extraction_mode": extraction_mode,
+            "extraction_strategy": extraction_strategy,
             "status": "queued",
             "deleted_at": None,
             "indexed_at": None,
@@ -1688,12 +1708,16 @@ class DocumentService:
         content: bytes,
         original_name: str,
         relative_path: Optional[str] = None,
+        extraction_mode: DocumentExtractionMode = "standard",
+        extraction_strategy: DocumentExtractionStrategy = "auto",
     ) -> Dict:
         """Persist a document, then index inline or admit durable background work."""
         document = await self.add_document(
             content=content,
             original_name=original_name,
             relative_path=relative_path,
+            extraction_mode=extraction_mode,
+            extraction_strategy=extraction_strategy,
         )
         try:
             return await self.schedule_document_index(
@@ -1742,6 +1766,8 @@ class DocumentService:
                 content=validated.content,
                 original_name=validated.original_name,
                 relative_path=validated.relative_path,
+                extraction_mode=validated.extraction_mode,
+                extraction_strategy=validated.extraction_strategy,
             )
 
         if not durable:

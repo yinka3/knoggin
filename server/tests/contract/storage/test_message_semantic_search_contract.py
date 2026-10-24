@@ -16,7 +16,7 @@ async def test_semantic_message_search_preserves_scope_and_projection_boundary()
             [{"message_id": 7, "score": 0.82, "session_id": "session-2"}]
         ]
     )
-    vector = [0.25] * 1024
+    vector = [0.25] * 768
 
     rows = await MessageReader(client).search_semantic_episode_sources(
         vector,
@@ -50,7 +50,7 @@ async def test_semantic_message_search_skips_empty_visibility_without_database_r
     client = RecordingPostgresClient()
 
     rows = await MessageReader(client).search_semantic_episode_sources(
-        [0.25] * 1024,
+        [0.25] * 768,
         user_name="ada",
         session_ids=[],
         visible_project_ids=["project-1"],

@@ -54,6 +54,8 @@ from common.schema.public import (
     DocumentContentResponse,
     DocumentDeletedResponse,
     DocumentFocusResponse,
+    DocumentOcrPreflightRequest,
+    DocumentOcrPreflightResponse,
     DocumentResponse,
     EntityMergeRollbackRequest,
     EpisodeEditedResponse,
@@ -617,7 +619,9 @@ class ApplicationRuntimePort:
                         raise failures[index]
                     if isinstance(item, BatchDocumentItem):
                         row = await service.submit_document(content=decoded[index], original_name=item.original_name,
-                                                            relative_path=item.relative_path)
+                                                            relative_path=item.relative_path,
+                                                            extraction_mode=item.extraction_mode,
+                                                            extraction_strategy=item.extraction_strategy)
                         results.append(BatchDocumentAccepted(index=index, document=project_public_model(DocumentResponse, row)))
                     else:
                         try:
@@ -646,7 +650,30 @@ class ApplicationRuntimePort:
                 content=content,
                 original_name=request.original_name,
                 relative_path=request.relative_path,
+                extraction_mode=request.extraction_mode,
+                extraction_strategy=request.extraction_strategy,
             ))
+
+    async def inspect_document_ocr(
+        self,
+        *,
+        user_name: str,
+        request: DocumentOcrPreflightRequest,
+    ) -> DocumentOcrPreflightResponse:
+        """Recommend OCR without admitting or indexing the supplied PDF."""
+        self._require_user(user_name)
+        if not request.original_name.lower().endswith(".pdf"):
+            raise ValueError("OCR preflight only supports PDF documents")
+        try:
+            content = base64.b64decode(request.content_base64, validate=True)
+        except ValueError as exc:
+            raise ValueError("content_base64 must be valid base64") from exc
+        if len(content) > MAX_DOCUMENT_SIZE:
+            raise PayloadTooLargeError()
+        from core.knowledge.documents.extraction import inspect_pdf_ocr_need
+
+        result = await asyncio.to_thread(inspect_pdf_ocr_need, content)
+        return DocumentOcrPreflightResponse.model_validate(result.__dict__)
 
     async def reindex_document(self, *, user_name: str, project_id: str, document_id: str) -> DocumentResponse:
         async with self._project_documents(user_name=user_name, project_id=project_id) as service:

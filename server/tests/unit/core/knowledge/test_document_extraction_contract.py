@@ -1,7 +1,10 @@
+import asyncio
+import io
 import json
 from types import SimpleNamespace
 
 import pytest
+from pypdf import PdfReader, PdfWriter
 
 from common.exceptions import DependencyError
 from core.knowledge.documents import extraction as extraction_module
@@ -11,6 +14,7 @@ from core.knowledge.documents.extraction import (
     DocumentSnapshotPage,
     LayoutRegion,
     NativePdfTextCell,
+    PdfPageGroup,
 )
 from core.knowledge.documents.indexer import DocumentIndexer
 from tests.fixtures.documents import (
@@ -179,11 +183,382 @@ def test_docling_parse_failures_distinguish_missing_models_from_bad_content(
         def convert(self, _stream):
             raise RuntimeError(detail)
 
-    monkeypatch.setattr(extraction_module, "_docling_converter", lambda: FailingConverter())
+    monkeypatch.setattr(
+        extraction_module,
+        "_docling_converter",
+        lambda _mode="standard": FailingConverter(),
+    )
 
     with pytest.raises(error_type, match=expected) as error:
         extraction_module._parse_with_docling(b"document", ".pdf")
     assert DocumentIndexer._classify_index_failure(error.value) == classification
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_docling_extraction_modes_change_ocr_without_disabling_tables():
+    standard = extraction_module._docling_parser_configuration("standard")
+    ocr = extraction_module._docling_parser_configuration("ocr")
+
+    assert standard["do_ocr"] is False
+    assert ocr["do_ocr"] is True
+    assert standard["do_table_structure"] is True
+    assert ocr["do_table_structure"] is True
+    assert extraction_module._DOCLING_CPU_THREADS == 4
+    fingerprints = extraction_module.locator_repair_fingerprints()
+    assert fingerprints[".pdf"] != fingerprints[".pdf:ocr"]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_pdf_ocr_preflight_recommends_only_image_backed_low_text_pages(monkeypatch):
+    class FakePage:
+        def __init__(self, text, *, scanned):
+            self._text = text
+            image = {
+                "/Subtype": "/Image",
+                "/Width": 1000,
+                "/Height": 1400,
+            }
+            self._resources = {"/XObject": {"/scan": image}} if scanned else {}
+
+        def extract_text(self):
+            return self._text
+
+        def get(self, key):
+            return self._resources if key == "/Resources" else None
+
+    pages = [FakePage("", scanned=True) for _ in range(3)]
+    monkeypatch.setattr(
+        extraction_module,
+        "PdfReader",
+        lambda _stream: SimpleNamespace(pages=pages),
+    )
+
+    result = extraction_module.inspect_pdf_ocr_need(b"pdf")
+
+    assert result.page_count == 3
+    assert result.low_text_page_count == 3
+    assert result.scanned_page_count == 3
+    assert result.ocr_recommended is True
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_pdf_ocr_preflight_does_not_recommend_for_native_text(monkeypatch):
+    page = SimpleNamespace(
+        extract_text=lambda: "native text " * 20,
+        get=lambda _key: {},
+    )
+    monkeypatch.setattr(
+        extraction_module,
+        "PdfReader",
+        lambda _stream: SimpleNamespace(pages=[page]),
+    )
+
+    result = extraction_module.inspect_pdf_ocr_need(b"pdf")
+
+    assert result.low_text_page_count == 0
+    assert result.scanned_page_count == 0
+    assert result.ocr_recommended is False
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_pdf_page_groups_keep_chapters_whole_and_cover_every_page():
+    writer = PdfWriter()
+    for _ in range(12):
+        writer.add_blank_page(width=612, height=792)
+    part = writer.add_outline_item("Part I", 0)
+    chapter_one = writer.add_outline_item("Chapter 1. First", 1, parent=part)
+    writer.add_outline_item("Section 1.1", 2, parent=chapter_one)
+    writer.add_outline_item("Chapter 2. Oversized", 5, parent=part)
+    writer.add_outline_item("Back Matter", 10)
+    payload = io.BytesIO()
+    writer.write(payload)
+
+    groups = extraction_module._pdf_page_groups(
+        PdfReader(io.BytesIO(payload.getvalue())),
+        target_pages=4,
+    )
+
+    assert groups == (
+        PdfPageGroup(1, 1),
+        PdfPageGroup(2, 5),
+        PdfPageGroup(6, 10),
+        PdfPageGroup(11, 12),
+    )
+    assert [page for group in groups for page in range(group.start_page, group.end_page + 1)] == list(
+        range(1, 13)
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_pdf_page_groups_fall_back_to_fixed_ranges_without_chapter_outline():
+    writer = PdfWriter()
+    for _ in range(9):
+        writer.add_blank_page(width=612, height=792)
+    payload = io.BytesIO()
+    writer.write(payload)
+
+    assert extraction_module._pdf_page_groups(
+        PdfReader(io.BytesIO(payload.getvalue())),
+        target_pages=4,
+    ) == (
+        PdfPageGroup(1, 4),
+        PdfPageGroup(5, 8),
+        PdfPageGroup(9, 9),
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_pdf_page_groups_require_more_than_one_chapter_bookmark():
+    writer = PdfWriter()
+    for _ in range(6):
+        writer.add_blank_page(width=612, height=792)
+    writer.add_outline_item("Chapter 1. Only bookmark", 2)
+    payload = io.BytesIO()
+    writer.write(payload)
+
+    assert extraction_module._pdf_page_groups(
+        PdfReader(io.BytesIO(payload.getvalue())),
+        target_pages=4,
+    ) == (PdfPageGroup(1, 4), PdfPageGroup(5, 6))
+
+
+def _blank_pdf(page_count: int) -> bytes:
+    writer = PdfWriter()
+    for _ in range(page_count):
+        writer.add_blank_page(width=612, height=792)
+    payload = io.BytesIO()
+    writer.write(payload)
+    return payload.getvalue()
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+@pytest.mark.parametrize("strategy", ["auto", "full"])
+async def test_small_auto_and_full_pdf_use_original_document(
+    monkeypatch,
+    strategy,
+):
+    content = _blank_pdf(3)
+    seen = []
+
+    async def extract_once(payload, extension, mode):
+        seen.append((payload, extension, mode))
+        return object()
+
+    monkeypatch.setattr(
+        extraction_module,
+        "_extract_and_split_docling_document_unlocked",
+        extract_once,
+    )
+
+    result = await extraction_module.extract_and_split_docling_document(
+        content,
+        ".pdf",
+        extraction_strategy=strategy,
+    )
+
+    assert result is not None
+    assert seen == [(content, ".pdf", "standard")]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_bounded_pdf_uses_page_groups_even_when_small(monkeypatch):
+    content = _blank_pdf(3)
+    seen = []
+    grouped_content = b"bounded-pdf"
+
+    async def extract_group(payload, extension, mode):
+        seen.append((payload, extension, mode))
+        return object()
+
+    monkeypatch.setattr(
+        extraction_module,
+        "_extract_and_split_docling_document_unlocked",
+        extract_group,
+    )
+    monkeypatch.setattr(
+        extraction_module,
+        "_pdf_group_bytes",
+        lambda _reader, _group: grouped_content,
+    )
+    monkeypatch.setattr(
+        extraction_module,
+        "_rebase_pdf_group_extraction",
+        lambda result, _group: result,
+    )
+    monkeypatch.setattr(
+        extraction_module,
+        "_combine_pdf_group_extractions",
+        lambda groups, _mode, _grouping_method: groups,
+    )
+
+    result = await extraction_module.extract_and_split_docling_document(
+        content,
+        ".pdf",
+        extraction_strategy="bounded",
+    )
+
+    assert len(seen) == 1
+    assert seen[0][0] == grouped_content
+    assert result[0][0] == PdfPageGroup(1, 3)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_large_auto_pdf_uses_fixed_page_fallback_without_outline(monkeypatch):
+    content = _blank_pdf(5)
+    grouped_content = b"group"
+    grouping_methods = []
+
+    async def extract_group(_payload, _extension, _mode):
+        return object()
+
+    monkeypatch.setattr(extraction_module, "_DOCLING_PAGE_GROUP_TARGET", 2)
+    monkeypatch.setattr(
+        extraction_module,
+        "_extract_and_split_docling_document_unlocked",
+        extract_group,
+    )
+    monkeypatch.setattr(
+        extraction_module,
+        "_pdf_group_bytes",
+        lambda _reader, _group: grouped_content,
+    )
+    monkeypatch.setattr(
+        extraction_module,
+        "_rebase_pdf_group_extraction",
+        lambda result, _group: result,
+    )
+
+    def combine(groups, _mode, grouping_method):
+        grouping_methods.append(grouping_method)
+        return groups
+
+    monkeypatch.setattr(
+        extraction_module,
+        "_combine_pdf_group_extractions",
+        combine,
+    )
+
+    result = await extraction_module.extract_and_split_docling_document(
+        content,
+        ".pdf",
+        extraction_strategy="auto",
+    )
+
+    assert [group for group, _result in result] == [
+        PdfPageGroup(1, 2),
+        PdfPageGroup(3, 4),
+        PdfPageGroup(5, 5),
+    ]
+    assert grouping_methods == ["fixed_pages"]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_docling_parse_selects_requested_extraction_mode(monkeypatch):
+    selected = []
+
+    class Converter:
+        @staticmethod
+        def convert(_stream):
+            return type("Result", (), {"document": "parsed"})()
+
+    def converter(mode):
+        selected.append(mode)
+        return Converter()
+
+    monkeypatch.setattr(extraction_module, "_docling_converter", converter)
+
+    assert extraction_module._parse_with_docling(b"pdf", ".pdf", "ocr") == "parsed"
+    assert selected == ["ocr"]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_docling_extraction_process_returns_stable_document_projection():
+    extraction = await extraction_module.extract_and_split_docling_document(
+        build_docx_bytes(
+            [
+                ("Isolated extraction", 1),
+                ("The child process returns ordinary Knoggin chunks.", None),
+            ]
+        ),
+        ".docx",
+    )
+
+    assert extraction.snapshot.parser_name == "docling"
+    assert extraction.text.startswith("## Isolated extraction")
+    assert "child process returns ordinary Knoggin chunks" in extraction.chunks[0].content
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_docling_extraction_process_preserves_invalid_content_failure():
+    with pytest.raises(ValueError, match="Docling could not parse"):
+        await extraction_module.extract_and_split_docling_document(
+            b"not a docx archive",
+            ".docx",
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_docling_extraction_process_timeout_stops_worker(monkeypatch):
+    monkeypatch.setattr(extraction_module, "_DOCLING_PROCESS_TIMEOUT_SECONDS", 0.01)
+
+    with pytest.raises(TimeoutError, match="exceeded 0.01 seconds"):
+        await extraction_module.extract_and_split_docling_document(
+            build_docx_bytes([("Timeout", 1)]),
+            ".docx",
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_docling_extraction_process_cancellation_reaps_worker():
+    extraction = asyncio.create_task(
+        extraction_module.extract_and_split_docling_document(
+            build_docx_bytes([("Cancelled", 1)]),
+            ".docx",
+        )
+    )
+    await asyncio.sleep(0)
+    extraction.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await extraction
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_standard_mode_never_labels_docling_text_as_ocr():
+    regions = extraction_module._regions_from_docling_structure(
+        {
+            "texts": [
+                {
+                    "label": "text",
+                    "prov": [
+                        {
+                            "page_no": 1,
+                            "bbox": {"l": 0, "b": 0, "r": 10, "t": 10},
+                        }
+                    ],
+                }
+            ]
+        },
+        native_regions={},
+        ocr_enabled=False,
+    )
+
+    assert regions[1][0].extraction_method == "native_text"
 
 
 @pytest.mark.unit
@@ -782,6 +1157,61 @@ def test_text_processing_strategies_preserve_exact_chunk_locations(
     extraction = extraction_module.extract_and_split_document(content, extension)
 
     assert extraction.chunks == expected_chunks
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_python_class_methods_receive_qualified_symbol_names():
+    extraction = extraction_module.extract_and_split_document(
+        b"""class Worker:
+    category = "indexing"
+
+    @classmethod
+    async def recover(cls):
+        return cls.category
+
+    def wake(self):
+        return "ready"
+
+def outside():
+    return Worker()
+""",
+        ".py",
+    )
+
+    assert [chunk.symbol_name for chunk in extraction.chunks] == [
+        "Worker",
+        "Worker.recover",
+        "Worker.wake",
+        "outside",
+    ]
+    assert extraction.chunks[1].content.startswith("@classmethod\n    async def recover")
+    assert (extraction.chunks[1].start_line, extraction.chunks[1].end_line) == (4, 7)
+    assert (extraction.chunks[2].start_line, extraction.chunks[2].end_line) == (8, 10)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_split_python_method_retains_qualified_symbol_name():
+    long_assignment = "        value = '" + ("x" * 1_100) + "'\n"
+    content = (
+        "class Worker:\n"
+        "    def large(self):\n"
+        + long_assignment
+        + long_assignment
+        + long_assignment
+        + "        return value\n"
+    ).encode()
+
+    extraction = extraction_module.extract_and_split_document(content, ".py")
+
+    method_chunks = [
+        chunk
+        for chunk in extraction.chunks
+        if chunk.symbol_name == "Worker.large"
+    ]
+    assert len(method_chunks) == 2
+    assert all(chunk.chunk_kind == "code" for chunk in method_chunks)
 
 
 @pytest.mark.unit

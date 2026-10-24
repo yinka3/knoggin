@@ -54,5 +54,5 @@ def test_episode_embedding_text_from_fields_matches_an_edited_episode():
 
 @pytest.mark.no_network
 def test_episode_rejects_invalid_embedding_dimensions():
-    with pytest.raises(ValueError, match="exactly 1024 dimensions"):
-        make_episode().validated_copy(update={"embedding": [0.0] * 1023})
+    with pytest.raises(ValueError, match="exactly 768 dimensions"):
+        make_episode().validated_copy(update={"embedding": [0.0] * 767})

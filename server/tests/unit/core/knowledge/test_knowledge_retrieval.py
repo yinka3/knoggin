@@ -97,7 +97,7 @@ async def test_message_search_fuses_lexical_and_semantic_episode_sources(scenari
 
     class Embeddings:
         async def encode_query(self, _query):
-            return [0.1] * 1024
+            return [0.1] * 768
 
         async def rerank(self, _query, candidates):
             return [float(len(candidates) - index) for index, _ in enumerate(candidates)]
@@ -146,7 +146,7 @@ async def test_message_search_keeps_all_candidates_when_reranker_is_incomplete()
 
     class Embeddings:
         async def encode_query(self, _query):
-            return [0.1] * 1024
+            return [0.1] * 768
 
         async def rerank(self, _query, _candidates):
             return [0.9]
@@ -181,7 +181,7 @@ async def test_message_search_propagates_lexical_storage_failure():
 
     class Embeddings:
         async def encode_query(self, _query):
-            return [0.1] * 1024
+            return [0.1] * 768
 
     retrieval = KnowledgeRetrieval(
         project_id="project-1",

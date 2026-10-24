@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 from loguru import logger
 
 from common.conf.manager import ConfigManager
+from common.embedding_contract import DEFAULT_EMBEDDING_MODEL, DEFAULT_RERANKER_MODEL
 from common.exceptions import ConfigurationError, DependencyError
 from common.utils.coordination_log import configure_coordination_log
 from common.utils.lifecycle import settle_owned_task
@@ -279,10 +280,8 @@ class RuntimeResources:
             config_manager.subscribe(self.jev_client.update_settings, "jev")
         )
         self.embedding = EmbeddingService(
-            embedding_model=os.getenv(
-                "KNOGGIN_EMBEDDING_MODEL", "dunzhang/stella_en_1.5B_v5"
-            ),
-            reranker_model=os.getenv("KNOGGIN_RERANKER_MODEL", "BAAI/bge-reranker-large"),
+            embedding_model=os.getenv("KNOGGIN_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
+            reranker_model=os.getenv("KNOGGIN_RERANKER_MODEL", DEFAULT_RERANKER_MODEL),
             device=device,
             batch_size=self.resource_profile.embedding_batch_size,
             model_work=self.model_work,

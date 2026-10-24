@@ -9,7 +9,7 @@ from tests.fixtures.fakes import RecordingPostgresClient
 
 
 class RecordingEmbeddingService:
-    embedding_dim = 1024
+    embedding_dim = 768
     configuration_fingerprint = "fingerprint-v2"
 
     def __init__(self, *, fail: bool = False, chunk_limit=None):
@@ -27,7 +27,7 @@ class RecordingEmbeddingService:
 
     @staticmethod
     def vector_for(text: str):
-        return [float(sum(ord(character) for character in text))] * 1024
+        return [float(sum(ord(character) for character in text))] * 768
 
     async def encode(self, texts):
         values = list(texts)
@@ -87,7 +87,7 @@ async def test_full_rebuild_replaces_episode_and_document_vectors_and_fingerprin
         if call[0] == "execute" and "UPDATE public." in call[1]
     ]
     assert len(updates) == 2
-    assert len(json.loads(updates[0][2][0])) == 1024
+    assert len(json.loads(updates[0][2][0])) == 768
     assert any(
         call[0] == "execute"
         and "INSERT INTO public.embedding_configuration" in call[1]
@@ -143,8 +143,21 @@ async def test_rebuild_rejects_wrong_dimension_before_reading_storage():
     embedding = RecordingEmbeddingService()
     embedding.embedding_dim = 3
 
-    with pytest.raises(RuntimeError, match="1024-dimensional"):
+    with pytest.raises(RuntimeError, match="768-dimensional"):
         await EmbeddingRebuilder(client, embedding).rebuild_all_embeddings()
+
+    assert client.calls == []
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_configuration_rejects_wrong_dimension_before_reading_storage():
+    client = RecordingPostgresClient()
+    embedding = RecordingEmbeddingService()
+    embedding.embedding_dim = 1024
+
+    with pytest.raises(RuntimeError, match="database requires 768"):
+        await EmbeddingRebuilder(client, embedding).ensure_configuration()
 
     assert client.calls == []
 

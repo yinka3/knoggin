@@ -40,7 +40,7 @@ async def real_resource_manager(monkeypatch):
         huggingface_hub,
         os.environ.get(
             "KNOGGIN_SEMANTIC_SMOKE_MODEL",
-            os.environ.get("KNOGGIN_EMBEDDING_MODEL", "dunzhang/stella_en_1.5B_v5"),
+            os.environ.get("KNOGGIN_EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5"),
         ),
         revision_env="KNOGGIN_SEMANTIC_SMOKE_MODEL_REVISION",
     )
@@ -48,7 +48,7 @@ async def real_resource_manager(monkeypatch):
         huggingface_hub,
         os.environ.get(
             "KNOGGIN_SEMANTIC_SMOKE_RERANKER_MODEL",
-            os.environ.get("KNOGGIN_RERANKER_MODEL", "BAAI/bge-reranker-large"),
+            os.environ.get("KNOGGIN_RERANKER_MODEL", "BAAI/bge-reranker-base"),
         ),
         revision_env="KNOGGIN_SEMANTIC_SMOKE_RERANKER_REVISION",
     )

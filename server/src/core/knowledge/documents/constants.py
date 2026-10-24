@@ -1,6 +1,7 @@
 from pathlib import PurePosixPath
 
 from common.document_limits import MAX_DOCUMENT_SIZE as MAX_DOCUMENT_SIZE
+from common.embedding_contract import EMBEDDING_DIMENSION
 
 # Keep indexed relative paths comfortably below PostgreSQL's B-tree entry
 # limit, including multibyte UTF-8 path components.
@@ -16,7 +17,7 @@ DOCUMENT_RERANK_DEFAULT_CANDIDATES = 15
 # Token-based chunk settings for SentenceSplitter
 CHUNK_SIZE_TOKENS = 512
 CHUNK_OVERLAP_TOKENS = 50
-EXPECTED_EMBEDDING_DIMENSION = 1024
+EXPECTED_EMBEDDING_DIMENSION = EMBEDDING_DIMENSION
 MAX_ERROR_MESSAGE_LENGTH = 1000
 MAX_READ_LINES = 200
 MAX_READ_CHARACTERS = 20_000
@@ -174,7 +175,7 @@ ACCEPTED_EXTENSIONS = (
     | {".bash", ".c", ".coffee", ".cpp", ".cs", ".css", ".dart", ".ex", ".exs",
        ".go", ".groovy", ".h", ".hpp", ".hs", ".java", ".js", ".jsx", ".kt",
        ".lua", ".m", ".php", ".pl", ".proto", ".py", ".r", ".rb", ".rs", ".scala",
-       ".sh", ".sql", ".swift", ".ts", ".tsx", ".vue", ".zsh"}
+       ".sh", ".sql", ".swift", ".ts", ".tsx", ".vue", ".zig", ".zsh"}
     # Config / data
     | {".cfg", ".conf", ".dockerfile", ".env", ".ini", ".toml"}
 )

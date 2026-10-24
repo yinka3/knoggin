@@ -7,9 +7,10 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
+from common.embedding_contract import EMBEDDING_DIMENSION
 from common.utils.time_utils import get_now
 
-EPISODE_EMBEDDING_DIMENSION = 1024
+EPISODE_EMBEDDING_DIMENSION = EMBEDDING_DIMENSION
 
 
 class EpisodeNarrativeLimitError(ValueError):

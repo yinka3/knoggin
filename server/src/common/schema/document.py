@@ -17,6 +17,9 @@ from pydantic import (
 
 from common.schema.source.locators import DocumentLocator
 
+DocumentExtractionMode = Literal["standard", "ocr"]
+DocumentExtractionStrategy = Literal["auto", "full", "bounded"]
+
 
 class SavedWebLink(BaseModel):
     """One project-owned bookmark, deliberately separate from documents."""
@@ -69,6 +72,8 @@ class UserAttachedFile(BaseModel):
     original_name: str = Field(min_length=1, max_length=512)
     content: bytes = Field(min_length=1, repr=False)
     relative_path: str | None = Field(default=None, min_length=1, max_length=2048)
+    extraction_mode: DocumentExtractionMode = "standard"
+    extraction_strategy: DocumentExtractionStrategy = "auto"
 
     @field_validator("original_name", "relative_path")
     @classmethod

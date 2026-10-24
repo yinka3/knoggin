@@ -14,6 +14,10 @@ SERVER_ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = SERVER_ROOT.parent
 sys.path.insert(0, str(SERVER_ROOT / "src"))
 
+from common.embedding_contract import (  # noqa: E402
+    DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_RERANKER_MODEL,
+)
 from core.ingestion.vp01 import GLiNER25VP01Adapter  # noqa: E402
 from core.knowledge.services.embedding_service import EmbeddingService  # noqa: E402
 from infrastructure.model_work import ModelWorkPriority  # noqa: E402
@@ -35,12 +39,8 @@ async def prefetch_models() -> None:
     profile = ResourceProfile.from_environment()
     device = _device()
     embedding = EmbeddingService(
-        embedding_model=os.getenv(
-            "KNOGGIN_EMBEDDING_MODEL", "dunzhang/stella_en_1.5B_v5"
-        ),
-        reranker_model=os.getenv(
-            "KNOGGIN_RERANKER_MODEL", "BAAI/bge-reranker-large"
-        ),
+        embedding_model=os.getenv("KNOGGIN_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
+        reranker_model=os.getenv("KNOGGIN_RERANKER_MODEL", DEFAULT_RERANKER_MODEL),
         device=device,
         batch_size=profile.embedding_batch_size,
     )

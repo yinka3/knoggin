@@ -126,7 +126,7 @@ async def test_project_entity_and_semantic_queries_use_project_scope():
     reader = EpisodeReader(client)
 
     semantic_matches = await reader.search_project_episodes_by_embedding(
-        [0.1] * 1024,
+        [0.1] * 768,
         user_name="ada",
         project_id="project-1",
         visible_project_ids=["project-1"],

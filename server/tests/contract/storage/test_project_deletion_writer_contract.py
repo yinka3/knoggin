@@ -180,7 +180,7 @@ async def test_project_deletion_executes_complete_aggregate_against_postgres(
     document_id = "11111111-1111-4111-8111-111111111111"
     snapshot_id = "12121212-1212-4121-8121-121212121212"
     chunk_id = "22222222-2222-4222-8222-222222222222"
-    embedding = "[" + ",".join(["0"] * 1024) + "]"
+    embedding = "[" + ",".join(["0"] * 768) + "]"
 
     await real_postgres_client.execute(
         """
@@ -337,7 +337,7 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
     """Project deletion removes derived aggregates without touching a sibling project."""
 
     writer = ProjectDeletionWriter(real_postgres_client)
-    embedding = "[" + ",".join(["0"] * 1024) + "]"
+    embedding = "[" + ",".join(["0"] * 768) + "]"
 
     async with real_postgres_client.transaction() as cur:
         await cur.execute(

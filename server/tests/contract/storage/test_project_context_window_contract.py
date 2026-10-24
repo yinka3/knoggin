@@ -650,7 +650,7 @@ async def test_semantic_episode_rejects_reused_identity_without_rewriting_histor
         episode_id="prior-semantic-episode",
         project_id="project-1",
         summary="A later result must not replace the earlier episode.",
-        embedding=[0.5] * 1024,
+        embedding=[0.5] * 768,
         messages=[
             MessageEpisode(message_id=102, session_id="session-1", message_position=0)
         ],
@@ -754,7 +754,7 @@ async def test_window_local_episodes_reach_notebook_synthesis_with_reversal_hist
             return [text]
 
         async def encode(self, texts):
-            return [[0.25] * 1024 for _ in texts]
+            return [[0.25] * 768 for _ in texts]
 
     async def ignore_retrieval_event(*_args, **_kwargs):
         return None

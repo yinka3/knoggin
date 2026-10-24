@@ -1,16 +1,24 @@
 """Format-aware document extraction, snapshots, and chunk construction."""
 
+import ast
+import asyncio
 import csv
 import hashlib
 import io
 import json
 import math
+import os
+import pickle
 import re
+import shutil
+import sys
+import tempfile
 import threading
 import warnings
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pytesseract
@@ -31,11 +39,15 @@ import tree_sitter_rust
 import tree_sitter_sql
 import tree_sitter_typescript
 import tree_sitter_yaml
+import tree_sitter_zig
 from llama_index.core.node_parser import SentenceSplitter
+from loguru import logger
 from PIL import Image as PILImage
+from pypdf import PdfReader, PdfWriter
 from tree_sitter import Language, Parser
 
 from common.exceptions import DependencyError
+from common.schema.document import DocumentExtractionMode, DocumentExtractionStrategy
 from core.knowledge.documents.constants import (
     ACCEPTED_EXTENSIONS,
     CHUNK_OVERLAP_TOKENS,
@@ -174,6 +186,29 @@ class DocumentExtraction:
     snapshot: DocumentParseSnapshot
 
 
+@dataclass(frozen=True)
+class PdfPageGroup:
+    """One inclusive original-page range sent through Docling as a unit."""
+
+    start_page: int
+    end_page: int
+
+    @property
+    def page_count(self) -> int:
+        return self.end_page - self.start_page + 1
+
+
+@dataclass(frozen=True)
+class PdfOcrPreflight:
+    """Cheap evidence used to recommend, but never silently enable, OCR."""
+
+    page_count: int
+    low_text_page_count: int
+    scanned_page_count: int
+    ocr_recommended: bool
+    reason: str
+
+
 _CODE_LANGUAGES = {
     ".bash": "bash", ".c": "c", ".cpp": "cpp", ".cs": "c_sharp",
     ".dockerfile": "dockerfile",
@@ -182,7 +217,7 @@ _CODE_LANGUAGES = {
     ".php": "php", ".py": "python", ".rb": "ruby", ".rs": "rust",
     ".sh": "bash", ".sql": "sql", ".swift": "swift", ".ts": "typescript",
     ".tsx": "typescript", ".vue": "vue", ".yaml": "yaml", ".yml": "yaml",
-    ".zsh": "bash",
+    ".zig": "zig", ".zsh": "bash",
 }
 _SYMBOL_PATTERN = re.compile(
     r"^(?:(?:export\s+)?(?:async\s+)?)?"
@@ -198,18 +233,110 @@ _DOCKERFILE_INSTRUCTION_PATTERN = re.compile(r"^([A-Za-z]+)(?:\s|$)")
 _MARKDOWN_HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 _TEXT_CHUNK_TARGET_CHARS = CHUNK_SIZE_TOKENS * 4
 _DOCLING_CONVERSION_LOCK = threading.RLock()
-_DOCLING_PARSER_CONFIGURATION = {
-    "knoggin_projection_revision": 2,
-    "accelerator": "cpu",
-    "do_ocr": True,
-    "do_table_structure": True,
-    "do_code_enrichment": False,
-    "do_formula_enrichment": False,
-    "do_picture_description": False,
-    "do_picture_classification": False,
-    "remote_services": False,
-    "external_plugins": False,
-}
+_DOCLING_PROCESS_LOCK = asyncio.Lock()
+_DOCLING_CPU_THREADS = 4
+_DOCLING_PROCESS_POLL_SECONDS = 0.1
+_DOCLING_PROCESS_STOP_SECONDS = 5.0
+_DOCLING_PROCESS_TIMEOUT_SECONDS = float(
+    os.getenv("KNOGGIN_DOCLING_TIMEOUT_SECONDS", str(3 * 60 * 60))
+)
+_DOCLING_PAGE_GROUP_TARGET = int(
+    os.getenv("KNOGGIN_DOCLING_PAGE_GROUP_PAGES", "100")
+)
+_OCR_PREFLIGHT_MAX_NATIVE_CHARACTERS = 50
+_OCR_PREFLIGHT_MIN_SCANNED_RATIO = 0.60
+_OCR_PREFLIGHT_MIN_IMAGE_PIXELS = 250_000
+
+
+def _resources_have_large_raster_image(resources: Any, seen: set[int]) -> bool:
+    try:
+        resources = resources.get_object()
+    except AttributeError:
+        pass
+    xobjects = resources.get("/XObject") or {}
+    try:
+        xobjects = xobjects.get_object()
+    except AttributeError:
+        pass
+    for reference in xobjects.values():
+        try:
+            item = reference.get_object() if hasattr(reference, "get_object") else reference
+            object_key = id(item)
+            if object_key in seen:
+                continue
+            seen.add(object_key)
+            if (
+                item.get("/Subtype") == "/Image"
+                and int(item.get("/Width", 0)) * int(item.get("/Height", 0))
+                >= _OCR_PREFLIGHT_MIN_IMAGE_PIXELS
+            ):
+                return True
+            if item.get("/Subtype") == "/Form" and _resources_have_large_raster_image(
+                item.get("/Resources") or {}, seen
+            ):
+                return True
+        except (AttributeError, TypeError, ValueError):
+            continue
+    return False
+
+
+def _page_has_large_raster_image(page: Any) -> bool:
+    return _resources_have_large_raster_image(page.get("/Resources") or {}, set())
+
+
+def inspect_pdf_ocr_need(content: bytes) -> PdfOcrPreflight:
+    """Inspect native text and raster evidence without running Docling or OCR."""
+    reader = PdfReader(io.BytesIO(content))
+    page_count = len(reader.pages)
+    if page_count == 0:
+        raise ValueError("PDF contains no pages")
+    low_text_pages = 0
+    scanned_pages = 0
+    for page in reader.pages:
+        try:
+            native_text = page.extract_text() or ""
+        except Exception:
+            native_text = ""
+        low_text = len("".join(native_text.split())) < _OCR_PREFLIGHT_MAX_NATIVE_CHARACTERS
+        if low_text:
+            low_text_pages += 1
+            if _page_has_large_raster_image(page):
+                scanned_pages += 1
+    required_pages = max(1, math.ceil(page_count * _OCR_PREFLIGHT_MIN_SCANNED_RATIO))
+    recommended = scanned_pages >= required_pages
+    reason = (
+        f"{scanned_pages} of {page_count} pages have little native text and a large raster image"
+        if recommended
+        else f"only {scanned_pages} of {page_count} pages look scanned"
+    )
+    return PdfOcrPreflight(
+        page_count=page_count,
+        low_text_page_count=low_text_pages,
+        scanned_page_count=scanned_pages,
+        ocr_recommended=recommended,
+        reason=reason,
+    )
+
+
+def _docling_parser_configuration(
+    extraction_mode: DocumentExtractionMode,
+) -> Dict[str, Any]:
+    if extraction_mode not in {"standard", "ocr"}:
+        raise ValueError("Unsupported document extraction mode")
+    return {
+        "knoggin_projection_revision": 4,
+        "extraction_mode": extraction_mode,
+        "accelerator": "cpu",
+        "do_ocr": extraction_mode == "ocr",
+        "do_table_structure": True,
+        "do_code_enrichment": False,
+        "do_formula_enrichment": False,
+        "do_picture_description": False,
+        "do_picture_classification": False,
+        "remote_services": False,
+        "external_plugins": False,
+        "chapter_page_group_target": _DOCLING_PAGE_GROUP_TARGET,
+    }
 
 
 def _fingerprint(value: Dict[str, Any]) -> str:
@@ -218,13 +345,11 @@ def _fingerprint(value: Dict[str, Any]) -> str:
     ).hexdigest()
 
 
-_DOCLING_PARSER_FINGERPRINT = _fingerprint(_DOCLING_PARSER_CONFIGURATION)
-
-
 def locator_repair_fingerprints() -> dict[str, str]:
     """Parser identities that include the notebook and PDF locator repairs."""
     return {
-        ".pdf": _DOCLING_PARSER_FINGERPRINT,
+        ".pdf": _fingerprint(_docling_parser_configuration("standard")),
+        ".pdf:ocr": _fingerprint(_docling_parser_configuration("ocr")),
         ".ipynb": _fingerprint(
             {"format": ".ipynb", "mode": "exact_text", "knoggin_projection_revision": 2}
         ),
@@ -267,6 +392,7 @@ _TREE_SITTER_LANGUAGES = {
     ".tsx": Language(tree_sitter_typescript.language_tsx()),
     ".yaml": Language(tree_sitter_yaml.language()),
     ".yml": Language(tree_sitter_yaml.language()),
+    ".zig": Language(tree_sitter_zig.language()),
     ".zsh": Language(tree_sitter_bash.language()),
 }
 _DOCKERFILE_LANGUAGE = _dockerfile_language()
@@ -323,6 +449,7 @@ _TREE_SITTER_SYMBOL_TYPES = {
         "type_alias_declaration",
     },
     "yaml": set(),
+    "zig": {"function_declaration", "test_declaration", "variable_declaration"},
 }
 _TREE_SITTER_WRAPPER_TYPES = {
     "ambient_declaration",
@@ -394,7 +521,7 @@ def _docling_version() -> str:
 
 
 @lru_cache(maxsize=1)
-def _docling_converter():
+def _docling_converter(extraction_mode: DocumentExtractionMode = "standard"):
     """Build the one local-only converter shared by blocking index workers."""
 
     from docling.datamodel.accelerator_options import (
@@ -408,9 +535,9 @@ def _docling_converter():
     pdf_options = PdfPipelineOptions(
         accelerator_options=AcceleratorOptions(
             device=AcceleratorDevice.CPU,
-            num_threads=2,
+            num_threads=_DOCLING_CPU_THREADS,
         ),
-        do_ocr=True,
+        do_ocr=extraction_mode == "ocr",
         do_table_structure=True,
         do_code_enrichment=False,
         do_formula_enrichment=False,
@@ -425,7 +552,11 @@ def _docling_converter():
     )
 
 
-def _parse_with_docling(content: bytes, extension: str):
+def _parse_with_docling(
+    content: bytes,
+    extension: str,
+    extraction_mode: DocumentExtractionMode = "standard",
+):
     """Convert in a single serialized local pipeline invocation.
 
     Docling keeps parser/model state inside its converter.  The lock prevents
@@ -437,7 +568,7 @@ def _parse_with_docling(content: bytes, extension: str):
 
     try:
         with _DOCLING_CONVERSION_LOCK:
-            return _docling_converter().convert(
+            return _docling_converter(extraction_mode).convert(
                 DocumentStream(
                     name=f"captured-document{extension}",
                     stream=io.BytesIO(content),
@@ -536,6 +667,7 @@ def _regions_from_docling_structure(
     structure: Dict[str, Any],
     *,
     native_regions: Dict[int, tuple[tuple[float, float, float, float], ...]],
+    ocr_enabled: bool = True,
 ) -> Dict[int, tuple[LayoutRegion, ...]]:
     """Retain Docling element provenance in a small stable region projection."""
 
@@ -561,6 +693,8 @@ def _regions_from_docling_structure(
                 native_boxes = native_regions.get(page_number, ())
                 if collection != "texts":
                     extraction_method = "model_interpretation"
+                elif not ocr_enabled:
+                    extraction_method = "unknown" if bbox is None else "native_text"
                 elif not native_boxes:
                     extraction_method = "ocr"
                 elif bbox is None:
@@ -706,8 +840,12 @@ def _boxes_overlap(
     )
 
 
-def _extract_docling_snapshot(content: bytes, extension: str) -> DocumentParseSnapshot:
-    document = _parse_with_docling(content, extension)
+def _extract_docling_snapshot(
+    content: bytes,
+    extension: str,
+    extraction_mode: DocumentExtractionMode = "standard",
+) -> DocumentParseSnapshot:
+    document = _parse_with_docling(content, extension, extraction_mode)
     structure = _sanitize_parser_structure(document.export_to_dict(coord_precision=3))
     text = document.export_to_markdown().strip()
     if not text and extension != ".pdf":
@@ -722,6 +860,7 @@ def _extract_docling_snapshot(content: bytes, extension: str) -> DocumentParseSn
                 page: tuple(cell.bbox for cell in cells if cell.bbox is not None)
                 for page, cells in native_cells.items()
             },
+            ocr_enabled=extraction_mode == "ocr",
         )
         document_index_pages = _document_index_page_numbers(structure)
         index_boxes = _document_index_boxes(structure)
@@ -802,7 +941,9 @@ def _extract_docling_snapshot(content: bytes, extension: str) -> DocumentParseSn
         structure=structure,
         parser_name="docling",
         parser_version=_docling_version(),
-        parser_fingerprint=_DOCLING_PARSER_FINGERPRINT,
+        parser_fingerprint=_fingerprint(
+            _docling_parser_configuration(extraction_mode)
+        ),
         pages=pages,
     )
 
@@ -830,12 +971,20 @@ def _page_locator(page: DocumentSnapshotPage) -> Dict[str, Any]:
     ).as_locator()
 
 
-def extract_and_split_document(content: bytes, extension: str) -> DocumentExtraction:
+def extract_and_split_document(
+    content: bytes,
+    extension: str,
+    extraction_mode: DocumentExtractionMode = "standard",
+) -> DocumentExtraction:
     """Capture one canonical parse, then derive all retrieval chunks from it."""
 
     normalized_extension = extension.lower()
     if normalized_extension == ".pdf":
-        snapshot = _extract_docling_snapshot(content, normalized_extension)
+        snapshot = _extract_docling_snapshot(
+            content,
+            normalized_extension,
+            extraction_mode,
+        )
         chunks = [
             DocumentChunk(
                 content=chunk,
@@ -856,6 +1005,358 @@ def extract_and_split_document(content: bytes, extension: str) -> DocumentExtrac
     if not chunks:
         raise ValueError("Document produced no non-empty chunks")
     return DocumentExtraction(text=snapshot.text, chunks=chunks, snapshot=snapshot)
+
+
+def _flatten_pdf_outline(
+    reader: PdfReader,
+) -> list[tuple[int, str, int]]:
+    """Return valid one-based outline destinations in reading order."""
+
+    flattened: list[tuple[int, str, int]] = []
+
+    def visit(items: list[Any], depth: int) -> None:
+        for item in items:
+            if isinstance(item, list):
+                visit(item, depth + 1)
+                continue
+            try:
+                page_number = reader.get_destination_page_number(item) + 1
+            except Exception:
+                continue
+            title = str(getattr(item, "title", "")).strip()
+            if title and 1 <= page_number <= len(reader.pages):
+                flattened.append((page_number, title, depth))
+
+    try:
+        visit(reader.outline, 0)
+    except Exception:
+        return []
+    return flattened
+
+
+def _chapter_outline_entries(
+    outline: list[tuple[int, str, int]],
+) -> list[tuple[int, str, int]]:
+    explicit = [
+        entry
+        for entry in outline
+        if re.match(r"^chapter\s+\d+(?:\D|$)", entry[1], re.IGNORECASE)
+    ]
+    candidates = explicit or [
+        entry for entry in outline if re.match(r"^\d+\s+\S", entry[1])
+    ]
+    if not candidates:
+        return []
+    if not explicit:
+        shallowest_depth = min(entry[2] for entry in candidates)
+        candidates = [entry for entry in candidates if entry[2] == shallowest_depth]
+    by_page: dict[int, tuple[int, str, int]] = {}
+    for entry in candidates:
+        by_page.setdefault(entry[0], entry)
+    chapters = [by_page[page] for page in sorted(by_page)]
+    # One bookmark is not enough evidence of a chapter structure. Treat it as
+    # an ordinary bookmark so auto mode can use the safer fixed-page fallback.
+    return chapters if len(chapters) >= 2 else []
+
+
+def _pdf_page_groups(
+    reader: PdfReader,
+    *,
+    target_pages: int,
+) -> tuple[PdfPageGroup, ...]:
+    """Pack whole outline chapters into bounded, gap-free page groups."""
+
+    if target_pages <= 0:
+        raise ValueError("Docling page group target must be positive")
+    page_count = len(reader.pages)
+    if page_count == 0:
+        raise ValueError("PDF contains no pages")
+
+    outline = _flatten_pdf_outline(reader)
+    chapters = _chapter_outline_entries(outline)
+    if not chapters:
+        return tuple(
+            PdfPageGroup(start, min(start + target_pages - 1, page_count))
+            for start in range(1, page_count + 1, target_pages)
+        )
+
+    boundaries = {1, page_count + 1}
+    for start_page, _title, depth in chapters:
+        boundaries.add(start_page)
+        next_peer_page = next(
+            (
+                page
+                for page, _next_title, next_depth in outline
+                if page > start_page and next_depth <= depth
+            ),
+            page_count + 1,
+        )
+        boundaries.add(next_peer_page)
+    ordered_boundaries = sorted(boundaries)
+    spans = [
+        PdfPageGroup(start, end - 1)
+        for start, end in zip(ordered_boundaries, ordered_boundaries[1:])
+        if start < end
+    ]
+
+    groups: list[PdfPageGroup] = []
+    current: PdfPageGroup | None = None
+    for span in spans:
+        if current is None:
+            current = span
+            continue
+        if current.page_count + span.page_count <= target_pages:
+            current = PdfPageGroup(current.start_page, span.end_page)
+            continue
+        groups.append(current)
+        current = span
+    if current is not None:
+        groups.append(current)
+    return tuple(groups)
+
+
+def _pdf_group_bytes(reader: PdfReader, group: PdfPageGroup) -> bytes:
+    writer = PdfWriter()
+    for page_index in range(group.start_page - 1, group.end_page):
+        writer.add_page(reader.pages[page_index])
+    output = io.BytesIO()
+    writer.write(output)
+    return output.getvalue()
+
+
+def _rebase_pdf_group_extraction(
+    extraction: DocumentExtraction,
+    group: PdfPageGroup,
+) -> DocumentExtraction:
+    page_offset = group.start_page - 1
+    pages = tuple(
+        replace(
+            page,
+            page_number=page.page_number + page_offset,
+            regions=tuple(
+                replace(region, page_number=region.page_number + page_offset)
+                for region in page.regions
+            ),
+        )
+        for page in extraction.snapshot.pages
+    )
+    chunks = [
+        replace(
+            chunk,
+            page_number=(
+                chunk.page_number + page_offset
+                if chunk.page_number is not None
+                else None
+            ),
+            layout_region=(
+                {**chunk.layout_region, "page": chunk.layout_region["page"] + page_offset}
+                if chunk.layout_region is not None
+                else None
+            ),
+        )
+        for chunk in extraction.chunks
+    ]
+    return DocumentExtraction(
+        text="\n\n".join(page.text for page in pages if page.text),
+        chunks=chunks,
+        snapshot=replace(extraction.snapshot, text="", pages=pages),
+    )
+
+
+def _combine_pdf_group_extractions(
+    groups: list[tuple[PdfPageGroup, DocumentExtraction]],
+    extraction_mode: DocumentExtractionMode,
+    grouping_method: str,
+) -> DocumentExtraction:
+    if not groups:
+        raise ValueError("PDF extraction produced no page groups")
+    pages = tuple(page for _group, result in groups for page in result.snapshot.pages)
+    text = "\n\n".join(page.text for page in pages if page.text)
+    chunks = [chunk for _group, result in groups for chunk in result.chunks]
+    first_snapshot = groups[0][1].snapshot
+    structure = {
+        "schema_name": "KnogginGroupedDoclingDocument",
+        "version": 1,
+        "page_group_target": _DOCLING_PAGE_GROUP_TARGET,
+        "grouping_method": grouping_method,
+        "groups": [
+            {
+                "start_page": group.start_page,
+                "end_page": group.end_page,
+                "structure": result.snapshot.structure,
+            }
+            for group, result in groups
+        ],
+    }
+    snapshot = DocumentParseSnapshot(
+        text=text,
+        structure=structure,
+        parser_name=first_snapshot.parser_name,
+        parser_version=first_snapshot.parser_version,
+        parser_fingerprint=_fingerprint(_docling_parser_configuration(extraction_mode)),
+        pages=pages,
+    )
+    return DocumentExtraction(text=text, chunks=chunks, snapshot=snapshot)
+
+
+async def _stop_docling_process(process: asyncio.subprocess.Process) -> None:
+    """Stop and reap a dedicated extraction subprocess."""
+
+    if process.returncode is not None:
+        return
+    process.terminate()
+    try:
+        async with asyncio.timeout(_DOCLING_PROCESS_STOP_SECONDS):
+            await process.wait()
+    except TimeoutError:
+        process.kill()
+        await process.wait()
+
+
+async def extract_and_split_docling_document(
+    content: bytes,
+    extension: str,
+    extraction_mode: DocumentExtractionMode = "standard",
+    extraction_strategy: DocumentExtractionStrategy = "auto",
+) -> DocumentExtraction:
+    """Run PDF/DOCX extraction in a disposable spawned process.
+
+    Process ownership stays here so success, failure, timeout, and caller
+    cancellation all reap the worker.  Only the stable Knoggin extraction
+    projection crosses back to the server process; Docling state dies with
+    the worker.
+    """
+
+    normalized_extension = extension.lower()
+    if normalized_extension not in {".pdf", ".docx"}:
+        raise ValueError("Isolated Docling extraction only supports PDF and DOCX")
+    if extraction_strategy not in {"auto", "full", "bounded"}:
+        raise ValueError("Unsupported document extraction strategy")
+    if _DOCLING_PROCESS_TIMEOUT_SECONDS <= 0:
+        raise ValueError("KNOGGIN_DOCLING_TIMEOUT_SECONDS must be positive")
+    if _DOCLING_PAGE_GROUP_TARGET <= 0:
+        raise ValueError("KNOGGIN_DOCLING_PAGE_GROUP_PAGES must be positive")
+
+    async with _DOCLING_PROCESS_LOCK:
+        if normalized_extension == ".pdf":
+            reader = PdfReader(io.BytesIO(content))
+            page_count = len(reader.pages)
+            if page_count == 0:
+                raise ValueError("PDF contains no pages")
+            use_bounded_groups = extraction_strategy == "bounded" or (
+                extraction_strategy == "auto" and page_count > _DOCLING_PAGE_GROUP_TARGET
+            )
+            if not use_bounded_groups:
+                return await _extract_and_split_docling_document_unlocked(
+                    content,
+                    normalized_extension,
+                    extraction_mode,
+                )
+            has_chapter_outline = bool(
+                _chapter_outline_entries(_flatten_pdf_outline(reader))
+            )
+            page_groups = _pdf_page_groups(
+                reader,
+                target_pages=_DOCLING_PAGE_GROUP_TARGET,
+            )
+            extracted_groups: list[tuple[PdfPageGroup, DocumentExtraction]] = []
+            for group_index, page_group in enumerate(page_groups, start=1):
+                logger.info(
+                    "Docling extraction group "
+                    f"{group_index}/{len(page_groups)} | "
+                    f"pages={page_group.start_page}-{page_group.end_page}"
+                )
+                group_result = await _extract_and_split_docling_document_unlocked(
+                    _pdf_group_bytes(reader, page_group),
+                    normalized_extension,
+                    extraction_mode,
+                )
+                extracted_groups.append(
+                    (
+                        page_group,
+                        _rebase_pdf_group_extraction(group_result, page_group),
+                    )
+                )
+                logger.info(
+                    "Completed Docling extraction group "
+                    f"{group_index}/{len(page_groups)} | "
+                    f"pages={page_group.start_page}-{page_group.end_page}"
+                )
+            return _combine_pdf_group_extractions(
+                extracted_groups,
+                extraction_mode,
+                "chapters" if has_chapter_outline else "fixed_pages",
+            )
+        return await _extract_and_split_docling_document_unlocked(
+            content,
+            normalized_extension,
+            extraction_mode,
+        )
+
+
+async def _extract_and_split_docling_document_unlocked(
+    content: bytes,
+    normalized_extension: str,
+    extraction_mode: DocumentExtractionMode,
+) -> DocumentExtraction:
+    """Own one child process while the global Docling admission lock is held."""
+
+    work_directory = Path(tempfile.mkdtemp(prefix="knoggin-docling-"))
+    input_path = work_directory / "source.bin"
+    result_path = work_directory / "result.pickle"
+    stderr_path = work_directory / "stderr.log"
+    input_path.write_bytes(content)
+    try:
+        with stderr_path.open("wb") as stderr_file:
+            start_process = asyncio.create_task(
+                asyncio.create_subprocess_exec(
+                    sys.executable,
+                    "-m",
+                    "core.knowledge.documents.extraction_worker",
+                    str(input_path),
+                    str(result_path),
+                    normalized_extension,
+                    extraction_mode,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=stderr_file,
+                )
+            )
+            try:
+                process = await asyncio.shield(start_process)
+            except asyncio.CancelledError:
+                process = await start_process
+                await asyncio.shield(_stop_docling_process(process))
+                raise
+        try:
+            async with asyncio.timeout(_DOCLING_PROCESS_TIMEOUT_SECONDS):
+                while not result_path.is_file() and process.returncode is None:
+                    await asyncio.sleep(_DOCLING_PROCESS_POLL_SECONDS)
+        except TimeoutError as exc:
+            raise TimeoutError(
+                "Docling extraction exceeded "
+                f"{_DOCLING_PROCESS_TIMEOUT_SECONDS:g} seconds"
+            ) from exc
+        finally:
+            await asyncio.shield(_stop_docling_process(process))
+
+        if not result_path.is_file():
+            detail = stderr_path.read_text(encoding="utf-8", errors="replace").strip()
+            raise RuntimeError(
+                "Docling extraction process exited without returning a result "
+                f"(exit code {process.returncode}): {detail[-1000:]}"
+            )
+        with result_path.open("rb") as result_file:
+            status, payload = pickle.load(result_file)
+    finally:
+        shutil.rmtree(work_directory, ignore_errors=True)
+
+    if status == "ok":
+        return payload
+    if status == "dependency_error":
+        raise DependencyError(payload)
+    if status == "value_error":
+        raise ValueError(payload)
+    raise RuntimeError(f"Docling extraction process failed: {payload}")
 
 
 def split_text(text: str) -> List[str]:
@@ -1193,7 +1694,9 @@ def _split_code_with_tree_sitter(
 
     source = text.encode("utf-8")
     tree = Parser(tree_sitter_language).parse(source)
-    if language == "yaml":
+    if language == "zig":
+        boundaries = _zig_boundaries(tree.root_node, source)
+    elif language == "yaml":
         boundaries = _yaml_boundaries(tree.root_node, source)
     else:
         boundaries = []
@@ -1209,9 +1712,77 @@ def _split_code_with_tree_sitter(
             if symbol_name is None:
                 continue
             boundaries.append((node.start_point.row, symbol_name))
+        if language == "python":
+            boundaries.extend(_python_method_boundaries(text))
+            boundaries.sort(key=lambda boundary: boundary[0])
     if not boundaries:
         return None
     return _split_code_sections(text, language, boundaries)
+
+
+def _python_method_boundaries(
+    text: str,
+) -> List[tuple[int, str]]:
+    """Return direct Python class methods with qualified names."""
+    try:
+        module = ast.parse(text)
+    except SyntaxError:
+        return []
+    boundaries = []
+    for declaration in module.body:
+        if not isinstance(declaration, ast.ClassDef):
+            continue
+        for member in declaration.body:
+            if not isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            start_line = min(
+                (decorator.lineno for decorator in member.decorator_list),
+                default=member.lineno,
+            )
+            boundaries.append(
+                (start_line - 1, f"{declaration.name}.{member.name}")
+            )
+    return boundaries
+
+
+def _zig_boundaries(root_node, source: bytes) -> List[tuple[int, str]]:
+    """Find file declarations and methods inside named Zig containers."""
+    boundaries: List[tuple[int, str]] = []
+    container_types = {"struct_declaration", "enum_declaration", "union_declaration"}
+
+    def visit(nodes, scope: str = "") -> None:
+        for node in nodes:
+            if node.type == "function_declaration":
+                name_node = node.child_by_field_name("name")
+            elif node.type == "variable_declaration":
+                name_node = next(
+                    (child for child in node.named_children if child.type == "identifier"),
+                    None,
+                )
+            elif node.type == "test_declaration":
+                name_node = next(
+                    (child for child in node.named_children if child.type == "string"),
+                    None,
+                )
+            else:
+                continue
+            if name_node is None:
+                continue
+            name = _tree_sitter_node_text(name_node, source)
+            if node.type == "test_declaration":
+                name = f"test {name}"
+            symbol_name = f"{scope}.{name}" if scope else name
+            boundaries.append((node.start_point.row, symbol_name))
+            if node.type == "variable_declaration":
+                container = next(
+                    (child for child in node.named_children if child.type in container_types),
+                    None,
+                )
+                if container is not None:
+                    visit(container.named_children, symbol_name)
+
+    visit(root_node.named_children)
+    return boundaries
 
 
 def _unwrap_tree_sitter_node(node, symbol_types):

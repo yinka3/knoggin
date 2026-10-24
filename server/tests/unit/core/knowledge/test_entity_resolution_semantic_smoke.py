@@ -22,11 +22,11 @@ async def test_local_embedding_service_similarity_ordering_smoke():
     huggingface_hub = pytest.importorskip("huggingface_hub")
     embedding_model_name = os.environ.get(
         "KNOGGIN_SEMANTIC_SMOKE_MODEL",
-        os.environ.get("KNOGGIN_EMBEDDING_MODEL", "dunzhang/stella_en_1.5B_v5"),
+        os.environ.get("KNOGGIN_EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5"),
     )
     reranker_model_name = os.environ.get(
         "KNOGGIN_SEMANTIC_SMOKE_RERANKER_MODEL",
-        os.environ.get("KNOGGIN_RERANKER_MODEL", "BAAI/bge-reranker-large"),
+        os.environ.get("KNOGGIN_RERANKER_MODEL", "BAAI/bge-reranker-base"),
     )
     embedding_revision = os.environ.get("KNOGGIN_SEMANTIC_SMOKE_MODEL_REVISION")
     reranker_revision = os.environ.get(

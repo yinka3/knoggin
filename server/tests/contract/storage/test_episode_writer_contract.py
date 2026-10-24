@@ -11,7 +11,7 @@ from tests.fixtures.fakes import RecordingPostgresClient
 
 class RecordingEmbeddingService:
     def __init__(self, vector=None, error=None, chunk_limit=None):
-        self.vector = vector if vector is not None else [0.25] * 1024
+        self.vector = vector if vector is not None else [0.25] * 768
         self.error = error
         self.calls = []
         self.chunk_limit = chunk_limit
@@ -44,7 +44,7 @@ def _edit_arguments(**overrides):
         "new_developments": ["The vector follows the narrative."],
         "updates": ["The writer persists both together."],
         "unresolved": [],
-        "embedding": [0.25] * 1024,
+        "embedding": [0.25] * 768,
         "expected_updated_at": _INITIAL_UPDATED_AT,
     }
     values.update(overrides)
@@ -103,7 +103,7 @@ async def test_store_edit_generates_the_canonical_vector_before_the_atomic_write
         json.dumps(["The vector follows the narrative."]),
         json.dumps(["The writer persists both together."]),
         json.dumps([]),
-        json.dumps([0.25] * 1024),
+        json.dumps([0.25] * 768),
         "episode-1",
         "project-1",
         _INITIAL_UPDATED_AT,
@@ -130,7 +130,7 @@ async def test_store_edit_preserves_long_narrative_across_embedding_chunks():
         "\n\nUpdates:\n- The writer persists both together."
     )
     assert client.calls[0][2][0] == summary.strip()
-    assert len(json.loads(client.calls[0][2][4])) == 1024
+    assert len(json.loads(client.calls[0][2][4])) == 768
 
 
 @pytest.mark.storage
@@ -138,7 +138,7 @@ async def test_store_edit_preserves_long_narrative_across_embedding_chunks():
 @pytest.mark.parametrize(
     ("embedding", "error", "match"),
     [
-        ([0.25] * 3, None, "1024-dimensional"),
+        ([0.25] * 3, None, "768-dimensional"),
         (None, RuntimeError("embedding unavailable"), "embedding unavailable"),
     ],
 )
@@ -182,9 +182,9 @@ async def test_episode_writer_rejects_a_stale_edit_without_a_second_write():
 async def test_episode_writer_commits_narrative_and_vector_together_with_a_stale_guard(
     real_postgres_client,
 ):
-    old_vector = [0.1] * 1024
-    new_vector = [0.2] * 1024
-    failed_vector = [0.3] * 1024
+    old_vector = [0.1] * 768
+    new_vector = [0.2] * 768
+    failed_vector = [0.3] * 768
     original_updated_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
     await real_postgres_client.execute(
         """

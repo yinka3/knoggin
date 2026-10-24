@@ -462,7 +462,30 @@ async def test_stella_retrieval_query_uses_document_search_instruction(monkeypat
 
 
 @pytest.mark.no_network
-async def test_non_stella_retrieval_query_remains_unprompted(monkeypatch):
+async def test_bge_retrieval_query_uses_document_search_instruction(monkeypatch):
+    service = EmbeddingService(
+        embedding_model="BAAI/bge-base-en-v1.5",
+        embedding_backend="onnx",
+        device="cpu",
+    )
+    calls = []
+
+    async def encode_single(text):
+        calls.append(text)
+        return [0.1] * 768
+
+    monkeypatch.setattr(service, "encode_single", encode_single)
+
+    await service.encode_query("How do random forests reduce variance?")
+
+    assert calls == [
+        "Represent this sentence for searching relevant passages: "
+        "How do random forests reduce variance?"
+    ]
+
+
+@pytest.mark.no_network
+async def test_unrecognized_retrieval_model_remains_unprompted(monkeypatch):
     service = EmbeddingService(
         embedding_model="local/custom-retriever",
         embedding_backend="torch",

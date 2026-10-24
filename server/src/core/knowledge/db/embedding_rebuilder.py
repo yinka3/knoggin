@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 
+from common.embedding_contract import EMBEDDING_DIMENSION
 from core.knowledge.documents.extraction import DocumentChunk, embedding_text
 from core.knowledge.episodes.embedding import (
     build_episode_embedding_text_from_fields,
@@ -25,6 +26,12 @@ class EmbeddingRebuilder:
 
     async def ensure_configuration(self) -> None:
         """Refuse to compare vectors from an unknown or different configuration."""
+        if self.embedding_service.embedding_dim != EMBEDDING_DIMENSION:
+            raise RuntimeError(
+                "Loaded embedding model produces "
+                f"{self.embedding_service.embedding_dim} dimensions; "
+                f"the database requires {EMBEDDING_DIMENSION}"
+            )
         async with self.client.transaction() as cur:
             await cur.execute(
                 "LOCK TABLE public.embedding_configuration IN EXCLUSIVE MODE"
@@ -58,8 +65,12 @@ class EmbeddingRebuilder:
         normalized = []
         for embedding in embeddings:
             vector = list(embedding) if embedding is not None else []
-            if len(vector) != 1024 or any(not math.isfinite(value) for value in vector):
-                raise RuntimeError(f"{label} embeddings require 1024 finite values")
+            if len(vector) != EMBEDDING_DIMENSION or any(
+                not math.isfinite(value) for value in vector
+            ):
+                raise RuntimeError(
+                    f"{label} embeddings require {EMBEDDING_DIMENSION} finite values"
+                )
             normalized.append(vector)
         return normalized
 
@@ -81,8 +92,10 @@ class EmbeddingRebuilder:
     async def _rebuild(
         self, *, project_id: str | None = None, user_name: str | None = None
     ) -> dict[str, int]:
-        if self.embedding_service.embedding_dim != 1024:
-            raise RuntimeError("Embeddings require 1024-dimensional vectors")
+        if self.embedding_service.embedding_dim != EMBEDDING_DIMENSION:
+            raise RuntimeError(
+                f"Embeddings require {EMBEDDING_DIMENSION}-dimensional vectors"
+            )
         # The caller excludes runtime writes. All encoding finishes before any
         # mutation; failure leaves both the old corpus and fingerprint intact.
         async with self.client.transaction() as cur:

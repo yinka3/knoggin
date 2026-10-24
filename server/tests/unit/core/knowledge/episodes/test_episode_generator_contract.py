@@ -34,7 +34,7 @@ class _RecordingEmbeddingService:
 
     async def encode(self, texts):
         self.calls.append(list(texts))
-        return [[float(index + 1)] * 1024 for index in range(len(texts))]
+        return [[float(index + 1)] * 768 for index in range(len(texts))]
 
 
 @pytest.mark.no_network
@@ -221,7 +221,7 @@ async def test_valid_long_narrative_embeds_every_chunk_and_keeps_full_text():
     assert len(embeddings.calls[0]) > 1
     assert all(len(chunk) <= 400 for chunk in embeddings.calls[0])
     assert "".join(embeddings.calls[0]) == "Summary:\n" + summary.strip()
-    assert len(build.final_episodes[0].embedding) == 1024
+    assert len(build.final_episodes[0].embedding) == 768
 
 
 @pytest.mark.no_network

@@ -45,7 +45,11 @@ from common.exceptions import (
 )
 from common.schema.agent.research import ResearchMode
 from common.schema.artifacts import ArtifactBlock, ArtifactKind, ArtifactStatus
-from common.schema.document import DocumentSelection
+from common.schema.document import (
+    DocumentExtractionMode,
+    DocumentExtractionStrategy,
+    DocumentSelection,
+)
 from common.schema.evidence import EvidenceBundle, EvidencePointer, EvidenceSnapshot
 from common.schema.maintenance import MaintenanceImpactPreview
 from common.schema.settings import DeveloperSettings, LLMSpendingBudgetSettings
@@ -386,6 +390,8 @@ class UploadDocumentRequest(PublicModel):
     original_name: str = Field(min_length=1, max_length=512)
     content_base64: str = Field(min_length=1)
     relative_path: str | None = Field(default=None, min_length=1, max_length=2048)
+    extraction_mode: DocumentExtractionMode = "standard"
+    extraction_strategy: DocumentExtractionStrategy = "auto"
 
     @field_validator("content_base64", mode="before")
     @classmethod
@@ -393,6 +399,26 @@ class UploadDocumentRequest(PublicModel):
         if isinstance(value, str) and len(value) > MAX_DOCUMENT_BASE64_LENGTH:
             raise PayloadTooLargeError()
         return value
+
+
+class DocumentOcrPreflightRequest(PublicModel):
+    original_name: str = Field(min_length=1, max_length=512)
+    content_base64: str = Field(min_length=1)
+
+    @field_validator("content_base64", mode="before")
+    @classmethod
+    def _bound_encoded_content(cls, value):
+        if isinstance(value, str) and len(value) > MAX_DOCUMENT_BASE64_LENGTH:
+            raise PayloadTooLargeError()
+        return value
+
+
+class DocumentOcrPreflightResponse(PublicModel):
+    page_count: int = Field(ge=1)
+    low_text_page_count: int = Field(ge=0)
+    scanned_page_count: int = Field(ge=0)
+    ocr_recommended: bool
+    reason: str
 
 
 class DocumentResponse(PublicModel):
@@ -403,6 +429,8 @@ class DocumentResponse(PublicModel):
     extension: str
     size_bytes: int = Field(ge=0)
     content_hash: str = Field(min_length=1)
+    extraction_mode: DocumentExtractionMode
+    extraction_strategy: DocumentExtractionStrategy = "auto"
     status: Literal["queued", "indexing", "indexed", "failed", "deleted"]
     current_snapshot_id: str | None = None
     chunk_count: int = Field(default=0, ge=0)

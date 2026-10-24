@@ -16,6 +16,11 @@ from loguru import logger
 from sentence_transformers import CrossEncoder, SentenceTransformer
 from transformers import AutoTokenizer
 
+from common.embedding_contract import (
+    DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_RERANKER_MODEL,
+    EMBEDDING_DIMENSION,
+)
 from infrastructure.model_work import ModelWorkCoordinator, ModelWorkPriority
 from infrastructure.work_record import WorkRecord
 
@@ -129,8 +134,8 @@ class EmbeddingService:
 
     def __init__(
         self,
-        embedding_model: str = "dunzhang/stella_en_1.5B_v5",
-        reranker_model: str = "BAAI/bge-reranker-large",
+        embedding_model: str = DEFAULT_EMBEDDING_MODEL,
+        reranker_model: str = DEFAULT_RERANKER_MODEL,
         device: str = None,
         batch_size: int = 32,
         model_work: ModelWorkCoordinator | None = None,
@@ -386,7 +391,7 @@ class EmbeddingService:
     def embedding_dim(self) -> int:
         """Dynamically determined dimension of the loaded embedding model."""
         if self._embedding_dim is None:
-            return 1024
+            return EMBEDDING_DIMENSION
         return self._embedding_dim
 
     @property
@@ -461,13 +466,22 @@ class EmbeddingService:
     async def encode_query(self, query: str) -> List[float]:
         """Encode a retrieval query; corpus text remains unprompted.
 
-        Apply the Stella instruction explicitly so Torch and the direct ONNX
-        adapter receive identical input. Other models retain plain encoding.
+        Apply each supported model's retrieval instruction explicitly so Torch
+        and ONNX receive identical input. Other models retain plain encoding.
         """
-        if "stella" in self._embedding_model.casefold():
+        normalized_model = self._embedding_model.casefold()
+        if "stella" in normalized_model:
             query = (
                 "Instruct: Given a web search query, retrieve relevant passages "
                 "that answer the query.\nQuery: " + query
+            )
+        elif normalized_model in {
+            "baai/bge-large-en-v1.5",
+            "baai/bge-base-en-v1.5",
+            "baai/bge-small-en-v1.5",
+        }:
+            query = (
+                "Represent this sentence for searching relevant passages: " + query
             )
         return await self.encode_single(query)
 
