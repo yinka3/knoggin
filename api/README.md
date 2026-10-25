@@ -24,7 +24,17 @@ private to the current OS user and must not already exist. It may contain API
 keys from `knoggin.yml`; store it accordingly. `.env`, database credentials,
 downloaded models, and code are not included.
 
-With `DATABASE_URL` and `SETTINGS_DIR` set in the environment:
+From the repository root, the usual command is:
+
+```bash
+./backup.sh
+```
+
+It loads `.env` and creates a timestamped directory under
+`~/knoggin-backups`. Pass a directory path as its only argument to choose a
+different destination. Use `./backup.sh verify <backup-directory>` to check a
+saved backup later. The lower-level CLI is also available when
+`DATABASE_URL` and `SETTINGS_DIR` are already set in the environment:
 
 ```bash
 uv run --package api python -m instance_backup backup ~/backups/knoggin-2026-10-24
