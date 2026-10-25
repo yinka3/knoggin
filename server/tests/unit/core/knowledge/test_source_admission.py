@@ -65,6 +65,29 @@ async def test_assistant_source_promotion_is_explicit_and_bookmark_only():
 
 @pytest.mark.unit
 @pytest.mark.no_network
+@pytest.mark.parametrize("url", [
+    "http://127.0.0.1/private", "http://localhost/private",
+    "https://user:pass@example.com/", "https://example.com:8443/",
+])
+async def test_assistant_source_promotion_rejects_unsafe_urls(url):
+    service = _service()
+    service.save_web_link = AsyncMock()
+    candidate = SourceReferenceCandidate.model_validate({
+        "project_id": "project-1", "session_id": "session-1",
+        "source_kind": "web_page", "canonical_url": url,
+        "content_hash": "a" * 64,
+        "locator": {"kind": "text_lines", "start_line": 1, "end_line": 2},
+        "excerpt": "A transient observation.", "metadata": {},
+        "encounter_kind": "web_read", "agent_run_id": "run-1",
+        "tool_call_id": "call-1", "result_position": 0,
+    })
+    with pytest.raises(ValueError):
+        await service.promote_source(candidate)
+    service.save_web_link.assert_not_awaited()
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 async def test_promoting_a_document_source_is_rejected():
     service = _service()
     with pytest.raises(ValueError, match="only assistant-observed web sources"):

@@ -28,3 +28,13 @@ async def project_runtime(runtime, project_id: str):
 async def project_documents(runtime, project_id: str):
     async with project_runtime(runtime, project_id) as project:
         yield project.document_service
+
+
+@asynccontextmanager
+async def readable_project_documents(runtime, project_id: str):
+    project = await runtime.projects.get_project(project_id)
+    if project is not None and project["status"] == "archived":
+        yield await runtime.projects.archived_document_reader(project_id)
+    else:
+        async with project_documents(runtime, project_id) as service:
+            yield service

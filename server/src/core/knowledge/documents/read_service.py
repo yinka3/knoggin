@@ -28,5 +28,8 @@ class DocumentReadService:
     async def read_document(self, **kwargs: Any) -> Dict:
         return await self._service.read_document(**kwargs)
 
+    async def list_saved_web_links(self, **kwargs: Any) -> List[Dict]:
+        return await self._service.list_saved_web_links(**kwargs)
+
     async def search(self, query: str, **kwargs: Any) -> List[Dict]:
         return await self._service.search(query, **kwargs)

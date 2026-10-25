@@ -17,6 +17,7 @@ from common.utils.lifecycle import settle_owned_task
 from core.knowledge.db.writers.artifact_retention_writer import ArtifactRetentionWriter
 from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
 from core.knowledge.documents import DocumentService, ProjectFilesystemFactory
+from core.knowledge.documents.read_service import DocumentReadService
 from core.knowledge.entity.maintenance_service import EntityMaintenanceService
 from core.knowledge.jobs.application_maintenance_scheduler import (
     ApplicationMaintenanceScheduler,
@@ -611,6 +612,21 @@ class ProjectManager:
             return active.document_service
         # Scan settings need storage, not a running indexer or project scheduler.
         return DocumentService(project_id, self.pg, self.resources.embedding)
+
+    async def archived_document_reader(self, project_id: str) -> DocumentReadService:
+        """Read archived knowledge without starting a project runtime."""
+        project = await self.get_project(project_id)
+        if project is None or project["status"] != ProjectStatus.ARCHIVED.value:
+            raise ValueError("Project is not archived")
+        readable_ids = await self.get_readable_project_ids(
+            project_id, project_metadata=project
+        )
+        return DocumentReadService(
+            DocumentService(
+                project_id, self.pg, self.resources.embedding,
+                readable_project_ids=readable_ids,
+            )
+        )
 
     async def get_document_scan_settings(self, project_id: str) -> FolderScanSettings:
         async with self.maintenance_service.lock:

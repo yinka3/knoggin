@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from functools import partial
 from io import BytesIO
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit
 
 if TYPE_CHECKING:
     from core.knowledge.documents import DocumentService
@@ -24,6 +24,7 @@ from markitdown import MarkItDown
 from pypdf import PdfReader
 
 from common.exceptions import ToolExecutionError
+from common.web_url import normalize_public_web_url as _normalize_web_url
 
 try:
     from duckduckgo_search import DDGS
@@ -209,49 +210,6 @@ def _web_page_error(message: str, *, retryable: bool = False) -> ToolExecutionEr
     return ToolExecutionError("read_web_page", message, retryable=retryable)
 
 
-def _normalize_web_url(value: object) -> str:
-    """Return a normalized public-web URL or reject unsafe syntax early."""
-
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError("url must be a non-blank absolute HTTP(S) URL")
-    try:
-        parsed = urlsplit(value.strip())
-        port = parsed.port
-    except ValueError as exc:
-        raise ValueError("url has an invalid host or port") from exc
-
-    scheme = parsed.scheme.lower()
-    host = parsed.hostname
-    if scheme not in {"http", "https"} or not parsed.netloc or not host:
-        raise ValueError("url must be an absolute HTTP(S) URL")
-    if parsed.username is not None or parsed.password is not None:
-        raise ValueError("url must not include credentials")
-    if parsed.fragment:
-        raise ValueError("url must not include a fragment")
-    if port is not None and port not in {80, 443}:
-        raise ValueError("url must use a standard HTTP(S) port")
-
-    try:
-        normalized_host = host.encode("idna").decode("ascii").lower()
-    except UnicodeError as exc:
-        raise ValueError("url hostname cannot be normalized") from exc
-    if normalized_host == "localhost":
-        raise ValueError("url must not target localhost")
-
-    try:
-        literal_ip = ipaddress.ip_address(normalized_host)
-    except ValueError:
-        literal_ip = None
-    if literal_ip is not None and not literal_ip.is_global:
-        raise ValueError("url must not target a non-public IP address")
-
-    host_for_netloc = (
-        f"[{normalized_host}]" if ":" in normalized_host else normalized_host
-    )
-    netloc = host_for_netloc if port is None else f"{host_for_netloc}:{port}"
-    return urlunsplit((scheme, netloc, parsed.path or "/", parsed.query, ""))
-
-
 def _require_public_addresses(addresses: List[str] | Tuple[str, ...]) -> tuple[str, ...]:
     """Normalize DNS answers and reject a hostname with any non-public answer."""
 
@@ -413,20 +371,10 @@ def _search_source_context(
 
 
 def _canonical_search_url(value) -> Optional[str]:
-    if not isinstance(value, str) or not value.strip():
+    try:
+        return _normalize_web_url(value)
+    except ValueError:
         return None
-    parsed = urlsplit(value.strip())
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        return None
-    return urlunsplit(
-        (
-            parsed.scheme.lower(),
-            parsed.netloc.lower(),
-            parsed.path,
-            parsed.query,
-            "",
-        )
-    )
 
 
 class DocumentSearchTools:

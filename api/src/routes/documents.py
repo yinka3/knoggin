@@ -18,7 +18,7 @@ from contracts.documents import (
     UploadDocument,
 )
 from errors import handle_error
-from project_lease import project_documents, project_runtime
+from project_lease import project_documents, project_runtime, readable_project_documents
 from routes.project_settings import _error, _json, _project_error
 
 DOCUMENT_FIELDS = {
@@ -30,7 +30,7 @@ DOCUMENT_FIELDS = {
 }
 CONTENT_FIELDS = DOCUMENT_FIELDS | {
     "document_name", "parse_snapshot_id", "chunk_index", "content", "start_line",
-    "end_line", "total_lines", "truncated", "locator", "page_number",
+    "end_line", "total_lines", "truncated", "locator", "page_number", "total_pages",
 }
 LINK_FIELDS = {"link_id", "project_id", "url", "title", "summary", "created_at", "updated_at"}
 
@@ -42,14 +42,14 @@ def _public(row, fields):
     }
 
 
-async def _project(request):
+async def _project(request, *, write=True):
     return await _project_error(
-        request.app.state.runtime, request.path_params["project_id"], write=True
+        request.app.state.runtime, request.path_params["project_id"], write=write
     )
 
 
 async def list_documents(request):
-    if error := await _project(request):
+    if error := await _project(request, write=False):
         return error
     try:
         limit = int(request.query_params.get("limit", "100"))
@@ -57,15 +57,15 @@ async def list_documents(request):
         return _error("invalid_limit", "Invalid document limit", 422)
     if not 1 <= limit <= 1000:
         return _error("invalid_limit", "Invalid document limit", 422)
-    async with project_documents(request.app.state.runtime, request.path_params["project_id"]) as service:
+    async with readable_project_documents(request.app.state.runtime, request.path_params["project_id"]) as service:
         rows = await service.list_documents(limit=limit)
     return JSONResponse([_public(row, DOCUMENT_FIELDS) for row in rows])
 
 
 async def get_document(request):
-    if error := await _project(request):
+    if error := await _project(request, write=False):
         return error
-    async with project_documents(request.app.state.runtime, request.path_params["project_id"]) as service:
+    async with readable_project_documents(request.app.state.runtime, request.path_params["project_id"]) as service:
         try:
             row = await service.get_document_info(document_id=request.path_params["document_id"])
         except FileNotFoundError:
@@ -74,23 +74,32 @@ async def get_document(request):
 
 
 async def read_document(request):
-    if error := await _project(request):
+    if error := await _project(request, write=False):
         return error
     try:
         start = int(request.query_params.get("start_line", "1"))
         end_value = request.query_params.get("end_line")
         end = int(end_value) if end_value is not None else None
+        page_value = request.query_params.get("page_number")
+        page = int(page_value) if page_value is not None else None
     except ValueError:
         return _error("invalid_lines", "Invalid line range", 422)
-    if start < 1 or (end is not None and end < start):
+    if start < 1 or (end is not None and end < start) or (page is not None and page < 1):
         return _error("invalid_lines", "Invalid line range", 422)
-    async with project_documents(request.app.state.runtime, request.path_params["project_id"]) as service:
+    async with readable_project_documents(request.app.state.runtime, request.path_params["project_id"]) as service:
         try:
             row = await service.read_document(
-                document_id=request.path_params["document_id"], start_line=start, end_line=end
+                document_id=request.path_params["document_id"],
+                page_number=page, start_line=start, end_line=end,
             )
         except FileNotFoundError:
             return _error("document_not_found", "Document not found", 404)
+        except ValueError:
+            return _error("invalid_read_range", "Invalid document page or line range", 422)
+        except RuntimeError as exc:
+            if str(exc) == "Document has not been indexed":
+                return _error("document_not_ready", "Document text is not ready", 409)
+            raise
     return JSONResponse(_public(row, CONTENT_FIELDS))
 
 
@@ -221,7 +230,7 @@ async def delete_document(request):
 
 
 async def list_links(request):
-    if error := await _project(request):
+    if error := await _project(request, write=False):
         return error
     try:
         limit = int(request.query_params.get("limit", "50"))
@@ -229,7 +238,7 @@ async def list_links(request):
         return _error("invalid_limit", "Invalid link limit", 422)
     if not 1 <= limit <= 500:
         return _error("invalid_limit", "Invalid link limit", 422)
-    async with project_documents(request.app.state.runtime, request.path_params["project_id"]) as service:
+    async with readable_project_documents(request.app.state.runtime, request.path_params["project_id"]) as service:
         rows = await service.list_saved_web_links(limit=limit)
     return JSONResponse([_public(row, LINK_FIELDS) for row in rows])
 

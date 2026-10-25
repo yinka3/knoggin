@@ -1257,6 +1257,7 @@ class DocumentService:
         )
         if selected_page is not None:
             result["page_number"] = selected_page
+            result["total_pages"] = len(payload["pages"])
         return result
 
     async def resolve_document_selection(
@@ -1882,6 +1883,7 @@ class DocumentService:
         search/read excerpt as durable document content.
         """
         from common.schema.source.references import SourceReferenceCandidate
+        from common.web_url import normalize_public_web_url
 
         candidate = (
             source
@@ -1897,11 +1899,12 @@ class DocumentService:
             raise ValueError("only assistant-observed web sources can be promoted")
         if not candidate.canonical_url:
             raise ValueError("assistant source is missing a canonical URL")
+        safe_url = normalize_public_web_url(candidate.canonical_url)
         if title is None:
             candidate_title = candidate.metadata.get("title")
             title = candidate_title if isinstance(candidate_title, str) else None
         return await self.save_web_link(
-            url=candidate.canonical_url,
+            url=safe_url,
             title=title,
             summary=summary,
         )
