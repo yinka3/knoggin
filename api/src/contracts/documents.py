@@ -70,3 +70,18 @@ class PromoteSource(BaseModel):
     source_ref_id: str = Field(min_length=1)
     title: str | None = Field(default=None, max_length=512)
     summary: str | None = Field(default=None, max_length=4000)
+
+
+class FolderFile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    relative_path: str = Field(min_length=1, max_length=2048)
+    content_base64: str = Field(min_length=1)
+
+
+class FolderIntake(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    folder_name: str = Field(min_length=1, max_length=512)
+    files: list[FolderFile] = Field(min_length=1, max_length=1000)
+    force_include_paths: list[str] = Field(default_factory=list, max_length=1000)

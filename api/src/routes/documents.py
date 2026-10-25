@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import json
+from dataclasses import asdict
 from datetime import datetime
 from uuid import UUID
 
@@ -10,11 +11,15 @@ from pydantic import ValidationError
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from common.document_limits import MAX_DOCUMENT_BASE64_LENGTH, MAX_DOCUMENT_SIZE
+from common.document_limits import (
+    MAX_DOCUMENT_BASE64_LENGTH, MAX_DOCUMENT_SIZE, MAX_DOCUMENT_UPLOAD_BODY_BYTES,
+)
 from common.exceptions import SavedWebLinkAlreadyExistsError
+from common.schema.document import FolderUploadEntry
+from core.knowledge.documents.scanning import normalize_relative_path
 
 from contracts.documents import (
-    BatchDocument, BatchSources, OcrPreflight, PromoteSource, SaveWebLink, UpdateWebLink,
+    BatchDocument, BatchSources, FolderIntake, OcrPreflight, PromoteSource, SaveWebLink, UpdateWebLink,
     UploadDocument,
 )
 from errors import handle_error
@@ -127,6 +132,83 @@ async def upload_document(request):
         except ValueError:
             return _error("invalid_document", "Invalid document upload", 422)
     return JSONResponse(_public(row, DOCUMENT_FIELDS), status_code=201)
+
+
+async def _folder_manifest(request):
+    # A bounded JSON upload keeps folder intake comparable to existing document uploads.
+    ceiling = MAX_DOCUMENT_UPLOAD_BODY_BYTES + 2 * 1024 * 1024
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > ceiling:
+            return _error("payload_too_large", "Folder upload is too large", 413)
+    try:
+        payload = FolderIntake.model_validate(json.loads(body))
+        files = []
+        total_bytes = 0
+        for item in payload.files:
+            content = base64.b64decode(item.content_base64, validate=True)
+            total_bytes += len(content)
+            if total_bytes > MAX_DOCUMENT_SIZE:
+                return _error("payload_too_large", "Folder upload is too large", 413)
+            files.append(FolderUploadEntry(relative_path=item.relative_path, content=content))
+    except (ValidationError, ValueError, TypeError):
+        return _error("invalid_folder", "Invalid folder manifest", 422)
+    return payload, files
+
+
+def _folder_preview(preview):
+    return {
+        "folder_name": preview.folder_name,
+        "settings": preview.settings.model_dump(mode="json"),
+        "summary": asdict(preview.summary),
+        "force_include_paths": preview.force_include_paths,
+        "included": [asdict(entry) for entry in preview.included],
+        "excluded": [asdict(entry) for entry in preview.excluded],
+    }
+
+
+async def folder_intake(request):
+    if error := await _project(request):
+        return error
+    manifest = await _folder_manifest(request)
+    if isinstance(manifest, JSONResponse):
+        return manifest
+    payload, files = manifest
+    async with project_documents(request.app.state.runtime, request.path_params["project_id"]) as service:
+        try:
+            preview = await service.preview_folder(
+                folder_name=payload.folder_name, entries=files,
+                force_include_paths=payload.force_include_paths,
+            )
+        except ValueError:
+            return _error("invalid_folder", "Invalid folder manifest", 422)
+        result = _folder_preview(preview)
+        if request.url.path.endswith("/preview"):
+            return JSONResponse(result)
+
+        content_by_path = {
+            normalize_relative_path(entry.relative_path, entry.relative_path): entry.content
+            for entry in files
+        }
+        accepted = []
+        failed = []
+        for entry in preview.included:
+            try:
+                row = await service.submit_document(
+                    content=content_by_path[entry.relative_path],
+                    original_name=entry.original_name,
+                    relative_path=entry.relative_path,
+                )
+                accepted.append(_public(row, DOCUMENT_FIELDS))
+            except Exception as exc:
+                public_error = await handle_error(request, exc)
+                failed.append({
+                    "relative_path": entry.relative_path,
+                    "error": json.loads(public_error.body)["error"],
+                })
+        result.update({"accepted": accepted, "failed": failed})
+        return JSONResponse(result)
 
 
 async def inspect_ocr(request):
@@ -322,6 +404,8 @@ async def promote_source(request):
 routes = [
     Route("/v1/documents/ocr-preflight", inspect_ocr, methods=["POST"]),
     Route("/v1/projects/{project_id}/sources/batch", admit_batch, methods=["POST"]),
+    Route("/v1/projects/{project_id}/folders/preview", folder_intake, methods=["POST"]),
+    Route("/v1/projects/{project_id}/folders/intake", folder_intake, methods=["POST"]),
     Route("/v1/projects/{project_id}/documents", list_documents, methods=["GET"]),
     Route("/v1/projects/{project_id}/documents", upload_document, methods=["POST"]),
     Route("/v1/projects/{project_id}/documents/{document_id}", get_document, methods=["GET"]),

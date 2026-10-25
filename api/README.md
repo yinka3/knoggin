@@ -149,13 +149,26 @@ CORS currently permits `localhost:3000` and `127.0.0.1:3000`.
   `POST /v1/community/discussions/trigger` and `/stop`. Agent participation is
   `PUT /v1/agents/{agent_id}/aac-participation` with `{"enabled":true}`.
 - Project document routes support list, upload, metadata, content, reindex, and
-  delete. `POST /v1/documents/ocr-preflight` checks a PDF without saving it.
+  delete. Content reads accept `start_line`, `end_line`, and, for PDFs,
+  `page_number`; PDF responses include `total_pages`. Unindexed content returns
+  `document_not_ready` (409), and invalid page or line ranges return
+  `invalid_read_range` (422). Archived projects remain readable.
+  `POST /v1/documents/ocr-preflight` checks a PDF without saving it.
   `POST /v1/projects/{project_id}/sources/batch` admits up to 20 documents or
   web links and reports each result. `POST /v1/projects/{project_id}/sources/promote`
-  saves a cited source as a link. Saved links support list, create, update, and
+  saves a cited source as a link after applying the agent web URL safety check.
+  Saved links support list, create, update, and
   delete. Links normalize the HTTP(S) host and default port; a duplicate URL
   in the same project returns `link_exists` (409). Artifact routes support
   list, metadata, and revision reads.
+- `POST /v1/projects/{project_id}/folders/preview` accepts `folder_name` and
+  `files` containing `relative_path` and `content_base64`. It applies the
+  project's saved scan rules and returns included and excluded paths without
+  saving anything. Send the same manifest to `/folders/intake` to preview
+  again and submit only included files; the response reports accepted and
+  failed files separately. Both routes accept optional `force_include_paths`.
+  One request is capped at 50 MiB of decoded files, so larger folders require
+  a later chunked intake design.
 - `GET/PUT /v1/projects/{project_id}/episodes/{episode_id}` reads and edits an
   episode narrative. Edits require `expected_updated_at` and return a conflict
   when the episode changed.
