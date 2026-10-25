@@ -12,8 +12,12 @@ def test_archived_documents_and_links_remain_readable_without_a_runtime(monkeypa
     archived_reads = []
 
     class Documents:
-        async def list_documents(self, *, limit):
+        async def list_documents(self, *, limit, path_prefix, before):
             return [{"document_id": "doc-1", "project_id": "project-1", "original_name": "a.txt"}]
+
+        async def search(self, query, *, n_results, document_filter, relative_path, path_prefix):
+            return [{"document_id": "doc-1", "project_id": "project-1",
+                     "relative_path": "a.txt", "content": query}]
 
         async def get_document_info(self, *, document_id):
             return {"document_id": document_id, "project_id": "project-1"}
@@ -26,7 +30,7 @@ def test_archived_documents_and_links_remain_readable_without_a_runtime(monkeypa
             return {"document_id": document_id, "content": "1: hello", "start_line": start_line,
                     "page_number": page_number, "total_pages": 3}
 
-        async def list_saved_web_links(self, *, limit):
+        async def list_saved_web_links(self, *, limit, before):
             return [{"link_id": "link-1", "project_id": "project-1", "url": "https://example.com"}]
 
     class Projects:
@@ -64,6 +68,7 @@ def test_archived_documents_and_links_remain_readable_without_a_runtime(monkeypa
                     assert (await client.get(base + path)).status_code == 200
                     assert (await client.get("/v1/projects/project-2" + path)).status_code == 200
                     assert (await client.get("/v1/projects/project-3" + path)).status_code == 404
+                assert (await client.get(base + "/documents/search?query=hello")).json()["items"][0]["content"] == "hello"
                 page = await client.get(base + "/documents/doc-1/content?page_number=2")
                 assert page.json()["page_number"] == 2
                 assert page.json()["total_pages"] == 3
@@ -72,7 +77,7 @@ def test_archived_documents_and_links_remain_readable_without_a_runtime(monkeypa
                 assert (await client.get(base + "/documents/pending/content")).json()["error"]["code"] == "document_not_ready"
                 assert (await client.post(base + "/links", json={"url": "https://example.com"})).status_code == 409
                 assert (await client.delete(base + "/documents/doc-1")).status_code == 409
-                assert archived_reads == ["project-1"] * 7
+                assert archived_reads == ["project-1"] * 8
                 assert not leases
 
     asyncio.run(exercise())

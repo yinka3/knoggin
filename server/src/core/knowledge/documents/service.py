@@ -1909,7 +1909,9 @@ class DocumentService:
             summary=summary,
         )
 
-    async def list_saved_web_links(self, *, limit: int = 50) -> List[Dict]:
+    async def list_saved_web_links(
+        self, *, limit: int = 50, before: tuple[datetime, uuid.UUID] | None = None
+    ) -> List[Dict]:
         """List this project's durable bookmarks, newest update first."""
         if (
             not isinstance(limit, int)
@@ -1917,7 +1919,7 @@ class DocumentService:
             or not 1 <= limit <= 1000
         ):
             raise ValueError("limit must be between 1 and 1000")
-        rows = await self._reader.list_saved_web_links(limit=limit)
+        rows = await self._reader.list_saved_web_links(limit=limit, before=before)
         return [self._public_saved_web_link(row) for row in rows]
 
     async def update_saved_web_link(
@@ -1981,6 +1983,7 @@ class DocumentService:
         *,
         path_prefix: Optional[str] = None,
         limit: int = 50,
+        before: tuple[datetime, uuid.UUID] | None = None,
     ) -> List[Dict]:
         """List documents visible to the current project context."""
         if (
@@ -1993,6 +1996,7 @@ class DocumentService:
         rows = await self._reader.list_documents(
             path_prefix=normalized_prefix,
             limit=limit,
+            before=before,
         )
         return [self._public_metadata(row) for row in rows]
 

@@ -1,7 +1,9 @@
 """Read-only queries for the document knowledge base."""
 
 import json
+from datetime import datetime
 from typing import Dict, Iterable, List, Optional
+from uuid import UUID
 
 from common.scoping import require_scope_value, require_visible_project_ids
 from infrastructure.postgres_client import PostgresClient
@@ -55,10 +57,17 @@ class DocumentReader:
         )
         return rows[0] if rows else None
 
-    async def list_saved_web_links(self, *, limit: int) -> List[Dict]:
-        """List the active project's lightweight saved web links."""
+    async def list_saved_web_links(
+        self, *, limit: int, before: tuple[datetime, UUID] | None = None
+    ) -> List[Dict]:
+        """List project bookmarks in newest-first cursor order."""
+        cursor_sql = "AND (updated_at, link_id) < (%s, %s)" if before else ""
+        params = [self._project_id]
+        if before:
+            params.extend(before)
+        params.append(limit)
         return await self._client.fetch_all(
-            """
+            f"""
             SELECT
                 link_id,
                 project_id,
@@ -69,10 +78,11 @@ class DocumentReader:
                 updated_at
             FROM public.saved_web_links
             WHERE project_id = %s
+            {cursor_sql}
             ORDER BY updated_at DESC, link_id DESC
             LIMIT %s
             """,
-            (self._project_id, limit),
+            tuple(params),
         )
 
     async def fetch_saved_web_link(self, *, link_id: str) -> Optional[Dict]:
@@ -403,6 +413,7 @@ class DocumentReader:
         *,
         path_prefix: Optional[str] = None,
         limit: int = 50,
+        before: tuple[datetime, UUID] | None = None,
     ) -> List[Dict]:
         """Paginated list of documents visible to this project."""
         query = """
@@ -441,6 +452,9 @@ class DocumentReader:
                 "OR pd.relative_path LIKE %s ESCAPE '\\')"
             )
             params.extend([path_prefix, f"{escaped}/%"])
+        if before is not None:
+            query += " AND (pd.created_at, pd.document_id) < (%s, %s)"
+            params.extend(before)
         query += """
             GROUP BY pd.document_id
             ORDER BY pd.created_at DESC, pd.document_id DESC

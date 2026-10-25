@@ -38,6 +38,13 @@ CONTENT_FIELDS = DOCUMENT_FIELDS | {
     "end_line", "total_lines", "truncated", "locator", "page_number", "total_pages",
 }
 LINK_FIELDS = {"link_id", "project_id", "url", "title", "summary", "created_at", "updated_at"}
+SEARCH_FIELDS = {
+    "chunk_id", "document_id", "project_id", "original_name", "document_name",
+    "relative_path", "extension", "content_hash", "snapshot_id", "chunk_index",
+    "content", "language", "chunk_kind", "symbol_name", "page_number",
+    "start_line", "end_line", "start_row", "end_row", "section_path",
+    "start_paragraph", "end_paragraph", "locator", "score",
+}
 
 
 def _public(row, fields):
@@ -53,18 +60,89 @@ async def _project(request, *, write=True):
     )
 
 
+def _read_cursor(value):
+    if value is None:
+        return None
+    if len(value) > 256:
+        raise ValueError("Invalid cursor")
+    try:
+        timestamp, identifier = json.loads(base64.b64decode(value, altchars=b"-_", validate=True))
+        created_at = datetime.fromisoformat(timestamp)
+        if created_at.tzinfo is None:
+            raise ValueError("Cursor timestamp needs a time zone")
+        return created_at, UUID(identifier)
+    except (TypeError, ValueError, UnicodeDecodeError):
+        raise ValueError("Invalid cursor") from None
+
+
+def _next_cursor(row, *, time_field, id_field):
+    value = row[time_field]
+    timestamp = value.isoformat() if isinstance(value, datetime) else value
+    payload = json.dumps([timestamp, str(row[id_field])]).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii")
+
+
+def _page(rows, *, limit, fields, time_field, id_field):
+    items = rows[:limit]
+    return {
+        "items": [_public(row, fields) for row in items],
+        "next_cursor": _next_cursor(items[-1], time_field=time_field, id_field=id_field)
+        if len(rows) > limit else None,
+    }
+
+
 async def list_documents(request):
     if error := await _project(request, write=False):
         return error
     try:
         limit = int(request.query_params.get("limit", "100"))
+        before = _read_cursor(request.query_params.get("cursor"))
     except ValueError:
-        return _error("invalid_limit", "Invalid document limit", 422)
-    if not 1 <= limit <= 1000:
-        return _error("invalid_limit", "Invalid document limit", 422)
+        return _error("invalid_document_list", "Invalid document list options", 422)
+    if not 1 <= limit <= 100:
+        return _error("invalid_document_list", "Invalid document list options", 422)
+    path_prefix = request.query_params.get("path_prefix")
+    if path_prefix is not None and len(path_prefix) > 2048:
+        return _error("invalid_document_list", "Invalid document list options", 422)
     async with readable_project_documents(request.app.state.runtime, request.path_params["project_id"]) as service:
-        rows = await service.list_documents(limit=limit)
-    return JSONResponse([_public(row, DOCUMENT_FIELDS) for row in rows])
+        try:
+            rows = await service.list_documents(
+                limit=limit + 1, path_prefix=path_prefix, before=before,
+            )
+        except ValueError:
+            return _error("invalid_document_list", "Invalid document list options", 422)
+    return JSONResponse(_page(
+        rows, limit=limit, fields=DOCUMENT_FIELDS,
+        time_field="created_at", id_field="document_id",
+    ))
+
+
+async def search_documents(request):
+    if error := await _project(request, write=False):
+        return error
+    query = request.query_params.get("query", "").strip()
+    try:
+        limit = int(request.query_params.get("limit", "10"))
+        document_id = request.query_params.get("document_id")
+        if document_id is not None:
+            document_id = str(UUID(document_id))
+    except ValueError:
+        return _error("invalid_document_search", "Invalid document search", 422)
+    if not query or len(query) > 500 or not 1 <= limit <= 50:
+        return _error("invalid_document_search", "Invalid document search", 422)
+    relative_path = request.query_params.get("relative_path")
+    path_prefix = request.query_params.get("path_prefix")
+    if any(value is not None and len(value) > 2048 for value in (relative_path, path_prefix)):
+        return _error("invalid_document_search", "Invalid document search", 422)
+    async with readable_project_documents(request.app.state.runtime, request.path_params["project_id"]) as service:
+        try:
+            rows = await service.search(
+                query, n_results=limit, document_filter=document_id,
+                relative_path=relative_path, path_prefix=path_prefix,
+            )
+        except ValueError:
+            return _error("invalid_document_search", "Invalid document search", 422)
+    return JSONResponse({"items": [_public(row, SEARCH_FIELDS) for row in rows]})
 
 
 async def get_document(request):
@@ -316,13 +394,17 @@ async def list_links(request):
         return error
     try:
         limit = int(request.query_params.get("limit", "50"))
+        before = _read_cursor(request.query_params.get("cursor"))
     except ValueError:
-        return _error("invalid_limit", "Invalid link limit", 422)
-    if not 1 <= limit <= 500:
-        return _error("invalid_limit", "Invalid link limit", 422)
+        return _error("invalid_link_list", "Invalid link list options", 422)
+    if not 1 <= limit <= 100:
+        return _error("invalid_link_list", "Invalid link list options", 422)
     async with readable_project_documents(request.app.state.runtime, request.path_params["project_id"]) as service:
-        rows = await service.list_saved_web_links(limit=limit)
-    return JSONResponse([_public(row, LINK_FIELDS) for row in rows])
+        rows = await service.list_saved_web_links(limit=limit + 1, before=before)
+    return JSONResponse(_page(
+        rows, limit=limit, fields=LINK_FIELDS,
+        time_field="updated_at", id_field="link_id",
+    ))
 
 
 async def save_link(request):
@@ -408,6 +490,7 @@ routes = [
     Route("/v1/projects/{project_id}/folders/intake", folder_intake, methods=["POST"]),
     Route("/v1/projects/{project_id}/documents", list_documents, methods=["GET"]),
     Route("/v1/projects/{project_id}/documents", upload_document, methods=["POST"]),
+    Route("/v1/projects/{project_id}/documents/search", search_documents, methods=["GET"]),
     Route("/v1/projects/{project_id}/documents/{document_id}", get_document, methods=["GET"]),
     Route("/v1/projects/{project_id}/documents/{document_id}", delete_document, methods=["DELETE"]),
     Route("/v1/projects/{project_id}/documents/{document_id}/content", read_document, methods=["GET"]),

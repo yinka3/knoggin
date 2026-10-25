@@ -194,7 +194,14 @@ CORS currently permits `localhost:3000` and `127.0.0.1:3000`.
   `POST /v1/community/discussions/trigger` and `/stop`. Agent participation is
   `PUT /v1/agents/{agent_id}/aac-participation` with `{"enabled":true}`.
 - Project document routes support list, upload, metadata, content, reindex, and
-  delete. Content reads accept `start_line`, `end_line`, and, for PDFs,
+  delete. `GET /v1/projects/{project_id}/documents` accepts `limit` (1–100),
+  `path_prefix`, and a `cursor`; `GET /v1/projects/{project_id}/links` accepts
+  `limit` (1–100) and a `cursor`. Both return `items` and `next_cursor`; pass
+  the returned cursor unchanged to read the next page.
+  `GET /v1/projects/{project_id}/documents/search` accepts `query`, `limit` (1–50),
+  and one of `document_id`, `relative_path`, or `path_prefix` to narrow results.
+  Search returns bounded indexed passages in `items`. Content reads accept
+  `start_line`, `end_line`, and, for PDFs,
   `page_number`; PDF responses include `total_pages`. Unindexed content returns
   `document_not_ready` (409), and invalid page or line ranges return
   `invalid_read_range` (422). Archived projects remain readable.
