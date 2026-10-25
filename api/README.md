@@ -13,6 +13,41 @@ uv run --package api uvicorn app:create_app --factory --env-file .env --host 127
 Set `RUNTIME_USER_NAME` and `SETTINGS_DIR` in `.env`. The API uses the running
 process's user; requests cannot select a different one.
 
+## Whole-instance backup and restore
+
+Stop the API and any other Knoggin writers before creating a backup. PostgreSQL
+can stay running. Install compatible `pg_dump` and `pg_restore` command-line
+tools on the machine running the CLI. The offline CLI captures a PostgreSQL custom dump, the
+managed `knoggin.yml` settings file when present, and the configured project
+library. It checks file hashes and rejects symlinks. The output directory is
+private to the current OS user and must not already exist. It may contain API
+keys from `knoggin.yml`; store it accordingly. `.env`, database credentials,
+downloaded models, and code are not included.
+
+With `DATABASE_URL` and `SETTINGS_DIR` set in the environment:
+
+```bash
+uv run --package api python -m instance_backup backup ~/backups/knoggin-2026-10-24
+uv run --package api python -m instance_backup verify ~/backups/knoggin-2026-10-24
+```
+
+Restore into a **new, empty PostgreSQL database** and empty filesystem paths,
+while the API is stopped. Set `DATABASE_URL` to the new database first. The
+restore command refuses a database with user tables and refuses nonempty file
+destinations. An absolute library path in the saved settings needs an explicit
+new `--library-root`. Restore writes that target path into `knoggin.yml`.
+
+```bash
+uv run --package api python -m instance_backup restore ~/backups/knoggin-2026-10-24 \
+  --settings-dir ~/.config/knoggin-restored
+```
+
+After restoring, point the API's `DATABASE_URL` and `SETTINGS_DIR` at those new
+targets, use a compatible code version and PostgreSQL extensions, and check project files, document
+reads, notebooks, and a new run. If restore fails, discard the partial **new**
+database and target directories before retrying. The command never replaces a
+running or populated instance.
+
 ## Global settings
 
 - `GET /v1/settings` returns the current settings and apply status. Credentials
