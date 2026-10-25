@@ -14,7 +14,7 @@ from common.schema.document import create_document_focus
 from common.schema.primitives import Message
 from common.schema.source.references import SourceReferenceCandidate
 from core.knowledge.db.readers.message_reader import MessageReader, UserAgentExchange
-from runtime.session_runtime import SessionRuntime
+from runtime.session_runtime import FollowUpQueueFull, SessionRuntime
 from tests.fixtures.factories import make_project_state
 from tests.fixtures.fakes import FakeConfigValue, FakeResources
 
@@ -81,6 +81,120 @@ async def _collect_turn(ctx, message, orchestrator):
     ]
 
 
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_follow_up_queue_runs_after_active_turn_and_skips_cancelled_item(context):
+    ctx, _ = context
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def handler(kwargs):
+        if kwargs["user_query"] == "first":
+            started.set()
+            await release.wait()
+        if kwargs["user_query"] == "second":
+            yield {"event": "error", "data": {"message": "Unavailable"}}
+            return
+        yield _response_event(f"Answer to {kwargs['user_query']}")
+
+    orchestrator = _FakeTurnOrchestrator(handler)
+    ctx.agent_orchestrator = orchestrator
+    stream = await ctx.open_agent_run_stream(Message(content="first"))
+    active = asyncio.create_task(_collect_stream(stream))
+    await asyncio.wait_for(started.wait(), 2)
+    queued = await ctx.queue_follow_up(stream.run_id, "second")
+    third = await ctx.queue_follow_up(stream.run_id, "third")
+    cancelled = await ctx.queue_follow_up(stream.run_id, "fourth")
+    assert (await ctx.get_follow_up(queued["queue_id"]))["state"] == "queued"
+    assert (await ctx.cancel_follow_up(cancelled["queue_id"]))["state"] == "cancelled"
+    assert [call["user_query"] for call in orchestrator.calls] == ["first"]
+    release.set()
+    await active
+    async def completed():
+        while (await ctx.get_follow_up(third["queue_id"]))["state"] != "completed":
+            await asyncio.sleep(0.01)
+    await asyncio.wait_for(completed(), 2)
+    assert [call["user_query"] for call in orchestrator.calls] == ["first", "second", "third"]
+    assert (await ctx.get_follow_up(queued["queue_id"]))["state"] == "failed"
+    assert (await ctx.get_follow_up(queued["queue_id"]))["error_code"] == "run_failed"
+    assert (await ctx.get_follow_up(third["queue_id"]))["assistant_message_id"] is not None
+    assert (await ctx.get_follow_up(cancelled["queue_id"]))["state"] == "cancelled"
+
+
+async def _collect_stream(stream):
+    return [event async for event in stream]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_follow_up_queue_is_bounded_and_shutdown_cancels_pending(context):
+    ctx, _ = context
+    stream = await ctx.open_agent_run_stream(Message(content="first"))
+    assert await ctx.queue_follow_up("stale", "wrong") is None
+    items = [await ctx.queue_follow_up(stream.run_id, f"later {index}") for index in range(5)]
+    with pytest.raises(FollowUpQueueFull):
+        await ctx.queue_follow_up(stream.run_id, "one more")
+    await ctx.shutdown()
+    for item in items:
+        assert (await ctx.get_follow_up(item["queue_id"]))["state"] == "cancelled"
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_shutdown_cancels_running_follow_up(context):
+    ctx, _ = context
+    started = asyncio.Event()
+
+    async def handler(kwargs):
+        if kwargs["user_query"] == "later":
+            started.set()
+            await asyncio.Event().wait()
+        yield _response_event("Done")
+
+    ctx.agent_orchestrator = _FakeTurnOrchestrator(handler)
+    first = await ctx.open_agent_run_stream(Message(content="first"))
+    queued = await ctx.queue_follow_up(first.run_id, "later")
+    await _collect_stream(first)
+    await asyncio.wait_for(started.wait(), 2)
+    assert (await ctx.get_follow_up(queued["queue_id"]))["state"] == "running"
+    await asyncio.wait_for(ctx.shutdown(), 2)
+    assert (await ctx.get_follow_up(queued["queue_id"]))["state"] == "cancelled"
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_follow_up_cannot_be_removed_once_admission_starts(context):
+    ctx, _ = context
+    starting = asyncio.Event()
+    resume = asyncio.Event()
+    original_accept = ctx._accept_user_message
+
+    async def slow_accept(message, **kwargs):
+        if message.content == "later":
+            starting.set()
+            await resume.wait()
+        return await original_accept(message, **kwargs)
+
+    ctx._accept_user_message = slow_accept
+
+    async def handler(_kwargs):
+        yield _response_event("Done")
+
+    ctx.agent_orchestrator = _FakeTurnOrchestrator(handler)
+    first = await ctx.open_agent_run_stream(Message(content="first"))
+    queued = await ctx.queue_follow_up(first.run_id, "later")
+    await _collect_stream(first)
+    await asyncio.wait_for(starting.wait(), 2)
+    assert (await ctx.cancel_follow_up(queued["queue_id"]))["state"] == "starting"
+    resume.set()
+
+    async def completed():
+        while (await ctx.get_follow_up(queued["queue_id"]))["state"] != "completed":
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(completed(), 2)
+
+
 def _runtime(resources, *, session_id="session-1", project_id="project-1"):
     runtime = SessionRuntime(
         "ada",
@@ -119,6 +233,21 @@ async def test_unconsumed_admission_has_an_explicit_cleanup_owner(
     assert not ctx._agent_run_reserved
     assert resources.knowledge_store.closed_exchanges[-1]["outcome"] == "cancelled"
     assert [event async for event in stream] == []
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_unconsumed_close_releases_run_when_exchange_close_fails(context):
+    ctx, _ = context
+    stream = await ctx.open_agent_run_stream(Message(content="first"))
+
+    async def fail_close(*_args, **_kwargs):
+        raise RuntimeError("database unavailable")
+
+    ctx._close_user_exchange = fail_close
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        await stream.aclose()
+    assert not ctx._agent_run_reserved
 
 
 @pytest.mark.runtime

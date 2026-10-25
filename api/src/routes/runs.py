@@ -20,7 +20,8 @@ from common.schema.source.references import SourceConsulted
 from common.utils.streams import ClosingAsyncIterator
 from core.project.notebook_store import NotebookConflict
 
-from contracts.sessions import StartRun, SteerRun
+from contracts.sessions import QueueFollowUp, StartRun, SteerRun
+from runtime.session_runtime import FollowUpQueueFull
 from routes.project_settings import _error, _json
 
 
@@ -156,6 +157,8 @@ async def start_run(request):
         return _error("project_unavailable", "Project is unavailable", 409)
     try:
         session = await runtime.sessions.get_or_resume_session(session_id)
+        if session is None:
+            return _error("session_not_found", "Session not found", 404)
         focus = await _request_focus(session, body)
         selected_notebook = await _selected_notebook(runtime, metadata["project_id"], body.notebook_id)
         if body.notebook_id is not None and selected_notebook is None:
@@ -279,6 +282,52 @@ async def stop_run(request):
     return JSONResponse(status)
 
 
+async def queue_follow_up(request):
+    try:
+        body = QueueFollowUp.model_validate(await _json(request))
+    except ValidationError:
+        return _error("invalid_follow_up", "Invalid follow-up turn", 422)
+    session = await _active_session(request)
+    if session is None:
+        return _error("run_not_found", "Run not found", 404)
+    try:
+        result = await session.queue_follow_up(request.path_params["run_id"], body.query)
+    except FollowUpQueueFull:
+        return _error("follow_up_queue_full", "Follow-up queue is full", 409)
+    if result is None:
+        return _error("run_not_active", "Run is no longer active", 409)
+    return JSONResponse(result, status_code=202)
+
+
+async def list_follow_ups(request):
+    session = await _active_session(request)
+    if session is None:
+        return _error("session_not_loaded", "Session has no live follow-up queue", 404)
+    return JSONResponse({"follow_ups": await session.list_follow_ups()})
+
+
+async def get_follow_up(request):
+    session = await _active_session(request)
+    if session is None:
+        return _error("follow_up_not_found", "Follow-up not found", 404)
+    result = await session.get_follow_up(request.path_params["queue_id"])
+    if result is None:
+        return _error("follow_up_not_found", "Follow-up not found", 404)
+    return JSONResponse(result)
+
+
+async def cancel_follow_up(request):
+    session = await _active_session(request)
+    if session is None:
+        return _error("follow_up_not_found", "Follow-up not found", 404)
+    result = await session.cancel_follow_up(request.path_params["queue_id"])
+    if result is None:
+        return _error("follow_up_not_found", "Follow-up not found", 404)
+    if result["state"] != "cancelled":
+        return _error("follow_up_not_pending", "Follow-up is no longer pending", 409)
+    return JSONResponse(result)
+
+
 async def _request_focus(session, body):
     requested = body.document_focus
     if requested is None:
@@ -306,4 +355,8 @@ routes = [
     Route("/v1/sessions/{session_id}/runs/{run_id}", get_run, methods=["GET"]),
     Route("/v1/sessions/{session_id}/runs/{run_id}", stop_run, methods=["DELETE"]),
     Route("/v1/sessions/{session_id}/runs/{run_id}/steers", steer_run, methods=["POST"]),
+    Route("/v1/sessions/{session_id}/runs/{run_id}/follow-ups", queue_follow_up, methods=["POST"]),
+    Route("/v1/sessions/{session_id}/follow-ups", list_follow_ups, methods=["GET"]),
+    Route("/v1/sessions/{session_id}/follow-ups/{queue_id}", get_follow_up, methods=["GET"]),
+    Route("/v1/sessions/{session_id}/follow-ups/{queue_id}", cancel_follow_up, methods=["DELETE"]),
 ]

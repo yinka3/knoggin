@@ -150,6 +150,13 @@ def test_start_run_passes_selected_notebook_without_changing_query():
         }
         await response.owned_stream.aclose()
 
+        async def disappeared(_session_id):
+            return None
+
+        runtime = Request.app.state.runtime
+        runtime.sessions.get_or_resume_session = disappeared
+        assert (await start_run(Request())).status_code == 404
+
     asyncio.run(exercise())
 
 
@@ -205,6 +212,7 @@ def test_run_steer_and_stop_routes_target_only_the_active_run(monkeypatch, tmp_p
 
     class Session:
         stopped = False
+        follow_up = None
 
         async def get_run_status(self, run_id):
             return {"run_id": run_id, "state": "cancelled" if self.stopped else "running", "steer": None} if run_id == "run-1" else None
@@ -217,6 +225,28 @@ def test_run_steer_and_stop_routes_target_only_the_active_run(monkeypatch, tmp_p
                 return False
             self.stopped = True
             return True
+
+        async def queue_follow_up(self, run_id, query):
+            if run_id != "run-1" or self.stopped:
+                return None
+            self.follow_up = {
+                "queue_id": "queued-1", "after_run_id": run_id,
+                "run_id": "run-2", "state": "queued", "assistant_message_id": None,
+            }
+            assert query == "Later question"
+            return self.follow_up
+
+        async def list_follow_ups(self):
+            return [self.follow_up] if self.follow_up else []
+
+        async def get_follow_up(self, queue_id):
+            return self.follow_up if queue_id == "queued-1" else None
+
+        async def cancel_follow_up(self, queue_id):
+            if queue_id != "queued-1":
+                return None
+            self.follow_up["state"] = "cancelled"
+            return self.follow_up
 
     class Sessions:
         session = Session()
@@ -242,8 +272,16 @@ def test_run_steer_and_stop_routes_target_only_the_active_run(monkeypatch, tmp_p
                 assert (await client.get(base)).json()["state"] == "running"
                 assert (await client.post(base + "/steers", json={"instruction": "  Focus  "})).status_code == 202
                 assert (await client.post(base + "/steers", json={"instruction": " "})).status_code == 422
+                assert (await client.post(base + "/follow-ups", json={"query": " "})).status_code == 422
+                queued = await client.post(base + "/follow-ups", json={"query": " Later question "})
+                assert queued.status_code == 202
+                queue_base = "/v1/sessions/session-1/follow-ups"
+                assert (await client.get(queue_base)).json()["follow_ups"][0]["queue_id"] == "queued-1"
+                assert (await client.get(queue_base + "/queued-1")).json()["state"] == "queued"
+                assert (await client.delete(queue_base + "/queued-1")).json()["state"] == "cancelled"
                 assert (await client.delete(base)).json()["state"] == "cancelled"
                 assert (await client.get("/v1/sessions/other/runs/run-1")).status_code == 404
                 assert (await client.post("/v1/sessions/session-1/runs/old/steers", json={"instruction": "now"})).status_code == 409
+                assert (await client.post("/v1/sessions/session-1/runs/old/follow-ups", json={"query": "Later question"})).status_code == 409
 
     asyncio.run(exercise())

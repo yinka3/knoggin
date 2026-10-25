@@ -55,6 +55,20 @@ class SteerRun(BaseModel):
         return value
 
 
+class QueueFollowUp(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(min_length=1, max_length=100_000)
+
+    @field_validator("query")
+    @classmethod
+    def nonblank_query(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("blank query")
+        return value
+
+
 class DocumentFocus(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

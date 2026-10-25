@@ -95,6 +95,16 @@ For an existing project, replace `{project_id}` in these routes:
   state; applied instructions appear in later agent context.
   `DELETE /v1/sessions/{session_id}/runs/{run_id}` stops that
   active run.
+- `POST /v1/sessions/{session_id}/runs/{run_id}/follow-ups` with
+  `{"query":"..."}` queues a later turn for that live session. Up to five
+  pending turns run in order after the current turn ends, using the session's
+  preferences when each starts. `GET /v1/sessions/{session_id}/follow-ups`
+  lists their statuses; `GET` or `DELETE` on `/follow-ups/{queue_id}` reads or
+  cancels a pending item. Once started, use its `run_id` to stop the run.
+  Queue status includes an `assistant_message_id` when completed; read the
+  answer in session history. The queue is in memory and pending items are
+  cancelled on session unload or API shutdown. Stopping one run does not
+  cancel its queued follow-ups.
 
 CORS currently permits `localhost:3000` and `127.0.0.1:3000`.
 

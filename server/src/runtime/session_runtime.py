@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from collections import deque
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -32,6 +33,10 @@ from runtime.project_runtime import ProjectRuntime
 from runtime.resources import RuntimeResources
 
 _REQUEST_FINGERPRINT_METADATA_KEY = "request_fingerprint"
+
+
+class FollowUpQueueFull(ValueError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -91,12 +96,14 @@ class _AdmittedAgentStream:
                 if self.started:
                     await self.stream.aclose()
                 else:
-                    await self.session._close_user_exchange(
-                        self.accepted.id,
-                        outcome="cancelled",
-                        terminal_error={"code": "run_cancelled", "retryable": False},
-                    )
-                    await self.session._release_agent_run(None)
+                    try:
+                        await self.session._close_user_exchange(
+                            self.accepted.id,
+                            outcome="cancelled",
+                            terminal_error={"code": "run_cancelled", "retryable": False},
+                        )
+                    finally:
+                        await self.session._release_agent_run(None)
                 self.closed = True
                 return
         try:
@@ -160,6 +167,12 @@ class SessionRuntime:
         self._last_run_status: dict[str, Any] | None = None
         self._active_run_state: str | None = None
         self._active_steer: dict[str, str] | None = None
+        self._follow_up_queue: deque[str] = deque()
+        self._follow_ups: dict[str, dict[str, Any]] = {}
+        self._follow_up_task: asyncio.Task | None = None
+        self._follow_up_starting = False
+        self._run_idle = asyncio.Event()
+        self._run_idle.set()
         self._agent_runs_closed = False
         self._closed = False
         self._shutdown_event_emitted = False
@@ -212,6 +225,122 @@ class SessionRuntime:
             "steer": deepcopy(self._active_steer),
         }
 
+    async def queue_follow_up(self, run_id: str, query: str) -> dict[str, Any] | None:
+        """Accept one later user turn for this live session's active run."""
+
+        query = query.strip()
+        if not query or len(query) > 100_000:
+            raise ValueError("Follow-up query must contain 1 to 100000 characters")
+        async with self._agent_run_lock:
+            if self._agent_runs_closed or self._closed:
+                return None
+            if run_id != self._active_run_id or self._active_run_state not in {
+                "accepted", "running",
+            }:
+                return None
+            if len(self._follow_up_queue) >= 5:
+                raise FollowUpQueueFull("Follow-up queue is full")
+            if len(self._follow_ups) >= 100:
+                for old_id, old in list(self._follow_ups.items()):
+                    if old["state"] in {"completed", "clarification", "failed", "cancelled"}:
+                        del self._follow_ups[old_id]
+                        break
+            queue_id = str(uuid4())
+            item = {
+                "queue_id": queue_id, "after_run_id": run_id,
+                "run_id": str(uuid4()), "query": query,
+                "state": "queued", "assistant_message_id": None,
+                "error_code": None,
+            }
+            self._follow_ups[queue_id] = item
+            self._follow_up_queue.append(queue_id)
+            if self._follow_up_task is None or self._follow_up_task.done():
+                self._follow_up_task = asyncio.create_task(self._drain_follow_ups())
+            return self._public_follow_up(item)
+
+    @staticmethod
+    def _public_follow_up(item: dict[str, Any]) -> dict[str, Any]:
+        return {key: item[key] for key in (
+            "queue_id", "after_run_id", "run_id", "state", "assistant_message_id",
+            "error_code",
+        )}
+
+    async def list_follow_ups(self) -> list[dict[str, Any]]:
+        async with self._agent_run_lock:
+            return [self._public_follow_up(item) for item in self._follow_ups.values()]
+
+    async def get_follow_up(self, queue_id: str) -> dict[str, Any] | None:
+        async with self._agent_run_lock:
+            item = self._follow_ups.get(queue_id)
+            return self._public_follow_up(item) if item is not None else None
+
+    async def cancel_follow_up(self, queue_id: str) -> dict[str, Any] | None:
+        async with self._agent_run_lock:
+            item = self._follow_ups.get(queue_id)
+            if item is None:
+                return None
+            if item["state"] == "queued":
+                self._follow_up_queue.remove(queue_id)
+                item["state"] = "cancelled"
+                item.pop("query", None)
+            return self._public_follow_up(item)
+
+    async def _drain_follow_ups(self) -> None:
+        while True:
+            await self._run_idle.wait()
+            async with self._agent_run_lock:
+                if self._agent_runs_closed or not self._follow_up_queue:
+                    self._follow_up_task = None
+                    return
+                if self._agent_run_reserved:
+                    continue
+                queue_id = self._follow_up_queue.popleft()
+                item = self._follow_ups[queue_id]
+                item["state"] = "starting"
+                self._follow_up_starting = True
+                self._run_idle.clear()
+            stream = None
+            try:
+                stream = await self.open_agent_run_stream(
+                    Message(content=item["query"]), run_id=item["run_id"],
+                    _from_follow_up=True,
+                )
+                async with self._agent_run_lock:
+                    self._follow_up_starting = False
+                    item["state"] = "running"
+                async for event in stream:
+                    if event["event"] == "response":
+                        item["assistant_message_id"] = event["data"].get("assistant_message_id")
+                        item["state"] = "completed"
+                    elif event["event"] == "clarification":
+                        item["assistant_message_id"] = event["data"].get("assistant_message_id")
+                        item["state"] = "clarification"
+                    elif event["event"] == "error":
+                        item["state"] = "failed"
+                        code = event["data"].get("code")
+                        item["error_code"] = (
+                            code if code in {"llm_budget_exhausted", "workspace_conflict"}
+                            else "run_failed"
+                        )
+                if item["state"] == "running":
+                    item["state"] = "failed"
+                    item["error_code"] = "run_failed"
+            except asyncio.CancelledError:
+                item["state"] = "cancelled"
+                raise
+            except Exception:
+                logger.exception("Queued follow-up failed for session {}", self.session_id)
+                item["state"] = "failed"
+                item["error_code"] = "run_failed"
+            finally:
+                item.pop("query", None)
+                if stream is not None:
+                    await stream.aclose()
+                async with self._agent_run_lock:
+                    self._follow_up_starting = False
+                    if not self._agent_run_reserved:
+                        self._run_idle.set()
+
     async def submit_steer(self, run_id: str, instruction: str) -> dict[str, str] | None:
         if not instruction or not instruction.strip() or len(instruction) > 4000:
             raise ValueError("Steer instruction must contain 1 to 4000 characters")
@@ -263,6 +392,7 @@ class SessionRuntime:
         research_mode: ResearchMode = "normal",
         selected_notebook: dict | None = None,
         run_id: str | None = None,
+        _from_follow_up: bool = False,
     ) -> AsyncGenerator[AgentExecutionEvent, None]:
         """Admit and persist a run before returning its event stream.
 
@@ -327,6 +457,8 @@ class SessionRuntime:
                         raise IdempotencyConflictError()
                     raise RequestInProgressError()
                 raise SessionBusyError()
+            if (self._follow_up_queue or self._follow_up_starting) and not _from_follow_up:
+                raise SessionBusyError()
             run_settings = SessionRunSettings(
                 config=deepcopy(self.current_config),
                 model=self.model,
@@ -342,6 +474,7 @@ class SessionRuntime:
             pasted_text_spans = deepcopy(pasted_text_spans)
             selected_notebook = deepcopy(selected_notebook)
             self._agent_run_reserved = True
+            self._run_idle.clear()
             self._active_run_id = run_id or str(uuid4())
             self._active_run_state = "admitting"
             self._active_steer = None
@@ -616,6 +749,7 @@ class SessionRuntime:
                     self._active_run_state = "cancelled"
                 self._last_run_status = self._run_status_unlocked()
             self._agent_run_reserved = False
+            self._run_idle.set()
             self._active_run_id = None
             self._active_user_message_id = None
             self._active_run_state = None
@@ -1122,6 +1256,11 @@ class SessionRuntime:
             failures: list[Exception] = []
             async with self._agent_run_lock:
                 self._agent_runs_closed = True
+                for queue_id in self._follow_up_queue:
+                    self._follow_ups[queue_id]["state"] = "cancelled"
+                    self._follow_ups[queue_id].pop("query", None)
+                self._follow_up_queue.clear()
+                follow_up_task = self._follow_up_task
 
             try:
                 await self.cancel_active_agent_run()
@@ -1130,6 +1269,16 @@ class SessionRuntime:
                     "Failed to cancel agent run for session {}", self.session_id
                 )
                 failures.append(exc)
+
+            if follow_up_task is not None and not follow_up_task.done():
+                follow_up_task.cancel()
+                try:
+                    await follow_up_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception as exc:
+                    logger.exception("Failed to stop follow-up queue for session {}", self.session_id)
+                    failures.append(exc)
 
             if not self._shutdown_event_emitted:
                 try:
