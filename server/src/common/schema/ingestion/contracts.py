@@ -540,3 +540,15 @@ class ContextEntityResult:
             for resolved in self.resolved_mentions
         ):
             raise ValueError("Context resolved mentions must reference resolved entities")
+        if self.resolved_mentions:
+            mention_associations = {
+                (block_id, resolved.entity_id, resolved.mention.name.casefold())
+                for resolved in self.resolved_mentions
+                for block_id in resolved.mention.block_ids
+            }
+            persisted_associations = {
+                (item.block_id, item.entity_id, item.mention_text.casefold())
+                for item in self.block_entity_associations
+            }
+            if mention_associations != persisted_associations:
+                raise ValueError("Resolved mentions must cover exactly the block associations")

@@ -661,6 +661,20 @@ class GlobalEntityMergeWriter:
                     },
                 )
 
+            merged_block_ids = [
+                association["block_id"] for association in before["context_block_entities"]
+                if int(association["entity_id"]) == retired_id
+            ]
+            if merged_block_ids:
+                # Historical occurrence rows do not prove which mentions now
+                # belong to a merged association.
+                await active_cur.execute(
+                    """UPDATE public.context_block_entities
+                       SET occurrence_provenance_complete = false
+                       WHERE block_id = ANY(%s::uuid[]) AND entity_id = %s""",
+                    (merged_block_ids, survivor_id),
+                )
+
             # Global message provenance refs.  A duplicate ref is a single
             # logical membership, so it is journaled and then removed safely.
             for ref in before["message_refs"]:

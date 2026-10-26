@@ -1,4 +1,6 @@
 -- One-time upgrade for existing local databases. Fresh databases use schema.sql.
+ALTER TABLE public.context_block_entities
+    ADD COLUMN IF NOT EXISTS occurrence_provenance_complete boolean DEFAULT false NOT NULL;
 CREATE TABLE IF NOT EXISTS public.context_block_entity_occurrences (
     window_id uuid NOT NULL,
     project_id text NOT NULL,

@@ -966,6 +966,7 @@ CREATE TABLE public.context_block_entities (
     project_id text NOT NULL,
     entity_id bigint NOT NULL,
     mention_text text NOT NULL,
+    occurrence_provenance_complete boolean DEFAULT false NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT context_block_entities_mention_text_check CHECK ((btrim(mention_text) <> ''::text))
 );

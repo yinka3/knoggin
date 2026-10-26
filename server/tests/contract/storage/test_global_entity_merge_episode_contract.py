@@ -344,14 +344,20 @@ async def test_global_merge_ignores_support_outside_episode_context_revision(
     )
     await real_postgres_client.execute(
         """INSERT INTO public.context_block_entities (
-               block_id, project_id, entity_id, mention_text
-           ) VALUES (%s, 'project-1', 3, 'Retired')""",
+               block_id, project_id, entity_id, mention_text,
+               occurrence_provenance_complete
+           ) VALUES (%s, 'project-1', 3, 'Retired', true)""",
         (stale_block,),
     )
 
     await GlobalEntityMergeWriter(real_postgres_client).merge(
         user_name="ada", survivor_id=2, retired_id=3, merge_id=str(uuid4())
     )
+    assert await real_postgres_client.fetch_one(
+        """SELECT occurrence_provenance_complete FROM public.context_block_entities
+           WHERE block_id = %s AND entity_id = 2""",
+        (stale_block,),
+    ) == {"occurrence_provenance_complete": False}
 
     assert await real_postgres_client.fetch_one(
         """SELECT source_message_count FROM public.episode_entities

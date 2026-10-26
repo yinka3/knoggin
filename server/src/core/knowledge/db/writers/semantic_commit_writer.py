@@ -1276,8 +1276,9 @@ class SemanticCommitWriter:
             await cur.execute(
                 """
                 INSERT INTO public.context_block_entities (
-                    block_id, project_id, entity_id, mention_text
-                ) VALUES (%s, %s, %s, %s)
+                    block_id, project_id, entity_id, mention_text,
+                    occurrence_provenance_complete
+                ) VALUES (%s, %s, %s, %s, %s)
                 ON CONFLICT (block_id, entity_id) DO NOTHING
                 """,
                 (
@@ -1285,6 +1286,7 @@ class SemanticCommitWriter:
                     project_id,
                     association.entity_id,
                     association.mention_text,
+                    bool(result.resolved_mentions),
                 ),
             )
             count += cur.rowcount

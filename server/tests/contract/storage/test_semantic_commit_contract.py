@@ -785,6 +785,11 @@ async def test_carried_active_identity_persists_once_after_second_pass(real_post
         "resolved_entity_id": first.entity_ids[0], "mention_text": "Bob",
         "identity_decision_key": f"0:{block.block_id}",
     }]
+    assert await real_postgres_client.fetch_one(
+        """SELECT occurrence_provenance_complete FROM public.context_block_entities
+           WHERE block_id = %s AND entity_id = %s""",
+        (block.block_id, first.entity_ids[0]),
+    ) == {"occurrence_provenance_complete": True}
     by_entity = await SemanticWindowReader(real_postgres_client).list_jev_decisions_for_entity(
         first.entity_ids[0], user_name="ada", project_id="project-1",
     )
