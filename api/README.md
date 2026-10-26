@@ -186,7 +186,7 @@ CORS currently permits `localhost:3000` and `127.0.0.1:3000`.
   orders entries by time. Each item labels `user_event`, `source_event`,
   `recorded`, or `unknown` time and includes `recorded_at` separately.
 
-## Other API routes in progress
+## Source, knowledge, and maintenance routes
 
 - `GET /v1/health/engine` and `GET /v1/projects/{project_id}/health/{kind}`
   expose safe engine and project health snapshots. `kind` is `resources`,
@@ -252,8 +252,22 @@ applied review in history. Corrections require current, exact occurrence
 provenance, so some older decisions cannot be corrected this way. A global
 merge remains the path when the whole entities are duplicates.
 
-The old server API adapter was removed in Phase 5. Live checks for newer routes
-still need PostgreSQL to be running.
+## Local verification
+
+Run the API with a disposable PostgreSQL database when checking routes that
+write project data. A simple `GET /v1/settings` confirms the HTTP process is
+up; it does not verify an agent run, document citation, or restore. For those
+journeys, complete a run, compare its `source_added` card with
+`GET /v1/sessions/{session_id}/messages/{message_id}/sources`, and check the
+saved project state after the run. Evidence-board evaluation requires a
+configured JEV provider; an unconfigured instance returns HTTP 503 and does
+not record a judgment. Confirming a ruled-out conclusion is a separate user
+action after evaluation.
+
+The focused API route tests live in `api/tests`. The PostgreSQL contracts for
+board expiry and JEV corrections live in `server/tests/contract/storage`. These
+checks complement live HTTP testing; a passing route test alone does not prove
+the full journey works.
 
 Temporary project runtime release now waits for scheduler shutdown outside the
 project maintenance lock. This allows scheduler jobs to finish and prevents
