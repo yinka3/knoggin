@@ -601,3 +601,114 @@ def test_context_import_fails_closed_for_unknown_marker_or_section():
         )
     with pytest.raises(ContextProjectionConflictError, match="section"):
         _parse_markdown(rendered.replace("## Active Work", "## Work"), _domain(), snapshot)
+
+
+def _discard_harness(*, file_content, snapshot):
+    domain = _domain()
+    state = SimpleNamespace(
+        current_revision_id=None if snapshot is None else snapshot.revision_id,
+        # The local edit was made against an older projection, which is the
+        # case synchronization refuses to import.
+        projection_revision_id=uuid4(),
+        projection_hash="0" * 64,
+        projection_pending_hash=None,
+    )
+
+    class Reader:
+        async def get_projection_state(self, **_kwargs):
+            return state
+
+        async def get_snapshot(self, *_args, **_kwargs):
+            return snapshot
+
+    class Writer:
+        async def ensure_context(self, **_kwargs):
+            return None
+
+        async def record_projection(self, *, revision_id, projection_hash, **_kwargs):
+            state.projection_revision_id = revision_id
+            state.projection_hash = projection_hash
+            return True
+
+        async def record_projection_failure(self, **_kwargs):
+            return None
+
+    class Filesystem:
+        content = file_content
+
+        def read_bytes(self, _path):
+            if self.content is None:
+                raise FileNotFoundError(_path)
+            return self.content
+
+        def write_bytes(self, _path, content, *, expected_content_hash, **_kwargs):
+            assert expected_content_hash == hashlib.sha256(self.content).hexdigest()
+            self.content = content
+
+        def delete_file(self, _path, *, expected_content_hash):
+            assert expected_content_hash == hashlib.sha256(self.content).hexdigest()
+            self.content = None
+
+    filesystem = Filesystem()
+    projection = ContextProjection(reader=Reader(), writer=Writer(), filesystem=filesystem)
+    return projection, filesystem, domain
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_discarding_a_stale_local_edit_restores_context_and_unblocks_sync():
+    snapshot = _snapshot()
+    edit = b"my edit against an older Context"
+    projection, filesystem, domain = _discard_harness(file_content=edit, snapshot=snapshot)
+    policy = IngestionPolicy.capture(
+        text_processor=TextProcessorSettings(),
+        entity_resolution=EntityResolutionSettings(),
+        compiled_domain=domain,
+    )
+    with pytest.raises(ContextUserEditSynchronizationError):
+        await projection.synchronize(
+            user_name="ada", project_id="project-1",
+            ingestion_policy=policy, allow_user_edit=True,
+        )
+
+    discarded = await projection.discard_local_edits(
+        user_name="ada", project_id="project-1", domain=domain,
+        expected_file_hash=hashlib.sha256(edit).hexdigest(),
+    )
+
+    assert discarded == edit.decode()
+    assert filesystem.content == render_context_markdown(snapshot, domain).encode()
+    await projection.synchronize(
+        user_name="ada", project_id="project-1",
+        ingestion_policy=policy, allow_user_edit=True,
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_discard_refuses_edits_the_user_has_not_seen():
+    projection, filesystem, domain = _discard_harness(
+        file_content=b"a newer edit", snapshot=_snapshot()
+    )
+
+    with pytest.raises(ContextProjectionConflictError):
+        await projection.discard_local_edits(
+            user_name="ada", project_id="project-1", domain=domain,
+            expected_file_hash=hashlib.sha256(b"the edit I reviewed").hexdigest(),
+        )
+    assert filesystem.content == b"a newer edit"
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_discard_without_committed_context_removes_the_local_file():
+    edit = b"a first Context that could not be imported"
+    projection, filesystem, domain = _discard_harness(file_content=edit, snapshot=None)
+
+    discarded = await projection.discard_local_edits(
+        user_name="ada", project_id="project-1", domain=domain,
+        expected_file_hash=hashlib.sha256(edit).hexdigest(),
+    )
+
+    assert discarded == edit.decode()
+    assert filesystem.content is None

@@ -19,3 +19,8 @@ class NoteReplace(NoteCreate):
 class NoteDelete(BaseModel):
     model_config = ConfigDict(extra="forbid")
     expected_revision_id: UUID | None
+
+
+class DiscardLocalEdits(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_file_hash: str = Field(pattern=r"^[0-9a-f]{64}$")

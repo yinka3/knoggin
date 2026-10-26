@@ -502,6 +502,66 @@ class ContextProjection:
             reconciliation_window_id=window.window_id,
         )
 
+    def read_local_file(self) -> tuple[str, str] | None:
+        """Return the raw CONTEXT.md text and hash a user reviews before discard."""
+
+        current = self._read_file_or_none()
+        if current is None:
+            return None
+        return current.decode("utf-8", errors="replace"), _hash(current)
+
+    async def discard_local_edits(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        domain: CompiledDomain,
+        expected_file_hash: str,
+    ) -> str | None:
+        """Replace CONTEXT.md with the committed Context, dropping local edits.
+
+        This is the user's way out of an edit that cannot be imported. The
+        hash names the exact file content the user chose to discard, so a
+        newer unseen edit is never thrown away. The discarded text is returned
+        so the caller can show or keep it.
+        """
+
+        current = self._read_file_or_none()
+        if current is None:
+            return None
+        if _hash(current) != expected_file_hash:
+            raise ContextProjectionConflictError(
+                "CONTEXT.md changed since it was reviewed for discard"
+            )
+        discarded = current.decode("utf-8", errors="replace")
+        state = await self._reader.get_projection_state(
+            user_name=user_name, project_id=project_id
+        )
+        if state is None or state.current_revision_id is None:
+            try:
+                self._filesystem.delete_file(
+                    CONTEXT_FILE_PATH, expected_content_hash=expected_file_hash
+                )
+            except (FileNotFoundError, ProjectFilesystemConflictError) as exc:
+                raise ContextProjectionConflictError(
+                    "CONTEXT.md changed while its local edits were being discarded"
+                ) from exc
+            return discarded
+        snapshot = await self._reader.get_snapshot(
+            state.current_revision_id, user_name=user_name, project_id=project_id
+        )
+        if snapshot is None:
+            raise RuntimeError("current Context revision cannot be materialized")
+        generated = render_context_markdown(snapshot, domain).encode("utf-8")
+        self._write_file(generated, expected_hash=expected_file_hash)
+        await self._record_projection_or_conflict(
+            user_name=user_name,
+            project_id=project_id,
+            snapshot=snapshot,
+            projection_hash=_hash(generated),
+        )
+        return discarded
+
     def _read_file_or_none(self) -> bytes | None:
         try:
             return self._filesystem.read_bytes(CONTEXT_FILE_PATH)

@@ -470,6 +470,18 @@ class ProjectSemanticProcessor(BaseJob):
                 status=ContextSynchronizationStatus.PROJECTION_PENDING,
             )
 
+    def read_context_file(self) -> tuple[str, str] | None:
+        return self._context_projection.read_local_file()
+
+    async def discard_context_edits(
+        self, *, user_name: str, project_id: str, expected_file_hash: str
+    ) -> str | None:
+        policy = await self._capture_semantic_policy()
+        return await self._context_projection.discard_local_edits(
+            user_name=user_name, project_id=project_id,
+            domain=policy.domain, expected_file_hash=expected_file_hash,
+        )
+
     async def change_user_note(self, *, user_name: str, project_id: str, **change):
         policy = await self._capture_semantic_policy()
         return await self._context_projection.change_user_note(

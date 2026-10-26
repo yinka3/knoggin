@@ -6,7 +6,7 @@ from pydantic import ValidationError
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from contracts.context_notes import NoteCreate, NoteDelete, NoteReplace
+from contracts.context_notes import DiscardLocalEdits, NoteCreate, NoteDelete, NoteReplace
 from core.knowledge.context.models import (
     ContextProjectionConflictError, ContextRevisionConflictError,
 )
@@ -93,7 +93,44 @@ async def delete_note(request):
     return await _change(request, operation="delete", model=NoteDelete)
 
 
+async def read_local_file(request):
+    runtime = request.app.state.runtime
+    project_id = request.path_params["project_id"]
+    if error := await _project_error(runtime, project_id, write=False):
+        return error
+    async with project_runtime(runtime, project_id) as project:
+        local = project.project_semantic_processor.read_context_file()
+    if local is None:
+        return JSONResponse({"content": None, "content_hash": None})
+    content, content_hash = local
+    return JSONResponse({"content": content, "content_hash": content_hash})
+
+
+async def discard_local_edits(request):
+    runtime = request.app.state.runtime
+    project_id = request.path_params["project_id"]
+    if error := await _project_error(runtime, project_id, write=True):
+        return error
+    try:
+        body = DiscardLocalEdits.model_validate(await _json(request))
+    except ValidationError:
+        return _error("invalid_discard", "Invalid Context discard request", 422)
+    async with project_runtime(runtime, project_id) as project:
+        try:
+            discarded = await project.project_semantic_processor.discard_context_edits(
+                user_name=runtime.sessions.user_name,
+                project_id=project_id,
+                expected_file_hash=body.expected_file_hash,
+            )
+        except ContextProjectionConflictError:
+            return _error("context_projection_conflict", "Context file changed since it was reviewed", 409)
+        project.signal_semantic_work()
+    return JSONResponse({"discarded_content": discarded})
+
+
 routes = [
+    Route("/v1/projects/{project_id}/context/local-file", read_local_file, methods=["GET"]),
+    Route("/v1/projects/{project_id}/context/discard-local-edits", discard_local_edits, methods=["POST"]),
     Route("/v1/projects/{project_id}/context/user-notes", list_notes, methods=["GET"]),
     Route("/v1/projects/{project_id}/context/user-notes", create_note, methods=["POST"]),
     Route("/v1/projects/{project_id}/context/user-notes/{block_id}", replace_note, methods=["PUT"]),
