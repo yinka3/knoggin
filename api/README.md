@@ -56,7 +56,9 @@ After restoring, point the API's `DATABASE_URL` and `SETTINGS_DIR` at those new
 targets, use a compatible code version and PostgreSQL extensions, and check project files, document
 reads, notebooks, and a new run. If restore fails, discard the partial **new**
 database and target directories before retrying. The command never replaces a
-running or populated instance.
+running or populated instance. Restore also repairs Apache AGE graph IDs that
+`pg_dump` preserves from the source database; a matching PostgreSQL client
+version is still required for `pg_dump` and `pg_restore`.
 
 ## Global settings
 
