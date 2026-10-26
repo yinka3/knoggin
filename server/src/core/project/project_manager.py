@@ -38,6 +38,7 @@ from core.project.domain_config_store import (
     DomainActivation,
     DomainConfigStore,
 )
+from core.project.evidence_board_service import EvidenceBoardService
 from core.project.maintenance_service import ProjectMaintenanceService
 from core.project.notebook_store import ProjectNotebookStore
 from core.project.project_files import PROJECT_FILE_PATH, build_project_markdown
@@ -102,6 +103,9 @@ class ProjectManager:
         self._config_manager = config_manager
         self._project_deletion_writer = ProjectDeletionWriter(self.pg)
         self.notebooks = ProjectNotebookStore(self.pg, user_name)
+        self.evidence_boards = EvidenceBoardService(
+            self.notebooks, getattr(resources, "jev_client", None), config_manager,
+        )
         self.active_projects: Dict[str, ProjectRuntime] = {}
         self._project_leases: Dict[str, set[str]] = {}
         self._project_shutdown_tasks: Dict[str, asyncio.Task[None]] = {}

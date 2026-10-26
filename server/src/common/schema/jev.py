@@ -13,7 +13,7 @@ from pydantic import (
     model_validator,
 )
 
-Capability = Literal["identity", "extraction", "classification"]
+Capability = Literal["identity", "extraction", "classification", "board"]
 Mode = Literal["disabled", "observe", "active"]
 Probability = Annotated[float, Field(ge=0, le=1, allow_inf_nan=False, strict=True)]
 
@@ -28,6 +28,7 @@ class JevPolicy(JevModel):
     identity_mode: Mode = "disabled"
     extraction_mode: Mode = "disabled"
     classification_mode: Mode = "disabled"
+    board_mode: Mode = "observe"
     model: str = Field(
         "jev-1.13.0",
         pattern=r"^(?:jev-\d+\.\d+\.\d+|typesafe/jev-\d+\.\d+)$",
@@ -73,7 +74,7 @@ class JevPolicy(JevModel):
         return self
 
     def mode_for(self, capability: Capability) -> Mode:
-        if capability not in {"identity", "extraction", "classification"}:
+        if capability not in {"identity", "extraction", "classification", "board"}:
             raise ValueError("Unknown JEV capability")
         return getattr(self, f"{capability}_mode")
 

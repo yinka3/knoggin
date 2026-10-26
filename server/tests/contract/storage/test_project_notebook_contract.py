@@ -4,12 +4,19 @@ from uuid import uuid4
 
 import pytest
 
+from common.schema.evidence_board import (
+    BoardClaimInput,
+    BoardConfirmation,
+    BoardQuestionInput,
+    BoardWrite,
+)
 from common.schema.project_notebook import (
     NotebookEntryInput,
     NotebookReplace,
     NotebookWrite,
 )
 from common.schema.source.references import SourceReferenceCandidate
+from core.knowledge.db.writers.maintenance_review_writer import MaintenanceReviewWriter
 from core.knowledge.db.writers.source_reference_writer import SourceReferenceWriter
 from core.project.notebook_store import (
     NotebookConflict,
@@ -279,3 +286,230 @@ async def test_saved_finding_is_scoped_immutable_and_survives_missing_source(rea
     item = (await store.source_desk("project-1", notebook["notebook_id"]))["items"][0]
     assert item["source"]["excerpt"] == "violet launch phrase"
     assert item["source"]["citations"][0]["status"] == "missing"
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_evidence_board_questions_dependencies_and_revisions(real_postgres_client):
+    client = real_postgres_client
+    store = ProjectNotebookStore(client, "ada")
+    board = await store.create("project-1", NotebookWrite(
+        title="Investigation", view="evidence_board",
+    ))
+    assert board["board_state"] == {"questions": []}
+    first_id, second_id, claim_id = uuid4(), uuid4(), uuid4()
+    write = BoardWrite(expected_revision=1, questions=[
+        BoardQuestionInput(question_id=first_id, text="What changed?", claims=[
+            BoardClaimInput(claim_id=claim_id, text="The parser changed"),
+        ]),
+        BoardQuestionInput(question_id=second_id, text="What was affected?", depends_on=first_id),
+    ])
+    updated = await store.replace_board("project-1", board["notebook_id"], write)
+    assert updated["revision"] == 2
+    assert updated["board_state"]["questions"][1]["depends_on"] == str(first_id)
+    assert updated["board_state"]["questions"][0]["claims"][0]["accepted"] is True
+    with pytest.raises(NotebookConflict):
+        await store.replace_board("project-1", board["notebook_id"], write)
+    with pytest.raises(NotebookReferenceUnavailable):
+        await store.replace_board("project-1", board["notebook_id"], BoardWrite(
+            expected_revision=2, questions=[BoardQuestionInput(
+                question_id=first_id, text="What changed?", claims=[BoardClaimInput(
+                    claim_id=claim_id, text="The parser changed",
+                    source_ref_ids=[uuid4()],
+                )],
+            )],
+        ))
+    with pytest.raises(ValueError):
+        BoardWrite(questions=[BoardQuestionInput(
+            question_id=second_id, text="Dependent first", depends_on=first_id,
+        )], expected_revision=2)
+
+    await client.execute(
+        """INSERT INTO public.sessions (session_id, project_id, user_name)
+           VALUES ('board-session', 'project-1', 'ada')"""
+    )
+    await client.execute(
+        """INSERT INTO public.messages
+           (user_name, session_id, project_id, message_id, role, content)
+           VALUES ('ada', 'board-session', 'project-1', 9940, 'assistant', 'Board answer')"""
+    )
+    candidate = SourceReferenceCandidate.model_validate({
+        "project_id": "project-1", "session_id": "board-session",
+        "source_kind": "web_page", "canonical_url": "https://example.test/board",
+        "content_hash": "c" * 64,
+        "locator": {"kind": "text_lines", "start_line": 1, "end_line": 1},
+        "excerpt": "Board evidence", "metadata": {"title": "Board source"},
+        "encounter_kind": "web_read", "agent_run_id": "board-run",
+        "tool_call_id": "board-call", "result_position": 0,
+    })
+    ref = (await SourceReferenceWriter(client).write_for_assistant_message(
+        9940, [candidate], user_name="ada", project_id="project-1",
+        session_id="board-session", readable_project_ids=["project-1"],
+    ))[0]
+    cited = await store.replace_board("project-1", board["notebook_id"], BoardWrite(
+        expected_revision=2, questions=[BoardQuestionInput(
+            question_id=first_id, text="What changed?", claims=[BoardClaimInput(
+                claim_id=claim_id, text="The parser changed",
+                source_ref_ids=[ref.source_ref_id],
+            )],
+        )],
+    ))
+    snapshot = await store.prepare_board_evaluation(
+        "project-1", board["notebook_id"], expected_revision=cited["revision"],
+        question_id=str(first_id), claim_id=str(claim_id),
+    )
+    judged = await store.record_board_judgment(
+        "project-1", board["notebook_id"], expected_revision=cited["revision"],
+        question_id=str(first_id), claim_id=str(claim_id),
+        fingerprint=snapshot["fingerprint"], verdict="conflict",
+        reason="Cited evidence conflicts", confidence=0.9,
+    )
+    assert judged["revision"] == 4
+    with pytest.raises(NotebookConflict):
+        await store.record_board_judgment(
+            "project-1", board["notebook_id"], expected_revision=3,
+            question_id=str(first_id), claim_id=str(claim_id),
+            fingerprint=snapshot["fingerprint"], verdict="support",
+            reason="Changed after the request", confidence=0.9,
+        )
+    confirmed = await store.confirm_board_judgment(
+        "project-1", board["notebook_id"], question_id=str(first_id),
+        claim_id=str(claim_id), confirmation=BoardConfirmation(
+            expected_revision=4, rationale="The cited source says the parser was healthy.",
+            scope_description="This project investigation",
+            reconsider_if="New parser logs show a failure",
+        ),
+    )
+    assert confirmed["revision"] == 5
+    visible = await store.evidence_board("project-1", board["notebook_id"])
+    visible_claim = visible["board_state"]["questions"][0]["claims"][0]
+    assert visible_claim["judgment"]["active_conclusion"] is True
+    assert visible_claim["judgment"]["review_id"] is not None
+    review = await MaintenanceReviewWriter(client).get(
+        visible_claim["judgment"]["review_id"], user_name="ada", project_id="project-1",
+    )
+    assert review.kind == "hypothesis_evaluation"
+    assert review.status == "applied"
+    assert review.proposed_plan.claim == "The parser changed"
+    matches = await store.lookup_ruled_out_hypotheses("project-1", "parser")
+    assert len(matches) == 1
+    assert matches[0]["board_id"] == board["notebook_id"]
+    assert (await ProjectNotebookStore(client, "bob").lookup_ruled_out_hypotheses(
+        "project-1", "parser"
+    )) == []
+    await client.execute(
+        """UPDATE public.project_notebooks
+           SET board_state = jsonb_set(
+               board_state, '{questions,0,claims,0,judgment,confirmed_at}',
+               to_jsonb(to_char(now() - interval '49 hours',
+                   'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+           ) WHERE notebook_id = %s""",
+        (board["notebook_id"],),
+    )
+    expired = await store.evidence_board("project-1", board["notebook_id"])
+    assert expired["board_state"]["questions"][0]["claims"][0]["judgment"]["active_conclusion"] is False
+    assert (await store.lookup_ruled_out_hypotheses("project-1", "parser")) == []
+    await client.execute(
+        "UPDATE public.message_source_refs SET content_hash = %s WHERE source_ref_id = %s",
+        ("d" * 64, ref.source_ref_id),
+    )
+    changed = await store.evidence_board("project-1", board["notebook_id"])
+    assert changed["board_state"]["questions"][0]["claims"][0]["citation_statuses"][ref.source_ref_id] == "changed"
+    with pytest.raises(NotebookConflict):
+        await store.prepare_board_evaluation(
+            "project-1", board["notebook_id"], expected_revision=5,
+            question_id=str(first_id), claim_id=str(claim_id),
+        )
+    refreshed = await store.replace_board("project-1", board["notebook_id"], BoardWrite(
+        expected_revision=5, refresh_claim_ids=[claim_id], questions=[BoardQuestionInput(
+            question_id=first_id, text="What changed?", claims=[BoardClaimInput(
+                claim_id=claim_id, text="The parser changed",
+                source_ref_ids=[ref.source_ref_id],
+            )],
+        )],
+    ))
+    assert refreshed["revision"] == 6
+    assert refreshed["board_state"]["questions"][0]["claims"][0]["judgment"]["stale"] is True
+    assert (await store.prepare_board_evaluation(
+        "project-1", board["notebook_id"], expected_revision=6,
+        question_id=str(first_id), claim_id=str(claim_id),
+    ))["citation_versions"][ref.source_ref_id] == "d" * 64
+    await client.execute(
+        "DELETE FROM public.message_source_refs WHERE source_ref_id = %s",
+        (ref.source_ref_id,),
+    )
+    visible = await store.evidence_board("project-1", board["notebook_id"])
+    visible_claim = visible["board_state"]["questions"][0]["claims"][0]
+    assert visible_claim["citation_statuses"][ref.source_ref_id] == "missing"
+    assert visible_claim["judgment"]["stale"] is True
+    assert visible_claim["judgment"]["active_conclusion"] is False
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_board_agent_answer_draft_requires_user_acceptance(real_postgres_client):
+    client = real_postgres_client
+    store = ProjectNotebookStore(client, "ada")
+    board = await store.create("project-1", NotebookWrite(
+        title="Draft board", view="evidence_board",
+    ))
+    question_id, claim_id = uuid4(), uuid4()
+    await store.replace_board("project-1", board["notebook_id"], BoardWrite(
+        expected_revision=1, questions=[BoardQuestionInput(
+            question_id=question_id, text="What was found?",
+        )],
+    ))
+    await client.execute(
+        "INSERT INTO public.sessions (session_id, project_id, user_name) VALUES ('draft-session', 'project-1', 'ada')"
+    )
+    await client.execute(
+        """INSERT INTO public.messages
+           (user_name, session_id, project_id, message_id, role, content,
+            exchange_state, exchange_outcome, exchange_closed_at_ms, user_msg_id)
+           VALUES ('ada', 'draft-session', 'project-1', 9960, 'user', 'What happened?',
+                   'closed', 'assistant_final', 1000, NULL),
+                  ('ada', 'draft-session', 'project-1', 9961, 'assistant',
+                   'The database index is outdated.', 'open', NULL, NULL, 9960)"""
+    )
+    candidate = SourceReferenceCandidate.model_validate({
+        "project_id": "project-1", "session_id": "draft-session",
+        "source_kind": "web_page", "canonical_url": "https://example.test/draft",
+        "content_hash": "e" * 64,
+        "locator": {"kind": "text_lines", "start_line": 1, "end_line": 1},
+        "excerpt": "Index build information", "metadata": {"title": "Index source"},
+        "encounter_kind": "web_read", "agent_run_id": "draft-run",
+        "tool_call_id": "draft-call", "result_position": 0,
+    })
+    ref = (await SourceReferenceWriter(client).write_for_assistant_message(
+        9961, [candidate], user_name="ada", project_id="project-1",
+        session_id="draft-session", readable_project_ids=["project-1"],
+    ))[0]
+    with pytest.raises(NotebookReferenceUnavailable):
+        await store.propose_board_claim(
+            "project-1", board["notebook_id"], question_id=str(question_id),
+            expected_revision=2, claim_id=claim_id, assistant_message_id=9961,
+            text="The index is healthy", source_ref_ids=[ref.source_ref_id],
+        )
+    proposed = await store.propose_board_claim(
+        "project-1", board["notebook_id"], question_id=str(question_id),
+        expected_revision=2, claim_id=claim_id, assistant_message_id=9961,
+        text="database index is outdated", source_ref_ids=[ref.source_ref_id],
+    )
+    draft = proposed["board_state"]["questions"][0]["claims"][0]
+    assert draft["proposed_by"] == "agent" and draft["accepted"] is False
+    with pytest.raises(NotebookConflict):
+        await store.prepare_board_evaluation(
+            "project-1", board["notebook_id"], expected_revision=3,
+            question_id=str(question_id), claim_id=str(claim_id),
+        )
+    accepted = await store.accept_board_claim(
+        "project-1", board["notebook_id"], question_id=str(question_id),
+        claim_id=str(claim_id), expected_revision=3,
+    )
+    assert accepted["board_state"]["questions"][0]["claims"][0]["accepted"] is True
+    assert (await store.prepare_board_evaluation(
+        "project-1", board["notebook_id"], expected_revision=4,
+        question_id=str(question_id), claim_id=str(claim_id),
+    ))["sources"][0]["source_ref_id"] == ref.source_ref_id

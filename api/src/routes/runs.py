@@ -200,6 +200,30 @@ async def _selected_notebook(runtime, project_id, notebook_id):
     row = await store.get(project_id, str(notebook_id))
     if row is None:
         return None
+    if row["view"] == "evidence_board":
+        board = await store.evidence_board(project_id, str(notebook_id))
+        lines = []
+        for question in board["board_state"]["questions"]:
+            lines.append(json.dumps({
+                "kind": "question", "question_id": question["question_id"],
+                "text": question["text"], "depends_on": question["depends_on"],
+            }, ensure_ascii=False))
+            for claim in question["claims"]:
+                if not claim["accepted"]:
+                    continue
+                judgment = claim.get("judgment") or {}
+                lines.append(json.dumps({
+                    "kind": "claim", "claim_id": claim["claim_id"],
+                    "question_id": question["question_id"], "text": claim["text"],
+                    "citations": claim["citation_statuses"],
+                    "confirmed_verdict": (
+                        judgment.get("verdict") if judgment.get("active_conclusion") else None
+                    ),
+                }, ensure_ascii=False))
+        return {
+            "notebook_id": str(notebook_id), "revision": board["revision"],
+            "context": "\n".join(lines),
+        }
     view = await (
         store.source_desk(project_id, str(notebook_id)) if row["view"] == "source_desk"
         else store.timeline(project_id, str(notebook_id))

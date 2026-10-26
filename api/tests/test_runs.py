@@ -147,6 +147,36 @@ def test_selected_finding_keeps_saved_answer_but_withholds_changed_citation():
     assert "Unverified source wording" not in selected["context"]
 
 
+def test_selected_evidence_board_uses_only_accepted_and_active_conclusions():
+    board = {"revision": 4, "board_state": {"questions": [{
+        "question_id": "q1", "text": "What changed?", "depends_on": None,
+        "claims": [
+            {"claim_id": "c1", "text": "The parser changed", "accepted": True,
+             "citation_statuses": {"ref-1": "current"},
+             "judgment": {"verdict": "conflict", "active_conclusion": True}},
+            {"claim_id": "c2", "text": "Unaccepted draft", "accepted": False,
+             "citation_statuses": {}, "judgment": None},
+            {"claim_id": "c3", "text": "Old theory", "accepted": True,
+             "citation_statuses": {"ref-2": "changed"},
+             "judgment": {"verdict": "support", "active_conclusion": False}},
+        ],
+    }]}}
+
+    class Store:
+        async def get(self, *_):
+            return {"view": "evidence_board"}
+
+        async def evidence_board(self, *_):
+            return board
+
+    runtime = SimpleNamespace(projects=SimpleNamespace(notebooks=Store()))
+    selected = asyncio.run(_selected_notebook(runtime, "project-1", "board-1"))
+    assert selected["revision"] == 4
+    assert "Unaccepted draft" not in selected["context"]
+    assert '"confirmed_verdict": "conflict"' in selected["context"]
+    assert '"confirmed_verdict": null' in selected["context"]
+
+
 def test_start_run_passes_selected_notebook_without_changing_query():
     notebook_id = "00000000-0000-0000-0000-000000000002"
     calls = []

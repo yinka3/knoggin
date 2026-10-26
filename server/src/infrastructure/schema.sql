@@ -730,12 +730,14 @@ CREATE TABLE public.project_notebooks (
     title text NOT NULL,
     view text NOT NULL,
     entries jsonb DEFAULT '[]'::jsonb NOT NULL,
+    board_state jsonb DEFAULT '{"questions": []}'::jsonb NOT NULL,
     revision integer DEFAULT 1 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT project_notebooks_title_check CHECK ((length(btrim(title)) > 0) AND (length(title) <= 200)),
-    CONSTRAINT project_notebooks_view_check CHECK (view IN ('source_desk', 'timeline')),
+    CONSTRAINT project_notebooks_view_check CHECK (view IN ('source_desk', 'timeline', 'evidence_board')),
     CONSTRAINT project_notebooks_entries_check CHECK (jsonb_typeof(entries) = 'array' AND jsonb_array_length(entries) <= 100),
+    CONSTRAINT project_notebooks_board_state_check CHECK (jsonb_typeof(board_state) = 'object'),
     CONSTRAINT project_notebooks_revision_check CHECK (revision >= 1)
 );
 CREATE TABLE public.project_file_cleanup_tasks (

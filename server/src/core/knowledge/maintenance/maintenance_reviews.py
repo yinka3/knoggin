@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Annotated, Any, Literal, Union
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
@@ -179,6 +180,22 @@ class RelationshipAdvisoryPlan(BaseModel):
     note: str | None = None
 
 
+class HypothesisEvaluationPlan(BaseModel):
+    """A user-confirmed, evidence-backed ruled-out claim."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["hypothesis_evaluation"] = "hypothesis_evaluation"
+    board_id: UUID
+    question_id: UUID
+    claim_id: UUID
+    question: str = Field(min_length=1, max_length=1000)
+    claim: str = Field(min_length=1, max_length=2000)
+    outcome: Literal["ruled_out"] = "ruled_out"
+    scope_description: str = Field(min_length=1, max_length=2000)
+    reconsider_if: str = Field(min_length=1, max_length=2000)
+
+
 MaintenancePlan = Annotated[
     Union[
         RelationshipInterpretationPlan,
@@ -188,6 +205,7 @@ MaintenancePlan = Annotated[
         EntityMergeRollbackPlan,
         ConflictResolutionPlan,
         RelationshipAdvisoryPlan,
+        HypothesisEvaluationPlan,
     ],
     Field(discriminator="kind"),
 ]

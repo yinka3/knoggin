@@ -8,7 +8,9 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-NotebookView = Literal["source_desk", "timeline"]
+from common.schema.evidence_board import BoardState
+
+NotebookView = Literal["source_desk", "timeline", "evidence_board"]
 NotebookSourceKind = Literal[
     "document", "saved_link", "message", "episode", "artifact", "source_ref", "finding"
 ]
@@ -82,6 +84,8 @@ class NotebookWrite(BaseModel):
 
     @model_validator(mode="after")
     def unique_entry_ids(self):
+        if self.view == "evidence_board" and self.entries:
+            raise ValueError("Evidence boards use questions instead of source entries")
         ids = [entry.entry_id for entry in self.entries if entry.entry_id is not None]
         if len(ids) != len(set(ids)):
             raise ValueError("entry_id must be unique within a notebook")
@@ -101,6 +105,7 @@ class ProjectNotebook(BaseModel):
     title: str
     view: NotebookView
     entries: list[NotebookEntry]
+    board_state: BoardState | None = None
     revision: int = Field(ge=1)
     created_at: datetime
     updated_at: datetime
