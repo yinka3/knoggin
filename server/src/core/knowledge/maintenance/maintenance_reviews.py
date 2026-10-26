@@ -11,7 +11,14 @@ from datetime import datetime
 from typing import Annotated, Any, Literal, Union
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    field_validator,
+    model_validator,
+)
 
 from common.schema.evidence import EvidenceBundle, EvidencePointer, EvidenceSnapshot
 from core.knowledge.conflict.conflicts import ConflictResolutionKind
@@ -93,6 +100,36 @@ class EntityContextChangePlan(BaseModel):
     project_id: str = Field(min_length=1)
     entity_type: str | None = Field(default=None, min_length=1)
     topic: str | None = Field(default=None, min_length=1)
+
+
+class IdentityReassignmentPlan(BaseModel):
+    """One decision-linked mention to attach to another identity."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["identity_reassignment"] = "identity_reassignment"
+    window_id: UUID
+    occurrence_key: str = Field(min_length=1, max_length=500)
+    source_entity_id: int = Field(gt=0)
+    target_entity_id: int | None = Field(default=None, gt=0)
+    new_entity_name: str | None = Field(default=None, min_length=1, max_length=200)
+    entity_type: str | None = Field(default=None, min_length=1, max_length=200)
+    topic: str | None = Field(default=None, min_length=1, max_length=200)
+    block_ids: tuple[UUID, ...] = Field(min_length=1, max_length=8)
+
+    @model_validator(mode="after")
+    def validate_target(self):
+        if (self.target_entity_id is None) == (self.new_entity_name is None):
+            raise ValueError("Choose one existing entity or a new identity")
+        if self.target_entity_id == self.source_entity_id:
+            raise ValueError("Identity correction must change the entity")
+        if self.new_entity_name is not None and (self.entity_type is None or self.topic is None):
+            raise ValueError("A new identity needs an entity type and topic")
+        if self.target_entity_id is not None and (self.entity_type is not None or self.topic is not None):
+            raise ValueError("An existing identity keeps its current project classification")
+        if len(set(self.block_ids)) != len(self.block_ids):
+            raise ValueError("Identity correction block IDs must be unique")
+        return self
 
 
 class EntityMergePlan(BaseModel):
@@ -201,6 +238,7 @@ MaintenancePlan = Annotated[
         RelationshipInterpretationPlan,
         RelationshipDomainChangePlan,
         EntityContextChangePlan,
+        IdentityReassignmentPlan,
         EntityMergePlan,
         EntityMergeRollbackPlan,
         ConflictResolutionPlan,

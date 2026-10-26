@@ -12,6 +12,8 @@ CREATE TABLE IF NOT EXISTS public.context_block_entity_occurrences (
     source_start integer,
     source_end integer,
     identity_decision_key text,
+    corrected_entity_id bigint,
+    human_correction_review_id text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT context_block_entity_occurrences_pkey PRIMARY KEY
         (window_id, pass_number, occurrence_index, block_id),
@@ -22,9 +24,16 @@ CREATE TABLE IF NOT EXISTS public.context_block_entity_occurrences (
     CONSTRAINT context_block_entity_occurrences_window_fk FOREIGN KEY (window_id, project_id)
         REFERENCES public.project_semantic_windows(window_id, project_id) ON DELETE CASCADE,
     CONSTRAINT context_block_entity_occurrences_block_fk FOREIGN KEY (block_id, project_id)
-        REFERENCES public.project_context_blocks(block_id, project_id) ON DELETE CASCADE,
-    CONSTRAINT context_block_entity_occurrences_entity_fk FOREIGN KEY (resolved_entity_id)
-        REFERENCES public.entities(entity_id) ON DELETE CASCADE
+        REFERENCES public.project_context_blocks(block_id, project_id) ON DELETE CASCADE
 );
+ALTER TABLE public.context_block_entity_occurrences
+    DROP CONSTRAINT IF EXISTS context_block_entity_occurrences_entity_fk,
+    DROP CONSTRAINT IF EXISTS context_block_entity_occurrences_corrected_entity_fk;
+ALTER TABLE public.context_block_entity_occurrences
+    ADD COLUMN IF NOT EXISTS corrected_entity_id bigint,
+    ADD COLUMN IF NOT EXISTS human_correction_review_id text;
+ALTER TABLE public.context_block_entity_occurrences
+    ADD CONSTRAINT context_block_entity_occurrences_corrected_entity_fk
+    FOREIGN KEY (corrected_entity_id) REFERENCES public.entities(entity_id);
 CREATE INDEX IF NOT EXISTS context_block_entity_occurrences_entity_idx
     ON public.context_block_entity_occurrences (project_id, block_id, resolved_entity_id);

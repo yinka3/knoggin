@@ -981,6 +981,8 @@ CREATE TABLE public.context_block_entity_occurrences (
     source_start integer,
     source_end integer,
     identity_decision_key text,
+    corrected_entity_id bigint,
+    human_correction_review_id text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT context_block_entity_occurrences_pkey PRIMARY KEY
         (window_id, pass_number, occurrence_index, block_id),
@@ -1481,8 +1483,8 @@ ALTER TABLE ONLY public.context_block_entity_occurrences
     ADD CONSTRAINT context_block_entity_occurrences_block_fk FOREIGN KEY (block_id, project_id)
         REFERENCES public.project_context_blocks(block_id, project_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.context_block_entity_occurrences
-    ADD CONSTRAINT context_block_entity_occurrences_entity_fk FOREIGN KEY (resolved_entity_id)
-        REFERENCES public.entities(entity_id) ON DELETE CASCADE;
+    ADD CONSTRAINT context_block_entity_occurrences_corrected_entity_fk FOREIGN KEY (corrected_entity_id)
+        REFERENCES public.entities(entity_id);
 ALTER TABLE ONLY public.project_semantic_windows
     ADD CONSTRAINT project_semantic_windows_project_scope_fk FOREIGN KEY (user_name, project_id) REFERENCES public.projects(user_name, project_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.project_semantic_windows
