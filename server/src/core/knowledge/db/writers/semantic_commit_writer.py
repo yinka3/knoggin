@@ -166,6 +166,12 @@ class SemanticCommitWriter:
                         project_id=project_id,
                         eligible_blocks=context_input.eligible_blocks,
                     )
+                    await self._write_resolved_occurrences(
+                        cur, entity_result, window_id=build.window_id,
+                        pass_number=build.identity_pass_number,
+                        project_id=project_id,
+                        eligible_blocks=context_input.eligible_blocks,
+                    )
                     await self._update_entity_recency(
                         cur,
                         entity_result,
@@ -859,6 +865,7 @@ class SemanticCommitWriter:
             or result.project_classifications
             or result.block_entity_associations
             or result.message_entity_refs
+            or result.resolved_mentions
         ):
             raise ValueError("Reused Context revision requires an empty Knowledge build")
 
@@ -1282,6 +1289,38 @@ class SemanticCommitWriter:
             )
             count += cur.rowcount
         return count
+
+    @staticmethod
+    async def _write_resolved_occurrences(
+        cur, result: ContextEntityResult, *, window_id: UUID, pass_number: int,
+        project_id: str, eligible_blocks: set[UUID],
+    ) -> None:
+        """Keep exact mention provenance beside aggregate block associations."""
+
+        if result.resolved_mentions and pass_number not in {1, 2}:
+            raise ValueError("Resolved occurrences require a final identity pass")
+        associations = {
+            (item.block_id, item.entity_id, item.mention_text.casefold())
+            for item in result.block_entity_associations
+        }
+        for resolved in result.resolved_mentions:
+            mention = resolved.mention
+            for block_id in mention.block_ids:
+                if block_id not in eligible_blocks or (
+                    block_id, resolved.entity_id, mention.name.casefold()
+                ) not in associations:
+                    raise ValueError("Resolved occurrence lacks an eligible block association")
+                await cur.execute(
+                    """INSERT INTO public.context_block_entity_occurrences
+                       (window_id, project_id, pass_number, occurrence_index,
+                        block_id, resolved_entity_id, mention_text,
+                        source_start, source_end, identity_decision_key)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (window_id, project_id, pass_number, resolved.occurrence_index,
+                     block_id, resolved.entity_id, mention.name,
+                     mention.source_start, mention.source_end,
+                     resolved.identity_decision_key),
+                )
 
     @staticmethod
     def _require_source_time(

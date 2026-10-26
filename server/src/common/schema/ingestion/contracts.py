@@ -428,11 +428,17 @@ class ResolvedContextBlockMention:
 
     mention: ContextBlockMention
     entity_id: int
+    occurrence_index: int
+    identity_decision_key: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.mention, ContextBlockMention):
             raise TypeError("ResolvedContextBlockMention.mention must be typed")
         _require_positive_id(self.entity_id, "ResolvedContextBlockMention.entity_id")
+        if not isinstance(self.occurrence_index, int) or self.occurrence_index < 0:
+            raise ValueError("ResolvedContextBlockMention occurrence index must be non-negative")
+        if self.identity_decision_key is not None and not self.identity_decision_key:
+            raise ValueError("ResolvedContextBlockMention identity decision key must not be blank")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -447,6 +453,7 @@ class ContextEntityResult:
     project_classifications: dict[int, ProjectEntityClassification]
     block_entity_associations: tuple[ContextBlockEntityAssociation, ...]
     message_entity_refs: tuple[MessageEntityRef, ...]
+    resolved_mentions: tuple[ResolvedContextBlockMention, ...] = ()
 
     def __post_init__(self) -> None:
         entity_ids = tuple(
@@ -527,3 +534,9 @@ class ContextEntityResult:
             for reference in self.message_entity_refs
         ):
             raise ValueError("Context message refs must reference resolved entities")
+        if any(
+            not isinstance(resolved, ResolvedContextBlockMention)
+            or resolved.entity_id not in set(entity_ids)
+            for resolved in self.resolved_mentions
+        ):
+            raise ValueError("Context resolved mentions must reference resolved entities")

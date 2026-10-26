@@ -511,7 +511,14 @@ class EntityResolver:
                     decision["jev"]["operational_entity_id"] = entity_id
                     decision["jev"]["mention_text"] = mention.name
                 state.resolved_mentions.append(
-                    ResolvedContextBlockMention(mention=mention, entity_id=entity_id)
+                    ResolvedContextBlockMention(
+                        mention=mention, entity_id=entity_id,
+                        occurrence_index=index,
+                        identity_decision_key=(
+                            decision["jev"]["record"]["occurrence_key"]
+                            if "jev" in decision else None
+                        ),
+                    )
                 )
                 state.associations.extend(
                     ContextBlockEntityAssociation(

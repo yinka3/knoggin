@@ -969,6 +969,27 @@ CREATE TABLE public.context_block_entities (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT context_block_entities_mention_text_check CHECK ((btrim(mention_text) <> ''::text))
 );
+CREATE TABLE public.context_block_entity_occurrences (
+    window_id uuid NOT NULL,
+    project_id text NOT NULL,
+    pass_number integer NOT NULL,
+    occurrence_index integer NOT NULL,
+    block_id uuid NOT NULL,
+    resolved_entity_id bigint NOT NULL,
+    mention_text text NOT NULL,
+    source_start integer,
+    source_end integer,
+    identity_decision_key text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT context_block_entity_occurrences_pkey PRIMARY KEY
+        (window_id, pass_number, occurrence_index, block_id),
+    CONSTRAINT context_block_entity_occurrences_offsets_check CHECK
+        ((source_start IS NULL AND source_end IS NULL) OR
+         (source_start >= 0 AND source_end > source_start)),
+    CONSTRAINT context_block_entity_occurrences_mention_check CHECK (btrim(mention_text) <> '')
+);
+CREATE INDEX context_block_entity_occurrences_entity_idx
+    ON public.context_block_entity_occurrences (project_id, block_id, resolved_entity_id);
 CREATE TABLE public.relationship_observation_blocks (
     observation_id bigint NOT NULL,
     project_id text NOT NULL,
@@ -1452,6 +1473,15 @@ ALTER TABLE ONLY public.context_block_entities
     ADD CONSTRAINT context_block_entities_block_scope_fk FOREIGN KEY (block_id, project_id) REFERENCES public.project_context_blocks(block_id, project_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.context_block_entities
     ADD CONSTRAINT context_block_entities_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.context_block_entity_occurrences
+    ADD CONSTRAINT context_block_entity_occurrences_window_fk FOREIGN KEY (window_id, project_id)
+        REFERENCES public.project_semantic_windows(window_id, project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.context_block_entity_occurrences
+    ADD CONSTRAINT context_block_entity_occurrences_block_fk FOREIGN KEY (block_id, project_id)
+        REFERENCES public.project_context_blocks(block_id, project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.context_block_entity_occurrences
+    ADD CONSTRAINT context_block_entity_occurrences_entity_fk FOREIGN KEY (resolved_entity_id)
+        REFERENCES public.entities(entity_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.project_semantic_windows
     ADD CONSTRAINT project_semantic_windows_project_scope_fk FOREIGN KEY (user_name, project_id) REFERENCES public.projects(user_name, project_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.project_semantic_windows

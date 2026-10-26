@@ -99,6 +99,7 @@ def assemble_context_entity_result(
         project_classifications=resolution.project_classifications,
         block_entity_associations=resolution.block_entity_associations,
         message_entity_refs=tuple(message_refs.values()),
+        resolved_mentions=resolved_mentions,
     )
     for observation in build.trace.extraction_decisions:
         if observation.get("accepted_entity_type") is None:

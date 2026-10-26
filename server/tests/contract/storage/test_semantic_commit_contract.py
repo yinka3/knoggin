@@ -763,6 +763,7 @@ async def test_carried_active_identity_persists_once_after_second_pass(real_post
         entity_ids=second.entity_ids, entities={}, existing_classifications={entity_id: "Person" for entity_id in second.entity_ids},
         associations=second.block_entity_associations, ingestion_policy=frozen)
     assemble_context_entity_result(build, second)
+    build.identity_pass_number = 2
     build.trace.identity_decisions.extend(second.identity_decisions)
     writer = SemanticCommitWriter(real_postgres_client)
     assert not (await writer.commit(build)).resumed
@@ -773,6 +774,17 @@ async def test_carried_active_identity_persists_once_after_second_pass(real_post
     assert records[0]["accepted_entity_id"] == first.entity_ids[0]
     assert records[0]["operational_entity_id"] == first.entity_ids[0]
     assert records[0]["reused_for_pass"] == 2
+    occurrences = await real_postgres_client.fetch_all(
+        """SELECT pass_number, occurrence_index, block_id, resolved_entity_id,
+                  mention_text, identity_decision_key
+           FROM public.context_block_entity_occurrences WHERE window_id = %s""",
+        (window.window_id,),
+    )
+    assert occurrences == [{
+        "pass_number": 2, "occurrence_index": 0, "block_id": block.block_id,
+        "resolved_entity_id": first.entity_ids[0], "mention_text": "Bob",
+        "identity_decision_key": f"0:{block.block_id}",
+    }]
     by_entity = await SemanticWindowReader(real_postgres_client).list_jev_decisions_for_entity(
         first.entity_ids[0], user_name="ada", project_id="project-1",
     )
