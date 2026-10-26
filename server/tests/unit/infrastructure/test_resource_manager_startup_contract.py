@@ -141,7 +141,6 @@ async def test_resource_manager_cleans_every_partial_startup_stage(
 
     config = RootConfig(
         llm=LLMSettings(
-            api_key="",
             base_url="https://llm.example/v1",
             agent_model="agent",
             extraction_model="extract",

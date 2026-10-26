@@ -22,15 +22,13 @@ def policy(jev=None):
     )
 
 
-def test_disabled_defaults_and_private_key_round_trip():
-    config = RootConfig(jev=JevSettings(api_key="private-key"))
+def test_disabled_defaults_and_credentials_cannot_be_saved():
+    config = RootConfig(jev=JevSettings())
     assert config.jev.identity_mode == "disabled"
-    assert "private-key" not in repr(config.jev)
-    assert (
-        RootConfig.model_validate(config.model_dump(mode="json")).jev.api_key
-        == "private-key"
-    )
     assert "api_key" not in config.jev.capture_policy().model_dump()
+    # Keys come only from the environment (JEV_API_KEY).
+    with pytest.raises(ValueError):
+        JevSettings(api_key="private-key")
 
 
 def test_openrouter_decisions_settings_are_supported():
@@ -44,7 +42,7 @@ def test_openrouter_decisions_settings_are_supported():
 
 def test_frozen_snapshot_round_trip_and_legacy_disabled_replay():
     captured = policy(
-        JevSettings(api_key="private-key", identity_mode="observe").capture_policy()
+        JevSettings(identity_mode="observe").capture_policy()
     )
     snapshot = captured.semantic_window_snapshot()
     assert "private-key" not in str(snapshot)
@@ -104,14 +102,12 @@ def test_unknown_snapshot_keys_and_versions_rejected():
 
 def test_runtime_credentials_cannot_be_captured_as_policy():
     with pytest.raises(TypeError, match="runtime settings"):
-        policy(JevSettings(api_key="secret"))
+        policy(JevSettings())
 
 
 async def test_project_admission_captures_live_jev_settings_once():
     state = make_project_state(text_processor=TextProcessorSettings())
-    state._config_manager.config.jev = JevSettings(
-        identity_mode="observe", api_key="secret"
-    )
+    state._config_manager.config.jev = JevSettings(identity_mode="observe")
     captured = await state.capture_semantic_policy()
     state._config_manager.config.jev = JevSettings(identity_mode="active")
     assert captured.jev.identity_mode == "observe"

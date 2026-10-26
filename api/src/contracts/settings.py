@@ -2,6 +2,7 @@
 
 from pydantic import BaseModel, ConfigDict
 
+from common.api_keys import brave_api_key, jev_api_key, llm_api_key, tavily_api_key
 from common.schema.jev import JevPolicy
 from common.schema.settings import (
     DeveloperSettings,
@@ -62,16 +63,16 @@ class SettingsView(APIModel):
                     config.llm.base_url, config.llm.thinking
                 ),
                 spending_budget=config.llm.spending_budget,
-                api_key_configured=bool(config.llm.api_key),
+                api_key_configured=bool(llm_api_key()),
             ),
             search=SearchSettingsView(
                 provider=config.search.provider,
-                brave_api_key_configured=bool(config.search.brave_api_key),
-                tavily_api_key_configured=bool(config.search.tavily_api_key),
+                brave_api_key_configured=bool(brave_api_key()),
+                tavily_api_key_configured=bool(tavily_api_key()),
             ),
             jev=JevSettingsView(
-                **config.jev.model_dump(exclude={"api_key"}),
-                api_key_configured=bool(config.jev.api_key),
+                **config.jev.model_dump(),
+                api_key_configured=bool(jev_api_key()),
             ),
             developer_settings=config.developer_settings,
         )

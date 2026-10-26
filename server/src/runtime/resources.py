@@ -15,6 +15,7 @@ import torch
 from dotenv import load_dotenv
 from loguru import logger
 
+from common.api_keys import llm_api_key
 from common.conf.manager import ConfigManager
 from common.embedding_contract import DEFAULT_EMBEDDING_MODEL, DEFAULT_RERANKER_MODEL
 from common.exceptions import ConfigurationError, DependencyError
@@ -260,7 +261,7 @@ class RuntimeResources:
             else None
         )
         self.llm_service = LLMService(
-            api_key=llm_config.api_key,
+            api_key=llm_api_key(),
             agent_model=llm_config.agent_model,
             extraction_model=llm_config.extraction_model,
             merge_model=llm_config.merge_model,

@@ -32,7 +32,13 @@ def settings_app(monkeypatch, tmp_path):
     return create_app(user_name="local", config_dir=tmp_path), manager
 
 
-def test_settings_http_round_trip_redacts_secrets_and_reports_restart(settings_app):
+def secret_not_saved(manager):
+    return "test-private-api-key" not in manager.config_file.read_text()
+
+
+def test_settings_http_round_trip_redacts_secrets_and_reports_restart(
+    settings_app, monkeypatch
+):
     app, manager = settings_app
 
     async def exercise():
@@ -75,10 +81,12 @@ def test_settings_http_round_trip_redacts_secrets_and_reports_restart(settings_a
                 assert jev.status_code == 200
 
                 secret = "test-private-api-key"
-                set_key = await client.put(
+                # Credentials are environment-only; there is no route to save one.
+                removed = await client.put(
                     "/v1/settings/llm/secrets/api_key", json={"value": secret}
                 )
-                assert set_key.status_code == 200
+                assert removed.status_code == 404
+                monkeypatch.setenv("OPENROUTER_API_KEY", secret)
                 visible = await client.get("/v1/settings")
                 assert visible.json()["settings"]["llm"]["api_key_configured"] is True
                 assert (
@@ -89,7 +97,6 @@ def test_settings_http_round_trip_redacts_secrets_and_reports_restart(settings_a
                     visible.json()["settings"]["jev"]["shutdown_timeout_seconds"] == 8
                 )
                 assert secret not in visible.text
-                assert secret not in set_key.text
 
                 before = manager.config.model_dump()
                 saved_before = manager.config_file.read_text()
@@ -109,8 +116,7 @@ def test_settings_http_round_trip_redacts_secrets_and_reports_restart(settings_a
                 assert manager.config.model_dump() == before
                 assert manager.config_file.read_text() == saved_before
 
-                cleared = await client.delete("/v1/settings/llm/secrets/api_key")
-                assert cleared.status_code == 200
+                monkeypatch.delenv("OPENROUTER_API_KEY")
                 assert (await client.get("/v1/settings")).json()["settings"]["llm"][
                     "api_key_configured"
                 ] is False
@@ -123,7 +129,8 @@ def test_settings_http_round_trip_redacts_secrets_and_reports_restart(settings_a
     persisted = yaml.safe_load(manager.config_file.read_text())
     assert persisted["developer_settings"]["documents"]["rerank_enabled"] is False
     assert persisted["llm"]["base_url"] == "https://example.test/v1"
-    assert persisted["llm"]["api_key"] == ""
+    assert "api_key" not in persisted["llm"]
+    assert secret_not_saved(manager)
 
 
 def test_failed_settings_write_does_not_activate(settings_app, monkeypatch):

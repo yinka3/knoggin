@@ -29,7 +29,7 @@ class DummyModel(BaseModel):
     name: str
 
 
-async def test_jev_and_llm_use_one_spending_balance(llm_service):
+async def test_jev_and_llm_use_one_spending_balance(llm_service, monkeypatch):
     from common.schema.jev import JevSettings, NoulQuestion
     from infrastructure.jev_client import JevClient, JevWorkBudget
 
@@ -42,7 +42,8 @@ async def test_jev_and_llm_use_one_spending_balance(llm_service):
         usage=SimpleNamespace(prompt_tokens=100, completion_tokens=20),
     )
     assert await service.generate_text(system="system", user="user") == "ok"
-    settings = JevSettings(api_key="fake", identity_mode="observe")
+    monkeypatch.setenv("JEV_API_KEY", "fake")
+    settings = JevSettings(identity_mode="observe")
     client = JevClient(settings, spending_ledger=service.spending_ledger,
         transport=httpx.MockTransport(lambda _: httpx.Response(200, json={
             "model": "jev-1.13.0", "answers": {"support": {"type": "noul", "noul": 0.8}},
@@ -484,7 +485,9 @@ async def test_stream_does_not_retry_after_output(llm_service):
 
 @pytest.mark.unit
 @pytest.mark.no_network
-def test_update_settings_swaps_client_and_supports_clearing_credentials(llm_service):
+def test_update_settings_swaps_client_and_supports_clearing_credentials(
+    llm_service, monkeypatch
+):
     service, raw_client, _, openai, from_openai = llm_service
     replacement_raw = MagicMock()
     replacement_raw.close = AsyncMock()
@@ -492,9 +495,9 @@ def test_update_settings_swaps_client_and_supports_clearing_credentials(llm_serv
     openai.return_value = replacement_raw
     from_openai.return_value = replacement_instructor
 
+    monkeypatch.setenv("OPENROUTER_API_KEY", "new-key")
     service.update_settings(
         LLMSettings(
-            api_key="new-key",
             base_url="https://new.test.com",
             agent_model="new-agent",
             extraction_model="new-extract",
@@ -511,9 +514,9 @@ def test_update_settings_swaps_client_and_supports_clearing_credentials(llm_serv
     assert openai.call_count == 2
     assert from_openai.call_count == 2
 
+    monkeypatch.delenv("OPENROUTER_API_KEY")
     service.update_settings(
         LLMSettings(
-            api_key="",
             base_url=None,
             agent_model="new-agent",
             extraction_model="new-extract",
@@ -529,7 +532,7 @@ def test_update_settings_swaps_client_and_supports_clearing_credentials(llm_serv
 
 @pytest.mark.unit
 @pytest.mark.no_network
-def test_update_settings_initializes_client_when_key_is_added():
+def test_update_settings_initializes_client_when_key_is_added(monkeypatch):
     with (
         patch("infrastructure.llm_client.instructor.from_openai") as from_openai,
         patch("infrastructure.llm_client.AsyncOpenAI") as openai,
@@ -538,7 +541,8 @@ def test_update_settings_initializes_client_when_key_is_added():
         openai.return_value = raw_client
         service = LLMService(api_key="")
 
-        service.update_settings(LLMSettings(api_key="added-later"))
+        monkeypatch.setenv("OPENROUTER_API_KEY", "added-later")
+        service.update_settings(LLMSettings())
 
     assert service.is_configured is True
     openai.assert_called_once()
@@ -559,7 +563,9 @@ async def test_close_closes_only_owned_raw_client(llm_service):
 
 @pytest.mark.unit
 @pytest.mark.no_network
-async def test_hot_reload_does_not_close_client_used_by_inflight_request(llm_service):
+async def test_hot_reload_does_not_close_client_used_by_inflight_request(
+    llm_service, monkeypatch
+):
     service, raw_client, _, openai, from_openai = llm_service
     request_started = asyncio.Event()
     release_request = asyncio.Event()
@@ -579,7 +585,8 @@ async def test_hot_reload_does_not_close_client_used_by_inflight_request(llm_ser
     replacement_raw.close = AsyncMock()
     openai.return_value = replacement_raw
     from_openai.return_value = MagicMock()
-    service.update_settings(LLMSettings(api_key="replacement-key"))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "replacement-key")
+    service.update_settings(LLMSettings())
 
     raw_client.close.assert_not_awaited()
     release_request.set()
@@ -597,7 +604,7 @@ async def test_closed_service_rejects_requests_and_updates(llm_service):
     with pytest.raises(ConfigurationError, match="closed"):
         await service.generate_text(system="system", user="user")
     with pytest.raises(RuntimeError, match="closed"):
-        service.update_settings(LLMSettings(api_key="new-key"))
+        service.update_settings(LLMSettings())
 
 
 @pytest.mark.unit

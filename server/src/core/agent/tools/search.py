@@ -23,6 +23,7 @@ from loguru import logger
 from markitdown import MarkItDown
 from pypdf import PdfReader
 
+from common.api_keys import brave_api_key, tavily_api_key
 from common.exceptions import ToolExecutionError
 from common.web_url import normalize_public_web_url as _normalize_web_url
 
@@ -982,8 +983,8 @@ class WebTools:
         Tier: configured provider > Brave > Tavily > DuckDuckGo (free default).
         """
         provider = self.search_cfg.get("provider", "auto")
-        brave_key = self.search_cfg.get("brave_api_key", "")
-        tavily_key = self.search_cfg.get("tavily_api_key", "")
+        brave_key = brave_api_key()
+        tavily_key = tavily_api_key()
 
         if provider == "brave" and brave_key:
             results = await self._search_brave(query, limit, brave_key, freshness)
@@ -1016,7 +1017,7 @@ class WebTools:
         """
         Search for news articles. Requires Brave Search API key.
         """
-        brave_key = self.search_cfg.get("brave_api_key", "")
+        brave_key = brave_api_key()
         if not brave_key:
             return [
                     {
@@ -1628,18 +1629,18 @@ class WebTools:
                 logger.warning("Brave API key invalid, falling back")
                 return (
                     await self._search_tavily(
-                        query, limit, self.search_cfg.get("tavily_api_key", "")
+                        query, limit, tavily_api_key()
                     )
-                    if self.search_cfg.get("tavily_api_key")
+                    if tavily_api_key()
                     else await self._search_duckduckgo(query, limit)
                 )
             if response.status_code == 429:
                 logger.warning("Brave rate limit hit, falling back")
                 return (
                     await self._search_tavily(
-                        query, limit, self.search_cfg.get("tavily_api_key", "")
+                        query, limit, tavily_api_key()
                     )
-                    if self.search_cfg.get("tavily_api_key")
+                    if tavily_api_key()
                     else await self._search_duckduckgo(query, limit)
                 )
 

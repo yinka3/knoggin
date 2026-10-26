@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 import httpx
 from pydantic import ValidationError
 
+from common.api_keys import jev_api_key
 from common.exceptions import ConfigurationError, LLMBudgetExceededError
 from common.schema.jev import (
     Capability,
@@ -121,7 +122,8 @@ class JevClient:
         if self._closing:
             return JevResult(outcome="unavailable", reason="closing")
         settings = self._settings.model_copy(deep=True)
-        if not settings.api_key.strip():
+        api_key = jev_api_key(settings.endpoint)
+        if not api_key:
             return JevResult(outcome="unavailable", reason="missing_api_key")
         if self._pending_accounting or any(task.cancelling() for task in self._tasks):
             # Recovery is owned by this client. Do not issue more optional
@@ -186,7 +188,7 @@ class JevClient:
         }
         task = asyncio.create_task(
             self._evaluate(
-                settings, policy, questions, body, work_budget, started, progress
+                settings, api_key, policy, questions, body, work_budget, started, progress
             )
         )
         self._tasks.add(task)
@@ -250,7 +252,7 @@ class JevClient:
         work.task.add_done_callback(self._accounting_tasks.discard)
 
     async def _evaluate(
-        self, settings, policy, questions, body, work_budget, started, progress
+        self, settings, api_key, policy, questions, body, work_budget, started, progress
     ):
         attempts = 0
         reason = "provider_error"
@@ -324,7 +326,7 @@ class JevClient:
                             settings.endpoint,
                             content=body,
                             headers={
-                                "Authorization": f"Bearer {settings.api_key.strip()}",
+                                "Authorization": f"Bearer {api_key}",
                                 "Content-Type": "application/json",
                             },
                             timeout=policy.request_timeout_seconds,

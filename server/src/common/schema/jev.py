@@ -80,9 +80,7 @@ class JevPolicy(JevModel):
 
 
 class JevSettings(JevPolicy):
-    # Like llm.api_key, this is persisted in private settings. Hide it in repr;
-    # policy snapshots and decision records explicitly exclude credentials.
-    api_key: str = Field("", repr=False)
+    # The API key is read from JEV_API_KEY (common.api_keys), never saved.
     endpoint: str = "https://api.typesafe.ai/v1/systemone"
     shutdown_timeout_seconds: float = Field(5, gt=0, le=30, allow_inf_nan=False)
 
@@ -114,7 +112,7 @@ class JevSettings(JevPolicy):
 
     def capture_policy(self) -> JevPolicy:
         return JevPolicy.model_validate(
-            self.model_dump(exclude={"api_key", "endpoint", "shutdown_timeout_seconds"})
+            self.model_dump(exclude={"endpoint", "shutdown_timeout_seconds"})
         )
 
 

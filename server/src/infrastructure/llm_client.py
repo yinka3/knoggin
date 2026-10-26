@@ -24,6 +24,7 @@ from openai import (
     RateLimitError,
 )
 
+from common.api_keys import llm_api_key
 from common.exceptions import (
     ConfigurationError,
     LLMBudgetExceededError,
@@ -286,7 +287,7 @@ class LLMService:
         if self._closed:
             raise RuntimeError("Cannot update a closed LLM service")
 
-        api_key = settings.api_key.strip()
+        api_key = llm_api_key()
         base_url = settings.base_url or OPENROUTER_BASE_URL
         connection_changed = (
             api_key != self._api_key

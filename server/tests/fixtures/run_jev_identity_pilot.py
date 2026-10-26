@@ -183,7 +183,6 @@ def _pilot_policy(settings: JevSettings) -> IngestionPolicy:
 async def run_pilot(cases: list[dict], api_key: str):
     validate_case_ids(cases)
     settings = JevSettings(
-        api_key=api_key,
         endpoint=OPENROUTER_DECISIONS_ENDPOINT,
         model=OPENROUTER_JEV_MODEL,
         identity_mode="observe",

@@ -32,8 +32,14 @@ RESPONSE = {
 }
 
 
+@pytest.fixture(autouse=True)
+def jev_api_key(monkeypatch):
+    # Credentials come from the environment, never from JevSettings.
+    monkeypatch.setenv("JEV_API_KEY", "private-key")
+
+
 def setup_client(handler, **updates):
-    settings = JevSettings(api_key="private-key", extraction_mode="observe", **updates)
+    settings = JevSettings(extraction_mode="observe", **updates)
     ledger = ExternalModelSpendingLedger(
         LLMSpendingBudgetSettings(
             model_pricing={
@@ -82,7 +88,7 @@ async def test_valid_choice_noul_and_shared_accounting():
     await client.close()
 
 
-async def test_disabled_missing_key_and_closed_make_no_requests():
+async def test_disabled_missing_key_and_closed_make_no_requests(monkeypatch):
     def handler(_):
         pytest.fail("No network work expected")
 
@@ -92,7 +98,7 @@ async def test_disabled_missing_key_and_closed_make_no_requests():
         client, policy.model_copy(update={"extraction_mode": "disabled"})
     )
     assert result.reason == "disabled"
-    client.update_settings(JevSettings(extraction_mode="observe"))
+    monkeypatch.delenv("JEV_API_KEY")
     assert (await evaluate(client, policy)).reason == "missing_api_key"
     await client.close()
     assert (await evaluate(client, policy)).reason == "closing"
@@ -620,7 +626,7 @@ async def test_late_reservation_cannot_dispatch_provider_after_deadline():
     assert snapshot["reserved_usd"] == 0
 
 
-async def test_settings_update_keeps_inflight_credentials_and_next_call_uses_new_key():
+async def test_key_rotation_keeps_inflight_credentials_and_next_call_uses_new_key(monkeypatch):
     entered, release = asyncio.Event(), asyncio.Event()
     keys = []
 
@@ -634,7 +640,7 @@ async def test_settings_update_keeps_inflight_credentials_and_next_call_uses_new
     client, policy, _ = setup_client(handler)
     first = asyncio.create_task(evaluate(client, policy))
     await entered.wait()
-    client.update_settings(JevSettings(api_key="new-key", extraction_mode="observe"))
+    monkeypatch.setenv("JEV_API_KEY", "new-key")
     release.set()
     assert (await first).outcome == "available"
     assert (await evaluate(client, policy)).outcome == "available"

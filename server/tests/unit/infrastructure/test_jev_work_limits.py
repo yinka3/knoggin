@@ -6,6 +6,10 @@ from infrastructure.jev_client import JevWorkBudget
 from tests.unit.infrastructure.test_jev_client import evaluate, setup_client
 
 
+@pytest.fixture(autouse=True)
+def jev_api_key(monkeypatch):
+    monkeypatch.setenv("JEV_API_KEY", "private-key")
+
 @pytest.mark.parametrize(
     "updates",
     [

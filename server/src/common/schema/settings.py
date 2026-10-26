@@ -167,7 +167,7 @@ class LLMSpendingBudgetSettings(ConfigModel):
 
 
 class LLMSettings(ConfigModel):
-    api_key: str = Field("")
+    # The API key is read from OPENROUTER_API_KEY (common.api_keys), never saved.
     base_url: Optional[str] = None
     agent_model: str = Field("google/gemini-3-flash-preview")
     extraction_model: str = Field("google/gemini-2.5-flash")
@@ -186,9 +186,8 @@ class LLMSettings(ConfigModel):
 
 
 class SearchAPIKeySettings(ConfigModel):
+    # Brave and Tavily keys come from BRAVE_API_KEY / TAVILY_API_KEY.
     provider: str = Field("auto")
-    brave_api_key: str = Field("")
-    tavily_api_key: str = Field("")
 
 
 class CommunitySettings(ConfigModel):

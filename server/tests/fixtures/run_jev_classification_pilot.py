@@ -236,7 +236,6 @@ def _policy(case: dict, settings: JevSettings) -> IngestionPolicy:
 
 async def run_pilot(cases: list[dict], api_key: str):
     settings = JevSettings(
-        api_key=api_key,
         endpoint=OPENROUTER_DECISIONS_ENDPOINT,
         model=OPENROUTER_JEV_MODEL,
         classification_mode="observe",

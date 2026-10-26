@@ -69,7 +69,6 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
         def __init__(self):
             self.config = RootConfig(
                 llm=LLMSettings(
-                    api_key="key",
                     base_url="https://llm.example/v1",
                     agent_model="agent",
                     extraction_model="extract",
@@ -228,7 +227,6 @@ async def test_resource_manager_cleans_up_when_postgres_startup_fails(monkeypatc
         def __init__(self):
             self.config = RootConfig(
                 llm=LLMSettings(
-                    api_key="key",
                     base_url="https://llm.example/v1",
                     agent_model="agent",
                     extraction_model="extract",

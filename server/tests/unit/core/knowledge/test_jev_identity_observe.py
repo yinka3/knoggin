@@ -564,7 +564,7 @@ async def test_provider_exception_falls_back_to_baseline():
 
 
 @pytest.mark.no_network
-async def test_shared_work_budget_limits_occurrences_in_one_build():
+async def test_shared_work_budget_limits_occurrences_in_one_build(monkeypatch):
     sent = []
 
     def answer(request):
@@ -591,9 +591,8 @@ async def test_shared_work_budget_limits_occurrences_in_one_build():
             },
         )
 
-    settings = JevSettings(
-        api_key="fake", identity_mode="observe", max_calls_per_window=1
-    )
+    monkeypatch.setenv("JEV_API_KEY", "fake")
+    settings = JevSettings(identity_mode="observe", max_calls_per_window=1)
     client = JevClient(
         settings,
         spending_ledger=ExternalModelSpendingLedger(),

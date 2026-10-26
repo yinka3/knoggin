@@ -7,11 +7,6 @@ from starlette.routing import Route
 from contracts.settings import SettingsView, settings_status
 
 SECTIONS = frozenset({"user_aliases", "llm", "search", "jev", "developer_settings"})
-SECRET_FIELDS = {
-    "llm": frozenset({"api_key"}),
-    "search": frozenset({"brave_api_key", "tavily_api_key"}),
-    "jev": frozenset({"api_key"}),
-}
 
 
 def _error(code: str, message: str, status: int) -> JSONResponse:
@@ -79,37 +74,7 @@ async def patch_section(request):
         valid_shape = isinstance(changes, dict) and bool(changes)
     if not valid_shape:
         return _error("invalid_settings", "Invalid settings update", 422)
-    if section in SECRET_FIELDS and SECRET_FIELDS[section].intersection(changes):
-        return _error(
-            "secret_action_required",
-            "Use the secret route to set or clear credentials",
-            422,
-        )
     return _update(request.app.state.runtime, {section: changes})
-
-
-async def set_secret(request):
-    section = request.path_params["section"]
-    field = request.path_params["field"]
-    if field not in SECRET_FIELDS.get(section, ()):
-        return _error("unknown_settings_secret", "Unknown settings credential", 404)
-    body = await _json(request)
-    if (
-        not isinstance(body, dict)
-        or set(body) != {"value"}
-        or not isinstance(body["value"], str)
-        or not body["value"]
-    ):
-        return _error("invalid_settings", "Invalid settings update", 422)
-    return _update(request.app.state.runtime, {section: {field: body["value"]}})
-
-
-async def clear_secret(request):
-    section = request.path_params["section"]
-    field = request.path_params["field"]
-    if field not in SECRET_FIELDS.get(section, ()):
-        return _error("unknown_settings_secret", "Unknown settings credential", 404)
-    return _update(request.app.state.runtime, {section: {field: ""}})
 
 
 def _update(runtime, changes: dict) -> JSONResponse:
@@ -130,6 +95,4 @@ routes = [
     Route("/v1/settings/reload", reload_settings, methods=["POST"]),
     Route("/v1/settings/retry-applies", retry_applies, methods=["POST"]),
     Route("/v1/settings/{section}", patch_section, methods=["PATCH"]),
-    Route("/v1/settings/{section}/secrets/{field}", set_secret, methods=["PUT"]),
-    Route("/v1/settings/{section}/secrets/{field}", clear_secret, methods=["DELETE"]),
 ]

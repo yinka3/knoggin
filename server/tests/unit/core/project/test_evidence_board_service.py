@@ -54,7 +54,7 @@ async def test_board_evaluation_uses_only_user_selected_claim_and_sources():
 
     service = EvidenceBoardService(
         Notebooks(), JEV(),
-        SimpleNamespace(config=SimpleNamespace(jev=JevSettings(api_key="test"))),
+        SimpleNamespace(config=SimpleNamespace(jev=JevSettings())),
     )
     result = await service.evaluate(
         "project-1", "board-1", expected_revision=1,

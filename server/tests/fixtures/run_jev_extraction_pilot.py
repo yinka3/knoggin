@@ -142,7 +142,6 @@ def evaluate(cases: list[dict], observations: list[dict]) -> dict:
 async def run(cases: list[dict], api_key: str):
     validate_case_ids(cases)
     settings = JevSettings(
-        api_key=api_key,
         endpoint=OPENROUTER_ENDPOINT,
         model=OPENROUTER_MODEL,
         extraction_mode="observe",
