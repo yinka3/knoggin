@@ -4,7 +4,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from contracts.agents import CreateAgent, UpdateAgent
+from contracts.agents import CreateAgent, Persona, UpdateAgent
 from routes.project_settings import _error, _json
 
 
@@ -76,6 +76,22 @@ async def update_agent(request):
     return JSONResponse(_public(agent))
 
 
+async def replace_persona(request):
+    try:
+        body = Persona.model_validate(await _json(request))
+    except ValidationError:
+        return _error("invalid_persona", "Invalid agent persona", 422)
+    try:
+        agent = await request.app.state.runtime.agent_manager.update_persona(
+            request.path_params["agent_id"], body.model_dump()
+        )
+    except ValueError:
+        return _error("invalid_persona", "Invalid agent persona", 422)
+    if agent is None:
+        return _error("agent_not_found", "Agent not found", 404)
+    return JSONResponse(_public(agent))
+
+
 async def set_default_agent(request):
     agent_id = request.path_params["agent_id"]
     if not await request.app.state.runtime.agent_manager.set_default_agent(agent_id):
@@ -112,6 +128,7 @@ routes = [
     Route("/v1/agents", create_agent, methods=["POST"]),
     Route("/v1/agents/{agent_id}", get_agent, methods=["GET"]),
     Route("/v1/agents/{agent_id}", update_agent, methods=["PATCH"]),
+    Route("/v1/agents/{agent_id}/persona", replace_persona, methods=["PUT"]),
     Route("/v1/agents/{agent_id}", delete_agent, methods=["DELETE"]),
     Route("/v1/agents/{agent_id}/default", set_default_agent, methods=["POST"]),
     Route("/v1/agents/{agent_id}/aac-participation", set_aac_participation, methods=["PUT"]),

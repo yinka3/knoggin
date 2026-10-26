@@ -47,6 +47,14 @@ async def get_status(request):
     return JSONResponse(_status_response(request.app.state.runtime))
 
 
+async def get_spending(request):
+    snapshot = await request.app.state.runtime.resources.llm_service.spending_snapshot()
+    return JSONResponse({key: snapshot[key] for key in (
+        "configured_limit_usd", "spent_usd", "reserved_usd", "remaining_usd",
+        "request_count", "enforced",
+    )})
+
+
 async def reload_settings(request):
     runtime = request.app.state.runtime
     if not runtime.config_manager.load():
@@ -118,6 +126,7 @@ def _update(runtime, changes: dict) -> JSONResponse:
 routes = [
     Route("/v1/settings", get_settings, methods=["GET"]),
     Route("/v1/settings/status", get_status, methods=["GET"]),
+    Route("/v1/settings/spending", get_spending, methods=["GET"]),
     Route("/v1/settings/reload", reload_settings, methods=["POST"]),
     Route("/v1/settings/retry-applies", retry_applies, methods=["POST"]),
     Route("/v1/settings/{section}", patch_section, methods=["PATCH"]),

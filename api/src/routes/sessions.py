@@ -4,6 +4,7 @@ from pydantic import ValidationError
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from common.schema.source.references import SourceConsulted
 from contracts.sessions import CreateSession, SessionPreferences, focus_input
 from routes.project_settings import _error, _json
 
@@ -17,6 +18,50 @@ def _public(row):
         if key in {"session_id", "project_id", "status", "model", "agent_id",
                    "enabled_tools", "created_at", "last_active_at"}
     }
+
+
+def _public_history_message(row):
+    """Return stable conversation fields without stored request bookkeeping."""
+
+    metadata = row.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    public_metadata = {}
+
+    usage = metadata.get("usage")
+    if isinstance(usage, dict):
+        public_metadata["usage"] = {
+            key: usage[key]
+            for key in (
+                "prompt_tokens", "completion_tokens", "total_tokens", "approximate"
+            )
+            if key in usage
+        }
+    if metadata.get("research_mode") in {"normal", "research", "deep_research"}:
+        public_metadata["research_mode"] = metadata["research_mode"]
+    if metadata.get("fallback") is True:
+        public_metadata["fallback"] = True
+
+    terminal_error = metadata.get("terminal_error")
+    if isinstance(terminal_error, dict):
+        public_metadata["terminal_error"] = {
+            key: terminal_error[key]
+            for key in ("code", "retryable")
+            if key in terminal_error
+        }
+
+    steer = metadata.get("run_steer")
+    if isinstance(steer, dict):
+        public_metadata["run_steer"] = {
+            key: steer[key]
+            for key in ("steer_id", "instruction", "state")
+            if key in steer
+        }
+
+    return {
+        key: value.isoformat() if hasattr(value, "isoformat") else value
+        for key, value in row.items()
+        if key in {"message_id", "role", "content", "timestamp", "user_msg_id"}
+    } | {"metadata": public_metadata}
 
 
 async def _metadata(runtime, session_id):
@@ -99,11 +144,39 @@ async def history(request):
     rows = await request.app.state.runtime.sessions.get_session_history_readonly(
         session_id, limit=limit
     )
-    return JSONResponse([
-        {key: value.isoformat() if hasattr(value, "isoformat") else value
-         for key, value in row.items()}
-        for row in rows
-    ])
+    return JSONResponse([_public_history_message(row) for row in rows])
+
+
+async def message_sources(request):
+    """Reload the public source cards for one completed assistant message."""
+    runtime = request.app.state.runtime
+    session_id = request.path_params["session_id"]
+    session = await _metadata(runtime, session_id)
+    if session is None:
+        return _error("session_not_found", "Session not found", 404)
+    try:
+        message_id = int(request.path_params["message_id"])
+    except ValueError:
+        return _error("message_not_found", "Message not found", 404)
+    if message_id <= 0:
+        return _error("message_not_found", "Message not found", 404)
+    messages = await runtime.resources.knowledge_store.get_messages_by_ids(
+        [message_id], user_name=runtime.sessions.user_name,
+        session_ids=[session_id], visible_project_ids=[session["project_id"]],
+    )
+    if not messages or messages[0]["role"] != "assistant":
+        return _error("message_not_found", "Message not found", 404)
+    values = await runtime.resources.knowledge_store.get_message_source_refs(
+        message_id, user_name=runtime.sessions.user_name,
+        project_id=session["project_id"], session_id=session_id,
+    )
+    return JSONResponse({
+        "message_id": message_id,
+        "sources": [
+            SourceConsulted.model_validate(value).model_dump(mode="json")
+            for value in values
+        ],
+    })
 
 
 async def get_focus(request):
@@ -151,6 +224,7 @@ routes = [
     Route("/v1/sessions/{session_id}", update_session, methods=["PATCH"]),
     Route("/v1/sessions/{session_id}", delete_session, methods=["DELETE"]),
     Route("/v1/sessions/{session_id}/history", history, methods=["GET"]),
+    Route("/v1/sessions/{session_id}/messages/{message_id}/sources", message_sources, methods=["GET"]),
     Route("/v1/sessions/{session_id}/document-focus", get_focus, methods=["GET"]),
     Route("/v1/sessions/{session_id}/document-focus", set_focus, methods=["PUT"]),
     Route("/v1/sessions/{session_id}/document-focus", clear_focus, methods=["DELETE"]),
