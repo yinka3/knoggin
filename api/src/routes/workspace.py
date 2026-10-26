@@ -8,7 +8,7 @@ from common.exceptions import WorkspaceConflictError
 from contracts.workspace import (
     FileAppend, FileCreate, FileDelete, FileMove, FileReplace, FolderCreate,
 )
-from project_lease import project_documents
+from project_lease import project_documents, readable_project_documents
 from routes.project_settings import _error, _json, _project_error
 
 
@@ -44,7 +44,7 @@ async def list_files(request):
         return _error("invalid_limit", "Invalid file limit", 422)
     if not 1 <= limit <= 100:
         return _error("invalid_limit", "Invalid file limit", 422)
-    async with project_documents(request.app.state.runtime, request.path_params["project_id"]) as service:
+    async with readable_project_documents(request.app.state.runtime, request.path_params["project_id"]) as service:
         try:
             items = await service.list_project_files(
                 path_prefix=request.query_params.get("path_prefix"), limit=limit
@@ -66,7 +66,7 @@ async def read_file(request):
         end_line = int(end_line) if end_line is not None else None
     except ValueError:
         return _error("invalid_project_file", "Invalid line range", 422)
-    async with project_documents(request.app.state.runtime, request.path_params["project_id"]) as service:
+    async with readable_project_documents(request.app.state.runtime, request.path_params["project_id"]) as service:
         try:
             row = await service.read_project_file(
                 path, start_line=start_line, end_line=end_line

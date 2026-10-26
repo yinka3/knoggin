@@ -625,6 +625,7 @@ class ProjectManager:
             DocumentService(
                 project_id, self.pg, self.resources.embedding,
                 readable_project_ids=readable_ids,
+                filesystem_factory=self._filesystem_factory,
             )
         )
 

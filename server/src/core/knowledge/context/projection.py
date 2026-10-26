@@ -26,6 +26,7 @@ from core.ingestion.policy import IngestionPolicy
 from core.knowledge.context.models import (
     ContextMaterialization,
     ContextProjectionConflictError,
+    ContextRevisionConflictError,
     ContextUserEditSynchronizationError,
 )
 from core.knowledge.context.render import (
@@ -106,6 +107,103 @@ class ContextProjection:
         self._reader = reader
         self._writer = writer
         self._filesystem = filesystem
+
+    async def change_user_note(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        ingestion_policy: IngestionPolicy,
+        expected_revision_id: UUID | None,
+        operation: str,
+        block_id: UUID | None = None,
+        section_key: str | None = None,
+        markdown: str | None = None,
+    ) -> ContextSnapshot:
+        """Commit one versioned human note, then repair its Context projection."""
+        if operation not in {"add", "replace", "delete"}:
+            raise ValueError("unsupported user note operation")
+        if operation == "add" and block_id is not None:
+            raise ValueError("new user notes cannot specify a block ID")
+        if operation != "add" and block_id is None:
+            raise ValueError("user note block ID is required")
+        domain = ingestion_policy.domain
+        if operation != "delete":
+            if section_key not in domain.context_section_by_key:
+                raise ValueError("user note section is not configured")
+            markdown = normalize_block_markdown(markdown)
+
+        await self._writer.ensure_context(user_name=user_name, project_id=project_id)
+        revision = await self._reader.get_current_revision(
+            user_name=user_name, project_id=project_id
+        )
+        current_id = revision.revision_id if revision else None
+        if current_id != expected_revision_id:
+            raise ContextRevisionConflictError("Context changed before the note edit")
+        snapshot = (
+            await self._reader.get_snapshot(
+                current_id, user_name=user_name, project_id=project_id
+            ) if current_id else None
+        )
+        if current_id is None and self._read_file_or_none() is not None:
+            raise ContextProjectionConflictError(
+                "CONTEXT.md must be synchronized before adding user notes"
+            )
+        # Resolve any known stale projection and reject unimported local edits
+        # before committing another authoritative revision.
+        await self.reconcile(
+            user_name=user_name, project_id=project_id, domain=domain
+        )
+        existing = None
+        parsed = []
+        for block in snapshot.blocks if snapshot else ():
+            if block.block_id == block_id:
+                existing = block
+                if operation == "delete":
+                    continue
+                parsed.append(_ParsedBlock(section_key, markdown, block.block_id))
+            else:
+                parsed.append(_ParsedBlock(
+                    block.section_key, normalize_block_markdown(block.markdown),
+                    block.block_id,
+                ))
+        if operation != "add" and (
+            existing is None or existing.assertion_kind is not AssertionKind.HUMAN_ASSERTED
+        ):
+            raise FileNotFoundError("User note not found")
+        if operation == "add":
+            parsed.append(_ParsedBlock(section_key, markdown, None))
+        materialization = _materialize_human_edit(snapshot, parsed, domain, project_id)
+        if materialization is None:
+            return snapshot
+        window = SemanticWindowRecord(
+            window_id=uuid4(), user_name=user_name, project_id=project_id,
+            origin=SemanticWindowOrigin.HUMAN_EDIT,
+            stage=SemanticWindowStage.CONTEXT_COMMITTED,
+            domain_version=domain.version,
+            policy_snapshot={
+                "kind": "context_user_note",
+                "compiled_domain": domain.to_dict(),
+                "ingestion_policy": ingestion_policy.semantic_window_snapshot(),
+            },
+            source_token_count=0,
+            token_estimator="context-user-note",
+            token_estimator_version="1",
+        )
+        committed = await self._writer.commit_revision(
+            user_name=user_name, project_id=project_id,
+            expected_parent_revision_id=current_id,
+            window_id=window.window_id,
+            origin=ContextRevisionOrigin.HUMAN_EDIT,
+            domain_version=domain.version,
+            edit_summary=f"User note {operation}",
+            materialization=materialization,
+            new_human_edit_window=window,
+        )
+        await self.reconcile(
+            user_name=user_name, project_id=project_id, domain=domain
+        )
+        return committed
 
     async def reconcile(
         self,

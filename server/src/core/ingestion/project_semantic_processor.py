@@ -413,6 +413,13 @@ class ProjectSemanticProcessor(BaseJob):
                 status=ContextSynchronizationStatus.PROJECTION_PENDING,
             )
 
+    async def change_user_note(self, *, user_name: str, project_id: str, **change):
+        policy = await self._capture_semantic_policy()
+        return await self._context_projection.change_user_note(
+            user_name=user_name, project_id=project_id,
+            ingestion_policy=policy, **change,
+        )
+
     async def _execute_episode_stage(
         self, window: SemanticWindowRecord, ctx: JobContext
     ) -> JobResult:
