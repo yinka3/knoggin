@@ -7,7 +7,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from common.schema.project_notebook import NotebookReplace, NotebookWrite, ProjectNotebook
-from contracts.notebooks import DeleteNotebook
+from contracts.notebooks import DeleteNotebook, SaveFinding
 from core.project.notebook_store import NotebookConflict, NotebookReferenceUnavailable
 from routes.project_settings import _error, _json, _project_error
 
@@ -121,6 +121,33 @@ async def replace_notebook(request):
     return JSONResponse(_public(row))
 
 
+async def save_finding(request):
+    runtime = request.app.state.runtime
+    project_id = request.path_params["project_id"]
+    if error := await _project_error(runtime, project_id, write=True):
+        return error
+    notebook_id = _notebook_id(request)
+    if notebook_id is None:
+        return _error("notebook_not_found", "Notebook not found", 404)
+    try:
+        body = SaveFinding.model_validate(await _json(request))
+        finding = body.entry()
+    except (ValidationError, ValueError):
+        return _error("invalid_finding", "Invalid saved finding", 422)
+    try:
+        row = await runtime.projects.notebooks.save_finding(
+            project_id, notebook_id,
+            expected_revision=body.expected_revision, finding=finding,
+        )
+    except NotebookReferenceUnavailable:
+        return _error("source_unavailable", "Answer or source is unavailable", 422)
+    except NotebookConflict:
+        return _error("notebook_conflict", "Notebook changed", 409)
+    if row is None:
+        return _error("notebook_not_found", "Notebook not found", 404)
+    return JSONResponse(_public(row), status_code=201)
+
+
 async def delete_notebook(request):
     runtime = request.app.state.runtime
     project_id = request.path_params["project_id"]
@@ -150,6 +177,7 @@ routes = [
     Route("/v1/projects/{project_id}/notebooks/{notebook_id}", get_notebook, methods=["GET"]),
     Route("/v1/projects/{project_id}/notebooks/{notebook_id}/source-desk", source_desk, methods=["GET"]),
     Route("/v1/projects/{project_id}/notebooks/{notebook_id}/timeline", timeline, methods=["GET"]),
+    Route("/v1/projects/{project_id}/notebooks/{notebook_id}/findings", save_finding, methods=["POST"]),
     Route("/v1/projects/{project_id}/notebooks/{notebook_id}", replace_notebook, methods=["PUT"]),
     Route("/v1/projects/{project_id}/notebooks/{notebook_id}", delete_notebook, methods=["DELETE"]),
 ]

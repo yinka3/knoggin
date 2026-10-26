@@ -44,6 +44,19 @@ def test_notebook_routes_scope_and_revision_conflicts(monkeypatch, tmp_path):
                 raise NotebookConflict("stale")
             return True
 
+        async def save_finding(self, project_id, requested_id, *, expected_revision, finding):
+            assert (project_id, requested_id, expected_revision) == (
+                "project-1", notebook_id, row["revision"]
+            )
+            assert finding.target_id == "42"
+            assert finding.answer_excerpt == "Selected answer"
+            row["entries"].append({
+                **finding.model_dump(mode="json"), "entry_id": str(uuid4()),
+                "source_version": "1", "source_versions": {},
+            })
+            row["revision"] += 1
+            return row
+
     class Projects:
         notebooks = Notebooks()
 
@@ -70,6 +83,12 @@ def test_notebook_routes_scope_and_revision_conflicts(monkeypatch, tmp_path):
                 assert (await client.put(base + "/" + notebook_id, json=update)).json()["revision"] == 2
                 assert (await client.put(base + "/" + notebook_id, json=update)).status_code == 409
                 assert (await client.request("DELETE", base + "/" + notebook_id, json={"expected_revision": 1})).status_code == 409
+                finding = await client.post(base + "/" + notebook_id + "/findings", json={
+                    "expected_revision": 2, "assistant_message_id": 42,
+                    "answer_excerpt": "Selected answer", "note": "My note",
+                })
+                assert finding.status_code == 201
+                assert finding.json()["entries"][0]["answer_excerpt"] == "Selected answer"
                 project["status"] = "archived"
                 assert (await client.get(base + "/" + notebook_id)).status_code == 200
                 assert (await client.post(base, json={"title": "Blocked", "view": "timeline"})).status_code == 409

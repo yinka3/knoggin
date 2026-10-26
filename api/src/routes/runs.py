@@ -225,6 +225,20 @@ async def _selected_notebook(runtime, project_id, notebook_id):
                 line["excerpt"] = str(line["excerpt"])[:1000]
             if "summary" in line:
                 line["summary"] = str(line["summary"])[:500]
+        if item["kind"] == "finding":
+            line["answer_excerpt"] = str(source.get("excerpt") or "")[:4000]
+            line["citations"] = [
+                {
+                    "source_ref_id": citation["source_ref_id"],
+                    "status": citation["status"],
+                    **({
+                        "title": str(citation["source"].get("title") or "")[:200],
+                        "excerpt": str(citation["source"].get("excerpt") or "")[:500],
+                        "locator": citation["source"].get("locator"),
+                    } if citation["status"] == "current" and citation["source"] else {}),
+                }
+                for citation in source.get("citations", [])
+            ]
         if row["view"] == "timeline":
             line["time"] = item["time"]
             line["time_kind"] = item["time_kind"]

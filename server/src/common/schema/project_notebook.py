@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 NotebookView = Literal["source_desk", "timeline"]
 NotebookSourceKind = Literal[
-    "document", "saved_link", "message", "episode", "artifact", "source_ref"
+    "document", "saved_link", "message", "episode", "artifact", "source_ref", "finding"
 ]
 
 
@@ -22,6 +22,8 @@ class NotebookEntryInput(BaseModel):
     target_id: str = Field(min_length=1, max_length=200)
     note: str | None = Field(default=None, max_length=4000)
     event_at: datetime | None = None
+    answer_excerpt: str | None = Field(default=None, max_length=4000)
+    source_ref_ids: list[UUID] = Field(default_factory=list, max_length=20)
 
     @field_validator("target_id")
     @classmethod
@@ -42,17 +44,25 @@ class NotebookEntryInput(BaseModel):
     def canonical_target(self):
         if self.kind in {"document", "saved_link", "artifact", "source_ref"}:
             self.target_id = str(UUID(self.target_id))
-        elif self.kind == "message":
+        elif self.kind in {"message", "finding"}:
             number = int(self.target_id)
             if number <= 0:
                 raise ValueError("message ID must be positive")
             self.target_id = str(number)
+        if self.kind == "finding":
+            if self.answer_excerpt is None or not self.answer_excerpt.strip():
+                raise ValueError("finding requires an answer excerpt")
+            if len(set(self.source_ref_ids)) != len(self.source_ref_ids):
+                raise ValueError("finding source references must be unique")
+        elif self.answer_excerpt is not None or self.source_ref_ids:
+            raise ValueError("answer excerpt and source references require a finding")
         return self
 
 
 class NotebookEntry(NotebookEntryInput):
     entry_id: UUID
     source_version: str = Field(min_length=1, max_length=200)
+    source_versions: dict[str, str] = Field(default_factory=dict)
 
 
 class NotebookWrite(BaseModel):

@@ -7,7 +7,11 @@ from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from common.artifact_retention import ARTIFACT_RETENTION_PERIOD
-from common.schema.project_notebook import NotebookEntry, NotebookWrite
+from common.schema.project_notebook import (
+    NotebookEntry,
+    NotebookEntryInput,
+    NotebookWrite,
+)
 
 
 class NotebookConflict(ValueError):
@@ -38,16 +42,35 @@ class ProjectNotebookStore:
                 UUID(target_id)
             except ValueError as exc:
                 raise NotebookReferenceUnavailable("Invalid source ID") from exc
-        if kind == "message":
+        if kind in {"message", "finding"}:
             if not target_id.isdecimal():
                 raise NotebookReferenceUnavailable("Invalid message ID")
-            query = """SELECT selected_revision::text AS version,
+            if kind == "finding":
+                query = """SELECT assistant.selected_revision::text AS version,
+                                  assistant.content AS answer_content,
+                                  'Answer ' || assistant.message_id::text AS title,
+                                  to_timestamp(assistant.timestamp_ms / 1000.0)::text AS recorded_at
+                           FROM public.messages AS assistant
+                           JOIN public.messages AS user_message
+                             ON user_message.message_id = assistant.user_msg_id
+                            AND user_message.session_id = assistant.session_id
+                            AND user_message.project_id = assistant.project_id
+                            AND user_message.user_name = assistant.user_name
+                           WHERE assistant.user_name = %s AND assistant.project_id = %s
+                             AND assistant.message_id = %s AND assistant.role = 'assistant'
+                             AND assistant.lifecycle_state = 'sealed'
+                             AND user_message.role = 'user'
+                             AND user_message.exchange_state = 'closed'
+                             AND user_message.exchange_outcome = 'assistant_final'"""
+                args = (self.user_name, project_id, int(target_id))
+            else:
+                query = """SELECT selected_revision::text AS version,
                               left(content, 2000) AS excerpt,
                               'Message ' || message_id::text AS title,
                               to_timestamp(timestamp_ms / 1000.0)::text AS recorded_at
                        FROM public.messages WHERE user_name = %s AND project_id = %s
                          AND message_id = %s AND lifecycle_state <> 'superseded'"""
-            args = (self.user_name, project_id, int(target_id))
+                args = (self.user_name, project_id, int(target_id))
         elif kind == "document":
             query = """SELECT content_hash AS version, original_name AS title,
                               created_at::text AS recorded_at
@@ -108,6 +131,24 @@ class ProjectNotebookStore:
         await cursor.execute(query, args)
         return await cursor.fetchone()
 
+    async def _finding_source_version(
+        self, cursor, project_id: str, message_id: str, source_ref_id: str
+    ) -> str | None:
+        await cursor.execute(
+            """SELECT ref.content_hash AS version
+               FROM public.message_source_refs AS ref
+               JOIN public.messages AS assistant
+                 ON assistant.message_id = ref.message_id
+                AND assistant.project_id = ref.project_id
+                AND assistant.session_id = ref.session_id
+               WHERE ref.source_ref_id = %s AND ref.message_id = %s
+                 AND ref.project_id = %s AND assistant.user_name = %s
+                 AND assistant.role = 'assistant'""",
+            (source_ref_id, int(message_id), project_id, self.user_name),
+        )
+        row = await cursor.fetchone()
+        return row["version"] if row is not None else None
+
     async def _entries(self, cursor, project_id: str, requested, previous=()):
         old = {entry["entry_id"]: entry for entry in previous}
         result = []
@@ -121,11 +162,35 @@ class ProjectNotebookStore:
             source = await self._source(cursor, project_id, candidate.kind, candidate.target_id)
             if source is None and prior is None:
                 raise NotebookReferenceUnavailable("Source is unavailable in this project")
+            source_versions = {}
+            if candidate.kind == "finding":
+                if prior is not None:
+                    if (candidate.answer_excerpt != prior["answer_excerpt"]
+                            or [str(value) for value in candidate.source_ref_ids]
+                            != prior["source_ref_ids"]):
+                        raise NotebookConflict("A saved finding's answer and sources cannot change")
+                    source_versions = prior["source_versions"]
+                else:
+                    if candidate.answer_excerpt not in source["answer_content"]:
+                        raise NotebookReferenceUnavailable(
+                            "Selected excerpt is not in the completed answer"
+                        )
+                    for source_ref_id in candidate.source_ref_ids:
+                        ref_id = str(source_ref_id)
+                        version = await self._finding_source_version(
+                            cursor, project_id, candidate.target_id, ref_id
+                        )
+                        if version is None:
+                            raise NotebookReferenceUnavailable(
+                                "Selected source is not from this answer"
+                            )
+                        source_versions[ref_id] = version
             version = prior["source_version"] if prior is not None else source["version"]
             entry = NotebookEntry.model_validate({
                 **candidate.model_dump(mode="json"),
                 "entry_id": entry_id,
                 "source_version": version,
+                "source_versions": source_versions,
             })
             result.append(entry.model_dump(mode="json"))
         if len({entry["entry_id"] for entry in result}) != len(result):
@@ -197,6 +262,34 @@ class ProjectNotebookStore:
                     "changed" if source["version"] != entry["source_version"]
                     or source.get("source_stale") else "current"
                 )
+                citations = []
+                if entry["kind"] == "finding":
+                    for ref_id in entry["source_ref_ids"]:
+                        ref = await self._source(cursor, project_id, "source_ref", ref_id)
+                        citations.append({
+                            "source_ref_id": ref_id,
+                            "status": (
+                                "missing" if ref is None else
+                                "changed" if ref["version"] != entry["source_versions"].get(ref_id)
+                                or ref.get("source_stale") else "current"
+                            ),
+                            "source": {key: value for key, value in ref.items()
+                                       if key not in {"version", "source_stale"}} if ref else None,
+                        })
+                    source_view = {
+                        "excerpt": entry["answer_excerpt"], "citations": citations,
+                    }
+                    if source is not None:
+                        source_view.update({
+                            "title": source["title"],
+                            "recorded_at": source["recorded_at"],
+                        })
+                else:
+                    source_view = (
+                        {key: value for key, value in source.items()
+                         if key not in {"version", "source_stale"}}
+                        if source else None
+                    )
                 items.append({
                     "entry_id": entry["entry_id"],
                     "kind": entry["kind"],
@@ -204,8 +297,7 @@ class ProjectNotebookStore:
                     "status": status,
                     "saved_version": entry["source_version"],
                     "current_version": source["version"] if source else None,
-                    "source": {key: value for key, value in source.items()
-                               if key not in {"version", "source_stale"}} if source else None,
+                    "source": source_view,
                 })
         return items
 
@@ -260,6 +352,37 @@ class ProjectNotebookStore:
                    WHERE project_id = %s AND notebook_id = %s AND user_name = %s
                    RETURNING *""",
                 (body.title, body.view, json.dumps(entries), project_id, notebook_id, self.user_name),
+            )
+            return self._row(await cursor.fetchone())
+
+    async def save_finding(
+        self, project_id: str, notebook_id: str, *, expected_revision: int,
+        finding: NotebookEntryInput,
+    ):
+        if finding.kind != "finding":
+            raise ValueError("A saved finding requires a finding entry")
+        async with self.client.transaction() as cursor:
+            await self._active_project(cursor, project_id)
+            await cursor.execute(
+                """SELECT * FROM public.project_notebooks
+                   WHERE project_id = %s AND notebook_id = %s AND user_name = %s FOR UPDATE""",
+                (project_id, notebook_id, self.user_name),
+            )
+            current = self._row(await cursor.fetchone())
+            if current is None:
+                return None
+            if current["revision"] != expected_revision:
+                raise NotebookConflict("Notebook revision changed")
+            if len(current["entries"]) >= 100:
+                raise NotebookConflict("Notebook is full")
+            entry = (await self._entries(cursor, project_id, [finding]))[0]
+            await cursor.execute(
+                """UPDATE public.project_notebooks
+                   SET entries = %s::jsonb, revision = revision + 1,
+                       updated_at = clock_timestamp()
+                   WHERE project_id = %s AND notebook_id = %s AND user_name = %s
+                   RETURNING *""",
+                (json.dumps([*current["entries"], entry]), project_id, notebook_id, self.user_name),
             )
             return self._row(await cursor.fetchone())
 

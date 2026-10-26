@@ -166,3 +166,116 @@ async def test_timeline_orders_event_time_and_marks_record_time(real_postgres_cl
     assert [item["time_kind"] for item in result["items"]] == ["user_event", "recorded"]
     assert result["items"][0]["recorded_at"] != result["items"][0]["time"]
     assert result["items"][1]["recorded_at"] == result["items"][1]["time"]
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_saved_finding_is_scoped_immutable_and_survives_missing_source(real_postgres_client):
+    client = real_postgres_client
+    store = ProjectNotebookStore(client, "ada")
+    await client.execute(
+        """INSERT INTO public.sessions (session_id, project_id, user_name)
+           VALUES ('finding-session', 'project-1', 'ada'),
+                  ('foreign-finding-session', 'project-2', 'ada')"""
+    )
+    await client.execute(
+        """INSERT INTO public.messages
+           (user_name, session_id, project_id, message_id, role, content,
+            exchange_state, exchange_outcome, exchange_closed_at_ms, user_msg_id)
+           VALUES ('ada', 'finding-session', 'project-1', 9930, 'user', 'What happened?',
+                   'closed', 'assistant_final', 1000, NULL),
+                  ('ada', 'finding-session', 'project-1', 9931, 'assistant',
+                   'The violet launch phrase is durable.', 'open', NULL, NULL, 9930),
+                  ('ada', 'finding-session', 'project-1', 9933, 'assistant',
+                   'Different answer', 'open', NULL, NULL, NULL),
+                  ('ada', 'foreign-finding-session', 'project-2', 9932, 'assistant',
+                   'Other answer', 'open', NULL, NULL, NULL)"""
+    )
+    candidate = SourceReferenceCandidate.model_validate({
+        "project_id": "project-1", "session_id": "finding-session",
+        "source_kind": "web_page", "canonical_url": "https://example.test/finding",
+        "content_hash": "b" * 64,
+        "locator": {"kind": "text_lines", "start_line": 1, "end_line": 1},
+        "excerpt": "Original evidence", "metadata": {"title": "Source"},
+        "encounter_kind": "web_read", "agent_run_id": "finding-run",
+        "tool_call_id": "finding-call", "result_position": 0,
+    })
+    ref = (await SourceReferenceWriter(client).write_for_assistant_message(
+        9931, [candidate], user_name="ada", project_id="project-1",
+        session_id="finding-session", readable_project_ids=["project-1"],
+    ))[0]
+    other_ref = (await SourceReferenceWriter(client).write_for_assistant_message(
+        9933, [candidate], user_name="ada", project_id="project-1",
+        session_id="finding-session", readable_project_ids=["project-1"],
+    ))[0]
+    assert other_ref.source_ref_id != ref.source_ref_id
+    notebook = await store.create("project-1", NotebookWrite(
+        title="Findings", view="source_desk",
+    ))
+    finding = NotebookEntryInput(
+        kind="finding", target_id="9931", answer_excerpt="violet launch phrase",
+        source_ref_ids=[ref.source_ref_id], note="Follow up later",
+    )
+    saved = await store.save_finding(
+        "project-1", notebook["notebook_id"], expected_revision=1,
+        finding=finding,
+    )
+    assert saved["revision"] == 2
+    entry = saved["entries"][0]
+    assert entry["answer_excerpt"] == "violet launch phrase"
+    assert (await store.source_desk("project-1", notebook["notebook_id"]))["items"][0]["source"]["citations"][0]["status"] == "current"
+
+    with pytest.raises(NotebookReferenceUnavailable):
+        await store.save_finding(
+            "project-1", notebook["notebook_id"], expected_revision=2,
+            finding=NotebookEntryInput(
+                kind="finding", target_id="9931", answer_excerpt="Invented answer",
+                source_ref_ids=[ref.source_ref_id],
+            ),
+        )
+    with pytest.raises(NotebookReferenceUnavailable):
+        await store.save_finding(
+            "project-1", notebook["notebook_id"], expected_revision=2,
+            finding=NotebookEntryInput(
+                kind="finding", target_id="9932", answer_excerpt="Other answer",
+            ),
+        )
+    with pytest.raises(NotebookReferenceUnavailable):
+        await store.save_finding(
+            "project-1", notebook["notebook_id"], expected_revision=2,
+            finding=NotebookEntryInput(
+                kind="finding", target_id="9931", answer_excerpt="violet launch phrase",
+                source_ref_ids=[other_ref.source_ref_id],
+            ),
+        )
+    with pytest.raises(NotebookConflict):
+        await store.save_finding(
+            "project-1", notebook["notebook_id"], expected_revision=1,
+            finding=finding,
+        )
+
+    with pytest.raises(NotebookConflict):
+        await store.replace("project-1", notebook["notebook_id"], NotebookReplace(
+            title="Findings", view="source_desk", expected_revision=2,
+            entries=[NotebookEntryInput(
+                entry_id=entry["entry_id"], kind="finding", target_id="9931",
+                answer_excerpt="Changed quote", source_ref_ids=[ref.source_ref_id],
+            )],
+        ))
+    updated = await store.replace("project-1", notebook["notebook_id"], NotebookReplace(
+        title="Findings", view="source_desk", expected_revision=2,
+        entries=[NotebookEntryInput(
+            entry_id=entry["entry_id"], kind="finding", target_id="9931",
+            answer_excerpt="violet launch phrase", source_ref_ids=[ref.source_ref_id],
+            note="Confirmed later",
+        )],
+    ))
+    assert updated["entries"][0]["note"] == "Confirmed later"
+    await client.execute(
+        "DELETE FROM public.message_source_refs WHERE source_ref_id = %s",
+        (ref.source_ref_id,),
+    )
+    item = (await store.source_desk("project-1", notebook["notebook_id"]))["items"][0]
+    assert item["source"]["excerpt"] == "violet launch phrase"
+    assert item["source"]["citations"][0]["status"] == "missing"

@@ -120,6 +120,33 @@ def test_selected_notebook_does_not_drop_entries_at_old_character_limit():
     assert '"target_id": "29"' in selected["context"]
 
 
+def test_selected_finding_keeps_saved_answer_but_withholds_changed_citation():
+    view = {"notebook": {"revision": 2, "entries": [
+        {"entry_id": "finding-1", "note": "Verify this"},
+    ]}, "items": [{
+        "entry_id": "finding-1", "kind": "finding", "target_id": "42",
+        "status": "changed", "source": {
+            "excerpt": "Saved answer wording",
+            "citations": [{"source_ref_id": "ref-1", "status": "changed", "source": {
+                "excerpt": "Unverified source wording",
+            }}],
+        },
+    }]}
+
+    class Store:
+        async def get(self, *_):
+            return {"view": "source_desk"}
+
+        async def source_desk(self, *_):
+            return view
+
+    runtime = SimpleNamespace(projects=SimpleNamespace(notebooks=Store()))
+    selected = asyncio.run(_selected_notebook(runtime, "project-1", "notebook-1"))
+    assert "Saved answer wording" in selected["context"]
+    assert '"status": "changed"' in selected["context"]
+    assert "Unverified source wording" not in selected["context"]
+
+
 def test_start_run_passes_selected_notebook_without_changing_query():
     notebook_id = "00000000-0000-0000-0000-000000000002"
     calls = []
