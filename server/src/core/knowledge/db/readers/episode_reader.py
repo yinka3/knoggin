@@ -189,6 +189,8 @@ class EpisodeReader:
         user_name: str,
         project_id: str,
         visible_project_ids: Optional[List[str]] = None,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> List[Dict]:
         episode_id = require_scope_value(
             episode_id,
@@ -201,8 +203,14 @@ class EpisodeReader:
             visible_project_ids,
             "get_project_episode_source_messages",
         )
+        if limit is not None and not 1 <= limit <= 101:
+            raise ValueError("episode source message limit must be between 1 and 101")
+        if offset < 0:
+            raise ValueError("episode source message offset must not be negative")
+        limit_clause = "LIMIT %s" if limit is not None else ""
+        offset_clause = "OFFSET %s" if offset else ""
         return await self.client.fetch_all(
-            """
+            f"""
             SELECT m.message_id, m.session_id, m.role, m.content, m.timestamp_ms,
                    em.message_position,
                    em.attached_at
@@ -213,8 +221,12 @@ class EpisodeReader:
                            AND m.session_id = em.session_id
             WHERE e.episode_id = %s AND e.project_id = ANY(%s) AND p.user_name = %s
             ORDER BY em.message_position
+            {limit_clause}
+            {offset_clause}
             """,
-            (episode_id, visible_project_ids, user_name),
+            (episode_id, visible_project_ids, user_name)
+            + ((limit,) if limit is not None else ())
+            + ((offset,) if offset else ()),
         )
 
     @staticmethod

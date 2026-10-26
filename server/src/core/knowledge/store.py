@@ -1051,12 +1051,16 @@ class KnowledgeStore:
         user_name: str,
         project_id: str,
         visible_project_ids: Optional[List[str]] = None,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> List[Dict]:
         return await self._episode_reader.get_project_episode_source_messages(
             episode_id,
             user_name=user_name,
             project_id=project_id,
             visible_project_ids=visible_project_ids,
+            limit=limit,
+            offset=offset,
         )
 
     async def get_project_episodes_for_entities(
