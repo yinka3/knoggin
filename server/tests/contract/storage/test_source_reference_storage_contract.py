@@ -248,7 +248,7 @@ def persisted_row(candidate: SourceReferenceCandidate, **overrides):
         "agent_run_id": candidate.agent_run_id,
         "tool_call_id": candidate.tool_call_id,
         "result_position": candidate.result_position,
-        "idempotency_key": SourceReferenceWriter.idempotency_key(candidate),
+        "idempotency_key": SourceReferenceWriter.idempotency_key(candidate, 101),
         "created_at": datetime(2026, 7, 26, tzinfo=timezone.utc),
     }
     row.update(overrides)
@@ -282,7 +282,7 @@ async def test_writer_inserts_typed_candidates_through_scoped_assistant_message(
     assert "document.status <> 'deleted'" not in query
     assert "ON CONFLICT (idempotency_key) DO UPDATE" in query
     assert params[1:4] == ("project-1", "session-1", 101)
-    assert params[18] == SourceReferenceWriter.idempotency_key(candidate)
+    assert params[18] == SourceReferenceWriter.idempotency_key(candidate, 101)
     assert params[-10:] == (
         101,
         "project-1",
@@ -323,14 +323,17 @@ async def test_writer_uses_stable_idempotency_for_tool_and_pasted_origins():
     document = document_candidate()
     pasted = pasted_text_candidate()
 
-    assert SourceReferenceWriter.idempotency_key(document) == (
-        SourceReferenceWriter.idempotency_key(document)
+    assert SourceReferenceWriter.idempotency_key(document, 101) == (
+        SourceReferenceWriter.idempotency_key(document, 101)
     )
-    assert SourceReferenceWriter.idempotency_key(document) != (
-        SourceReferenceWriter.idempotency_key(document_candidate(result_position=1))
+    assert SourceReferenceWriter.idempotency_key(document, 101) != (
+        SourceReferenceWriter.idempotency_key(document_candidate(result_position=1), 101)
     )
-    assert SourceReferenceWriter.idempotency_key(pasted) == (
-        SourceReferenceWriter.idempotency_key(pasted)
+    assert SourceReferenceWriter.idempotency_key(document, 101) != (
+        SourceReferenceWriter.idempotency_key(document, 102)
+    )
+    assert SourceReferenceWriter.idempotency_key(pasted, 101) == (
+        SourceReferenceWriter.idempotency_key(pasted, 101)
     )
 
 
@@ -351,8 +354,8 @@ async def test_writer_accepts_server_resolved_document_selection_candidates():
 
     assert references[0].encounter_kind == "document_selection"
     assert references[0].tool_call_id is None
-    assert SourceReferenceWriter.idempotency_key(candidate) == (
-        SourceReferenceWriter.idempotency_key(candidate)
+    assert SourceReferenceWriter.idempotency_key(candidate, 101) == (
+        SourceReferenceWriter.idempotency_key(candidate, 101)
     )
 
 
