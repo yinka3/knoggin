@@ -107,3 +107,62 @@ def test_review_routes_enforce_scope_and_dispatch_decisions(monkeypatch, tmp_pat
                 )
 
     asyncio.run(exercise())
+
+
+def test_global_merge_preview_and_proposal_use_review_owner(monkeypatch, tmp_path):
+    calls = []
+    state_hash = "a" * 64
+    review = SimpleNamespace(
+        review_id="merge-review", scope="user-global", project_id=None,
+        kind="entity_merge", reasoning="Same identity", proposed_plan={"kind": "entity_merge"},
+        expected_state={"state_hash": state_hash}, status="open",
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc), resolved_at=None,
+    )
+
+    class EntityMaintenance:
+        async def preview_merge(self, **kwargs):
+            calls.append(("preview", kwargs))
+            return {
+                "plan": {"kind": "entity_merge"}, "affected_project_ids": ["project-1"],
+                "context_conflicts": [], "ready": True, "state_hash": state_hash,
+                "snapshot": {"private": "must not cross HTTP"},
+            }
+
+        async def propose(self, **kwargs):
+            calls.append(("propose", kwargs))
+            return review
+
+    projects = SimpleNamespace(entity_maintenance_service=EntityMaintenance())
+
+    async def start(**_kwargs):
+        async def shutdown():
+            pass
+        return SimpleNamespace(projects=projects, shutdown=shutdown)
+
+    monkeypatch.setattr("app.ApplicationRuntime.start", start)
+    app = create_app(user_name="ada", config_dir=tmp_path)
+
+    async def exercise():
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                candidates = {"survivor_entity_id": 2, "retired_entity_id": 3}
+                preview = await client.post("/v1/maintenance/merges/preview", json=candidates)
+                assert preview.status_code == 200
+                assert preview.json()["ready"] is True
+                assert "snapshot" not in preview.json()
+                assert calls[-1][0] == "preview"
+                proposal = await client.post("/v1/maintenance/merges", json={
+                    **candidates, "reasoning": "Same identity", "expected_state_hash": state_hash,
+                    "evidence_refs": [{"kind": "message", "identifier": "7"}],
+                })
+                assert proposal.status_code == 201
+                assert proposal.json()["review"]["review_id"] == "merge-review"
+                assert calls[-1][0] == "propose"
+                assert (await client.post("/v1/maintenance/merges", json={
+                    **candidates, "reasoning": "Same identity", "expected_state_hash": "bad",
+                    "evidence_refs": [{"kind": "message", "identifier": "7"}],
+                })).status_code == 422
+
+    asyncio.run(exercise())

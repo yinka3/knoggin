@@ -5,6 +5,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from common.schema.evidence import EvidencePointer
+
 
 class Decision(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -58,3 +60,31 @@ class ReopenJevContextCorrection(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     expected_review_id: str = Field(min_length=1, max_length=200)
+
+
+class MergeContextChoice(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str = Field(min_length=1, max_length=200)
+    entity_type: str = Field(min_length=1, max_length=200)
+    topic: str = Field(min_length=1, max_length=200)
+
+
+class MergeCandidates(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    survivor_entity_id: int = Field(gt=0)
+    retired_entity_id: int = Field(gt=0)
+    context_choices: tuple[MergeContextChoice, ...] = Field(default=(), max_length=100)
+
+    @model_validator(mode="after")
+    def distinct_candidates(self):
+        if self.survivor_entity_id == self.retired_entity_id:
+            raise ValueError("Merge candidates must be different entities")
+        return self
+
+
+class MergeProposal(MergeCandidates):
+    reasoning: str = Field(min_length=1, max_length=4000)
+    evidence_refs: tuple[EvidencePointer, ...] = Field(min_length=1, max_length=100)
+    expected_state_hash: str = Field(pattern=r"^[0-9a-f]{64}$")

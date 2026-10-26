@@ -11,6 +11,8 @@ from contracts.maintenance import (
     AdvisoryDecision,
     Decision,
     FlagJevContextDecision,
+    MergeCandidates,
+    MergeProposal,
     ReopenJevContextCorrection,
     RollbackSelection,
 )
@@ -65,6 +67,39 @@ async def _scope(request, *, write=False):
 async def global_reviews(request):
     reviews = await request.app.state.runtime.projects.list_global_maintenance_reviews()
     return JSONResponse({"reviews": [_review(review) for review in reviews]})
+
+
+async def global_merge_preview(request):
+    try:
+        body = MergeCandidates.model_validate(await _json(request))
+    except ValidationError:
+        return _error("invalid_merge", "Invalid merge candidates", 422)
+    result = await request.app.state.runtime.projects.entity_maintenance_service.preview_merge(
+        survivor_entity_id=body.survivor_entity_id,
+        retired_entity_id=body.retired_entity_id,
+        context_choices=body.context_choices,
+    )
+    return JSONResponse(_wire({
+        "plan": result["plan"], "affected_project_ids": result["affected_project_ids"],
+        "context_conflicts": result["context_conflicts"], "ready": result["ready"],
+        "state_hash": result["state_hash"],
+    }))
+
+
+async def global_merge_proposal(request):
+    try:
+        body = MergeProposal.model_validate(await _json(request))
+    except ValidationError:
+        return _error("invalid_merge", "Invalid merge proposal", 422)
+    review = await request.app.state.runtime.projects.entity_maintenance_service.propose(
+        survivor_entity_id=body.survivor_entity_id,
+        retired_entity_id=body.retired_entity_id,
+        context_choices=body.context_choices,
+        reasoning=body.reasoning,
+        evidence_refs=body.evidence_refs,
+        expected_state_hash=body.expected_state_hash,
+    )
+    return JSONResponse({"review": _review(review)}, status_code=201)
 
 
 async def global_decision(request):
@@ -197,6 +232,8 @@ async def rollback(request):
 
 routes = [
     Route("/v1/maintenance/reviews", global_reviews, methods=["GET"]),
+    Route("/v1/maintenance/merges/preview", global_merge_preview, methods=["POST"]),
+    Route("/v1/maintenance/merges", global_merge_proposal, methods=["POST"]),
     Route("/v1/maintenance/reviews/{review_id}/decision", global_decision, methods=["POST"]),
     Route("/v1/maintenance/merges/{merge_id}/rollback/preview", rollback_preview, methods=["GET"]),
     Route("/v1/maintenance/merges/{merge_id}/rollback", rollback, methods=["POST"]),
