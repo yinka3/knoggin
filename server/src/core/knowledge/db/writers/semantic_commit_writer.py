@@ -387,6 +387,20 @@ class SemanticCommitWriter:
             eligible = int(observation["eligible_candidate_count"])
             truncated = bool(observation["candidate_set_truncated"])
             accepted_entity_id = observation.get("accepted_entity_id")
+            operational_entity_id = observation.get("operational_entity_id")
+            if operational_entity_id is not None and (
+                operational_entity_id not in build.entity_result.entity_ids
+                or not isinstance(observation.get("mention_text"), str)
+                or not observation["mention_text"].strip()
+                or not any(
+                    association.entity_id == operational_entity_id
+                    and association.block_id in record.evidence_block_ids
+                    and association.mention_text.casefold()
+                    == observation["mention_text"].casefold()
+                    for association in build.entity_result.block_entity_associations
+                )
+            ):
+                raise ValueError("JEV identity final entity is not the committed association")
             if accepted_entity_id is not None:
                 if record.result.response is None:
                     raise ValueError("Accepted JEV identity requires a valid response")
@@ -511,6 +525,19 @@ class SemanticCommitWriter:
             proposed_type = observation.get("proposed_entity_type")
             suggested_type = observation.get("suggested_entity_type")
             accepted_type = observation.get("accepted_entity_type")
+            operational_entity_id = observation.get("operational_entity_id")
+            if operational_entity_id is not None and (
+                accepted_type is None
+                or operational_entity_id not in build.entity_result.entity_ids
+                or not any(
+                    association.entity_id == operational_entity_id
+                    and association.block_id == record.evidence_block_ids[0]
+                    and association.mention_text.casefold()
+                    == observation["candidate_name"].casefold()
+                    for association in build.entity_result.block_entity_associations
+                )
+            ):
+                raise ValueError("JEV extraction final entity is not the committed association")
             valid_types = set(build.policy.domain.active_entity_types)
             if any(
                 value is not None and value not in valid_types

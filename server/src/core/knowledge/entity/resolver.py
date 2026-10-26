@@ -507,6 +507,9 @@ class EntityResolver:
 
                 if entity_id not in state.entity_ids:
                     state.entity_ids.append(entity_id)
+                if entry[0] == "candidates" and "jev" in decision:
+                    decision["jev"]["operational_entity_id"] = entity_id
+                    decision["jev"]["mention_text"] = mention.name
                 state.resolved_mentions.append(
                     ResolvedContextBlockMention(mention=mention, entity_id=entity_id)
                 )

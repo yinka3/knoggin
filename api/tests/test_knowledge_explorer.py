@@ -1,5 +1,6 @@
 import asyncio
 from types import SimpleNamespace
+from uuid import uuid4
 
 import httpx
 
@@ -89,3 +90,101 @@ def test_knowledge_explorer_scopes_reads_and_removes_private_fields(monkeypatch,
     asyncio.run(exercise())
     assert ("search_entities", "Ada", {"visible_project_ids": ["p1"], "limit": 20}) in calls
     assert ("entity", 3, {"visible_project_ids": ["p1"]}) in calls
+
+
+def test_context_block_jev_explanation_is_scoped_and_allowlisted(monkeypatch, tmp_path):
+    block_id, window_id = str(uuid4()), str(uuid4())
+
+    class Projects:
+        async def get_project(self, project_id):
+            return {"status": "active"} if project_id == "p1" else None
+
+    class Store:
+        async def get_entity_by_id(self, entity_id, **scope):
+            assert (entity_id, scope) == (3, {"visible_project_ids": ["p1"]})
+            return {"id": 3, "canonical_name": "Ada", "contexts": []}
+
+        async def list_jev_decisions_for_entity(self, entity_id, **scope):
+            assert (entity_id, scope) == (3, {
+                "user_name": "ada", "project_id": "p1", "limit": 50,
+            })
+            return [{"capability": "classification", "window_id": window_id,
+                     "pass_number": 1, "occurrence_key": "one", "decision": {
+                         "baseline_topic": "General", "suggested_topic": "Research",
+                         "operational_topic": "Research", "record": {
+                             "baseline_outcome": "default_topic",
+                             "acceptance_status": "accepted",
+                             "evidence_block_ids": [block_id],
+                         },
+                     }}]
+
+        async def list_jev_decisions_for_block(self, requested_id, **scope):
+            assert requested_id == block_id
+            assert scope == {"user_name": "ada", "project_id": "p1", "limit": 50}
+            return {"block_id": block_id, "excerpt": "Evidence text", "decisions": [{
+                "capability": "classification", "window_id": window_id,
+                "pass_number": 1, "occurrence_key": "one", "decision": {
+                    "baseline_topic": "General", "suggested_topic": "Research",
+                    "operational_topic": "Research", "internal": "private",
+                    "record": {
+                        "baseline_outcome": "default_topic", "acceptance_status": "accepted",
+                        "evidence_block_ids": [block_id], "pinned_model": "jev-model",
+                        "question_version": "v1", "acceptance_policy_version": "v1",
+                        "option_mapping": {"topic_1": "Research"},
+                        "result": {"outcome": "available", "response": {"answers": {
+                            "topic_choice": {"type": "choice", "choice": "topic_1",
+                                             "confidence": 0.9,
+                                             "probabilities": {"topic_1": 0.9},
+                                             "private": "hidden"},
+                        }}},
+                    },
+                },
+            }, {
+                "capability": "identity", "window_id": window_id,
+                "pass_number": 1, "occurrence_key": "two", "decision": {
+                    "baseline_entity_id": 3, "suggested_entity_id": 4,
+                    "accepted_entity_id": 4,
+                    "record": {
+                        "baseline_outcome": "deterministic_reuse",
+                        "acceptance_status": "accepted", "evidence_block_ids": [block_id],
+                        "pinned_model": "jev-model", "question_version": "v1",
+                        "acceptance_policy_version": "v1", "option_mapping": {},
+                        "result": {"outcome": "available", "response": {"answers": {}}},
+                    },
+                },
+            }]}
+
+    async def start(**_kwargs):
+        async def shutdown():
+            pass
+        return SimpleNamespace(
+            projects=Projects(), resources=SimpleNamespace(knowledge_store=Store()),
+            sessions=SimpleNamespace(user_name="ada"), shutdown=shutdown,
+        )
+
+    monkeypatch.setattr("app.ApplicationRuntime.start", start)
+    app = create_app(user_name="ada", config_dir=tmp_path)
+
+    async def exercise():
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                path = f"/v1/projects/p1/knowledge/context-blocks/{block_id}/jev-decisions"
+                normal = await client.get(path)
+                assert normal.status_code == 200
+                assert normal.json()["items"][0]["operational_result"] == "Research"
+                assert normal.json()["items"][1]["operational_result"] is None
+                assert normal.json()["items"][1]["operational_result_recorded"] is False
+                entity = await client.get("/v1/projects/p1/knowledge/entities/3/jev-decisions")
+                assert entity.status_code == 200
+                assert entity.json()["items"][0]["operational_result"] == "Research"
+                assert "advanced" not in normal.text and "private" not in normal.text
+                advanced = await client.get(path, params={"advanced": "true"})
+                assert advanced.status_code == 200
+                assert advanced.json()["items"][0]["advanced"]["window_id"] == window_id
+                assert "private" not in advanced.text
+                assert (await client.get(path, params={"advanced": "yes"})).status_code == 422
+                assert (await client.get(path.replace("/p1/", "/p2/"))).status_code == 404
+
+    asyncio.run(exercise())

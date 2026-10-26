@@ -1,5 +1,7 @@
 """Bounded, project-scoped reads for the knowledge explorer."""
 
+from uuid import UUID
+
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
@@ -225,12 +227,100 @@ async def observation_evidence(request):
     return JSONResponse(bundle.model_dump(mode="json"))
 
 
+def _jev_explanation(item, *, advanced=False):
+    observation = item["decision"]
+    record = observation["record"]
+    capability = item["capability"]
+    baseline_field, suggestion_field, operational_field = {
+        "identity": ("baseline_entity_id", "suggested_entity_id", "operational_entity_id"),
+        "extraction": ("proposed_entity_type", "suggested_entity_type", "accepted_entity_type"),
+        "classification": ("baseline_topic", "suggested_topic", "operational_topic"),
+    }[capability]
+    baseline = observation.get(baseline_field)
+    suggestion = observation.get(suggestion_field)
+    operational = observation.get(operational_field)
+    result = {
+        "capability": capability,
+        "baseline": baseline if baseline is not None else record["baseline_outcome"],
+        "suggestion": suggestion,
+        "operational_result": operational,
+        "operational_result_recorded": operational is not None,
+        "acceptance_status": record["acceptance_status"],
+        "evidence_block_ids": record["evidence_block_ids"],
+    }
+    if capability == "extraction":
+        result["candidate_name"] = observation.get("candidate_name")
+    if advanced:
+        response = (record["result"].get("response") or {})
+        result["advanced"] = {
+            "window_id": str(item["window_id"]),
+            "pass_number": item["pass_number"],
+            "occurrence_key": item["occurrence_key"],
+            "model": record["pinned_model"],
+            "question_version": record["question_version"],
+            "acceptance_policy_version": record["acceptance_policy_version"],
+            "option_mapping": record["option_mapping"],
+            "result_outcome": record["result"]["outcome"],
+            "answers": {
+                key: _fields(answer, ("type", "choice", "confidence", "probabilities", "noul"))
+                for key, answer in response.get("answers", {}).items()
+            },
+        }
+    return result
+
+
+async def block_jev_decisions(request):
+    runtime, project_id, error = await _scope(request)
+    if error:
+        return error
+    try:
+        block_id = UUID(request.path_params["block_id"])
+    except ValueError:
+        return _error("block_not_found", "Context block not found", 404)
+    limit = _positive(request, "limit", default=50, maximum=100)
+    if limit is None or request.query_params.get("advanced", "false") not in {"true", "false"}:
+        return _error("invalid_query", "Invalid decision query", 422)
+    advanced = request.query_params.get("advanced") == "true"
+    bundle = await runtime.resources.knowledge_store.list_jev_decisions_for_block(
+        str(block_id), user_name=runtime.sessions.user_name,
+        project_id=project_id, limit=limit,
+    )
+    if bundle is None:
+        return _error("block_not_found", "Context block not found", 404)
+    return JSONResponse({
+        "block_id": bundle["block_id"], "evidence_excerpt": bundle["excerpt"],
+        "items": [_jev_explanation(item, advanced=advanced) for item in bundle["decisions"]],
+    })
+
+
+async def entity_jev_decisions(request):
+    runtime, project_id, entity, error = await _visible_entity(request)
+    if error:
+        return error
+    limit = _positive(request, "limit", default=50, maximum=100)
+    if limit is None or request.query_params.get("advanced", "false") not in {"true", "false"}:
+        return _error("invalid_query", "Invalid decision query", 422)
+    rows = await runtime.resources.knowledge_store.list_jev_decisions_for_entity(
+        entity["id"], user_name=runtime.sessions.user_name,
+        project_id=project_id, limit=limit,
+    )
+    if rows is None:
+        return _error("entity_not_found", "Entity not found", 404)
+    advanced = request.query_params.get("advanced") == "true"
+    return JSONResponse({
+        "entity_id": entity["id"],
+        "items": [_jev_explanation(item, advanced=advanced) for item in rows],
+    })
+
+
 routes = [
     Route("/v1/projects/{project_id}/knowledge/messages", messages, methods=["GET"]),
     Route("/v1/projects/{project_id}/knowledge/entities", entities, methods=["GET"]),
     Route("/v1/projects/{project_id}/knowledge/entities/{entity_id}", entity_detail, methods=["GET"]),
+    Route("/v1/projects/{project_id}/knowledge/entities/{entity_id}/jev-decisions", entity_jev_decisions, methods=["GET"]),
     Route("/v1/projects/{project_id}/knowledge/entities/{entity_id}/connections", entity_connections, methods=["GET"]),
     Route("/v1/projects/{project_id}/knowledge/entities/{entity_id}/activity", entity_activity, methods=["GET"]),
     Route("/v1/projects/{project_id}/knowledge/entities/{entity_id}/path/{target_id}", entity_path, methods=["GET"]),
     Route("/v1/projects/{project_id}/knowledge/observations/{observation_id}/evidence", observation_evidence, methods=["GET"]),
+    Route("/v1/projects/{project_id}/knowledge/context-blocks/{block_id}/jev-decisions", block_jev_decisions, methods=["GET"]),
 ]

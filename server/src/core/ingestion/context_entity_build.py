@@ -100,6 +100,21 @@ def assemble_context_entity_result(
         block_entity_associations=resolution.block_entity_associations,
         message_entity_refs=tuple(message_refs.values()),
     )
+    for observation in build.trace.extraction_decisions:
+        if observation.get("accepted_entity_type") is None:
+            continue
+        record = observation["record"]
+        if len(record["evidence_block_ids"]) != 1:
+            continue
+        block_id = str(record["evidence_block_ids"][0])
+        matching_ids = {
+            resolved.entity_id for resolved in resolved_mentions
+            if resolved.mention.origin == "jev_fallback"
+            and block_id in {str(value) for value in resolved.mention.block_ids}
+            and resolved.mention.name.casefold() == observation["candidate_name"].casefold()
+        }
+        if len(matching_ids) == 1:
+            observation["operational_entity_id"] = matching_ids.pop()
     build.set_entity_result(result)
     return result
 

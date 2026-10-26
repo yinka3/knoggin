@@ -732,6 +732,22 @@ class KnowledgeStore:
             offset=offset,
         )
 
+    async def list_jev_decisions_for_block(
+        self, block_id: str, *, user_name: str, project_id: str,
+        limit: int = 50,
+    ) -> dict | None:
+        return await self._semantic_window_reader.list_jev_decisions_for_block(
+            block_id, user_name=user_name, project_id=project_id, limit=limit,
+        )
+
+    async def list_jev_decisions_for_entity(
+        self, entity_id: int, *, user_name: str, project_id: str,
+        limit: int = 50,
+    ) -> list[dict] | None:
+        return await self._semantic_window_reader.list_jev_decisions_for_entity(
+            entity_id, user_name=user_name, project_id=project_id, limit=limit,
+        )
+
     async def list_jev_extraction_decisions(
         self,
         window_id: str,

@@ -686,6 +686,15 @@ async def test_jev_identity_decision_commits_once_and_is_owner_scoped(
     )
     assert len(records) == 1
     assert records[0]["record"]["occurrence_key"] == f"0:{block.block_id}"
+    by_block = await reader.list_jev_decisions_for_block(
+        block.block_id, user_name="ada", project_id="project-1",
+    )
+    assert by_block is not None
+    assert by_block["decisions"][0]["capability"] == "identity"
+    assert by_block["decisions"][0]["decision"]["record"]["occurrence_key"] == f"0:{block.block_id}"
+    assert await reader.list_jev_decisions_for_block(
+        block.block_id, user_name="other", project_id="project-1",
+    ) is None
     assert (
         await reader.list_jev_identity_decisions(
             window.window_id, user_name="other", project_id="project-1"
@@ -762,7 +771,13 @@ async def test_carried_active_identity_persists_once_after_second_pass(real_post
         window.window_id, user_name="ada", project_id="project-1")
     assert len(records) == 1
     assert records[0]["accepted_entity_id"] == first.entity_ids[0]
+    assert records[0]["operational_entity_id"] == first.entity_ids[0]
     assert records[0]["reused_for_pass"] == 2
+    by_entity = await SemanticWindowReader(real_postgres_client).list_jev_decisions_for_entity(
+        first.entity_ids[0], user_name="ada", project_id="project-1",
+    )
+    assert by_entity is not None
+    assert any(item["capability"] == "identity" for item in by_entity)
 
 
 @pytest.mark.storage

@@ -223,6 +223,8 @@ async def test_active_identity_positive_gate_reuses_supplied_eligible_candidate(
     assert decision["selection_source"] == "jev_active"
     assert decision["jev"]["accepted_entity_id"] == 701
     assert decision["jev"]["baseline_entity_id"] is None
+    assert decision["jev"]["operational_entity_id"] == 701
+    assert decision["jev"]["mention_text"] == "Bob"
     assert decision["jev"]["record"]["acceptance_status"] == "accepted"
 
 
