@@ -395,7 +395,7 @@ def test_gliner25_adapter_uses_compiled_labels_and_entity_descriptions():
         def __init__(self):
             self.calls = []
 
-        def extract_entities(self, *args, **kwargs):
+        def extract_entities_long(self, *args, **kwargs):
             self.calls.append((args, kwargs))
             return {
                 "entities": {

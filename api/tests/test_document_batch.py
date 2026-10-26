@@ -130,3 +130,18 @@ def test_source_promotion_scopes_lookup_and_releases_lease(monkeypatch, tmp_path
                 assert not leases
 
     asyncio.run(exercise())
+
+
+def test_public_document_rows_hide_internal_index_failure_detail():
+    from routes.documents import DOCUMENT_FIELDS, _public
+
+    row = {
+        "document_id": "doc-1", "status": "failed",
+        "last_index_failure_kind": "invalid_content",
+        "error_message": "private damaged PDF detail",
+    }
+
+    public = _public(row, DOCUMENT_FIELDS)
+
+    assert public["last_index_failure_kind"] == "invalid_content"
+    assert "error_message" not in public

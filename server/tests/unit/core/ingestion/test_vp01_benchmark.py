@@ -36,7 +36,7 @@ class RecordingGLiNER25Model:
     def __init__(self) -> None:
         self.calls = []
 
-    def extract_entities(self, text, schema, **kwargs):
+    def extract_entities_long(self, text, schema, **kwargs):
         self.calls.append((text, schema, kwargs))
         fixture = next(item for item in FROZEN_CONTEXT_FIXTURES if item.context_markdown == text)
         entities = {}

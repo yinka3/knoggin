@@ -751,10 +751,25 @@ class DocumentService:
         The engine-maintained ``CONTEXT.md`` projection is deliberately handled
         by the controlled Context component instead of this generic file API.
         """
+        filesystem = self._filesystem
+        if filesystem is None:
+            raise RuntimeError("No local project filesystem is configured")
         try:
-            return (await self.read_project_file(PROJECT_FILE_PATH))["content"]
+            content = await self._run_blocking(filesystem.read_bytes, PROJECT_FILE_PATH)
         except FileNotFoundError:
             return None
+        try:
+            text = content.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("PROJECT.md is not UTF-8 text") from exc
+        # The brief is read whole, not through the agent's line-window file
+        # reader; only an oversized brief is cut, and the agent is told so.
+        if len(text) <= MAX_READ_CHARACTERS:
+            return text
+        return (
+            text[:MAX_READ_CHARACTERS]
+            + f"\n\n[PROJECT.md was truncated to its first {MAX_READ_CHARACTERS} characters.]"
+        )
 
     @_settle_file_operation
     async def create_project_file(self, path: str, content: str) -> Dict:

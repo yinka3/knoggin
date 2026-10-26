@@ -19,8 +19,8 @@ def normalize_public_web_url(value: object) -> str:
         raise ValueError("url must be an absolute HTTP(S) URL")
     if parsed.username is not None or parsed.password is not None:
         raise ValueError("url must not include credentials")
-    if parsed.fragment:
-        raise ValueError("url must not include a fragment")
+    # Fragments are client-side anchors and are never sent to the server; the
+    # normalized URL below drops them.
     if port is not None and port not in {80, 443}:
         raise ValueError("url must use a standard HTTP(S) port")
 

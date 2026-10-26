@@ -111,7 +111,10 @@ class GLiNER25VP01Adapter:
         if not isinstance(threshold, (int, float)) or isinstance(threshold, bool):
             raise TypeError("VP-01 threshold must be numeric")
 
-        result = self._model.extract_entities(
+        # Long Context closures exceed the encoder's comfortable window.
+        # Chunked inference returns the same document offsets with much lower
+        # attention cost than a single full-length pass.
+        result = self._model.extract_entities_long(
             text,
             schema,
             threshold=float(threshold),

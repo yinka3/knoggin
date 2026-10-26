@@ -4083,8 +4083,9 @@ async def test_submit_document_returns_saved_identity_after_inline_index_failure
     assert service._filesystem.read_bytes("invalid.pdf") == b"invalid PDF"
     assert second["status"] == "failed"
     assert second["document_id"] == postgres.rows[1]["document_id"]
-    assert "private damaged PDF detail" not in str(uploaded)
-    assert "private damaged PDF detail" not in str(second)
+    # The engine keeps the parser detail for diagnostics; the API field
+    # allowlist owns redaction (api/tests/test_document_batch.py).
+    assert uploaded["last_index_failure_kind"] is not None
 
 
 @pytest.mark.storage
@@ -4538,3 +4539,28 @@ async def test_virtual_folder_preview_then_upload_preserves_each_relative_path(
     with pytest.raises(FileNotFoundError):
         service._filesystem.read_bytes("repo/.secret.md")
 
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_project_brief_is_not_cut_at_the_file_read_line_window(document_harness):
+    service, _postgres = document_harness
+    lines = [f"Goal {index}: keep this.\n" for index in range(1, 301)]
+    service._filesystem.write_bytes("PROJECT.md", "".join(lines).encode(), overwrite=True)
+
+    brief = await service.read_project_brief()
+
+    assert "Goal 300: keep this." in brief
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_oversized_project_brief_tells_the_agent_it_was_truncated(document_harness):
+    service, _postgres = document_harness
+    service._filesystem.write_bytes("PROJECT.md", b"x" * 30_000, overwrite=True)
+
+    brief = await service.read_project_brief()
+
+    assert brief.startswith("x" * 1_000)
+    assert "PROJECT.md was truncated" in brief
+    assert len(brief) < 21_000
