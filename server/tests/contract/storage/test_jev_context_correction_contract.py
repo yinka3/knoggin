@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import pytest
 
+from common.exceptions import MaintenanceConflictError
 from core.knowledge.db.readers.evidence_traversal_reader import EvidenceTraversalReader
 from core.knowledge.db.readers.semantic_window_reader import SemanticWindowReader
 from core.knowledge.db.writers.entity_reclassification_writer import (
@@ -88,6 +89,13 @@ async def test_jev_context_correction_review_applies_and_protects_user_choice(re
     detail, impact = await service.preview_maintenance_review("project-1", review.review_id)
     assert detail.evidence_state == "current"
     assert impact.impacts
+    with pytest.raises(MaintenanceConflictError):
+        await service.transition_maintenance_review(
+            "project-1", review.review_id, status="applied", expected_state={},
+        )
+    assert (await service.get_maintenance_review_detail(
+        "project-1", review.review_id,
+    )).review.status == "open"
     await client.execute(
         """UPDATE public.project_entity_contexts SET topic = 'Identity'
            WHERE project_id = 'project-1' AND entity_id = 2"""

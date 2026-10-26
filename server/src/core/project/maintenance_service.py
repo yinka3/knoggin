@@ -1091,7 +1091,7 @@ class ProjectMaintenanceService:
         if review is None or review.status != "open":
             raise ValueError("Unknown or already-resolved maintenance review")
         if expected_state is not None and review.expected_state != expected_state:
-            raise ValueError("Maintenance review expected state no longer matches")
+            raise MaintenanceConflictError()
         if isinstance(review.proposed_plan, EntityContextChangePlan):
             return await self._apply_jev_entity_context_review(project_id, review)
         if not isinstance(review.proposed_plan, RelationshipInterpretationPlan):
