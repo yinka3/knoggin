@@ -1190,15 +1190,11 @@ class KnowledgeStore:
         *,
         visible_project_ids: List[str],
         limit: int = 5,
-        connections_limit: int = 5,
-        evidence_limit: int = 5,
     ) -> List[Dict]:
         return await self._entity_reader.search_by_name(
             query,
             visible_project_ids=visible_project_ids,
             limit=limit,
-            connections_limit=connections_limit,
-            evidence_limit=evidence_limit,
         )
 
     async def get_related_entities(
