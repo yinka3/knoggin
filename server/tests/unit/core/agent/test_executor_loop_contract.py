@@ -17,6 +17,7 @@ from core.agent.prompt_context import build_evidence_context
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 from core.agent.sources.document_selection import build_document_selection_candidate
 from core.agent.sources.pasted_text import build_pasted_text_candidates
+from infrastructure.llm_client import system_text
 
 
 def make_run(
@@ -64,7 +65,8 @@ class ScriptedLLM:
         self.calls = []
 
     async def stream_with_tools(self, **kwargs):
-        self.calls.append(kwargs)
+        # Record the joined system prompt; the executor sends cacheable parts.
+        self.calls.append({**kwargs, "system": system_text(kwargs["system"])})
         for event in self.steps.pop(0):
             yield event
 
@@ -582,21 +584,16 @@ async def test_executor_loop_accumulates_context_across_reasoning_attempts(
     assert events[-1]["event"] == "response"
     assert events[-1]["data"]["content"] == "Both facts are retained."
     assert len(llm.calls) == 4
-    assert [call["model"] for call in llm.calls] == [
-        "architect",
-        "librarian",
-        "librarian",
-        "architect",
-    ]
+    assert [call["model"] for call in llm.calls] == ["architect"] * 4
     assert [call["reasoning"] for call in llm.calls] == [
         "high",
         "medium",
         "medium",
         "high",
     ]
-    assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[0]["system"]
-    assert "CURRENT EXECUTION PHASE: EXECUTE" in llm.calls[1]["system"]
-    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[-1]["system"]
+    assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[0]["user"]
+    assert "CURRENT EXECUTION PHASE: EXECUTE" in llm.calls[1]["user"]
+    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[-1]["user"]
     assert [schema["function"]["name"] for schema in llm.calls[-1]["tools"]] == [
         "request_clarification",
         "submit_answer",
@@ -753,7 +750,7 @@ async def test_final_synthesis_receives_each_admitted_evidence_kind(monkeypatch)
 
     assert events[-1]["data"]["content"] == "Final answer from all admitted evidence."
     assert len(llm.calls) == 7
-    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[-1]["system"]
+    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[-1]["user"]
     final_prompt = llm.calls[-1]["user"]
     assert "ep_a3f91c: EPISODE_A" in final_prompt
     assert (
@@ -993,7 +990,7 @@ async def test_capacity_rejection_records_no_sources_and_allows_a_narrow_retry(
     assert "Wide result one" not in llm.calls[1]["user"]
     assert "WIDE_RESULT_ONE" not in llm.calls[1]["user"]
     assert "Found 2 items" not in llm.calls[1]["user"]
-    assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[1]["system"]
+    assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[1]["user"]
     assert calls == [
         ("search_web", {"query": "wide release history"}),
         ("search_web", {"query": "narrow release history"}),
@@ -1104,7 +1101,7 @@ async def test_executor_automatically_replans_after_empty_evidence(monkeypatch):
 
     assert events[-1]["data"]["content"] == "Still looking."
     assert [call["model"] for call in llm.calls] == ["architect", "architect"]
-    assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[1]["system"]
+    assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[1]["user"]
 
 
 @pytest.mark.no_network
@@ -1150,7 +1147,7 @@ async def test_research_modes_reject_ungrounded_terminal_answers(mode):
     ]
     assert run.call_count == 0
     assert len(llm.calls) == 2
-    assert all("CURRENT EXECUTION PHASE: PLAN" in call["system"] for call in llm.calls)
+    assert all("CURRENT EXECUTION PHASE: PLAN" in call["user"] for call in llm.calls)
     assert (
         "Research mode requires grounded investigation evidence before submit_answer."
         in llm.calls[1]["user"]
@@ -1547,10 +1544,10 @@ async def test_deep_research_performs_one_gap_review_before_synthesis(monkeypatc
         "architect",
     ]
     assert [call["reasoning"] for call in llm.calls] == ["high", "high", "high"]
-    assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[0]["system"]
-    assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[1]["system"]
-    assert "<deep_research_gap_review>" in llm.calls[1]["system"]
-    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[2]["system"]
+    assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[0]["user"]
+    assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[1]["user"]
+    assert "<deep_research_gap_review>" in llm.calls[1]["user"]
+    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[2]["user"]
 
 
 @pytest.mark.no_network
@@ -1598,12 +1595,13 @@ async def test_executor_reserves_one_synthesis_attempt_after_normal_budget(
     events = [event async for event in executor._execute_run()]
 
     assert events[-1]["data"]["content"] == "Final answer."
+    # One model per run keeps the provider prompt cache warm across steps.
     assert [call["model"] for call in llm.calls] == [
         "architect",
-        "librarian",
+        "architect",
         "architect",
     ]
-    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[-1]["system"]
+    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[-1]["user"]
     assert run.attempt_count == 3
     assert run.synthesis_attempt_count == 1
 
@@ -1660,7 +1658,7 @@ async def test_executor_replans_after_mixed_terminal_batch_without_dispatch(
     assert run.call_count == 0
     assert run.tool_call_counts == {}
     assert len(llm.calls) == 2
-    assert all("CURRENT EXECUTION PHASE: PLAN" in call["system"] for call in llm.calls)
+    assert all("CURRENT EXECUTION PHASE: PLAN" in call["user"] for call in llm.calls)
     assert "Terminal protocol tools must be called alone." in llm.calls[1]["user"]
     assert secret not in llm.calls[1]["user"]
 
@@ -1764,12 +1762,12 @@ async def test_executor_rejects_hidden_synthesis_write_without_dispatch(monkeypa
     assert dispatched == [("search_knowledge_messages", {"query": "profile", "limit": 3})]
     assert run.call_count == 1
     assert len(llm.calls) == 4
-    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[2]["system"]
+    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[2]["user"]
     assert [schema["function"]["name"] for schema in llm.calls[2]["tools"]] == [
         "request_clarification",
         "submit_answer",
     ]
-    assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[3]["system"]
+    assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[3]["user"]
     assert "Returned tool is not allowed during SYNTHESIZE." in llm.calls[3]["user"]
     assert secret not in llm.calls[3]["user"]
 
@@ -1830,7 +1828,7 @@ async def test_topic_context_evidence_triggers_final_synthesis(monkeypatch):
     assert "load_project_topic_context" in [
         schema["function"]["name"] for schema in llm.calls[0]["tools"]
     ]
-    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[-1]["system"]
+    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[-1]["user"]
     messages = run.notebook.section_items("messages")
     assert messages[0]["id"] == "msg_7"
     assert messages[0]["context"][0]["content"] == ("The offer changes compensation.")

@@ -62,6 +62,13 @@ def test_settings_http_round_trip_redacts_secrets_and_reports_restart(settings_a
                     "/v1/settings/llm", json={"base_url": "https://example.test/v1"}
                 )
                 assert llm.status_code == 200
+                thinking = await client.patch(
+                    "/v1/settings/llm", json={"thinking": "provider_default"}
+                )
+                assert thinking.status_code == 200
+                warned = (await client.get("/v1/settings")).json()["settings"]["llm"]
+                assert "slower" in warned["thinking_warning"]
+                await client.patch("/v1/settings/llm", json={"thinking": "planning_only"})
                 jev = await client.patch(
                     "/v1/settings/jev", json={"shutdown_timeout_seconds": 8}
                 )

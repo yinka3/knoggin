@@ -8,6 +8,7 @@ from common.schema.settings import (
     LLMSpendingBudgetSettings,
     RootConfig,
 )
+from infrastructure.llm_client import local_thinking_warning
 
 
 class APIModel(BaseModel):
@@ -19,6 +20,10 @@ class LLMSettingsView(APIModel):
     extraction_model: str
     merge_model: str
     base_url: str | None
+    request_timeout_seconds: float
+    thinking: str
+    # Set when the chosen thinking mode makes a local model much slower.
+    thinking_warning: str | None
     spending_budget: LLMSpendingBudgetSettings
     api_key_configured: bool
 
@@ -51,6 +56,11 @@ class SettingsView(APIModel):
                 extraction_model=config.llm.extraction_model,
                 merge_model=config.llm.merge_model,
                 base_url=config.llm.base_url,
+                request_timeout_seconds=config.llm.request_timeout_seconds,
+                thinking=config.llm.thinking,
+                thinking_warning=local_thinking_warning(
+                    config.llm.base_url, config.llm.thinking
+                ),
                 spending_budget=config.llm.spending_budget,
                 api_key_configured=bool(config.llm.api_key),
             ),

@@ -51,7 +51,7 @@ async def get_spending(request):
     snapshot = await request.app.state.runtime.resources.llm_service.spending_snapshot()
     return JSONResponse({key: snapshot[key] for key in (
         "configured_limit_usd", "spent_usd", "reserved_usd", "remaining_usd",
-        "request_count", "enforced",
+        "request_count", "enforced", "prompt_cache",
     )})
 
 

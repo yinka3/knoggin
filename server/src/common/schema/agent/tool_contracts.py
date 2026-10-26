@@ -974,12 +974,12 @@ TOOL_SCHEMAS = [
                     "evidence_message_ids": {
                         "type": "array",
                         "items": {"type": "integer", "minimum": 1},
-                        "description": "Numeric message IDs that support the proposal."
+                        "description": "Numeric message IDs that support the proposal. Provide this, evidence_episode_ids, or both."
                     },
                     "evidence_episode_ids": {
                         "type": "array",
                         "items": {"type": "string", "minLength": 4},
-                        "description": "Episode IDs (for example ep_a3f91c) that support the proposal."
+                        "description": "Episode IDs (for example ep_a3f91c) that support the proposal. Provide this, evidence_message_ids, or both."
                     },
                     "expected_state_hash": {
                         "type": "string",
@@ -990,14 +990,12 @@ TOOL_SCHEMAS = [
                         ),
                     }
                 },
+                # At least one evidence list is required; the merge service
+                # enforces it. Top-level anyOf is rejected by OpenAI models.
                 "required": [
                     "primary_id",
                     "duplicate_id",
                     "reasoning"
-                ],
-                "anyOf": [
-                    {"required": ["evidence_message_ids"]},
-                    {"required": ["evidence_episode_ids"]}
                 ]
             },
             "tags": ["graph", "core"]

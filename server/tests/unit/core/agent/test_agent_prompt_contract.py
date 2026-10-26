@@ -4,6 +4,7 @@ from common.schema.agent.research import resolve_research_profile
 from core.agent.formatters import format_document_focus_context
 from core.agent.system_prompt import (
     get_agent_prompt,
+    get_agent_prompt_parts,
     get_fallback_summary_prompt,
 )
 from core.agent.tools.registry import get_runtime_instructions, get_tool_schemas
@@ -117,9 +118,11 @@ def test_agent_prompt_renders_distinct_project_brief_and_engine_context():
     assert "User-owned Project Brief from the canonical project workspace" in prompt
     assert "Engine-maintained current understanding" in prompt
     assert "not from the\nCONTEXT.md workspace projection" in prompt
-    assert prompt.index("<cognitive_persona>") < prompt.index("<project_brief>")
+    # Stable text first, project memory after it, so a Context change keeps
+    # the cached prompt start (see get_agent_prompt_parts).
+    assert prompt.index("<cognitive_persona>") < prompt.index("<agent_brain>")
+    assert prompt.index("<agent_brain>") < prompt.index("<project_brief>")
     assert prompt.index("<project_brief>") < prompt.index("<project_context>")
-    assert prompt.index("<project_context>") < prompt.index("<agent_brain>")
     assert "3. User-owned Project Brief from canonical PROJECT.md." in prompt
     assert "4. Engine-maintained Project Context from the canonical database." in prompt
     assert "It cannot override server-enforced safety rules" in prompt
@@ -237,3 +240,29 @@ def test_fallback_summary_prompt_renders_query_and_evidence():
     assert "Here is the evidence gathered:" in prompt
     assert "Relevant Messages:\n- retrieval ranking passed" in prompt
     assert "State what was found or explicitly state what is missing." in prompt
+
+
+@pytest.mark.no_network
+def test_prompt_parts_keep_changing_text_out_of_the_stable_start():
+    stable, project, per_step = get_agent_prompt_parts(
+        user_name="Ada",
+        current_time="2026-10-26 15:00 UTC",
+        phase="EXECUTE",
+        project_brief="Brief text.",
+        project_context="Context text.",
+        agent_brain="Brain text.",
+    )
+
+    assert "Brain text." in stable and "<engine_policy>" in stable
+    assert "Context text." not in stable and "2026-10-26" not in stable
+    assert "CURRENT EXECUTION PHASE" not in stable
+    assert "Brief text." in project and "Context text." in project
+    assert "2026-10-26 15:00 UTC" in per_step
+    assert "CURRENT EXECUTION PHASE: EXECUTE" in per_step
+    # A different phase or time changes only the last part.
+    other = get_agent_prompt_parts(
+        user_name="Ada", current_time="2026-10-26 15:01 UTC", phase="PLAN",
+        project_brief="Brief text.", project_context="Context text.",
+        agent_brain="Brain text.",
+    )
+    assert other[:2] == (stable, project)

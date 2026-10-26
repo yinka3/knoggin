@@ -90,12 +90,14 @@ def test_spending_returns_bounded_ledger_summary():
                 "configured_limit_usd": 10.0, "spent_usd": 2.0,
                 "reserved_usd": 1.0, "remaining_usd": 7.0,
                 "request_count": 3, "enforced": True, "internal_token": "hidden",
+                "prompt_cache": {"m1": {"requests": 2, "hit_rate": 0.9}},
             }
 
     runtime = SimpleNamespace(resources=SimpleNamespace(llm_service=LLM()))
     response = asyncio.run(get_spending(_request(runtime=runtime)))
     assert response.status_code == 200
     assert json.loads(response.body)["remaining_usd"] == 7.0
+    assert json.loads(response.body)["prompt_cache"]["m1"]["hit_rate"] == 0.9
     assert "hidden" not in response.body.decode()
 
 

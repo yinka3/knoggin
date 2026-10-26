@@ -266,6 +266,8 @@ class RuntimeResources:
             merge_model=llm_config.merge_model,
             spending_budget=llm_config.spending_budget,
             base_url=llm_config.base_url,
+            request_timeout_seconds=llm_config.request_timeout_seconds,
+            thinking=llm_config.thinking,
             trace_logger=trace_logger,
             postgres_client=self.postgres,
         )

@@ -37,7 +37,7 @@ def _resolved_response_event(agent_id="agent-1"):
 def _after_budget(events):
     assert events[0]["event"] == "prompt_budget_selected"
     assert events[0]["data"]["agent_id"] == "agent-1"
-    assert events[0]["data"]["budget"]["input_tokens"] == 12_000
+    assert events[0]["data"]["budget"]["input_tokens"] == 48_000
     return events[1:]
 
 

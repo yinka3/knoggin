@@ -17,19 +17,25 @@ from common.schema.evidence import (
 from core.agent.tools.maintenance import MaintenanceTools
 
 
-def test_merge_schema_requires_at_least_one_evidence_kind():
-    schema = TOOL_SCHEMAS_BY_NAME["propose_entity_merge"]
-    arguments = {
-        "primary_id": 1,
-        "duplicate_id": 2,
-        "reasoning": "same durable identity",
-    }
+async def test_merge_proposal_without_evidence_is_rejected_by_the_service():
+    # The tool schema cannot express "one of two lists" (OpenAI rejects
+    # top-level anyOf), so the merge service owns this rule.
+    from core.knowledge.entity.maintenance_service import EntityMaintenanceService
 
-    assert validate_tool_arguments(schema, arguments) == [
-        "arguments must satisfy at least one allowed shape"
-    ]
-    arguments["evidence_message_ids"] = [10]
-    assert validate_tool_arguments(schema, arguments) == []
+    service = EntityMaintenanceService(object(), "ada")
+
+    async def ready_preview(**_kwargs):
+        return {"state_hash": "a" * 64, "ready": True, "snapshot": {"message_refs": []}}
+
+    service.preview_merge = ready_preview
+    with pytest.raises(ValueError, match="at least one merge evidence reference"):
+        await service.propose(
+            survivor_entity_id=1, retired_entity_id=2, reasoning="same identity",
+        )
+    schema = TOOL_SCHEMAS_BY_NAME["propose_entity_merge"]
+    assert validate_tool_arguments(
+        schema, {"primary_id": 1, "duplicate_id": 2, "reasoning": "same identity"}
+    ) == []
 
 
 def test_merge_advisor_schema_requires_two_entity_ids():

@@ -612,3 +612,14 @@ async def test_memory_tools_return_clean_defaults_without_active_agent():
     for operation in operations:
         with pytest.raises(ToolExecutionError, match="No durable agent identity"):
             await operation
+
+
+def test_every_tool_schema_is_accepted_by_strict_providers():
+    """OpenAI rejects a tool whose parameters are not a plain top-level object."""
+    from common.schema.agent.tool_contracts import TOOL_SCHEMAS
+
+    rejected = {"oneOf", "anyOf", "allOf", "enum", "const", "not"}
+    for schema in TOOL_SCHEMAS:
+        parameters = schema["function"]["parameters"]
+        assert parameters.get("type") == "object", schema["function"]["name"]
+        assert not rejected & set(parameters), schema["function"]["name"]

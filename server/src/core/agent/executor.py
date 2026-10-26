@@ -56,7 +56,7 @@ from core.agent.prompt_context import (
 from core.agent.run import AgentRun
 from core.agent.sources.tool_results import capture_tool_source_candidates
 from core.agent.system_prompt import (
-    get_agent_prompt,
+    get_agent_prompt_parts,
     get_fallback_summary_prompt,
 )
 from core.agent.tool_references import localize_agent_tool_result
@@ -266,7 +266,9 @@ class AgentExecutor:
                     logger.info("AgentExecutor: replanning after an insufficient step.")
             else:
                 phase = _AgentPhase.EXECUTE
-                current_model = self.ctx.model or self.llm.extraction_model
+                # One model per run: provider caches are per model, so
+                # switching models between steps restarts the prompt cache.
+                current_model = self.ctx.model or self.llm.agent_model
                 current_reasoning = "medium"
 
             # Reset flags so a successful retrieval defaults back to execution.
@@ -722,7 +724,7 @@ class AgentExecutor:
         self, *, date, phase, gap_review, documents_context,
         document_focus_context, project_brief, project_context,
         runtime_instructions, tool_schemas, last_result,
-    ) -> tuple[str, str]:
+    ) -> tuple[tuple[str, str], str]:
         """Fit every memory category around the actual fixed prompt for this step."""
         budget = self.ctx.memory_budget
         counter = getattr(self.llm, "count_tokens", None)
@@ -736,8 +738,8 @@ class AgentExecutor:
             "conversation": format_conversation_history(self.ctx),
         }
 
-        def system(context: str) -> str:
-            return get_agent_prompt(
+        def system(context: str) -> tuple[str, str, str]:
+            return get_agent_prompt_parts(
                 user_name=self.ctx.user_name, current_time=date,
                 persona=self.ctx.agent.persona, agent_name=self.ctx.agent.name,
                 documents_context=documents_context,
@@ -765,7 +767,7 @@ class AgentExecutor:
         # Covers provider message framing and small tool-envelope differences.
         framing_reserve = 64
         fixed_tokens = (
-            token_count(system(""), counter)
+            token_count("".join(system("")), counter)
             + token_count(user(empty), counter)
             + tool_tokens + framing_reserve
         )
@@ -774,12 +776,15 @@ class AgentExecutor:
             system_prompt = system(memory["project_context"])
             user_message = user(memory)
             used = (
-                token_count(system_prompt, counter)
+                token_count("".join(system_prompt), counter)
                 + token_count(user_message, counter)
                 + tool_tokens + framing_reserve
             )
             if used <= budget.input_tokens:
-                return system_prompt, user_message
+                stable, project, per_step = system_prompt
+                # Providers such as Gemini cache the system message as one unit,
+                # so per-step text (time, phase) leads the user message instead.
+                return (stable, project), f"{per_step.strip()}\n\n{user_message}"
             overage = used - budget.input_tokens
             for key in reversed(budget.spare_priority):
                 current = memory[key]

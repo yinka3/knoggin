@@ -7,7 +7,9 @@ from typing import (
     Dict,
     List,
     Optional,
+    Sequence,
     TypeVar,
+    Union,
 )
 
 import instructor
@@ -25,6 +27,7 @@ from openai import (
 from common.exceptions import (
     ConfigurationError,
     LLMBudgetExceededError,
+    LLMContextTruncatedError,
     LLMProviderError,
     LLMResponseError,
 )
@@ -47,6 +50,51 @@ CLIENT_SHUTDOWN_TIMEOUT = 5.0
 ResponseT = TypeVar("ResponseT")
 
 
+# A system prompt is one string or ordered parts, most reusable first.
+SystemPrompt = Union[str, Sequence[str]]
+
+
+def local_thinking_warning(base_url: str | None, thinking: str) -> str | None:
+    if thinking != "provider_default" or "openrouter.ai" in (base_url or OPENROUTER_BASE_URL):
+        return None
+    return (
+        "llm.thinking is provider_default: the local model may think on every "
+        "agent step and memory call, so responses will be several times slower. "
+        "Use planning_only for faster responses."
+    )
+
+
+def system_text(system: SystemPrompt) -> str:
+    return system if isinstance(system, str) else "".join(system)
+
+
+def prompt_cache_tokens(usage: Any) -> tuple[int, int]:
+    """Return (tokens read from the prompt cache, tokens written to it).
+
+    Some providers (Gemini via OpenRouter) count a cache write inside
+    ``cached_tokens`` and report it again as ``cache_write_tokens``; only the
+    remainder was actually read from the cache.
+    """
+
+    if isinstance(usage, dict):
+        if "cached_prompt_tokens" in usage:
+            return (
+                int(usage["cached_prompt_tokens"] or 0),
+                int(usage.get("cache_write_tokens") or 0),
+            )
+        details = usage.get("prompt_tokens_details") or {}
+        if not isinstance(details, dict):
+            return 0, 0
+        cached, written = details.get("cached_tokens"), details.get("cache_write_tokens")
+    else:
+        details = getattr(usage, "prompt_tokens_details", None)
+        cached = getattr(details, "cached_tokens", 0) if details is not None else 0
+        written = getattr(details, "cache_write_tokens", 0) if details is not None else 0
+    cached = cached if isinstance(cached, int) else 0
+    written = written if isinstance(written, int) else 0
+    return max(cached - written, 0), written
+
+
 class LLMService:
     @property
     def spending_ledger(self) -> ExternalModelSpendingLedger:
@@ -63,10 +111,14 @@ class LLMService:
         merge_model: str = "google/gemini-2.5-pro",
         spending_budget: LLMSpendingBudgetSettings | None = None,
         postgres_client=None,
+        request_timeout_seconds: float = 300.0,
+        thinking: str = "planning_only",
     ):
         self._api_key = (api_key or "").strip()
         self._base_url = base_url or OPENROUTER_BASE_URL
         self._is_openrouter = "openrouter.ai" in self._base_url
+        self._request_timeout_seconds = request_timeout_seconds
+        self._thinking = thinking
         self._trace = trace_logger
         self._agent_model = agent_model
         self._extraction_model = extraction_model
@@ -79,17 +131,22 @@ class LLMService:
         self._tokenizer = None
         self._retired_clients: set[AsyncOpenAI] = set()
         self._retirement_tasks: dict[AsyncOpenAI, asyncio.Task] = {}
+        # Process-lifetime prompt cache counters per model, for visibility.
+        self._prompt_cache: dict[str, dict[str, int]] = {}
         self._client_usage: dict[AsyncOpenAI, int] = {}
         self._active_requests: set[asyncio.Task] = set()
         self._closed = False
         self._close_lock = asyncio.Lock()
 
-        if self._api_key:
+        if self._api_key or not self._is_openrouter:
             self._raw_client, self._client = self._build_clients(
                 self._api_key,
                 self._base_url,
+                self._request_timeout_seconds,
             )
 
+            if self.thinking_warning:
+                logger.warning(self.thinking_warning)
             provider_label = "OpenRouter" if self._is_openrouter else self._base_url
             logger.info(
                 f"LLMService initialized ({provider_label}) | "
@@ -103,14 +160,19 @@ class LLMService:
     def _build_clients(
         api_key: str,
         base_url: str,
+        timeout_seconds: float,
     ) -> tuple[AsyncOpenAI, AsyncInstructor]:
         client = AsyncOpenAI(
             base_url=base_url,
-            api_key=api_key,
-            timeout=60.0,
+            # Local OpenAI-compatible servers (Ollama, LM Studio, vLLM) need no
+            # key, but the client requires a value.
+            api_key=api_key or "no-key-required",
+            timeout=timeout_seconds,
             max_retries=0,
         )
-        return client, instructor.from_openai(client)
+        # Instructor applies the client's mode itself; a per-call ``mode``
+        # kwarg is passed twice and rejected before any request is sent.
+        return client, instructor.from_openai(client, mode=instructor.Mode.JSON)
 
     async def load_tokenizer(self):
         """Load tiktoken encoding for token estimation."""
@@ -138,13 +200,21 @@ class LLMService:
     async def spending_snapshot(self) -> dict[str, Any]:
         """Return bounded server-wide LLM spend and reservation state."""
 
-        return await self._spending_ledger.snapshot()
+        snapshot = await self._spending_ledger.snapshot()
+        snapshot["prompt_cache"] = {
+            model: {
+                **counts,
+                "hit_rate": round(
+                    counts["cached_prompt_tokens"] / counts["prompt_tokens"], 4
+                ) if counts["prompt_tokens"] else 0.0,
+            }
+            for model, counts in sorted(self._prompt_cache.items())
+        }
+        return snapshot
 
     @property
     def is_configured(self) -> bool:
-        return bool(
-            not self._closed and self._api_key and self._client and self._raw_client
-        )
+        return bool(not self._closed and self._client and self._raw_client)
 
     def _get_clients(self) -> tuple[AsyncOpenAI, AsyncInstructor]:
         if self._closed:
@@ -218,15 +288,20 @@ class LLMService:
 
         api_key = settings.api_key.strip()
         base_url = settings.base_url or OPENROUTER_BASE_URL
-        connection_changed = api_key != self._api_key or base_url != self._base_url
+        connection_changed = (
+            api_key != self._api_key
+            or base_url != self._base_url
+            or settings.request_timeout_seconds != self._request_timeout_seconds
+        )
 
         replacement_raw = self._raw_client
         replacement_instructor = self._client
         if connection_changed:
-            if api_key:
+            if api_key or "openrouter.ai" not in base_url:
                 replacement_raw, replacement_instructor = self._build_clients(
                     api_key,
                     base_url,
+                    settings.request_timeout_seconds,
                 )
             else:
                 replacement_raw = None
@@ -236,6 +311,11 @@ class LLMService:
         self._api_key = api_key
         self._base_url = base_url
         self._is_openrouter = "openrouter.ai" in self._base_url
+        self._request_timeout_seconds = settings.request_timeout_seconds
+        if settings.thinking != self._thinking:
+            self._thinking = settings.thinking
+            if self.thinking_warning:
+                logger.warning(self.thinking_warning)
 
         if connection_changed:
             self._raw_client = replacement_raw
@@ -280,6 +360,45 @@ class LLMService:
             name="llm-spending-budget-update",
         )
 
+    def _system_message(self, system: SystemPrompt) -> Dict[str, Any]:
+        """Mark reusable system text for provider prompt caching.
+
+        OpenRouter forwards explicit cache markers to providers that need them
+        (Gemini, Anthropic). Callers keep per-step text out of the system
+        message, because Gemini caches it as one unit. Other OpenAI-compatible
+        servers (Ollama, vLLM) get one string in the same order, which still
+        lets them reuse the identical prompt start.
+        """
+
+        parts = [system] if isinstance(system, str) else [part for part in system if part]
+        if not self._is_openrouter:
+            return {"role": "system", "content": "".join(parts)}
+        return {
+            "role": "system",
+            "content": [
+                {"type": "text", "text": part, "cache_control": {"type": "ephemeral"}}
+                for part in parts
+            ],
+        }
+
+    @property
+    def thinking_warning(self) -> str | None:
+        """Explain the cost of letting a local server think on every step."""
+
+        return local_thinking_warning(self._base_url, self._thinking)
+
+    def _provider_extra_body(self, reasoning: Optional[str]) -> Dict[str, Any] | None:
+        """Provider-specific request fields, including thinking control."""
+
+        if self._is_openrouter:
+            return self._openrouter_extra_body(reasoning)
+        # Local servers expose thinking only as on/off via reasoning_effort.
+        if self._thinking == "off" or (
+            self._thinking == "planning_only" and reasoning != "high"
+        ):
+            return {"reasoning_effort": "none"}
+        return None
+
     @staticmethod
     def _openrouter_extra_body(
         reasoning: Optional[str] = "low",
@@ -287,7 +406,6 @@ class LLMService:
         """Extra body parameters for OpenRouter."""
         body: Dict[str, Any] = {
             "provider": {"require_parameters": True},
-            "cache_control": {"type": "ephemeral"},
         }
         if reasoning == "high":
             body["reasoning"] = {"max_tokens": 4096}
@@ -362,6 +480,21 @@ class LLMService:
                 + max(additional_prompt_tokens, 0)
             )
             completion_tokens = self.count_tokens(content)
+        elif not failed:
+            counts = self._prompt_cache.setdefault(
+                model,
+                {
+                    "requests": 0,
+                    "prompt_tokens": 0,
+                    "cached_prompt_tokens": 0,
+                    "cache_write_tokens": 0,
+                },
+            )
+            read, written = prompt_cache_tokens(provider_usage)
+            counts["requests"] += 1
+            counts["prompt_tokens"] += int(prompt_tokens or 0)
+            counts["cached_prompt_tokens"] += read
+            counts["cache_write_tokens"] += written
         await self._spending_ledger.record(
             reservation,
             model=model,
@@ -380,6 +513,30 @@ class LLMService:
                     "approximate": approximate,
                 }
             )
+
+    def _truncation_message(
+        self, usage: Any, *, system: str, user: str, additional_prompt_tokens: int = 0
+    ) -> str | None:
+        """Explain a provider that silently processed only part of the prompt."""
+
+        if isinstance(usage, dict):
+            if usage.get("approximate"):
+                return None
+            reported = usage.get("prompt_tokens")
+        else:
+            reported = getattr(usage, "prompt_tokens", None)
+        if not isinstance(reported, int) or isinstance(reported, bool):
+            return None
+        estimate = self.count_tokens(f"{system}\n{user}") + max(additional_prompt_tokens, 0)
+        # Tokenizers differ by model, so only a large gap means truncation.
+        if estimate < 1_024 or reported >= estimate * 0.6:
+            return None
+        return (
+            f"The model processed only {reported} of about {estimate} prompt tokens: "
+            "its context window is smaller than the prompt, so part of it was "
+            "silently dropped. Use a model with a larger context, or raise the "
+            "server's context length (for Ollama, set OLLAMA_CONTEXT_LENGTH)."
+        )
 
     @staticmethod
     def _check_aac_budget(aac_budget: Any) -> None:
@@ -406,7 +563,7 @@ class LLMService:
 
     async def generate_text(
         self,
-        system: str,
+        system: SystemPrompt,
         user: str,
         model: Optional[str] = None,
         temperature: float = 1.0,
@@ -415,7 +572,8 @@ class LLMService:
     ) -> str:
         """Generate an unstructured text completion."""
         model = model or self._extraction_model
-        is_openrouter = self._is_openrouter
+        system_message = self._system_message(system)
+        system = system_text(system)
 
         async with self._client_snapshot() as (raw_client, _):
             for attempt in range(TRANSPORT_RETRIES):
@@ -432,16 +590,14 @@ class LLMService:
                     create_kwargs: Dict[str, Any] = {
                         "model": model,
                         "messages": [
-                            {"role": "system", "content": system},
+                            system_message,
                             {"role": "user", "content": user},
                         ],
                         "temperature": temperature,
                     }
 
-                    if is_openrouter:
-                        create_kwargs["extra_body"] = self._openrouter_extra_body(
-                            reasoning
-                        )
+                    if extra_body := self._provider_extra_body(reasoning):
+                        create_kwargs["extra_body"] = extra_body
 
                     response = await raw_client.chat.completions.create(**create_kwargs)
                     if not response.choices:
@@ -468,9 +624,14 @@ class LLMService:
                         aac_budget=aac_budget,
                     )
                     recorded = True
+                    truncated = self._truncation_message(
+                        getattr(response, "usage", None), system=system, user=user
+                    )
+                    if truncated:
+                        raise LLMContextTruncatedError(truncated, details={"model": model})
                     self._trace_exchange(model, user, content)
                     return content
-                except LLMBudgetExceededError:
+                except (LLMBudgetExceededError, LLMContextTruncatedError):
                     raise
                 except LLMResponseError:
                     if not recorded:
@@ -529,36 +690,37 @@ class LLMService:
         self,
         *,
         response_model: type[ResponseT],
-        system: str,
+        system: SystemPrompt,
         user: str,
         model: Optional[str] = None,
         temperature: float = 1.0,
         reasoning: Optional[str] = None,
-        mode: Optional[instructor.Mode] = None,
         aac_budget: Any = None,
     ) -> ResponseT:
         """Generate and validate a structured completion with Instructor."""
         model = model or self._extraction_model
-        is_openrouter = self._is_openrouter
+        system_message = self._system_message(system)
+        system = system_text(system)
         create_kwargs: Dict[str, Any] = {
             "model": model,
             "messages": [
-                {"role": "system", "content": system},
+                system_message,
                 {"role": "user", "content": user},
             ],
             "temperature": temperature,
             "response_model": response_model,
-            "mode": mode or instructor.Mode.JSON,
             # Validation retries are controlled below so each provider request
             # receives its own budget reservation and usage record.
             "max_retries": 0,
         }
-        if is_openrouter:
-            create_kwargs["extra_body"] = self._openrouter_extra_body(reasoning)
+        if extra_body := self._provider_extra_body(reasoning):
+            create_kwargs["extra_body"] = extra_body
 
         async with self._client_snapshot() as (_, instructor_client):
             response = None
-            for attempt in range(VALIDATION_RETRIES + 1):
+            validation_failures = 0
+            transport_failures = 0
+            while True:
                 self._check_aac_budget(aac_budget)
                 reservation = await self._reserve_external_attempt(
                     model=model,
@@ -599,11 +761,35 @@ class LLMService:
                             aac_budget=aac_budget,
                         )
                         recorded = True
-                    if attempt < VALIDATION_RETRIES:
+                    # Instructor also wraps timeouts and provider errors;
+                    # those are transport failures, not invalid output.
+                    provider_exc = self._wrapped_provider_error(exc)
+                    if provider_exc is not None:
+                        if (
+                            self._is_transient_provider_error(provider_exc)
+                            and transport_failures < TRANSPORT_RETRIES - 1
+                        ):
+                            transport_failures += 1
+                            logger.warning(
+                                "LLM structured provider request failed: {}. Retrying "
+                                "({}/{})",
+                                type(provider_exc).__name__,
+                                transport_failures,
+                                TRANSPORT_RETRIES,
+                            )
+                            await asyncio.sleep(0.5 * transport_failures)
+                            continue
+                        raise LLMProviderError(
+                            "LLM structured provider request failed",
+                            details={"model": model, "error": str(provider_exc)},
+                            transient=self._is_transient_provider_error(provider_exc),
+                        ) from exc
+                    if validation_failures < VALIDATION_RETRIES:
+                        validation_failures += 1
                         logger.warning(
                             "LLM structured response failed validation; retrying "
                             "({}/{})",
-                            attempt + 1,
+                            validation_failures,
                             VALIDATION_RETRIES,
                         )
                         continue
@@ -628,9 +814,24 @@ class LLMService:
                             aac_budget=aac_budget,
                         )
                         recorded = True
+                    if (
+                        self._is_transient_provider_error(exc)
+                        and transport_failures < TRANSPORT_RETRIES - 1
+                    ):
+                        transport_failures += 1
+                        logger.warning(
+                            "LLM structured provider request failed: {}. Retrying "
+                            "({}/{})",
+                            type(exc).__name__,
+                            transport_failures,
+                            TRANSPORT_RETRIES,
+                        )
+                        await asyncio.sleep(0.5 * transport_failures)
+                        continue
                     raise LLMProviderError(
                         "LLM structured provider request failed",
                         details={"model": model, "error": str(exc)},
+                        transient=self._is_transient_provider_error(exc),
                     ) from exc
                 except Exception as exc:
                     if not recorded:
@@ -662,8 +863,31 @@ class LLMService:
 
         if response is None:
             raise AssertionError("structured generation completed without a response")
+        truncated = self._truncation_message(
+            getattr(completion, "usage", None), system=system, user=user
+        )
+        if truncated:
+            raise LLMContextTruncatedError(truncated, details={"model": model})
         self._trace_exchange(model, user, response)
         return response
+
+    @staticmethod
+    def _wrapped_provider_error(exc: InstructorRetryException) -> Exception | None:
+        attempts = getattr(exc, "failed_attempts", None) or ()
+        candidates = [attempt.exception for attempt in attempts[-1:]]
+        candidates.append(exc.__cause__)
+        for candidate in candidates:
+            if isinstance(candidate, (APIConnectionError, APIStatusError)):
+                return candidate
+        return None
+
+    @staticmethod
+    def _is_transient_provider_error(exc: Exception) -> bool:
+        """Retry dropped connections, timeouts, rate limits, and provider 5xx."""
+
+        if isinstance(exc, (APIConnectionError, RateLimitError)):
+            return True
+        return isinstance(exc, APIStatusError) and exc.status_code >= 500
 
     @staticmethod
     def _structured_validation_error_details(
@@ -681,7 +905,7 @@ class LLMService:
 
     async def stream_with_tools(
         self,
-        system: str,
+        system: SystemPrompt,
         user: str,
         tools: List[Dict],
         model: Optional[str] = None,
@@ -696,7 +920,8 @@ class LLMService:
         async with self._client_snapshot() as (raw_client, _):
             async for event in self._stream_with_client(
                 raw_client=raw_client,
-                system=system,
+                system=system_text(system),
+                system_message=self._system_message(system),
                 user=user,
                 tools=tools,
                 model=model,
@@ -713,6 +938,7 @@ class LLMService:
         *,
         raw_client: AsyncOpenAI,
         system: str,
+        system_message: Dict[str, Any],
         user: str,
         tools: List[Dict],
         model: str,
@@ -757,7 +983,7 @@ class LLMService:
                 create_kwargs: Dict[str, Any] = dict(
                     model=model,
                     messages=[
-                        {"role": "system", "content": system},
+                        system_message,
                         {"role": "user", "content": user},
                     ],
                     tools=tools,
@@ -767,15 +993,11 @@ class LLMService:
                 )
                 if max_completion_tokens is not None:
                     create_kwargs["max_completion_tokens"] = max_completion_tokens
-                if is_openrouter:
-                    create_kwargs.update(
-                        {
-                            "stream_options": {"include_usage": True},
-                            "extra_body": self._openrouter_extra_body(
-                                reasoning=reasoning
-                            ),
-                        }
-                    )
+                # Standard OpenAI option, also honored by Ollama, vLLM, and
+                # LM Studio; usage is needed for accounting and truncation checks.
+                create_kwargs["stream_options"] = {"include_usage": True}
+                if extra_body := self._provider_extra_body(reasoning):
+                    create_kwargs["extra_body"] = extra_body
 
                 response = await raw_client.chat.completions.create(**create_kwargs)
 
@@ -785,6 +1007,8 @@ class LLMService:
                             "prompt_tokens": chunk.usage.prompt_tokens,
                             "completion_tokens": chunk.usage.completion_tokens,
                             "total_tokens": chunk.usage.total_tokens,
+                            "cached_prompt_tokens": prompt_cache_tokens(chunk.usage)[0],
+                            "cache_write_tokens": prompt_cache_tokens(chunk.usage)[1],
                             "approximate": False,
                         }
                     if not chunk.choices:
@@ -847,6 +1071,21 @@ class LLMService:
                     aac_budget=aac_budget,
                 )
                 recorded = True
+                truncated = self._truncation_message(
+                    usage, system=system, user=user,
+                    additional_prompt_tokens=tool_schema_tokens,
+                )
+                if truncated:
+                    yield {
+                        "event": "step_error",
+                        "data": {
+                            "kind": "provider",
+                            "message": truncated,
+                            "code": "provider_context_limit",
+                            "retryable": False,
+                        },
+                    }
+                    return
 
                 if tool_calls_by_index:
                     calls = [

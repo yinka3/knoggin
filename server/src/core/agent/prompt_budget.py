@@ -23,13 +23,34 @@ def token_count(text: str, counter: Callable[[str], int] | None) -> int:
     return (len(text) + 3) // 4
 
 
+_OMITTED_LATER = "\n[…later content omitted to fit the prompt budget]"
+_OMITTED_EARLIER = "[…earlier content omitted to fit the prompt budget]\n"
+
+
 def trim_to_tokens(
     text: str, limit: int, counter: Callable[[str], int] | None, *, tail: bool = False
 ) -> str:
+    """Fit text to a token limit and say so, so the model never mistakes a cut
+    Context or notebook for the complete record."""
+
     if limit <= 0:
         return ""
     if token_count(text, counter) <= limit:
         return text
+    marker = _OMITTED_EARLIER if tail else _OMITTED_LATER
+    text = text.removeprefix(marker) if tail else text.removesuffix(marker)
+    room = limit - token_count(marker, counter)
+    if room <= 0:
+        return _cut_to_tokens(text, limit, counter, tail=tail)
+    kept = _cut_to_tokens(text, room, counter, tail=tail)
+    if not kept:
+        return _cut_to_tokens(text, limit, counter, tail=tail)
+    return f"{marker}{kept}" if tail else f"{kept}{marker}"
+
+
+def _cut_to_tokens(
+    text: str, limit: int, counter: Callable[[str], int] | None, *, tail: bool
+) -> str:
     low, high = 0, len(text)
     while low < high:
         middle = (low + high + 1) // 2

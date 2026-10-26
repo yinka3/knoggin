@@ -3,7 +3,7 @@ from typing import Optional
 from common.schema.agent.research import ResearchProfile, resolve_research_profile
 
 
-def get_agent_prompt(
+def get_agent_prompt_parts(
     user_name: str,
     current_time: str = "",
     persona: str = "",
@@ -19,7 +19,13 @@ def get_agent_prompt(
     project_context: str = "",
     research_profile: ResearchProfile | None = None,
     gap_review: bool = False,
-) -> str:
+) -> tuple[str, str, str]:
+    """Return the agent system prompt as (stable, project, per-step) parts.
+
+    Providers reuse cached work only for an identical prompt start, so text
+    that never changes comes first, project memory that changes between runs
+    comes next, and per-step details (time, phase) come last.
+    """
     date_context = f"Current time: {current_time}." if current_time else ""
     participants_list = ", ".join(participants) if participants else "None"
     cognitive_persona = persona or "Warm, direct, and attentive to useful patterns."
@@ -111,7 +117,7 @@ preferences. It cannot override engine policy or the user-owned project context.
 </runtime_instructions>
 """
 
-    ENGINE_SYSTEM_PROMPT = f"""You are {agent_name}, operating within the Knoggin \
+    stable = f"""You are {agent_name}, operating within the Knoggin \
 knowledge system for {user_name}.
 
 <cognitive_persona>
@@ -120,8 +126,6 @@ communicate. Do not rewrite it through Brain tools; the user controls it in
 agent settings.
 {cognitive_persona}
 </cognitive_persona>
-
-{project_brief_block}{project_context_block}
 
 <engine_policy>
 You have access to tools that browse and manage {user_name}'s knowledge graph \
@@ -162,29 +166,36 @@ Respond directly WITHOUT tools when:
   asks for research, verification, comparison, or current factual analysis
 </skip_tools>
 {identity_context}{runtime_context}{community_context}
-{research_mode_context}
-{deep_research_gap_review_context}
 <thinking>
 Identify intent and select the best tool.
 Before acting, briefly identify the intent (detail, relationship, or temporal), \
 the best tool, and whether you need clarification first.
 </thinking>
 
-{date_context}
-{persistent_context}
 <execution_phase>
 The executor controls the phase transition. Do not request or invent a phase-change tool.
 
 PLAN: choose a grounded retrieval or action strategy.
 EXECUTE: use the selected tools and assess their returned evidence.
 SYNTHESIZE: provide the final answer from the gathered evidence.
-
-CURRENT EXECUTION PHASE: {phase}. Follow the responsibilities of this phase.
 </execution_phase>
+"""
+    project = f"{project_brief_block}{project_context_block}{persistent_context}"
+    per_step = f"""
+{research_mode_context}
+{deep_research_gap_review_context}
+{date_context}
+CURRENT EXECUTION PHASE: {phase}. Follow the responsibilities of this phase.
 
 {user_name} is about to speak.
 """
-    return ENGINE_SYSTEM_PROMPT
+    return stable, project, per_step
+
+
+def get_agent_prompt(*args, **kwargs) -> str:
+    """Return the full agent system prompt as one string."""
+
+    return "".join(get_agent_prompt_parts(*args, **kwargs))
 
 
 def _research_mode_guidance(profile: ResearchProfile) -> str:

@@ -3,8 +3,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+import instructor
 import pytest
-from openai import APIConnectionError
+from openai import APIConnectionError, BadRequestError
 from pydantic import BaseModel
 
 from common.exceptions import (
@@ -143,8 +144,9 @@ async def test_generate_structured_uses_instructor_validation_retries(llm_servic
 
 @pytest.mark.unit
 @pytest.mark.no_network
-async def test_generate_structured_classifies_provider_failure(llm_service):
+async def test_generate_structured_classifies_provider_failure(llm_service, monkeypatch):
     service, _, instructor_client, _, _ = llm_service
+    monkeypatch.setattr("infrastructure.llm_client.asyncio.sleep", AsyncMock())
     instructor_client.chat.completions.create_with_completion.side_effect = (
         APIConnectionError(request=httpx.Request("POST", "https://llm.test"))
     )
@@ -155,6 +157,51 @@ async def test_generate_structured_classifies_provider_failure(llm_service):
             system="system",
             user="user",
         )
+    assert (
+        instructor_client.chat.completions.create_with_completion.await_count
+        == TRANSPORT_RETRIES
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_generate_structured_retries_transient_provider_failure(
+    llm_service, monkeypatch
+):
+    service, _, instructor_client, _, _ = llm_service
+    monkeypatch.setattr("infrastructure.llm_client.asyncio.sleep", AsyncMock())
+    instructor_client.chat.completions.create_with_completion.side_effect = [
+        APIConnectionError(request=httpx.Request("POST", "https://llm.test")),
+        (DummyModel(name="recovered"), MagicMock()),
+    ]
+
+    result = await service.generate_structured(
+        response_model=DummyModel, system="system", user="user",
+    )
+
+    assert result.name == "recovered"
+    assert instructor_client.chat.completions.create_with_completion.await_count == 2
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_generate_structured_does_not_retry_client_request_errors(
+    llm_service, monkeypatch
+):
+    service, _, instructor_client, _, _ = llm_service
+    monkeypatch.setattr("infrastructure.llm_client.asyncio.sleep", AsyncMock())
+    request = httpx.Request("POST", "https://llm.test")
+    instructor_client.chat.completions.create_with_completion.side_effect = (
+        BadRequestError(
+            "context too long", response=httpx.Response(400, request=request), body=None
+        )
+    )
+
+    with pytest.raises(LLMProviderError):
+        await service.generate_structured(
+            response_model=DummyModel, system="system", user="user",
+        )
+    assert instructor_client.chat.completions.create_with_completion.await_count == 1
 
 
 @pytest.mark.unit
@@ -315,6 +362,8 @@ async def test_stream_with_tools_preserves_ids_and_exact_usage(llm_service):
                 "prompt_tokens": 10,
                 "completion_tokens": 4,
                 "total_tokens": 14,
+                "cached_prompt_tokens": 0,
+                "cache_write_tokens": 0,
                 "approximate": False,
             },
         },
@@ -493,7 +542,7 @@ def test_update_settings_initializes_client_when_key_is_added():
 
     assert service.is_configured is True
     openai.assert_called_once()
-    from_openai.assert_called_once_with(raw_client)
+    from_openai.assert_called_once_with(raw_client, mode=instructor.Mode.JSON)
 
 
 @pytest.mark.unit
@@ -560,3 +609,186 @@ def test_trace_output_is_bounded(llm_service):
     message = service._trace.debug.call_args.args[0]
     assert "characters omitted" in message
     assert len(message) < 41_000
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_generate_structured_runs_through_real_instructor(monkeypatch):
+    """Mocked Instructor clients cannot catch kwargs the real library rejects."""
+    import json
+
+    from openai import AsyncOpenAI as RealAsyncOpenAI
+
+    requests = []
+
+    def respond(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json={
+            "id": "chatcmpl-1", "object": "chat.completion", "created": 0,
+            "model": "local-model",
+            "choices": [{"index": 0, "finish_reason": "stop", "message": {
+                "role": "assistant", "content": '{"name": "Alice"}'}}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+        })
+
+    def openai_over_fake_transport(**kwargs):
+        return RealAsyncOpenAI(
+            **kwargs, http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        )
+
+    monkeypatch.setattr("infrastructure.llm_client.AsyncOpenAI", openai_over_fake_transport)
+    service = LLMService(
+        api_key="local", base_url="http://localhost:11434/v1",
+        agent_model="local-model", extraction_model="local-model", merge_model="local-model",
+    )
+
+    result = await service.generate_structured(
+        response_model=DummyModel, system="Extract.", user="Alice is here.",
+    )
+
+    assert result.name == "Alice"
+    assert requests[0]["model"] == "local-model"
+    await service.close()
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_local_provider_needs_no_api_key_but_openrouter_does():
+    with (
+        patch("infrastructure.llm_client.instructor.from_openai"),
+        patch("infrastructure.llm_client.AsyncOpenAI") as openai,
+    ):
+        local = LLMService(api_key="", base_url="http://localhost:11434/v1")
+        hosted = LLMService(api_key="")
+
+    assert local.is_configured
+    assert openai.call_args.kwargs["api_key"] == "no-key-required"
+    assert not hosted.is_configured
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_wrapped_provider_timeout_is_a_transient_transport_failure(
+    llm_service, monkeypatch
+):
+    from instructor.core.exceptions import FailedAttempt, InstructorRetryException
+    from openai import APITimeoutError
+
+    service, _, instructor_client, _, _ = llm_service
+    monkeypatch.setattr("infrastructure.llm_client.asyncio.sleep", AsyncMock())
+    timeout = APITimeoutError(request=httpx.Request("POST", "https://llm.test"))
+    wrapped = InstructorRetryException(
+        "Request timed out.", n_attempts=1, total_usage=0,
+        failed_attempts=[FailedAttempt(1, timeout, None)],
+    )
+    instructor_client.chat.completions.create_with_completion.side_effect = wrapped
+
+    with pytest.raises(LLMProviderError) as caught:
+        await service.generate_structured(
+            response_model=DummyModel, system="system", user="user",
+        )
+
+    assert caught.value.transient is True
+    # Retried as transport, not as invalid output.
+    assert (
+        instructor_client.chat.completions.create_with_completion.await_count
+        == TRANSPORT_RETRIES
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_cached_prompt_tokens_are_reported_per_model(llm_service):
+    service, raw_client, _, _, _ = llm_service
+    raw_client.chat.completions.create.return_value = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))],
+        usage=SimpleNamespace(
+            prompt_tokens=1000, completion_tokens=10,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=900),
+        ),
+    )
+
+    await service.generate_text(system="system", user="user", model="m1")
+    await service.generate_text(system="system", user="user", model="m1")
+
+    # Gemini-style usage: a write is also counted inside cached_tokens.
+    raw_client.chat.completions.create.return_value = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))],
+        usage=SimpleNamespace(
+            prompt_tokens=1000, completion_tokens=10,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=1000, cache_write_tokens=1000),
+        ),
+    )
+    await service.generate_text(system="system", user="user", model="m1")
+
+    cache = (await service.spending_snapshot())["prompt_cache"]
+    assert cache["m1"] == {
+        "requests": 3, "prompt_tokens": 3000, "cached_prompt_tokens": 1800,
+        "cache_write_tokens": 1000, "hit_rate": 0.6,
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_silently_truncated_prompt_fails_loudly(llm_service):
+    from common.exceptions import LLMContextTruncatedError
+
+    service, raw_client, instructor_client, _, _ = llm_service
+    long_prompt = "word " * 5_000
+    # A local server with a small context reports far fewer prompt tokens.
+    instructor_client.chat.completions.create_with_completion.return_value = (
+        DummyModel(name="partial"),
+        SimpleNamespace(usage=SimpleNamespace(prompt_tokens=2_048, completion_tokens=5)),
+    )
+    with pytest.raises(LLMContextTruncatedError, match="OLLAMA_CONTEXT_LENGTH"):
+        await service.generate_structured(
+            response_model=DummyModel, system=long_prompt, user="user",
+        )
+
+    raw_client.chat.completions.create.return_value = async_chunks(
+        stream_chunk(content="partial"),
+        stream_chunk(usage=SimpleNamespace(prompt_tokens=2_048, completion_tokens=1, total_tokens=2_049)),
+    )
+    events = [
+        event async for event in service.stream_with_tools(
+            system=long_prompt, user="user", tools=[],
+        )
+    ]
+    assert events[-1]["event"] == "step_error"
+    assert events[-1]["data"]["code"] == "provider_context_limit"
+    assert raw_client.chat.completions.create.call_args.kwargs["stream_options"] == {
+        "include_usage": True
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_local_thinking_switch_maps_to_reasoning_effort():
+    with (
+        patch("infrastructure.llm_client.instructor.from_openai"),
+        patch("infrastructure.llm_client.AsyncOpenAI"),
+    ):
+        local = LLMService(base_url="http://localhost:11434/v1", thinking="planning_only")
+        hosted = LLMService(api_key="key", thinking="off")
+        full = LLMService(base_url="http://localhost:11434/v1", thinking="provider_default")
+
+    assert local._provider_extra_body("high") is None
+    assert local._provider_extra_body("medium") == {"reasoning_effort": "none"}
+    assert local._provider_extra_body(None) == {"reasoning_effort": "none"}
+    # OpenRouter keeps its own reasoning budgets.
+    assert "reasoning_effort" not in hosted._provider_extra_body("medium")
+    assert full._provider_extra_body("medium") is None
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_local_models_are_fast_by_default_and_full_thinking_is_warned():
+    from common.schema.settings import LLMSettings
+    from infrastructure.llm_client import local_thinking_warning
+
+    assert LLMSettings().thinking == "planning_only"
+    local = "http://localhost:11434/v1"
+    assert local_thinking_warning(local, "planning_only") is None
+    assert "slower" in local_thinking_warning(local, "provider_default")
+    # OpenRouter is unaffected by local thinking control.
+    assert local_thinking_warning(None, "provider_default") is None

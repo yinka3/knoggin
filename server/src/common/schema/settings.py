@@ -170,8 +170,16 @@ class LLMSettings(ConfigModel):
     api_key: str = Field("")
     base_url: Optional[str] = None
     agent_model: str = Field("google/gemini-3-flash-preview")
-    extraction_model: str = Field("google/gemini-2.5-flash-preview")
+    extraction_model: str = Field("google/gemini-2.5-flash")
     merge_model: str = Field("google/gemini-2.5-pro")
+    # Long windows and local models can take minutes for one completion.
+    request_timeout_seconds: float = Field(300.0, gt=0, le=3_600, allow_inf_nan=False)
+    # Thinking control for non-OpenRouter servers (Ollama, vLLM), which can
+    # only switch it on or off. planning_only (fast default) thinks on the
+    # planning and final answer steps; off disables it everywhere;
+    # provider_default lets the server think on every step, which is much
+    # slower. OpenRouter keeps its own reasoning budgets.
+    thinking: Literal["provider_default", "planning_only", "off"] = "planning_only"
     spending_budget: LLMSpendingBudgetSettings = Field(
         default_factory=LLMSpendingBudgetSettings
     )

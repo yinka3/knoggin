@@ -16,12 +16,15 @@ PromptCategory = Literal[
 class PromptMemoryBudget(ConfigModel):
     """One model-independent input budget for an admitted agent run."""
 
-    input_tokens: StrictInt = Field(12_000, ge=1_024)
+    # About 6K tokens are fixed (system prompt and tool schemas) before any
+    # memory is added; the shares below leave real room for Context, the run's
+    # own results, and history on long-context models.
+    input_tokens: StrictInt = Field(48_000, ge=1_024)
     response_reserve_tokens: StrictInt = Field(2_000, ge=256)
-    project_context_tokens: StrictInt = Field(3_000, ge=0)
-    run_notebook_tokens: StrictInt = Field(4_000, ge=0)
-    selected_notebook_tokens: StrictInt = Field(1_500, ge=0)
-    conversation_tokens: StrictInt = Field(2_000, ge=0)
+    project_context_tokens: StrictInt = Field(12_000, ge=0)
+    run_notebook_tokens: StrictInt = Field(16_000, ge=0)
+    selected_notebook_tokens: StrictInt = Field(6_000, ge=0)
+    conversation_tokens: StrictInt = Field(8_000, ge=0)
     spare_priority: tuple[PromptCategory, PromptCategory, PromptCategory, PromptCategory] = (
         "conversation", "project_context", "run_notebook", "selected_notebook"
     )

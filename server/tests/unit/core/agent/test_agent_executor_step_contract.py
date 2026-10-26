@@ -20,6 +20,7 @@ from core.agent.executor import AgentExecutor, _AgentPhase
 from core.agent.executor import _ToolCall as ToolCall
 from core.agent.prompt_budget import token_count
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
+from infrastructure.llm_client import system_text
 
 
 class StreamingLLM:
@@ -32,7 +33,8 @@ class StreamingLLM:
         self.calls = []
 
     async def stream_with_tools(self, **kwargs):
-        self.calls.append(kwargs)
+        # Record the joined system prompt; the executor sends cacheable parts.
+        self.calls.append({**kwargs, "system": system_text(kwargs["system"])})
         if self.raises:
             raise self.raises
         for chunk in self.chunks:
@@ -79,6 +81,7 @@ def test_prompt_assembly_bounds_all_memory_while_retaining_current_query():
         tool_schemas=[], last_result=None,
     )
 
+    system = system_text(system)
     assert token_count(system, None) + token_count(user, None) + 64 <= 4_000
     assert executor.ctx.user_query in user
     assert "project" in system
@@ -230,10 +233,10 @@ async def test_step_forwards_standard_stream_events(monkeypatch):
 
     def fake_agent_prompt(*args, **kwargs):
         prompt_calls.append((args, kwargs))
-        return "SYSTEM PROMPT"
+        return ("SYSTEM PROMPT", "", "")
 
     monkeypatch.setattr(
-        "core.agent.executor.get_agent_prompt",
+        "core.agent.executor.get_agent_prompt_parts",
         fake_agent_prompt,
     )
     executor = make_executor(llm)
@@ -323,10 +326,10 @@ async def test_step_forwards_selected_research_profile_to_prompt(monkeypatch):
 
     def fake_agent_prompt(**kwargs):
         prompt_kwargs.update(kwargs)
-        return "SYSTEM PROMPT"
+        return ("SYSTEM PROMPT", "", "")
 
     monkeypatch.setattr(
-        "core.agent.executor.get_agent_prompt",
+        "core.agent.executor.get_agent_prompt_parts",
         fake_agent_prompt,
     )
     executor = make_executor(
