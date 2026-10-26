@@ -10,11 +10,6 @@ from common.schema.settings import DeveloperSettings, IngestionSettings, RootCon
 from core.agent.orchestrator import AgentOrchestrator
 from core.knowledge.documents import DocumentService, ProjectFilesystemFactory
 from core.knowledge.documents import extraction as document_extraction
-from core.knowledge.documents.extraction import (
-    DocumentParseSnapshot,
-    DocumentSnapshotPage,
-    LayoutRegion,
-)
 from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.retrieval import KnowledgeRetrieval
 from core.knowledge.store import KnowledgeStore
@@ -166,7 +161,7 @@ def _runtime_document_cases():
             ),
             {
                 "source_kind": "text_document",
-                "excerpt": "# Overview\n\nThe violet launch phrase is durable.",
+                "excerpt": "## Overview\n\nThe violet launch phrase is durable.",
                 "locator": {
                     "kind": "text_lines",
                     "start_line": 1,
@@ -202,40 +197,6 @@ def _runtime_document_cases():
     ]
 
 
-def _structured_parse_snapshot(_content: bytes, extension: str) -> DocumentParseSnapshot:
-    if extension == ".pdf":
-        text = "The violet launch phrase is durable."
-        return DocumentParseSnapshot(
-            text=text,
-            structure={"pages": {"1": {}}},
-            parser_name="docling",
-            parser_version="test",
-            parser_fingerprint="a" * 64,
-            pages=(
-                DocumentSnapshotPage(
-                    page_number=1,
-                    text=text,
-                    regions=(
-                        LayoutRegion(
-                            page_number=1,
-                            element_type="text",
-                            extraction_method="native_text",
-                        ),
-                    ),
-                ),
-            ),
-        )
-    if extension == ".docx":
-        return DocumentParseSnapshot(
-            text="# Overview\n\nThe violet launch phrase is durable.",
-            structure={"texts": [{"label": "section_header"}]},
-            parser_name="docling",
-            parser_version="test",
-            parser_fingerprint="a" * 64,
-        )
-    raise AssertionError(f"unexpected structured format {extension}")
-
-
 @pytest.mark.integration
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
@@ -259,11 +220,6 @@ async def test_session_run_preserves_format_specific_document_provenance(
         document_extraction.pytesseract,
         "image_to_string",
         lambda _: "The violet launch phrase is durable.\n",
-    )
-    monkeypatch.setattr(
-        document_extraction,
-        "_extract_docling_snapshot",
-        _structured_parse_snapshot,
     )
     embedding = _DeterministicEmbeddingService()
     llm = _DeterministicDocumentAgentLLM()
