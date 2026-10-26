@@ -39,6 +39,16 @@ def build_episode_embedding_text_from_fields(
     return "\n\n".join(f"{label}:\n{content}" for label, content in sections)
 
 
+def exchange_embedding_text(row: dict) -> str:
+    """Embed the question and its answer together; searches match the pair."""
+
+    parts = [f"USER: {str(row.get('user_content') or '').strip()}"]
+    assistant = str(row.get("assistant_content") or "").strip()
+    if assistant:
+        parts.append(f"ASSISTANT: {assistant}")
+    return "\n\n".join(parts)
+
+
 def build_episode_embedding_text(episode: Episode) -> str:
     """Build canonical embedding text from an in-memory episode aggregate."""
 

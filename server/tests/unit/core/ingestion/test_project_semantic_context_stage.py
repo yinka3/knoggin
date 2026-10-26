@@ -353,7 +353,10 @@ async def _publish_nothing(_entity_ids):
     return None
 
 
-def _job(store, updater, *, now_ms=lambda: 1_000, projection=None, policy=None):
+def _job(
+    store, updater, *, now_ms=lambda: 1_000, projection=None, policy=None,
+    exchange_embedding_service=None,
+):
     async def capture_semantic_policy():
         return policy or _policy()
 
@@ -361,6 +364,7 @@ def _job(store, updater, *, now_ms=lambda: 1_000, projection=None, policy=None):
         _Admission(),
         store,
         object(),
+        exchange_embedding_service=exchange_embedding_service,
         settings=IngestionSettings(semantic_window_tokens=1),
         capture_semantic_policy=capture_semantic_policy,
         context_updater=updater,
@@ -830,3 +834,63 @@ async def test_only_non_transient_failures_consume_window_attempts(
     assert failure.get("consume_attempt", True) is consumes_attempt
     assert failure["next_retry_at_ms"] == 1_000 + retry_delay_ms
     assert store.window.attempt_count == (1 if consumes_attempt else 0)
+
+
+class _ExchangeStore(_ContextStore):
+    def __init__(self, window):
+        super().__init__(window)
+        self.written = []
+
+    async def get_exchanges_without_embeddings(self, **_kwargs):
+        return [{
+            "user_message_id": 7, "session_id": "session-1",
+            "user_content": "Which queue?", "assistant_content": "The durable one.",
+        }]
+
+    async def write_exchange_embeddings(self, *, project_id, rows):
+        self.written.append((project_id, rows))
+        return len(rows)
+
+
+class _Embedder:
+    def __init__(self, *, fail=False):
+        self.fail = fail
+        self.texts = []
+
+    def split_for_embedding(self, text):
+        return [text]
+
+    async def encode(self, texts):
+        if self.fail:
+            raise RuntimeError("embedding model unavailable")
+        self.texts.extend(texts)
+        return [[0.5] * 768 for _ in texts]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_closed_exchanges_get_search_vectors_before_window_work():
+    store = _ExchangeStore(_window())
+    embedder = _Embedder()
+    job = _job(store, _Updater(), exchange_embedding_service=embedder)
+
+    result = await job.execute(JobContext(user_name="ada", project_id="project-1"))
+
+    assert result.success
+    assert embedder.texts == ["USER: Which queue?\n\nASSISTANT: The durable one."]
+    project_id, rows = store.written[0]
+    assert project_id == "project-1"
+    assert rows[0]["user_message_id"] == 7 and len(rows[0]["embedding"]) == 768
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_exchange_embedding_failure_never_blocks_semantic_windows():
+    store = _ExchangeStore(_window())
+    job = _job(store, _Updater(), exchange_embedding_service=_Embedder(fail=True))
+
+    result = await job.execute(JobContext(user_name="ada", project_id="project-1"))
+
+    assert result.success
+    assert store.written == []
+    assert store.window.stage is SemanticWindowStage.COMPLETED

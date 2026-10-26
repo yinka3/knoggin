@@ -11,6 +11,7 @@ from core.knowledge.embedding_service import EmbeddingService
 from core.knowledge.episodes.embedding import (
     build_episode_embedding_text_from_fields,
     encode_episode_embedding_texts,
+    exchange_embedding_text,
 )
 from infrastructure.postgres_client import PostgresClient
 
@@ -45,12 +46,13 @@ class EmbeddingRebuilder:
                 return
             await cur.execute(
                 "SELECT EXISTS (SELECT 1 FROM public.episodes WHERE embedding IS NOT NULL) "
-                "OR EXISTS (SELECT 1 FROM public.document_chunks) AS has_vectors"
+                "OR EXISTS (SELECT 1 FROM public.document_chunks) "
+                "OR EXISTS (SELECT 1 FROM public.exchange_embeddings) AS has_vectors"
             )
             if (await cur.fetchone())["has_vectors"]:
                 raise RuntimeError(
                     "Stored embedding configuration is unknown or changed. Stop the engine "
-                    "and run scripts/rebuild_embeddings.py to rebuild all episode and document vectors."
+                    "and run scripts/rebuild_embeddings.py to rebuild all episode, exchange, and document vectors."
                 )
             await self._record_configuration(cur, fingerprint)
 
@@ -117,6 +119,18 @@ class EmbeddingRebuilder:
                 params,
             )
             chunks = list(await cur.fetchall())
+            await cur.execute(
+                "SELECT x.project_id, x.user_message_id, u.content AS user_content, "
+                "a.content AS assistant_content "
+                "FROM public.exchange_embeddings x "
+                "JOIN public.messages u ON u.project_id = x.project_id "
+                "AND u.message_id = x.user_message_id "
+                "LEFT JOIN public.messages a ON a.project_id = x.project_id "
+                "AND a.role = 'assistant' AND a.user_msg_id = x.user_message_id "
+                "JOIN public.projects p ON p.project_id = x.project_id " + scope,
+                params,
+            )
+            exchanges = list(await cur.fetchall())
         episode_inputs = [
             build_episode_embedding_text_from_fields(
                 row["summary"],
@@ -143,8 +157,15 @@ class EmbeddingRebuilder:
         chunk_vectors = (
             await self.embedding_service.encode(chunk_inputs) if chunk_inputs else []
         )
+        exchange_vectors = await encode_episode_embedding_texts(
+            self.embedding_service,
+            [exchange_embedding_text(row) for row in exchanges],
+        )
         episode_vectors = self._validate_embeddings(
             episode_vectors, len(episode_inputs), "episode"
+        )
+        exchange_vectors = self._validate_embeddings(
+            exchange_vectors, len(exchanges), "exchange"
         )
         chunk_vectors = self._validate_embeddings(
             chunk_vectors, len(chunk_inputs), "document"
@@ -160,11 +181,21 @@ class EmbeddingRebuilder:
                     "UPDATE public.document_chunks SET embedding = %s::vector WHERE chunk_id = %s",
                     (json.dumps(vector), row["chunk_id"]),
                 )
+            for row, vector in zip(exchanges, exchange_vectors):
+                await cur.execute(
+                    "UPDATE public.exchange_embeddings SET embedding = %s::vector "
+                    "WHERE project_id = %s AND user_message_id = %s",
+                    (json.dumps(vector), row["project_id"], row["user_message_id"]),
+                )
             if project_id is None:
                 await self._record_configuration(
                     cur, self.embedding_service.configuration_fingerprint
                 )
-        return {"episodes": len(episodes), "document_chunks": len(chunks)}
+        return {
+            "episodes": len(episodes),
+            "document_chunks": len(chunks),
+            "exchanges": len(exchanges),
+        }
 
     @staticmethod
     async def _record_configuration(cur, fingerprint: str) -> None:

@@ -369,6 +369,13 @@ CREATE TABLE public.episode_relationships (
     source_message_count integer DEFAULT 0 NOT NULL,
     CONSTRAINT episode_relationships_source_message_count_check CHECK ((source_message_count >= 0))
 );
+CREATE TABLE public.exchange_embeddings (
+    project_id text NOT NULL,
+    session_id text NOT NULL,
+    user_message_id bigint NOT NULL,
+    embedding public.vector(768) NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
 CREATE TABLE public.episodes (
     episode_id text NOT NULL,
     project_id text NOT NULL,
@@ -1161,6 +1168,8 @@ ALTER TABLE ONLY public.episode_relationships
     ADD CONSTRAINT episode_relationships_pkey PRIMARY KEY (episode_id, relationship_id);
 ALTER TABLE ONLY public.episodes
     ADD CONSTRAINT episodes_id_project_key UNIQUE (episode_id, project_id);
+ALTER TABLE ONLY public.exchange_embeddings
+    ADD CONSTRAINT exchange_embeddings_pkey PRIMARY KEY (project_id, user_message_id);
 ALTER TABLE ONLY public.episodes
     ADD CONSTRAINT episodes_pkey PRIMARY KEY (episode_id);
 ALTER TABLE ONLY public.llm_budget_reservations
@@ -1351,6 +1360,7 @@ CREATE INDEX entity_global_merge_mutations_merge_idx ON public.entity_global_mer
 CREATE INDEX episode_entities_lookup_idx ON public.episode_entities USING btree (entity_id, episode_id);
 CREATE INDEX episode_messages_message_idx ON public.episode_messages USING btree (message_id, episode_id);
 CREATE INDEX episode_relationships_lookup_idx ON public.episode_relationships USING btree (relationship_id, episode_id);
+CREATE INDEX exchange_embeddings_embedding_idx ON public.exchange_embeddings USING hnsw (embedding public.vector_cosine_ops);
 CREATE INDEX episodes_embedding_idx ON public.episodes USING hnsw (embedding public.vector_cosine_ops) WHERE (embedding IS NOT NULL);
 CREATE INDEX episodes_project_updated_idx ON public.episodes USING btree (project_id, updated_at DESC);
 CREATE INDEX episodes_search_tsvector_idx ON public.episodes USING gin (search_tsvector);
@@ -1437,6 +1447,8 @@ ALTER TABLE ONLY public.episode_messages
     ADD CONSTRAINT episode_messages_episode_scope_fk FOREIGN KEY (episode_id, project_id) REFERENCES public.episodes(episode_id, project_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.episode_messages
     ADD CONSTRAINT episode_messages_message_scope_fk FOREIGN KEY (message_id, project_id, session_id) REFERENCES public.messages(message_id, project_id, session_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.exchange_embeddings
+    ADD CONSTRAINT exchange_embeddings_message_scope_fk FOREIGN KEY (user_message_id, project_id, session_id) REFERENCES public.messages(message_id, project_id, session_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.episode_relationships
     ADD CONSTRAINT episode_relationships_episode_project_fk FOREIGN KEY (episode_id, project_id) REFERENCES public.episodes(episode_id, project_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.episode_relationships

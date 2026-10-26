@@ -298,6 +298,7 @@ class ProjectRuntimeFactory:
             admission,
             resources.knowledge_store,
             episode_generator,
+            exchange_embedding_service=resources.embedding,
             settings=developer_settings.ingestion,
             capture_semantic_policy=runtime.capture_semantic_policy,
             context_updater=ContextUpdater(llm=resources.llm_service),

@@ -283,6 +283,18 @@ class KnowledgeStore:
             **kwargs
         )
 
+    async def get_exchanges_without_embeddings(
+        self, *, user_name: str, project_id: str, limit: int
+    ) -> list[dict]:
+        return await self._message_reader.get_exchanges_without_embeddings(
+            user_name=user_name, project_id=project_id, limit=limit
+        )
+
+    async def write_exchange_embeddings(self, *, project_id: str, rows: list[dict]) -> int:
+        return await self._message_writer.write_exchange_embeddings(
+            project_id=project_id, rows=rows
+        )
+
     async def close_orphaned_open_exchanges(self, *, user_name: str) -> int:
         return await self._message_lifecycle_writer.close_orphaned_open_exchanges(
             user_name=user_name
@@ -393,7 +405,7 @@ class KnowledgeStore:
         limit: int = 50,
         threshold: float = 0.25,
     ) -> List[Tuple[int, float, str]]:
-        return await self._message_reader.search_semantic_episode_sources(
+        return await self._message_reader.search_semantic_message_sources(
             query_embedding,
             user_name=user_name,
             session_ids=session_ids,

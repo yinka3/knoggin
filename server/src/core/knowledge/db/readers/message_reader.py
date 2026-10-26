@@ -192,7 +192,7 @@ class MessageReader:
         except Exception as exc:
             self._raise_storage_read("search_fts", exc)
 
-    async def search_semantic_episode_sources(
+    async def search_semantic_message_sources(
         self,
         query_embedding: list[float],
         *,
@@ -202,38 +202,73 @@ class MessageReader:
         limit: int = 50,
         threshold: float = 0.25,
     ) -> list[tuple[int, float, str]]:
-        """Return messages nominated by semantically matching source Episodes.
+        """Return messages nominated by matching exchange or Episode vectors.
 
-        Episode vectors are a rebuildable semantic projection over their exact
-        canonical source-message membership. Messages without an Episode remain
-        available through lexical search.
+        Each closed exchange has its own vector, so recent or never-episoded
+        conversation stays semantically reachable. A matching Episode also
+        nominates its members. A message keeps its best similarity.
         """
 
         user_name = require_scope_value(
             user_name,
             "user_name",
-            "search_semantic_episode_sources",
+            "search_semantic_message_sources",
         )
         visible_project_ids = require_visible_project_ids(
             visible_project_ids,
-            "search_semantic_episode_sources",
+            "search_semantic_message_sources",
         )
         if not session_ids or not query_embedding or limit <= 0:
             return []
         if not 0.0 <= threshold <= 1.0:
             raise ValueError("semantic message threshold must be between 0 and 1")
 
-        vector = json.dumps(query_embedding)
+        params = {
+            "vector": json.dumps(query_embedding),
+            "user_name": user_name,
+            "session_ids": session_ids,
+            "project_ids": visible_project_ids,
+            "threshold": threshold,
+            "limit": limit,
+        }
+        visible = """
+                    JOIN public.sessions AS session
+                      ON session.session_id = message.session_id
+                     AND session.project_id = message.project_id
+                     AND session.user_name = message.user_name
+                    WHERE message.user_name = %(user_name)s
+                      AND message.session_id = ANY(%(session_ids)s)
+                      AND message.project_id = ANY(%(project_ids)s)
+                      AND message.lifecycle_state = 'sealed'
+                      AND session.status = 'open'
+        """
         try:
             rows = await self.client.fetch_all(
-                """
+                f"""
                 SELECT source.message_id,
                        source.session_id,
                        MAX(source.similarity) AS score
                 FROM (
+                    SELECT message.message_id,
+                           message.session_id,
+                           1 - (exchange.embedding <=> %(vector)s::vector) AS similarity
+                    FROM public.exchange_embeddings AS exchange
+                    JOIN public.messages AS message
+                      ON message.project_id = exchange.project_id
+                     AND message.session_id = exchange.session_id
+                     AND (
+                         message.message_id = exchange.user_message_id
+                         OR (
+                             message.role = 'assistant'
+                             AND message.user_msg_id = exchange.user_message_id
+                         )
+                     )
+                    {visible}
+                      AND 1 - (exchange.embedding <=> %(vector)s::vector) >= %(threshold)s
+                    UNION ALL
                     SELECT membership.message_id,
                            membership.session_id,
-                           1 - (episode.embedding <=> %s::vector) AS similarity
+                           1 - (episode.embedding <=> %(vector)s::vector) AS similarity
                     FROM public.episodes AS episode
                     JOIN public.episode_messages AS membership
                       ON membership.episode_id = episode.episode_id
@@ -242,38 +277,66 @@ class MessageReader:
                       ON message.message_id = membership.message_id
                      AND message.project_id = membership.project_id
                      AND message.session_id = membership.session_id
-                    JOIN public.sessions AS session
-                      ON session.session_id = message.session_id
-                     AND session.project_id = message.project_id
-                     AND session.user_name = message.user_name
-                    WHERE episode.embedding IS NOT NULL
-                      AND message.user_name = %s
-                      AND message.session_id = ANY(%s)
-                      AND message.project_id = ANY(%s)
-                      AND message.lifecycle_state = 'sealed'
-                      AND session.status = 'open'
-                      AND 1 - (episode.embedding <=> %s::vector) >= %s
+                    {visible}
+                      AND episode.embedding IS NOT NULL
+                      AND 1 - (episode.embedding <=> %(vector)s::vector) >= %(threshold)s
                 ) AS source
                 GROUP BY source.message_id, source.session_id
                 ORDER BY score DESC, source.message_id ASC
-                LIMIT %s
+                LIMIT %(limit)s
                 """,
-                (
-                    vector,
-                    user_name,
-                    session_ids,
-                    visible_project_ids,
-                    vector,
-                    threshold,
-                    limit,
-                ),
+                params,
             )
         except Exception as exc:
-            self._raise_storage_read("search_semantic_episode_sources", exc)
+            self._raise_storage_read("search_semantic_message_sources", exc)
         return [
             (int(row["message_id"]), float(row["score"]), str(row["session_id"]))
             for row in rows
         ]
+
+    async def get_exchanges_without_embeddings(
+        self, *, user_name: str, project_id: str, limit: int
+    ) -> list[dict]:
+        """List closed, answered exchanges that still need a search vector."""
+
+        user_name = require_scope_value(user_name, "user_name", "exchanges_without_embeddings")
+        project_id = require_scope_value(project_id, "project_id", "exchanges_without_embeddings")
+        try:
+            return await self.client.fetch_all(
+                """
+                SELECT user_message.message_id AS user_message_id,
+                       user_message.session_id,
+                       user_message.content AS user_content,
+                       assistant.content AS assistant_content
+                FROM public.messages AS user_message
+                JOIN public.sessions AS session
+                  ON session.session_id = user_message.session_id
+                 AND session.project_id = user_message.project_id
+                 AND session.user_name = user_message.user_name
+                LEFT JOIN public.messages AS assistant
+                  ON assistant.project_id = user_message.project_id
+                 AND assistant.session_id = user_message.session_id
+                 AND assistant.role = 'assistant'
+                 AND assistant.user_msg_id = user_message.message_id
+                WHERE user_message.user_name = %s
+                  AND user_message.project_id = %s
+                  AND user_message.role = 'user'
+                  AND user_message.exchange_state = 'closed'
+                  AND user_message.exchange_outcome IN
+                      ('assistant_final', 'clarification', 'user_only')
+                  AND session.status = 'open'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM public.exchange_embeddings AS existing
+                      WHERE existing.project_id = user_message.project_id
+                        AND existing.user_message_id = user_message.message_id
+                  )
+                ORDER BY user_message.message_id
+                LIMIT %s
+                """,
+                (user_name, project_id, limit),
+            )
+        except Exception as exc:
+            self._raise_storage_read("get_exchanges_without_embeddings", exc)
 
     async def get_user_agent_exchange(
         self,

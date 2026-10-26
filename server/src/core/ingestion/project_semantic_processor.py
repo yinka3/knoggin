@@ -33,6 +33,11 @@ from core.knowledge.context.projection import (
 )
 from core.knowledge.context.render import context_document_hash
 from core.knowledge.context.updater import ContextUpdater
+from core.knowledge.episodes.embedding import (
+    EpisodeEmbeddingEncoder,
+    encode_episode_embedding_texts,
+    exchange_embedding_text,
+)
 from core.knowledge.episodes.generator import EpisodeGenerator
 from core.knowledge.episodes.policy import EpisodeGenerationPolicy
 from infrastructure.job.base import BaseJob, JobContext, JobResult
@@ -119,6 +124,14 @@ class SemanticEpisodeStore(Protocol):
 
     async def commit_project_semantic_knowledge(self, build: SemanticWindowBuild): ...
 
+    async def get_exchanges_without_embeddings(
+        self, *, user_name: str, project_id: str, limit: int
+    ) -> list[dict]: ...
+
+    async def write_exchange_embeddings(
+        self, *, project_id: str, rows: list[dict]
+    ) -> int: ...
+
     async def get_project_semantic_window_committed_entity_ids(
         self, window_id: str, *, user_name: str, project_id: str
     ) -> tuple[int, ...]: ...
@@ -156,6 +169,7 @@ class ProjectSemanticProcessor(BaseJob):
 
     enabled = True
     cadence_seconds = 30
+    EXCHANGE_EMBEDDING_BATCH = 64
     run_immediately_on_first_check = True
 
     def __init__(
@@ -165,6 +179,7 @@ class ProjectSemanticProcessor(BaseJob):
         episode_generator: EpisodeGenerator,
         *,
         settings: IngestionSettings,
+        exchange_embedding_service: EpisodeEmbeddingEncoder | None = None,
         capture_semantic_policy: Callable[[], Awaitable[IngestionPolicy]],
         context_updater: ContextUpdater,
         context_projection: ContextProjection,
@@ -197,6 +212,7 @@ class ProjectSemanticProcessor(BaseJob):
         self.admission = admission
         self.knowledge_store = knowledge_store
         self.episode_generator = episode_generator
+        self._exchange_embedding_service = exchange_embedding_service
         self._context_updater = context_updater
         self._context_projection = context_projection
         self._context_entity_builder = context_entity_builder
@@ -240,6 +256,7 @@ class ProjectSemanticProcessor(BaseJob):
 
     async def execute(self, ctx: JobContext) -> JobResult:
         self._timeout_stage = None
+        await self._embed_closed_exchanges(ctx)
         window = await self.knowledge_store.get_active_project_semantic_window(
             user_name=ctx.user_name,
             project_id=ctx.project_id,
@@ -278,6 +295,38 @@ class ProjectSemanticProcessor(BaseJob):
                 return JobResult(success=True, summary="No semantic window is due")
             window = claimed.window
         return await self._drain_window(window, ctx)
+
+    async def _embed_closed_exchanges(self, ctx: JobContext) -> None:
+        """Give each closed exchange its own search vector, ahead of windowing.
+
+        Exchange closure wakes this job, so new conversation becomes
+        semantically searchable without waiting for an Episode. Failure only
+        delays search; it never blocks semantic windows.
+        """
+
+        if self._exchange_embedding_service is None:
+            return
+        try:
+            pending = await self.knowledge_store.get_exchanges_without_embeddings(
+                user_name=ctx.user_name,
+                project_id=ctx.project_id,
+                limit=self.EXCHANGE_EMBEDDING_BATCH,
+            )
+            if not pending:
+                return
+            vectors = await encode_episode_embedding_texts(
+                self._exchange_embedding_service,
+                [exchange_embedding_text(row) for row in pending],
+            )
+            await self.knowledge_store.write_exchange_embeddings(
+                project_id=ctx.project_id,
+                rows=[
+                    {**row, "embedding": vector}
+                    for row, vector in zip(pending, vectors, strict=True)
+                ],
+            )
+        except Exception as exc:
+            logger.warning("Exchange embedding deferred: {}", exc)
 
     async def _drain_window(
         self,
