@@ -5,7 +5,7 @@ import hashlib
 import json
 from collections import deque
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Dict, List, Optional
 from uuid import uuid4
@@ -20,6 +20,7 @@ from common.exceptions import (
     SessionBusyError,
 )
 from common.schema.agent.research import ResearchMode
+from common.schema.agent.settings import PromptMemoryBudget
 from common.schema.agent.stream import AgentExecutionEvent
 from common.schema.artifacts import ArtifactDraft
 from common.schema.document import DocumentFocus
@@ -28,6 +29,7 @@ from common.schema.settings import RootConfig
 from common.schema.source.references import SourceReferenceCandidate
 from common.utils.events import emit
 from common.utils.time_utils import get_now
+from core.agent.run import AgentIdentity
 from core.knowledge.documents import DocumentService
 from runtime.project_runtime import ProjectRuntime
 from runtime.resources import RuntimeResources
@@ -47,6 +49,9 @@ class SessionRunSettings:
     enabled_tools: tuple[str, ...] | None
     document_focus: DocumentFocus | None
     readable_project_ids: tuple[str, ...]
+    resolved_identity: AgentIdentity | None = None
+    resolved_model: str | None = None
+    prompt_memory_budget: PromptMemoryBudget | None = None
 
 
 class _AdmittedAgentStream:
@@ -483,6 +488,27 @@ class SessionRuntime:
             self._active_request_fingerprint = request_fingerprint
             self._active_agent_task = asyncio.current_task()
 
+        selected_orchestrator = orchestrator or self.agent_orchestrator
+        if selected_orchestrator is not None and hasattr(selected_orchestrator, "resolve_run_policy"):
+            try:
+                identity, selected_model, budget = await selected_orchestrator.resolve_run_policy(
+                    config=run_settings.config,
+                    requested_agent_id=agent_id,
+                    session_agent_id=run_settings.agent_id,
+                    requested_model=model,
+                    session_model=run_settings.model,
+                    fallback_model=self.resources.llm_service.agent_model,
+                )
+                run_settings = replace(
+                    run_settings,
+                    resolved_identity=identity,
+                    resolved_model=selected_model,
+                    prompt_memory_budget=budget,
+                )
+            except BaseException:
+                await self._release_agent_run(None)
+                raise
+
         acceptance_task = asyncio.create_task(
             self._accept_user_message(
                 message,
@@ -596,9 +622,21 @@ class SessionRuntime:
         try:
             if shutting_down:
                 raise asyncio.CancelledError
+            prompt_memory = run_settings.config.developer_settings.prompt_memory
+            # At least one token is needed to represent each retained turn.
+            # Fetch against the largest admitted budget; the chosen run budget
+            # makes the final selection at prompt assembly.
+            history_turns = min(
+                10_000,
+                run_settings.prompt_memory_budget.input_tokens
+                if run_settings.prompt_memory_budget is not None
+                else max([
+                    prompt_memory.default.input_tokens,
+                    *(row.budget.input_tokens for row in prompt_memory.overrides),
+                ]),
+            )
             history = await self.get_conversation_context(
-                run_settings.config.developer_settings.limits.conversation_context_turns,
-                up_to_msg_id=accepted.id - 1,
+                history_turns, up_to_msg_id=accepted.id - 1,
             )
             orchestrator = orchestrator or self.agent_orchestrator
             if orchestrator is None:

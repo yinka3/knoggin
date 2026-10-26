@@ -99,6 +99,27 @@ def test_selected_notebook_snapshot_is_bounded_and_withholds_changed_passages():
     assert '"status": "changed"' in selected["context"]
 
 
+def test_selected_notebook_does_not_drop_entries_at_old_character_limit():
+    entries = [{"entry_id": str(index), "note": "n" * 400} for index in range(30)]
+    view = {"notebook": {"revision": 1, "entries": entries}, "items": [
+        {"entry_id": str(index), "kind": "source_ref", "target_id": str(index),
+         "status": "current", "source": {"title": f"Source {index}"}}
+        for index in range(30)
+    ]}
+
+    class Store:
+        async def get(self, *_):
+            return {"view": "source_desk"}
+
+        async def source_desk(self, *_):
+            return view
+
+    runtime = SimpleNamespace(projects=SimpleNamespace(notebooks=Store()))
+    selected = asyncio.run(_selected_notebook(runtime, "project-1", "notebook-1"))
+    assert len(selected["context"]) > 10_000
+    assert '"target_id": "29"' in selected["context"]
+
+
 def test_start_run_passes_selected_notebook_without_changing_query():
     notebook_id = "00000000-0000-0000-0000-000000000002"
     calls = []

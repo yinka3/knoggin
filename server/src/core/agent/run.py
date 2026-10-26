@@ -20,6 +20,7 @@ from common.schema.agent.research import (
 )
 from common.schema.agent.settings import (
     ProjectBriefingMode,
+    PromptMemoryBudget,
     validate_tool_limit_overrides,
 )
 from common.schema.agent.stream import StreamUsage
@@ -248,7 +249,9 @@ class AgentRunLimits:
     )
 
     @classmethod
-    def from_settings(cls, settings: Any) -> "AgentRunLimits":
+    def from_settings(
+        cls, settings: Any, memory_budget: PromptMemoryBudget | None = None
+    ) -> "AgentRunLimits":
         """Compile mutable application settings into an execution snapshot."""
 
         defaults = get_default_tool_limits()
@@ -264,7 +267,7 @@ class AgentRunLimits:
             max_calls=settings.max_tool_calls,
             tool_timeout=settings.tool_timeout,
             max_attempts=settings.max_attempts,
-            max_history_turns=settings.agent_history_turns,
+            max_history_turns=(memory_budget or PromptMemoryBudget()).input_tokens,
             max_accumulated_messages=settings.max_accumulated_messages,
             max_accumulated_profiles=settings.max_accumulated_profiles,
             max_accumulated_graph=settings.max_accumulated_graph,
@@ -276,7 +279,7 @@ class AgentRunLimits:
             max_accumulated_actions=settings.max_accumulated_actions,
             max_accumulated_next_steps=settings.max_accumulated_next_steps,
             max_accumulated_summary_chars=settings.max_accumulated_summary_chars,
-            max_notebook_render_tokens=settings.max_notebook_render_tokens,
+            max_notebook_render_tokens=(memory_budget or PromptMemoryBudget()).input_tokens,
             max_consecutive_errors=settings.max_consecutive_errors,
             project_briefing_mode=briefing_mode,
             tool_limits=tuple((defaults | overrides).items()),
@@ -328,6 +331,7 @@ class AgentRun:
     additional_tool_schemas: Tuple[Dict[str, Any], ...]
     tool_runtime: ToolRuntime
     limits: AgentRunLimits
+    memory_budget: PromptMemoryBudget = field(default_factory=PromptMemoryBudget)
     research_profile: ResearchProfile = field(
         default_factory=lambda: DEFAULT_RESEARCH_PROFILES["normal"]
     )
@@ -391,6 +395,7 @@ class AgentRun:
         document_focus: Optional[DocumentFocus] = None,
         document_selection_context: Optional[Dict[str, Any]] = None,
         selected_notebook: Optional[Dict[str, Any]] = None,
+        memory_budget: PromptMemoryBudget | None = None,
         notebook: Optional[RunNotebook] = None,
         is_community: bool = False,
         current_participants: Optional[List[str]] = None,
@@ -452,6 +457,7 @@ class AgentRun:
             additional_tool_schemas=effective_additional_schemas,
             tool_runtime=tool_runtime,
             limits=limits,
+            memory_budget=memory_budget or PromptMemoryBudget(),
             research_profile=effective_research_profile,
             history=list(history or []),
             document_focus=document_focus,

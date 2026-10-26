@@ -2,7 +2,7 @@ from typing import Dict, List, Literal, Optional
 
 from pydantic import Field, model_validator
 
-from common.schema.agent.settings import AgentLimitSettings
+from common.schema.agent.settings import AgentLimitSettings, PromptMemorySettings
 from common.schema.config import ConfigModel
 from common.schema.jev import JevSettings
 
@@ -201,6 +201,7 @@ class DeveloperSettings(ConfigModel):
     ingestion: IngestionSettings = Field(default_factory=IngestionSettings)
     jobs: JobSettings = Field(default_factory=JobSettings)
     limits: AgentLimitSettings = Field(default_factory=AgentLimitSettings)
+    prompt_memory: PromptMemorySettings = Field(default_factory=PromptMemorySettings)
     entity_resolution: EntityResolutionSettings = Field(
         default_factory=EntityResolutionSettings
     )

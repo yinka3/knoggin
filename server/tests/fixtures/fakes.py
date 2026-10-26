@@ -529,6 +529,8 @@ class FakeEmbeddingService:
 
 
 class FakeLLMService:
+    agent_model = "agent-model"
+
     async def close(self):
         pass
 
@@ -1048,16 +1050,14 @@ class FakeProjectManager:
         self.release_calls.append((project_id, session_id))
 
 class FakeConfigValue:
-    def __init__(self, conversation_context_turns=100):
+    def __init__(self):
+        from common.schema.agent.settings import PromptMemorySettings
+
         self.developer_settings = type(
             "DeveloperSettings",
             (),
             {
-                "limits": type(
-                    "Limits",
-                    (),
-                    {"conversation_context_turns": conversation_context_turns},
-                )(),
+                "prompt_memory": PromptMemorySettings(),
                 "ingestion": type(
                     "Ingestion",
                     (),

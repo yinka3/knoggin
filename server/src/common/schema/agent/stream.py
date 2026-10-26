@@ -77,7 +77,7 @@ class StepCompletedEvent(_StrictStreamDict):
 class StepErrorData(_StrictStreamDict):
     message: str
     kind: Literal["provider", "formatting"]
-    code: NotRequired[Literal["llm_budget_exhausted"]]
+    code: NotRequired[Literal["llm_budget_exhausted", "prompt_budget_exceeded", "provider_context_limit"]]
     retryable: NotRequired[StrictBool]
     usage: NotRequired[StreamUsage]
 
@@ -167,7 +167,7 @@ class ClarificationEvent(_StrictStreamDict):
 
 class ErrorData(_StrictStreamDict):
     message: NonBlankString
-    code: NotRequired[Literal["llm_budget_exhausted", "workspace_conflict"]]
+    code: NotRequired[Literal["llm_budget_exhausted", "prompt_budget_exceeded", "provider_context_limit", "workspace_conflict"]]
     retryable: NotRequired[StrictBool]
 
 
@@ -185,6 +185,17 @@ class SteerAppliedEvent(_StrictStreamDict):
     data: SteerAppliedData
 
 
+class PromptBudgetSelectedData(_StrictStreamDict):
+    agent_id: NonBlankString
+    model: NonBlankString
+    budget: Dict[str, Any]
+
+
+class PromptBudgetSelectedEvent(_StrictStreamDict):
+    event: Literal["prompt_budget_selected"]
+    data: PromptBudgetSelectedData
+
+
 # These events are engine-internal. API routes translate them into public
 # HTTP/SSE events rather than serializing this union directly.
 AgentExecutionEvent = Union[
@@ -197,6 +208,7 @@ AgentExecutionEvent = Union[
     ClarificationEvent,
     ErrorEvent,
     SteerAppliedEvent,
+    PromptBudgetSelectedEvent,
 ]
 
 AgentStreamEvent = Union[InternalAgentStreamEvent, AgentExecutionEvent]

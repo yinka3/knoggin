@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import uuid
 from collections.abc import Awaitable, Callable
@@ -41,9 +42,16 @@ from core.agent.formatters import (
     format_documents_context,
 )
 from core.agent.notebook import NotebookApplyResult
+from core.agent.prompt_budget import (
+    PromptBudgetExceeded,
+    allocate_memory,
+    token_count,
+    trim_to_tokens,
+)
 from core.agent.prompt_context import (
     build_evidence_context,
     build_user_message,
+    format_conversation_history,
 )
 from core.agent.run import AgentRun
 from core.agent.sources.tool_results import capture_tool_source_candidates
@@ -62,7 +70,6 @@ from core.agent.tools.registry import (
 from core.knowledge.context.render import render_context_model_input
 from infrastructure.llm_client import LLMService
 
-MAX_PROJECT_CONTEXT_CHARS = 24_000
 PUBLIC_AGENT_FAILURE_MESSAGE = (
     "The agent couldn't complete this request. Please try again."
 )
@@ -307,9 +314,12 @@ class AgentExecutor:
 
                 if event_type == "step_error":
                     self._accumulate_usage(data.get("usage"))
-                    if data.get("code") == "llm_budget_exhausted":
+                    if data.get("code") in {
+                        "llm_budget_exhausted", "prompt_budget_exceeded",
+                        "provider_context_limit",
+                    }:
                         yield self._terminal_error(
-                            code="llm_budget_exhausted",
+                            code=data["code"],
                             retryable=False,
                         )
                         return
@@ -626,25 +636,26 @@ class AgentExecutor:
             if phase is _AgentPhase.SYNTHESIZE
             else self.ctx.tool_runtime.runtime_instructions
         )
-        system_prompt = get_agent_prompt(
-            user_name=self.ctx.user_name,
-            current_time=date,
-            persona=self.ctx.agent.persona,
-            agent_name=self.ctx.agent.name,
-            documents_context=documents_context,
-            document_focus_context=document_focus_context,
-            agent_brain=self.ctx.brain,
-            project_brief=project_brief,
-            project_context=project_context,
-            runtime_instructions=runtime_instructions,
-            is_community=self.ctx.is_community,
-            participants=self.ctx.current_participants,
-            phase=phase,
-            research_profile=self.ctx.research_profile,
-            gap_review=gap_review,
-        )
-
-        user_message = build_user_message(self.ctx, last_result)
+        try:
+            system_prompt, user_message = self._bounded_prompt(
+                date=date, phase=phase, gap_review=gap_review,
+                documents_context=documents_context,
+                document_focus_context=document_focus_context,
+                project_brief=project_brief, project_context=project_context,
+                runtime_instructions=runtime_instructions,
+                tool_schemas=tool_schemas, last_result=last_result,
+            )
+        except PromptBudgetExceeded:
+            yield {
+                "event": "step_error",
+                "data": {
+                    "kind": "formatting",
+                    "message": "The fixed prompt exceeds the configured input budget.",
+                    "code": "prompt_budget_exceeded",
+                    "retryable": False,
+                },
+            }
+            return
         self.ctx.clear_last_error()
         saw_tool_calls = False
 
@@ -657,6 +668,7 @@ class AgentExecutor:
                 temperature=self.ctx.temperature,
                 reasoning=reasoning,
                 aac_budget=self._aac_budget,
+                max_completion_tokens=self.ctx.memory_budget.response_reserve_tokens,
             ):
                 if event["event"] == "tool_calls":
                     saw_tool_calls = True
@@ -695,6 +707,81 @@ class AgentExecutor:
                     "message": "LLM provider unavailable",
                 },
             }
+
+    def _bounded_prompt(
+        self, *, date, phase, gap_review, documents_context,
+        document_focus_context, project_brief, project_context,
+        runtime_instructions, tool_schemas, last_result,
+    ) -> tuple[str, str]:
+        """Fit every memory category around the actual fixed prompt for this step."""
+        budget = self.ctx.memory_budget
+        counter = getattr(self.llm, "count_tokens", None)
+        counter = counter if callable(counter) else None
+        parts = {
+            "project_context": project_context,
+            "run_notebook": (build_evidence_context(self.ctx) if self.ctx.has_any() else ""),
+            "selected_notebook": (
+                self.ctx.selected_notebook["context"] if self.ctx.selected_notebook else ""
+            ),
+            "conversation": format_conversation_history(self.ctx),
+        }
+
+        def system(context: str) -> str:
+            return get_agent_prompt(
+                user_name=self.ctx.user_name, current_time=date,
+                persona=self.ctx.agent.persona, agent_name=self.ctx.agent.name,
+                documents_context=documents_context,
+                document_focus_context=document_focus_context,
+                agent_brain=self.ctx.brain, project_brief=project_brief,
+                project_context=context, runtime_instructions=runtime_instructions,
+                is_community=self.ctx.is_community,
+                participants=self.ctx.current_participants, phase=phase,
+                research_profile=self.ctx.research_profile, gap_review=gap_review,
+            )
+
+        def user(memory: dict[str, str]) -> str:
+            return build_user_message(
+                self.ctx, last_result,
+                history_text=memory["conversation"],
+                selected_notebook_text=memory["selected_notebook"],
+                evidence_text=memory["run_notebook"],
+            )
+
+        empty = {key: "" for key in parts}
+        tool_tokens = token_count(
+            json.dumps(tool_schemas, sort_keys=True, default=str, separators=(",", ":")),
+            counter,
+        )
+        # Covers provider message framing and small tool-envelope differences.
+        framing_reserve = 64
+        fixed_tokens = (
+            token_count(system(""), counter)
+            + token_count(user(empty), counter)
+            + tool_tokens + framing_reserve
+        )
+        memory = allocate_memory(parts, budget, budget.input_tokens - fixed_tokens, counter)
+        for _ in range(16):
+            system_prompt = system(memory["project_context"])
+            user_message = user(memory)
+            used = (
+                token_count(system_prompt, counter)
+                + token_count(user_message, counter)
+                + tool_tokens + framing_reserve
+            )
+            if used <= budget.input_tokens:
+                return system_prompt, user_message
+            overage = used - budget.input_tokens
+            for key in reversed(budget.spare_priority):
+                current = memory[key]
+                if current:
+                    allowance = max(0, token_count(current, counter) - overage - 1)
+                    memory[key] = trim_to_tokens(
+                        current, allowance, counter, tail=key == "conversation"
+                    )
+                    break
+            else:
+                break
+        raise PromptBudgetExceeded("Prompt exceeds configured input budget")
 
     async def _ensure_project_briefing(self) -> tuple[str, str, str]:
         """Return run-cached persistent Project prompt material."""
@@ -816,10 +903,7 @@ class AgentExecutor:
                 type(exc).__name__,
             )
             return ""
-        if len(rendered) <= MAX_PROJECT_CONTEXT_CHARS:
-            return rendered
-        marker = "\n\n[Project Context truncated at the deterministic prompt limit.]\n"
-        return rendered[: MAX_PROJECT_CONTEXT_CHARS - len(marker)].rstrip() + marker
+        return rendered
 
     def _parse_tool_calls(
         self,

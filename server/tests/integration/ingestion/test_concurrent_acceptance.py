@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from common.schema.agent.settings import PromptMemorySettings
 from common.schema.primitives import Message
 from core.knowledge.store import KnowledgeStore
 from runtime.session_runtime import SessionRuntime as Session
@@ -24,9 +25,7 @@ def _configure_context(monkeypatch) -> None:
                         "DeveloperSettings",
                         (),
                         {
-                            "limits": type(
-                                "Limits", (), {"conversation_context_turns": 100}
-                            )(),
+                            "prompt_memory": PromptMemorySettings(),
                             "ingestion": type(
                                 "Ingestion", (), {"message_edit_window_seconds": 1}
                             )(),

@@ -5,6 +5,7 @@ import pytest
 from common.conf.domain_config import DomainConfig
 from common.exceptions import LLMBudgetExceededError, WorkspaceConflictError
 from common.schema.agent.identity import AgentConfig
+from common.schema.agent.settings import PromptMemorySettings
 from core.agent.agent_manager import AgentManager
 from core.agent.orchestrator import AgentOrchestrator
 from tests.fixtures.fakes import FakeResources
@@ -33,11 +34,17 @@ def _resolved_response_event(agent_id="agent-1"):
     }
 
 
+def _after_budget(events):
+    assert events[0]["event"] == "prompt_budget_selected"
+    assert events[0]["data"]["agent_id"] == "agent-1"
+    assert events[0]["data"]["budget"]["input_tokens"] == 12_000
+    return events[1:]
+
+
 class FakeLimits:
     max_tool_calls = 9
     tool_timeout = 1.5
     max_attempts = 8
-    agent_history_turns = 3
     max_accumulated_messages = 12
     max_accumulated_profiles = 8
     max_accumulated_graph = 16
@@ -49,7 +56,6 @@ class FakeLimits:
     max_accumulated_actions = 6
     max_accumulated_next_steps = 6
     max_accumulated_summary_chars = 2000
-    max_notebook_render_tokens = 5000
     max_consecutive_errors = 2
     tool_limit_overrides = {"search_knowledge_entities": 4}
 
@@ -60,6 +66,7 @@ class FakeConfig:
         (),
         {
             "limits": FakeLimits(),
+            "prompt_memory": PromptMemorySettings(),
             "search": type("Search", (), {"model_dump": lambda self: {}})(),
         },
     )()
@@ -212,7 +219,7 @@ async def test_orchestrator_compiles_selected_research_mode_into_same_agent_run(
         )
     ]
 
-    assert events == [_resolved_response_event()]
+    assert _after_budget(events) == [_resolved_response_event()]
     run = FakeExecutor.instances[0].ctx
     assert run.research_profile.mode == "research"
     assert run.limits.max_calls == FakeLimits.max_tool_calls * 2
@@ -258,7 +265,7 @@ async def test_orchestrator_stream_builds_context_and_forwards_effective_agent_c
         )
     ]
 
-    assert events == [_resolved_response_event()]
+    assert _after_budget(events) == [_resolved_response_event()]
     executor = FakeExecutor.instances[0]
     assert executor.ctx.user_query == "hello"
     assert executor.ctx.history == [{"role": "user", "content": "prior"}]
@@ -329,6 +336,33 @@ async def test_orchestrator_resolves_request_then_session_then_agent_config(
     assert session_run.ctx.enabled_tools == ("message_search",)
     assert request_run.execute_kwargs == {"user_timezone": None}
     assert session_run.execute_kwargs == {"user_timezone": None}
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_admitted_model_and_prompt_budget_ignore_later_session_change(monkeypatch):
+    context = FakeSession()
+    context.model = "later-model"
+    context.resources.postgres.upsert_agent(AgentConfig(
+        id="agent-1", name="Researcher", persona="Careful", is_default=True,
+    ))
+    monkeypatch.setattr("core.agent.orchestrator.AgentExecutor", FakeExecutor)
+
+    async def fake_bootstrap_services(self, context_arg, agent_id, document_focus):
+        return FakeTools()
+
+    monkeypatch.setattr(AgentOrchestrator, "_bootstrap_services", fake_bootstrap_services)
+    captured = SimpleNamespace(
+        config=FakeConfig(), model="captured-model", agent_id=None,
+        enabled_tools=None, document_focus=None,
+    )
+    events = [event async for event in make_orchestrator(context).run_stream(
+        user_query="hello", context=context, run_settings=captured,
+    )]
+
+    assert events[0]["event"] == "prompt_budget_selected"
+    assert events[0]["data"]["model"] == "captured-model"
+    assert FakeExecutor.instances[-1].ctx.model == "captured-model"
 
 
 @pytest.mark.runtime
@@ -417,7 +451,7 @@ async def test_orchestrator_translates_expected_runtime_failures(
         )
     ]
 
-    assert events == [{"event": "error", "data": expected_data}]
+    assert _after_budget(events) == [{"event": "error", "data": expected_data}]
     assert tools.closed is True
 
 
@@ -454,7 +488,7 @@ async def test_orchestrator_preserves_an_explicit_empty_tool_allowlist(
         )
     ]
 
-    assert events == [_resolved_response_event()]
+    assert _after_budget(events) == [_resolved_response_event()]
     assert FakeExecutor.instances[0].ctx.enabled_tools == ()
 
 
@@ -489,7 +523,7 @@ async def test_orchestrator_does_not_inject_maintenance_candidates(
         )
     ]
 
-    assert events == [_resolved_response_event()]
+    assert _after_budget(events) == [_resolved_response_event()]
     assert not hasattr(FakeExecutor.instances[0].ctx, "maintenance_candidates")
 
 @pytest.mark.runtime
@@ -758,7 +792,7 @@ async def test_orchestrator_runs_with_a_selected_document_passage(monkeypatch):
         )
     ]
 
-    assert events == [_resolved_response_event()]
+    assert _after_budget(events) == [_resolved_response_event()]
     candidate = FakeExecutor.instances[0].ctx.initial_source_candidates[0]
     assert candidate.parse_snapshot_id == "snapshot-1"
     assert candidate.excerpt == "2: Useful note\n3: Another note"
@@ -802,7 +836,7 @@ async def test_orchestrator_seeds_pasted_text_candidates_from_canonical_turn(
         )
     ]
 
-    assert events == [_resolved_response_event()]
+    assert _after_budget(events) == [_resolved_response_event()]
     candidates = FakeExecutor.instances[0].ctx.initial_source_candidates
     assert len(candidates) == 1
     assert candidates[0].source_message_id == 42

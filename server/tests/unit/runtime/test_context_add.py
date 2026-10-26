@@ -9,10 +9,13 @@ from common.exceptions import (
     RequestInterruptedError,
     SessionBusyError,
 )
+from common.schema.agent.identity import AgentConfig
+from common.schema.agent.settings import PromptMemoryBudget
 from common.schema.artifacts import ArtifactDraft, MarkdownArtifactBlock
 from common.schema.document import create_document_focus
 from common.schema.primitives import Message
 from common.schema.source.references import SourceReferenceCandidate
+from core.agent.run import AgentIdentity
 from core.knowledge.db.readers.message_reader import MessageReader, UserAgentExchange
 from runtime.session_runtime import FollowUpQueueFull, SessionRuntime
 from tests.fixtures.factories import make_project_state
@@ -284,7 +287,7 @@ def context(monkeypatch):
     monkeypatch.setattr(
         SessionRuntime,
         "current_config",
-        property(lambda self: FakeConfigValue(conversation_context_turns=100)),
+        property(lambda self: FakeConfigValue()),
     )
     return ctx, resources
 
@@ -312,6 +315,38 @@ async def test_admitted_defaults_do_not_change_before_stream_iteration(context):
         Message(content="Question"), orchestrator=_FakeTurnOrchestrator(handler)
     )
     ctx.model, ctx.agent_id, ctx.enabled_tools = "new-model", "new-agent", []
+    assert [event["event"] async for event in stream] == ["response"]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_admission_freezes_agent_model_and_budget_before_stream_iteration(context):
+    ctx, _ = context
+    ctx.model = "old-model"
+    chosen_budget = PromptMemoryBudget(input_tokens=2_048)
+
+    class PolicyOrchestrator(_FakeTurnOrchestrator):
+        async def resolve_run_policy(self, **kwargs):
+            assert kwargs["session_model"] == "old-model"
+            return (
+                AgentIdentity(
+                    config=AgentConfig(id="agent-1", name="Researcher", persona="Careful"),
+                    name="Researcher", persona="Careful",
+                ),
+                "old-model", chosen_budget,
+            )
+
+    async def handler(kwargs):
+        admitted = kwargs["run_settings"]
+        assert admitted.resolved_model == "old-model"
+        assert admitted.resolved_identity.config.id == "agent-1"
+        assert admitted.prompt_memory_budget == chosen_budget
+        yield _response_event("Answer")
+
+    stream = await ctx.open_agent_run_stream(
+        Message(content="Question"), orchestrator=PolicyOrchestrator(handler)
+    )
+    ctx.model = "later-model"
     assert [event["event"] async for event in stream] == ["response"]
 
 
@@ -882,7 +917,7 @@ async def test_run_agent_stream_persists_the_final_answer_and_sources_before_res
         events.append(event)
 
     assert [event["event"] for event in events] == ["token", "response"]
-    assert history_calls == [(100, 0)]
+    assert history_calls == [(10_000, 0)]
     assert orchestrator.calls[0]["user_query"] == "What did we decide?"
     assert orchestrator.calls[0]["conversation_history"] == [
         {"role": "assistant", "content": "A prior durable answer."}

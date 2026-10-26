@@ -276,7 +276,7 @@ async def test_session_run_preserves_format_specific_document_provenance(
     )
     runtime_config = RootConfig(
         developer_settings=DeveloperSettings(
-            limits=AgentLimitSettings(conversation_context_turns=100),
+            limits=AgentLimitSettings(),
             ingestion=IngestionSettings(message_edit_window_seconds=1),
         )
     )
@@ -353,7 +353,7 @@ async def test_session_run_preserves_format_specific_document_provenance(
         enabled_tools=["search_project_documents"],
     )
     events = [event async for event in stream]
-    assert events[-1]["event"] == "response"
+    assert events[-1]["event"] == "response", events
     assert not [event for event in events if event["event"] == "error"]
     assert any(
         event["event"] == "tool_end"

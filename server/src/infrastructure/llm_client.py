@@ -302,13 +302,13 @@ class LLMService:
             return 0
         if not self._tokenizer:
             # Fallback to rough estimation if tokenizer failed to load
-            return len(text) // 4
+            return (len(text) + 3) // 4
         return len(self._tokenizer.encode(text))
 
     def count_tokens_batch(self, texts: list[str]) -> list[int]:
         """Count independent rendered prefixes with the same tokenizer rule."""
         if not self._tokenizer:
-            return [len(value) // 4 for value in texts]
+            return [(len(value) + 3) // 4 for value in texts]
         return [
             len(tokens)
             for tokens in self._tokenizer.encode_batch(texts, num_threads=4)
@@ -688,6 +688,7 @@ class LLMService:
         temperature: float = 0.0,
         reasoning: Optional[str] = "low",
         aac_budget: Any = None,
+        max_completion_tokens: int | None = None,
     ) -> AsyncIterator[InternalAgentStreamEvent]:
         """Streaming completion with tools. Defaults to agent model."""
         model = model or self._agent_model
@@ -703,6 +704,7 @@ class LLMService:
                 reasoning=reasoning,
                 is_openrouter=is_openrouter,
                 aac_budget=aac_budget,
+                max_completion_tokens=max_completion_tokens,
             ):
                 yield event
 
@@ -718,6 +720,7 @@ class LLMService:
         reasoning: Optional[str],
         is_openrouter: bool,
         aac_budget: Any = None,
+        max_completion_tokens: int | None = None,
     ) -> AsyncIterator[InternalAgentStreamEvent]:
         tool_schema_tokens = self.count_tokens(
             json.dumps(tools, sort_keys=True, default=str, separators=(",", ":"))
@@ -762,6 +765,8 @@ class LLMService:
                     temperature=temperature,
                     stream=True,
                 )
+                if max_completion_tokens is not None:
+                    create_kwargs["max_completion_tokens"] = max_completion_tokens
                 if is_openrouter:
                     create_kwargs.update(
                         {
@@ -900,6 +905,22 @@ class LLMService:
                         aac_budget=aac_budget,
                     )
                     recorded = True
+                if isinstance(exc, APIStatusError) and exc.status_code in {400, 413, 422}:
+                    detail = str(getattr(exc, "body", "") or exc).lower()
+                    if any(marker in detail for marker in (
+                        "context_length", "context length", "context window",
+                        "maximum context", "too many tokens", "token limit",
+                    )):
+                        yield {
+                            "event": "step_error",
+                            "data": {
+                                "kind": "provider",
+                                "message": "Configured prompt and response reserve exceed this model's context limit.",
+                                "code": "provider_context_limit",
+                                "retryable": False,
+                            },
+                        }
+                        return
                 if attempt < TRANSPORT_RETRIES - 1:
                     if emitted_output or tool_calls_detected:
                         logger.error(

@@ -3,17 +3,63 @@
 from collections.abc import Mapping
 from typing import Dict, Literal
 
-from pydantic import Field, FiniteFloat, StrictInt, field_validator
+from pydantic import Field, FiniteFloat, StrictInt, field_validator, model_validator
 
 from common.schema.config import ConfigModel
 
 ProjectBriefingMode = Literal["always", "adaptive"]
+PromptCategory = Literal[
+    "conversation", "project_context", "run_notebook", "selected_notebook"
+]
+
+
+class PromptMemoryBudget(ConfigModel):
+    """One model-independent input budget for an admitted agent run."""
+
+    input_tokens: StrictInt = Field(12_000, ge=1_024)
+    response_reserve_tokens: StrictInt = Field(2_000, ge=256)
+    project_context_tokens: StrictInt = Field(3_000, ge=0)
+    run_notebook_tokens: StrictInt = Field(4_000, ge=0)
+    selected_notebook_tokens: StrictInt = Field(1_500, ge=0)
+    conversation_tokens: StrictInt = Field(2_000, ge=0)
+    spare_priority: tuple[PromptCategory, PromptCategory, PromptCategory, PromptCategory] = (
+        "conversation", "project_context", "run_notebook", "selected_notebook"
+    )
+
+    @model_validator(mode="after")
+    def validate_priority(self):
+        if len(set(self.spare_priority)) != 4:
+            raise ValueError("spare_priority must contain each prompt category once")
+        return self
+
+
+class AgentModelPromptMemory(ConfigModel):
+    agent_id: str = Field(min_length=1)
+    model: str = Field(min_length=1)
+    budget: PromptMemoryBudget
+
+
+class PromptMemorySettings(ConfigModel):
+    default: PromptMemoryBudget = Field(default_factory=PromptMemoryBudget)
+    overrides: list[AgentModelPromptMemory] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def unique_pairs(self):
+        pairs = [(row.agent_id, row.model) for row in self.overrides]
+        if len(pairs) != len(set(pairs)):
+            raise ValueError("agent/model prompt memory overrides must be unique")
+        return self
+
+    def for_run(self, agent_id: str, model: str) -> PromptMemoryBudget:
+        for row in self.overrides:
+            if row.agent_id == agent_id and row.model == model:
+                return row.budget
+        return self.default
 
 
 class AgentLimitSettings(ConfigModel):
     """Mutable application limits compiled into an immutable agent run."""
 
-    agent_history_turns: StrictInt = Field(7, ge=1)
     max_tool_calls: StrictInt = Field(12, ge=1)
     tool_timeout: FiniteFloat = Field(30.0, gt=0)
     max_attempts: StrictInt = Field(15, ge=1)
@@ -29,9 +75,6 @@ class AgentLimitSettings(ConfigModel):
     max_accumulated_actions: StrictInt = Field(12, ge=1)
     max_accumulated_next_steps: StrictInt = Field(12, ge=1)
     max_accumulated_summary_chars: StrictInt = Field(4000, ge=1)
-    max_notebook_render_tokens: StrictInt = Field(10000, ge=1)
-    conversation_context_turns: StrictInt = Field(10, ge=1)
-    max_conversation_history: StrictInt = Field(10000, ge=1)
     # ``adaptive`` only skips persistent Project material for a deliberately
     # narrow conversational fast path. All uncertain or substantive prompts
     # retain the Brief/Context before the first model step.

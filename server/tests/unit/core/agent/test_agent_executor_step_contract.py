@@ -6,6 +6,7 @@ import pytest
 from common.conf.domain_config import DomainConfig
 from common.exceptions import LLMProviderError, StorageReadError
 from common.schema.agent.research import resolve_research_profile
+from common.schema.agent.settings import PromptMemoryBudget
 from common.schema.artifacts import ArtifactDraft, MarkdownArtifactBlock
 from common.schema.context import (
     AssertionKind,
@@ -17,6 +18,7 @@ from common.schema.context import (
 )
 from core.agent.executor import AgentExecutor, _AgentPhase
 from core.agent.executor import _ToolCall as ToolCall
+from core.agent.prompt_budget import token_count
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 
 
@@ -58,6 +60,30 @@ def make_executor(llm, *, research_profile=None):
     )
     tools = SimpleNamespace(document_service=None)
     return AgentExecutor(ctx, llm, tools)
+
+
+@pytest.mark.no_network
+def test_prompt_assembly_bounds_all_memory_while_retaining_current_query():
+    executor = make_executor(StreamingLLM())
+    executor.ctx.memory_budget = PromptMemoryBudget(input_tokens=4_000)
+    executor.ctx.selected_notebook = {
+        "notebook_id": "notebook-1", "revision": 1, "context": "source " * 6_000,
+    }
+    executor.ctx.history = [
+        {"role": "user", "content": "prior " * 4_000},
+    ]
+    system, user = executor._bounded_prompt(
+        date="2026-10-26", phase=_AgentPhase.PLAN, gap_review=False,
+        documents_context="", document_focus_context="", project_brief="",
+        project_context="project " * 5_000, runtime_instructions="",
+        tool_schemas=[], last_result=None,
+    )
+
+    assert token_count(system, None) + token_count(user, None) + 64 <= 4_000
+    assert executor.ctx.user_query in user
+    assert "project" in system
+    assert "prior" in user
+    assert "source" in user
 
 
 @pytest.mark.no_network

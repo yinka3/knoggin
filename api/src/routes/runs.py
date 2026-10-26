@@ -64,6 +64,12 @@ async def _events(raw: AsyncIterator, run_id: str, *, runtime=None, session=None
                 data = {}
             if name == "token":
                 event, public = "message_delta", {"content": str(data.get("content", ""))}
+            elif name == "prompt_budget_selected":
+                event, public = "prompt_budget_selected", {
+                    "agent_id": str(data["agent_id"]),
+                    "model": str(data["model"]),
+                    "budget": data["budget"],
+                }
             elif name == "steer_applied":
                 event, public = "steer_applied", {"steer_id": data["steer_id"]}
             elif name in {"tool_start", "tool_end", "tool_error"}:
@@ -120,7 +126,7 @@ async def _events(raw: AsyncIterator, run_id: str, *, runtime=None, session=None
                 terminal = True
             elif name == "error":
                 event, public = "run_failed", {
-                    "code": data.get("code") if data.get("code") in {"llm_budget_exhausted", "workspace_conflict"} else "run_failed",
+                    "code": data.get("code") if data.get("code") in {"llm_budget_exhausted", "prompt_budget_exceeded", "provider_context_limit", "workspace_conflict"} else "run_failed",
                     "message": "The response could not be completed.",
                 }
                 terminal = True
@@ -202,7 +208,6 @@ async def _selected_notebook(runtime, project_id, notebook_id):
         return None
     entries = {entry["entry_id"]: entry for entry in view["notebook"]["entries"]}
     lines = []
-    length = 0
     for item in view["items"]:
         entry = entries[item["entry_id"]]
         source = item["source"] or {}
@@ -224,11 +229,7 @@ async def _selected_notebook(runtime, project_id, notebook_id):
             line["time"] = item["time"]
             line["time_kind"] = item["time_kind"]
         encoded = json.dumps(line, ensure_ascii=False, default=str)
-        if length + len(encoded) + len(lines) > 10_000:
-            lines.append("[Additional notebook entries omitted due to context limit]")
-            break
         lines.append(encoded)
-        length += len(encoded)
     return {
         "notebook_id": str(notebook_id), "revision": view["notebook"]["revision"],
         "context": "\n".join(lines),

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable
+from copy import deepcopy
 from typing import TYPE_CHECKING, AsyncGenerator, Dict, List, Optional
 
 from loguru import logger
 
 from common.exceptions import LLMBudgetExceededError, WorkspaceConflictError
 from common.schema.agent.research import ResearchMode, resolve_research_profile
+from common.schema.agent.settings import PromptMemoryBudget
 from common.schema.agent.stream import (
     AgentExecutionEvent,
     validate_agent_execution_event,
@@ -55,6 +57,23 @@ class AgentOrchestrator:
         self._entity_maintenance_service = entity_maintenance_service
         self._project_maintenance_service = project_maintenance_service
 
+    async def resolve_run_policy(
+        self, *, config, requested_agent_id: str | None,
+        session_agent_id: str | None, requested_model: str | None,
+        session_model: str | None, fallback_model: str,
+    ) -> tuple[AgentIdentity, str, PromptMemoryBudget]:
+        """Freeze the identity, model, and prompt budget before accepting a run."""
+        identity = deepcopy(await self._resolve_agent_identity(
+            requested_agent_id if requested_agent_id is not None else session_agent_id
+        ))
+        selected_model = (
+            requested_model or session_model or identity.config.model or fallback_model
+        )
+        budget = config.developer_settings.prompt_memory.for_run(
+            identity.config.id, selected_model
+        )
+        return identity, selected_model, budget
+
     async def run_stream(
         self,
         user_query: str,
@@ -92,20 +111,25 @@ class AgentOrchestrator:
             defaults = run_settings if run_settings is not None else context
             limits = config.developer_settings.limits
             research_profile = resolve_research_profile(research_mode)
-            run_limits = AgentRunLimits.from_settings(limits).for_research_profile(
-                research_profile
-            )
 
             # Identity & Persona
-            identity = await self._resolve_agent_identity(
-                agent_id if agent_id is not None else defaults.agent_id,
-            )
+            if run_settings is not None and getattr(run_settings, "resolved_identity", None) is not None:
+                identity = run_settings.resolved_identity
+                effective_model = run_settings.resolved_model
+                memory_budget = run_settings.prompt_memory_budget
+            else:
+                identity, effective_model, memory_budget = await self.resolve_run_policy(
+                    config=config,
+                    requested_agent_id=agent_id,
+                    session_agent_id=defaults.agent_id,
+                    requested_model=model,
+                    session_model=defaults.model,
+                    fallback_model=context.llm.agent_model,
+                )
             agent_cfg = identity.config
-            effective_model = (
-                model
-                if model is not None
-                else (defaults.model if context.model is not None else agent_cfg.model)
-            )
+            run_limits = AgentRunLimits.from_settings(
+                limits, memory_budget
+            ).for_research_profile(research_profile)
             effective_temperature = (
                 agent_cfg.temperature
                 if agent_cfg and agent_cfg.temperature is not None
@@ -153,6 +177,7 @@ class AgentOrchestrator:
                 document_focus=effective_document_focus,
                 document_selection_context=document_selection_context,
                 selected_notebook=selected_notebook,
+                memory_budget=memory_budget,
                 initial_source_candidates=self._initial_source_candidates(
                     context=context,
                     run_id=run_id,
@@ -170,6 +195,15 @@ class AgentOrchestrator:
                 tools,
                 **({"take_steer": take_steer} if take_steer is not None else {}),
             )
+
+            yield validate_agent_execution_event({
+                "event": "prompt_budget_selected",
+                "data": {
+                    "agent_id": agent_cfg.id,
+                    "model": effective_model,
+                    "budget": memory_budget.model_dump(mode="json"),
+                },
+            })
 
             async for event in executor.execute(user_timezone=user_timezone):
                 validated_event = validate_agent_execution_event(event)
