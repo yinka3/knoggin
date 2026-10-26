@@ -11,7 +11,12 @@ from loguru import logger
 
 from common.conf.relationship_config import normalize_relationship
 from common.exceptions import MaintenanceConflictError
-from common.schema.evidence import EvidencePointer
+from common.schema.evidence import (
+    EvidenceBundle,
+    EvidenceNode,
+    EvidencePointer,
+    EvidenceSubject,
+)
 from common.schema.maintenance import (
     MaintenanceImpactPreview,
     OrphanedExchangeBlockage,
@@ -488,6 +493,8 @@ class ProjectMaintenanceService:
         )
         if review is None:
             raise FileNotFoundError("Maintenance review not found")
+        if review.kind == "hypothesis_evaluation":
+            return await self._hypothesis_review_detail(project_id, review)
         observation_ids = [
             int(pointer.identifier)
             for pointer in review.evidence_refs
@@ -536,6 +543,64 @@ class ProjectMaintenanceService:
             current_evidence=tuple(bundles),
             unavailable_pointers=unsupported,
             evidence_state=state,
+        )
+
+    async def _hypothesis_review_detail(self, project_id, review) -> MaintenanceReviewDetail:
+        """Resolve the captured citations used by a confirmed board conclusion."""
+
+        refs = tuple(ref for ref in review.evidence_refs if ref.kind == "source_reference")
+        unsupported = tuple(ref for ref in review.evidence_refs if ref.kind != "source_reference")
+        rows = await self.pg.fetch_all(
+            """SELECT ref.source_ref_id::text AS source_ref_id, ref.content_hash,
+                      coalesce(ref.metadata ->> 'document_name', ref.metadata ->> 'title',
+                               ref.canonical_url, 'Captured source passage') AS title,
+                      CASE WHEN ref.document_id IS NOT NULL AND
+                          (document.document_id IS NULL OR document.status = 'deleted' OR
+                           document.current_snapshot_id IS DISTINCT FROM ref.parse_snapshot_id)
+                      THEN true ELSE false END AS source_stale
+               FROM public.message_source_refs AS ref
+               JOIN public.messages AS message
+                 ON message.message_id = ref.message_id
+                AND message.project_id = ref.project_id
+                AND message.session_id = ref.session_id
+               LEFT JOIN public.project_documents AS document
+                 ON document.document_id = ref.document_id
+                AND document.project_id = ref.source_project_id
+               WHERE ref.source_ref_id = ANY(%s::uuid[]) AND ref.project_id = %s
+                 AND message.user_name = %s AND message.role = 'assistant'""",
+            ([ref.identifier for ref in refs], project_id, self.user_name),
+        ) if refs else []
+        found = {row["source_ref_id"]: row for row in rows}
+        recorded = review.expected_state.get("citation_versions", {})
+        nodes = []
+        changed = False
+        missing = bool(unsupported)
+        token_parts = []
+        for ref in refs:
+            row = found.get(ref.identifier)
+            if row is None:
+                missing = True
+                nodes.append(EvidenceNode(pointer=ref, status="missing"))
+                token_parts.append((ref.identifier, None, None))
+                continue
+            stale = bool(row["source_stale"])
+            version = row["content_hash"]
+            changed |= stale or version != recorded.get(ref.identifier)
+            nodes.append(EvidenceNode(
+                pointer=ref, label=str(row["title"])[:200],
+                content_hash=version, status="retired" if stale else "available",
+            ))
+            token_parts.append((ref.identifier, version, stale))
+        token = hashlib.sha256(json.dumps(token_parts, sort_keys=True).encode()).hexdigest()
+        bundle = EvidenceBundle(
+            subject=EvidenceSubject(kind="maintenance_review", identifier=review.review_id),
+            nodes=tuple(nodes), total_nodes=len(nodes), total_edges=0,
+            state_token=token,
+        )
+        return MaintenanceReviewDetail(
+            review=review, stored_snapshot=review.evidence_snapshot,
+            current_evidence=(bundle,), unavailable_pointers=unsupported,
+            evidence_state="partially_unavailable" if missing else "changed" if changed else "current",
         )
 
     async def preview_maintenance_review(

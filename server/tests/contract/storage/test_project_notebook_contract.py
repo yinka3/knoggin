@@ -1,5 +1,6 @@
 """Durable notebook ownership and revision checks."""
 
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -18,6 +19,7 @@ from common.schema.project_notebook import (
 from common.schema.source.references import SourceReferenceCandidate
 from core.knowledge.db.writers.maintenance_review_writer import MaintenanceReviewWriter
 from core.knowledge.db.writers.source_reference_writer import SourceReferenceWriter
+from core.project.maintenance_service import ProjectMaintenanceService
 from core.project.notebook_store import (
     NotebookConflict,
     NotebookReferenceUnavailable,
@@ -392,6 +394,17 @@ async def test_evidence_board_questions_dependencies_and_revisions(real_postgres
     assert review.kind == "hypothesis_evaluation"
     assert review.status == "applied"
     assert review.proposed_plan.claim == "The parser changed"
+    async def project_lookup(project_id):
+        return {"status": "active"} if project_id == "project-1" else None
+
+    maintenance = ProjectMaintenanceService(
+        resources=SimpleNamespace(postgres=client), user_name="ada",
+        project_lookup=project_lookup, active_projects={}, project_leases={},
+    )
+    detail = await maintenance.get_maintenance_review_detail("project-1", review.review_id)
+    assert detail.evidence_state == "current"
+    assert detail.unavailable_pointers == ()
+    assert detail.current_evidence[0].nodes[0].pointer.identifier == ref.source_ref_id
     matches = await store.lookup_ruled_out_hypotheses("project-1", "parser")
     assert len(matches) == 1
     assert matches[0]["board_id"] == board["notebook_id"]
@@ -416,6 +429,8 @@ async def test_evidence_board_questions_dependencies_and_revisions(real_postgres
     )
     changed = await store.evidence_board("project-1", board["notebook_id"])
     assert changed["board_state"]["questions"][0]["claims"][0]["citation_statuses"][ref.source_ref_id] == "changed"
+    detail = await maintenance.get_maintenance_review_detail("project-1", review.review_id)
+    assert detail.evidence_state == "changed"
     with pytest.raises(NotebookConflict):
         await store.prepare_board_evaluation(
             "project-1", board["notebook_id"], expected_revision=5,
@@ -442,6 +457,9 @@ async def test_evidence_board_questions_dependencies_and_revisions(real_postgres
     visible = await store.evidence_board("project-1", board["notebook_id"])
     visible_claim = visible["board_state"]["questions"][0]["claims"][0]
     assert visible_claim["citation_statuses"][ref.source_ref_id] == "missing"
+    detail = await maintenance.get_maintenance_review_detail("project-1", review.review_id)
+    assert detail.evidence_state == "partially_unavailable"
+    assert detail.current_evidence[0].nodes[0].status == "missing"
     assert visible_claim["judgment"]["stale"] is True
     assert visible_claim["judgment"]["active_conclusion"] is False
 
