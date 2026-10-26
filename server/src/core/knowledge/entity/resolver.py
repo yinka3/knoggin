@@ -256,6 +256,9 @@ class EntityResolver:
                 if entry is None and forced_id is None:
                     continue
                 surface_key = self._candidate_search_key(mention.name)
+                # New-entity mentions record no identity decision; never let one
+                # inherit the previous mention's decision.
+                decision: dict = {}
                 entity_id: int | None = None
                 selected_profile: EntityProfile | None = None
                 support_text = "\n".join(
