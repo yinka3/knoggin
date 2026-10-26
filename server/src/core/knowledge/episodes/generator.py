@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Protocol, TypeVar
 
+from loguru import logger
+
 from common.schema.episode.generation import LLMEpisodeWindowDecision
 from common.schema.episode.models import EpisodeNarrativeLimitError
 from common.utils.diagnostic_context import diagnostic_scope
@@ -115,6 +117,7 @@ class EpisodeGenerator:
                     max_narrative_chars=policy.max_narrative_chars,
                     max_episode_source_messages=policy.max_episode_source_messages,
                     max_episode_source_tokens=policy.max_episode_source_tokens,
+                    max_proposals=build.max_proposals,
                 ),
                 user=build.evidence_brief(),
                 temperature=0.0,
@@ -143,6 +146,8 @@ class EpisodeGenerator:
                         "episode narrative repair changed proposal source references"
                     )
                 build.apply_llm_output(repaired)
+            for reason in build.rejected_proposals:
+                logger.warning("Dropped invalid Episode proposal: {}", reason)
             episodes = build.create_episodes()
             if episodes:
                 build.attach_embeddings(

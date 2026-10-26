@@ -243,6 +243,9 @@ async def test_application_start_cleans_resources_when_composition_fails(
         async def ensure_identity_entity(self, _user_name, _aliases):
             return None
 
+        async def close_orphaned_open_exchanges(self, *, user_name):
+            return 0
+
     resources.knowledge_store = KnowledgeStore()
 
     async def create_resources(cls, *, thread_workers=None, config_manager=None):
@@ -280,6 +283,9 @@ async def test_application_start_cleans_aac_and_resources_when_aac_start_fails(
     class KnowledgeStore:
         async def ensure_identity_entity(self, _user_name, _aliases):
             return None
+
+        async def close_orphaned_open_exchanges(self, *, user_name):
+            return 0
 
     class RecordingAACRuntime(RecordingOwner):
         @classmethod
@@ -347,6 +353,10 @@ async def test_application_start_establishes_identity_before_managers(
     class KnowledgeStore:
         async def ensure_identity_entity(self, user_name, aliases):
             calls.append(("identity", user_name, aliases))
+
+        async def close_orphaned_open_exchanges(self, *, user_name):
+            calls.append(("close_orphans", user_name))
+            return 0
 
     resources = RecordingOwner("resources", calls)
     resources.knowledge_store = KnowledgeStore()
@@ -431,6 +441,7 @@ async def test_application_start_establishes_identity_before_managers(
     assert runtime.config_manager is config_manager
     assert calls == [
         ("identity", "ada", ["Ada"]),
+        ("close_orphans", "ada"),
         "projects_start",
         "agent_manager",
         "ensure_default_agent",

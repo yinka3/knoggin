@@ -251,7 +251,8 @@ class _Store:
         self.window = self.window.model_validate(
             self.window.model_dump()
             | {
-                "attempt_count": self.window.attempt_count + 1,
+                "attempt_count": self.window.attempt_count
+                + (1 if kwargs.get("consume_attempt", True) else 0),
                 "last_failure_stage": kwargs["failure_stage"],
                 "last_failure_code": kwargs["failure_code"],
                 "last_failure_at_ms": kwargs["failed_at_ms"],

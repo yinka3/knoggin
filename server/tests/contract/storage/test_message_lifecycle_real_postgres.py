@@ -729,3 +729,42 @@ async def test_real_postgres_failure_and_cancellation_close_user_evidence(
             "terminal_error": None,
         },
     ]
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_startup_closes_exchanges_left_open_by_a_previous_process(
+    real_postgres_client,
+):
+    client = real_postgres_client
+    await _seed_session(client, "session-orphan")
+    writer = MessageLifecycleWriter(client, MessageWriter(client))
+    scope = dict(user_name="ada", project_id="project-1", session_id="session-orphan")
+    for message_id, key in ((905, "orphan"), (906, "answered")):
+        await writer.create_editable_user_message(
+            {**scope, "id": message_id, "role": "user", "content": key,
+             "timestamp": 1000 + message_id, "metadata": {},
+             "acceptance_key": f"content:{key}"},
+            edit_window_seconds=600,
+        )
+    await writer.close_user_exchange(**scope, user_message_id=906, outcome="user_only")
+
+    closed = await writer.close_orphaned_open_exchanges(user_name="ada")
+
+    assert closed == 1
+    rows = await client.fetch_all(
+        """
+        SELECT message_id, exchange_state, exchange_outcome, lifecycle_state,
+               metadata->'terminal_error' AS terminal_error
+        FROM public.messages WHERE session_id = %s ORDER BY message_id
+        """,
+        ("session-orphan",),
+    )
+    assert [(row["message_id"], row["exchange_state"], row["exchange_outcome"],
+             row["lifecycle_state"]) for row in rows] == [
+        (905, "closed", "failed", "sealed"),
+        (906, "closed", "user_only", "sealed"),
+    ]
+    assert rows[0]["terminal_error"] == {"code": "run_failed", "retryable": True}
+    assert await writer.close_orphaned_open_exchanges(user_name="ada") == 0

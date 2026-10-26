@@ -8,6 +8,7 @@ from typing import Awaitable, Callable, Protocol
 from loguru import logger
 
 from common.conf.domain_config import CompiledDomain
+from common.exceptions import LLMBudgetExceededError, LLMProviderError
 from common.schema.context import ContextRevisionOrigin, ContextSnapshot
 from common.schema.episode.models import Episode
 from common.schema.semantic_window import (
@@ -35,6 +36,12 @@ from core.knowledge.context.updater import ContextUpdater
 from core.knowledge.episodes.generator import EpisodeGenerator
 from core.knowledge.episodes.policy import EpisodeGenerationPolicy
 from infrastructure.job.base import BaseJob, JobContext, JobResult
+
+
+def _is_transient_failure(exc: Exception) -> bool:
+    if isinstance(exc, LLMBudgetExceededError):
+        return True
+    return isinstance(exc, LLMProviderError) and exc.transient
 
 
 class SemanticEpisodeStore(Protocol):
@@ -134,6 +141,7 @@ class SemanticEpisodeStore(Protocol):
         next_retry_at_ms: int | None,
         expected_attempt_count: int | None = None,
         expected_episode_result_recorded: bool | None = None,
+        consume_attempt: bool = True,
     ) -> SemanticWindowRecord | None: ...
 
 
@@ -857,14 +865,22 @@ class ProjectSemanticProcessor(BaseJob):
     ) -> None:
         failed_at_ms = self._now_ms()
         retry = self._settings.semantic_window_retry
+        # Provider outages and a spent budget say nothing about this window's
+        # content. Retry them at the slowest cadence without spending the
+        # bounded attempts reserved for failures that may never succeed.
+        consume_attempt = not _is_transient_failure(exc)
         attempt = window.attempt_count + 1
-        delay_seconds = min(
-            retry.initial_backoff_seconds * (2 ** max(0, attempt - 1)),
-            retry.max_backoff_seconds,
+        delay_seconds = (
+            min(
+                retry.initial_backoff_seconds * (2 ** max(0, attempt - 1)),
+                retry.max_backoff_seconds,
+            )
+            if consume_attempt
+            else retry.max_backoff_seconds
         )
         next_retry_at_ms = (
             failed_at_ms + (delay_seconds * 1000)
-            if attempt < retry.max_attempts
+            if attempt < retry.max_attempts or not consume_attempt
             else None
         )
         attempt_guard = (
@@ -887,6 +903,7 @@ class ProjectSemanticProcessor(BaseJob):
             error_summary=str(exc)[:2_000] or type(exc).__name__,
             failed_at_ms=failed_at_ms,
             next_retry_at_ms=next_retry_at_ms,
+            consume_attempt=consume_attempt,
             **attempt_guard,
             **checkpoint_guard,
         )

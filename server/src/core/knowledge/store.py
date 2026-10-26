@@ -283,6 +283,11 @@ class KnowledgeStore:
             **kwargs
         )
 
+    async def close_orphaned_open_exchanges(self, *, user_name: str) -> int:
+        return await self._message_lifecycle_writer.close_orphaned_open_exchanges(
+            user_name=user_name
+        )
+
     async def get_visible_session_ids(
         self,
         *,
@@ -678,6 +683,7 @@ class KnowledgeStore:
         next_retry_at_ms: int | None,
         expected_attempt_count: int | None = None,
         expected_episode_result_recorded: bool | None = None,
+        consume_attempt: bool = True,
     ) -> SemanticWindowRecord | None:
         return await self._semantic_window_writer.record_failure(
             window_id=window_id,
@@ -691,6 +697,7 @@ class KnowledgeStore:
             next_retry_at_ms=next_retry_at_ms,
             expected_attempt_count=expected_attempt_count,
             expected_episode_result_recorded=expected_episode_result_recorded,
+            consume_attempt=consume_attempt,
         )
 
     async def retry_project_semantic_window(

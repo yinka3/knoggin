@@ -442,6 +442,37 @@ class MessageLifecycleWriter:
                 cur=cur,
             )
 
+    async def close_orphaned_open_exchanges(self, *, user_name: str) -> int:
+        """Close every open exchange left behind by a previous engine process.
+
+        Call only at application startup, before any session can run: the
+        local single-engine runtime then owns no in-flight run, so an open
+        exchange can never complete and would block its session's semantic
+        FIFO forever.
+        """
+
+        rows = await self.client.fetch_all(
+            """
+            SELECT project_id, session_id, message_id
+            FROM public.messages
+            WHERE user_name = %s
+              AND role = 'user'
+              AND exchange_state = 'open'
+            ORDER BY message_id
+            """,
+            (user_name,),
+        )
+        for row in rows:
+            await self.close_user_exchange(
+                user_name=user_name,
+                project_id=row["project_id"],
+                session_id=row["session_id"],
+                user_message_id=int(row["message_id"]),
+                outcome="failed",
+                terminal_error={"code": "run_failed", "retryable": True},
+            )
+        return len(rows)
+
     async def edit_user_message(
         self,
         *,

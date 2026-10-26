@@ -438,6 +438,22 @@ async def test_semantic_episode_result_is_idempotent_and_has_no_legacy_side_effe
     )
     assert failed is not None
     assert failed.attempt_count == 1
+    transient = await store.record_project_semantic_window_failure(
+        window_id=str(window.window_id),
+        user_name="ada",
+        project_id="project-1",
+        expected_stage=SemanticWindowStage.CLAIMED,
+        failure_stage="episode_generation",
+        failure_code="LLMProviderError",
+        error_summary="provider rate limited",
+        failed_at_ms=1_500,
+        next_retry_at_ms=301_500,
+        consume_attempt=False,
+    )
+    assert transient is not None
+    assert transient.attempt_count == 1
+    assert transient.last_failure_code == "LLMProviderError"
+    assert transient.next_retry_at_ms == 301_500
     assert await store.write_project_semantic_window_episodes(
         window_id=str(window.window_id),
         episodes=[episode],

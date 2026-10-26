@@ -2,7 +2,7 @@
 
 from typing import List
 
-from pydantic import ConfigDict, Field, field_validator, model_validator
+from pydantic import ConfigDict, Field, field_validator
 
 from common.schema.episode.models import EpisodeNarrative
 from common.schema.llm import StructuredLLMOutput, normalize_required_text
@@ -81,14 +81,6 @@ class LLMEpisodeWindowDecision(StructuredLLMOutput):
 
     model_config = ConfigDict(extra="forbid")
 
-    proposals: List[LLMEpisodeDecision] = Field(..., max_length=3)
-
-    @model_validator(mode="after")
-    def validate_proposals(self) -> "LLMEpisodeWindowDecision":
-        source_ids: set[str] = set()
-        for proposal in self.proposals:
-            proposal_sources = set(proposal.message_influences)
-            if source_ids.intersection(proposal_sources):
-                raise ValueError("episode proposals cannot share source messages")
-            source_ids.update(proposal_sources)
-        return self
+    # Count and source-overlap rules are enforced per proposal by
+    # ProjectEpisodeBuild, so one bad proposal cannot fail the whole response.
+    proposals: List[LLMEpisodeDecision] = Field(...)

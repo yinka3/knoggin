@@ -5,6 +5,7 @@ from uuid import uuid4
 import pytest
 
 from common.conf.domain_config import DomainConfig
+from common.exceptions import LLMBudgetExceededError, LLMProviderError
 from common.schema.context import (
     AssertionKind,
     ContextAdd,
@@ -226,7 +227,8 @@ class _ContextStore:
         self.window = self.window.model_validate(
             self.window.model_dump()
             | {
-                "attempt_count": self.window.attempt_count + 1,
+                "attempt_count": self.window.attempt_count
+                + (1 if kwargs.get("consume_attempt", True) else 0),
                 "last_failure_stage": kwargs["failure_stage"],
                 "last_failure_code": kwargs["failure_code"],
                 "last_failure_at_ms": kwargs["failed_at_ms"],
@@ -792,3 +794,39 @@ async def test_stale_parent_conflict_retries_with_the_same_window_evidence_and_r
     assert len(updater.calls) == 2
     assert updater.calls[1]["snapshot"].blocks[0].markdown == "Concurrent Context revision."
     assert store.window.stage is SemanticWindowStage.COMPLETED
+
+
+class _RaisingUpdater(_Updater):
+    def __init__(self, error):
+        super().__init__()
+        self.error = error
+
+    async def update(self, **kwargs):
+        self.calls.append(kwargs)
+        raise self.error
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("error", "consumes_attempt", "retry_delay_ms"),
+    [
+        (LLMProviderError("provider down", transient=True), False, 300_000),
+        (LLMBudgetExceededError("spending cap reached"), False, 300_000),
+        (LLMProviderError("context too long"), True, 30_000),
+        (ValueError("invalid model output"), True, 30_000),
+    ],
+)
+async def test_only_non_transient_failures_consume_window_attempts(
+    error, consumes_attempt, retry_delay_ms
+):
+    store = _ContextStore(_window())
+    job = _job(store, _RaisingUpdater(error), now_ms=lambda: 1_000)
+
+    result = await job.execute(JobContext(user_name="ada", project_id="project-1"))
+
+    assert not result.success
+    failure = store.failures[0]
+    assert failure.get("consume_attempt", True) is consumes_attempt
+    assert failure["next_retry_at_ms"] == 1_000 + retry_delay_ms
+    assert store.window.attempt_count == (1 if consumes_attempt else 0)

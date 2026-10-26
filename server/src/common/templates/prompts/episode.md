@@ -2,8 +2,8 @@
 You are creating bounded, project-wide episodic memory for {user_name}.
 
 <task>
-Given one eligible project window, return zero to three independent new-episode
-proposals. Ungrouped material may be omitted; an empty proposal list is valid.
+Given one eligible project window, return zero to {max_proposals} independent
+new-episode proposals. Ungrouped material may be omitted; an empty proposal list is valid.
 Keep the combined narrative text in every proposal at or below
 {prompt_narrative_chars} characters. The server hard limit is
 {max_narrative_chars} characters.
@@ -35,7 +35,7 @@ at most {max_episode_source_tokens} estimated source tokens.
 
 <output_contract>
 Return exactly the structured response requested by the schema: an array named
-`proposals`, containing at most three new-episode proposals.
+`proposals`, containing at most {max_proposals} new-episode proposals.
 
 For every proposal:
 - provide `summary` and exactly one `message_influences` item for every

@@ -274,13 +274,13 @@ async def test_generator_repairs_an_overlong_narrative_without_changing_sources(
 
 
 @pytest.mark.no_network
-async def test_generator_rejects_over_capacity_output_without_embedding_it():
+async def test_generator_drops_over_capacity_output_without_embedding_it():
     llm = _ScriptedLLM(
         [
             LLMEpisodeWindowDecision(
                 proposals=[
                     LLMEpisodeDecision(
-                        summary="The model selected too many source messages.",
+                        summary="The model selected two exchanges past the limit.",
                         message_influences=["message:1", "message:2"],
                     )
                 ]
@@ -290,31 +290,31 @@ async def test_generator_rejects_over_capacity_output_without_embedding_it():
     embeddings = _RecordingEmbeddingService()
     generator = EpisodeGenerator(llm=llm, embedding_service=embeddings)
 
-    with pytest.raises(ValueError, match="source message limit"):
-        await generator.generate(
-            user_name="ada",
-            project_id="project-1",
-            messages=[
-                {
-                    "message_id": 101,
-                    "session_id": "session-1",
-                    "role": "user",
-                    "content": "First source.",
-                    "timestamp_ms": 1,
-                },
-                {
-                    "message_id": 102,
-                    "session_id": "session-1",
-                    "role": "assistant",
-                    "content": "Second source.",
-                    "timestamp_ms": 2,
-                    "user_msg_id": 101,
-                },
-            ],
-            policy=EpisodeGenerationPolicy.capture(
-                settings=EpisodeSettings(max_episode_source_messages=1)
-            ),
-        )
+    build = await generator.generate(
+        user_name="ada",
+        project_id="project-1",
+        messages=[
+            {
+                "message_id": 101,
+                "session_id": "session-1",
+                "role": "user",
+                "content": "First source.",
+                "timestamp_ms": 1,
+            },
+            {
+                "message_id": 103,
+                "session_id": "session-1",
+                "role": "user",
+                "content": "A second exchange.",
+                "timestamp_ms": 3,
+            },
+        ],
+        policy=EpisodeGenerationPolicy.capture(
+            settings=EpisodeSettings(max_episode_source_messages=1)
+        ),
+    )
 
+    assert build.final_episodes == []
+    assert "source message limit" in build.rejected_proposals[0]
     assert len(llm.calls) == 1
     assert embeddings.calls == []

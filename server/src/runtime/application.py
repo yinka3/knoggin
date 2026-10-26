@@ -124,6 +124,16 @@ class ApplicationRuntime:
                 user_name,
                 config_manager.config.user_aliases,
             )
+            # No session exists yet, so any open exchange belongs to a run
+            # that died with an earlier process; left open, it would block its
+            # session's semantic FIFO until manual repair.
+            orphaned = await knowledge_store.close_orphaned_open_exchanges(
+                user_name=user_name
+            )
+            if orphaned:
+                logger.warning(
+                    "Closed {} exchange(s) left open by a previous process", orphaned
+                )
             projects = ProjectManager(
                 resources=resources,
                 user_name=user_name,

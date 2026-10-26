@@ -68,14 +68,21 @@ def test_brief_marks_clarification_as_an_unresolved_question():
     )
 
 
-def test_window_rejects_overlapping_proposals():
+def test_overlapping_proposal_is_dropped_and_the_first_is_kept():
+    build = _build()
+    build.prepare_local_references()
     proposal = LLMEpisodeDecision(
         summary="Launch planning",
         message_influences=["message:1"],
     )
 
-    with pytest.raises(ValueError, match="cannot share source messages"):
+    decisions = build.apply_llm_output(
         LLMEpisodeWindowDecision(proposals=[proposal, proposal])
+    )
+
+    assert [decision.message_influences for decision in decisions] == [[10]]
+    assert len(build.rejected_proposals) == 1
+    assert "cannot share source messages" in build.rejected_proposals[0]
 
 
 def test_server_rejects_a_narrative_over_the_hard_character_limit():
@@ -106,8 +113,8 @@ def test_server_rejects_unknown_catalog_message_reference():
         ]
     )
 
-    with pytest.raises(ValueError, match="Unknown local ID"):
-        build.apply_llm_output(output)
+    assert build.apply_llm_output(output) == []
+    assert "Unknown local ID" in build.rejected_proposals[0]
 
 
 def test_server_assigns_source_positions_instead_of_using_llm_order():
@@ -130,38 +137,64 @@ def test_server_assigns_source_positions_instead_of_using_llm_order():
     ] == [(10, 0), (12, 1)]
 
 
-def test_over_capacity_create_proposal_fails_the_window_result():
-    build = _build(settings=EpisodeSettings(max_episode_source_messages=1))
+def test_over_capacity_multi_exchange_proposal_is_dropped_not_fatal():
+    build = _build(settings=EpisodeSettings(max_episode_source_messages=2))
     build.prepare_local_references()
 
-    with pytest.raises(ValueError, match="source message limit"):
-        build.apply_llm_output(
-            LLMEpisodeWindowDecision(
-                proposals=[
-                    LLMEpisodeDecision(
-                        summary="Two source messages do not fit.",
-                        message_influences=["message:1", "message:2"],
-                    )
-                ]
-            )
+    decisions = build.apply_llm_output(
+        LLMEpisodeWindowDecision(
+            proposals=[
+                LLMEpisodeDecision(
+                    summary="Three messages across two exchanges do not fit.",
+                    message_influences=["message:1", "message:2", "message:3"],
+                ),
+                LLMEpisodeDecision(
+                    summary="The launch plan alone fits.",
+                    message_influences=["message:1", "message:2"],
+                ),
+            ]
         )
+    )
+
+    assert [decision.message_influences for decision in decisions] == [[10, 11]]
+    assert "source message limit" in build.rejected_proposals[0]
 
 
-def test_over_token_capacity_create_proposal_fails_the_window_result():
+def test_one_oversized_exchange_is_always_a_valid_episode():
     build = _build(settings=EpisodeSettings(max_episode_source_tokens=1))
     build.prepare_local_references()
 
-    with pytest.raises(ValueError, match="source token limit"):
-        build.apply_llm_output(
-            LLMEpisodeWindowDecision(
-                proposals=[
-                    LLMEpisodeDecision(
-                        summary="The plan is over the source-token budget.",
-                        message_influences=["message:1"],
-                    )
-                ]
-            )
+    decisions = build.apply_llm_output(
+        LLMEpisodeWindowDecision(
+            proposals=[
+                LLMEpisodeDecision(
+                    summary="One exchange cannot be split further.",
+                    message_influences=["message:1", "message:2"],
+                ),
+                LLMEpisodeDecision(
+                    summary="Two exchanges over the token budget.",
+                    message_influences=["message:3", "message:1"],
+                ),
+            ]
         )
+    )
+
+    assert [decision.message_influences for decision in decisions] == [[10, 11]]
+    assert len(build.rejected_proposals) == 1
+
+
+def test_proposals_beyond_the_window_limit_are_dropped():
+    build = _build()
+    build.prepare_local_references()
+    proposals = [
+        LLMEpisodeDecision(summary=f"Thread {index}.", message_influences=[f"message:{index}"])
+        for index in (1, 2, 3)
+    ] + [LLMEpisodeDecision(summary="Extra thread.", message_influences=["message:3"])]
+
+    decisions = build.apply_llm_output(LLMEpisodeWindowDecision(proposals=proposals))
+
+    assert len(decisions) == 3
+    assert "3-proposal limit" in build.rejected_proposals[0]
 
 
 def test_window_creates_multiple_distinct_immutable_episodes():
@@ -197,3 +230,17 @@ def test_empty_window_output_creates_no_episodes():
 
     assert build.apply_llm_output(LLMEpisodeWindowDecision(proposals=[])) == []
     assert build.create_episodes() == []
+
+
+def test_large_windows_allow_enough_episodes_to_cover_them():
+    build = _build(settings=EpisodeSettings(max_episode_source_tokens=2))
+    build.prepare_local_references()
+    proposals = [
+        LLMEpisodeDecision(summary=f"Thread {index}.", message_influences=[f"message:{index}"])
+        for index in (1, 2, 3)
+    ]
+
+    # Three short messages need several 2-token Episodes, so the cap grows.
+    assert build.max_proposals > 3
+    assert len(build.apply_llm_output(LLMEpisodeWindowDecision(proposals=proposals))) == 3
+    assert _build().max_proposals == 3

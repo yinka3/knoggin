@@ -14,12 +14,19 @@ from common.schema.episode.generation import (
     EpisodeDecision,
     LLMEpisodeWindowDecision,
 )
-from common.schema.episode.models import Episode, MessageEpisode
+from common.schema.episode.models import (
+    Episode,
+    EpisodeNarrativeLimitError,
+    MessageEpisode,
+)
 from common.utils.local_references import resolve_local_id
 from core.knowledge.episodes.policy import (
     EpisodeGenerationPolicy,
     estimate_source_tokens,
 )
+
+# Small windows may still hold a few separate threads.
+MIN_EPISODE_PROPOSALS = 3
 
 
 @dataclass(slots=True)
@@ -34,6 +41,18 @@ class ProjectEpisodeBuild:
     message_ids_by_local: dict[str, int] = field(default_factory=dict)
     decisions: list[EpisodeDecision] = field(default_factory=list)
     final_episodes: list[Episode] = field(default_factory=list)
+    # Reasons for model proposals that failed validation and were dropped.
+    rejected_proposals: list[str] = field(default_factory=list)
+
+    @property
+    def max_proposals(self) -> int:
+        """Allow enough Episodes for a full window to fit the per-Episode size cap.
+
+        A fixed count would leave most of a large window with no Episode.
+        """
+
+        needed = -(-estimate_source_tokens(self.messages) // self.policy.max_episode_source_tokens)
+        return max(MIN_EPISODE_PROPOSALS, needed)
 
     @property
     def message_ids(self) -> list[int]:
@@ -93,30 +112,46 @@ class ProjectEpisodeBuild:
         decisions: list[EpisodeDecision] = []
         used_sources: set[int] = set()
         source_ids = set(self.message_ids)
-        for proposal in output.proposals:
-            decision = EpisodeDecision.model_validate(
-                {
-                    **proposal.model_dump(),
-                    "message_influences": [
-                        int(resolve_local_id(item, self.message_ids_by_local))
-                        for item in proposal.message_influences
-                    ],
-                }
-            )
-            decision.validate_narrative_character_limit(
-                self.policy.max_narrative_chars
-            )
-            selected = set(decision.message_influences)
-            if not selected.issubset(source_ids):
-                raise ValueError("episode proposal references a message outside the window")
-            if selected.intersection(used_sources):
-                raise ValueError("episode proposals cannot share source messages")
-            selected_messages = [
-                message
-                for message in self.messages
-                if int(message["message_id"]) in selected
-            ]
-            self._validate_source_limits(selected_messages)
+        self.rejected_proposals = []
+        max_proposals = self.max_proposals
+        for index, proposal in enumerate(output.proposals):
+            # One invalid proposal must not discard the valid ones or fail the
+            # whole window; its messages simply get no Episode this time.
+            if index >= max_proposals:
+                self.rejected_proposals.append(
+                    f"proposal {index + 1} exceeds the {max_proposals}-proposal limit"
+                )
+                continue
+            try:
+                decision = EpisodeDecision.model_validate(
+                    {
+                        **proposal.model_dump(),
+                        "message_influences": [
+                            int(resolve_local_id(item, self.message_ids_by_local))
+                            for item in proposal.message_influences
+                        ],
+                    }
+                )
+                # Narrative overflow is repaired by the generator, not dropped.
+                decision.validate_narrative_character_limit(
+                    self.policy.max_narrative_chars
+                )
+                selected = set(decision.message_influences)
+                if not selected.issubset(source_ids):
+                    raise ValueError("episode proposal references a message outside the window")
+                if selected.intersection(used_sources):
+                    raise ValueError("episode proposals cannot share source messages")
+                selected_messages = [
+                    message
+                    for message in self.messages
+                    if int(message["message_id"]) in selected
+                ]
+                self._validate_source_limits(selected_messages)
+            except EpisodeNarrativeLimitError:
+                raise
+            except ValueError as exc:
+                self.rejected_proposals.append(f"proposal {index + 1}: {exc}")
+                continue
             used_sources.update(selected)
             decisions.append(decision)
         self.decisions = decisions
@@ -125,6 +160,16 @@ class ProjectEpisodeBuild:
     def _validate_source_limits(self, source_messages: list[dict[str, Any]]) -> None:
         if not source_messages:
             raise ValueError("episode proposals require source messages")
+        exchanges = {
+            int(message.get("user_msg_id") or message["message_id"])
+            if message.get("role") == "assistant"
+            else int(message["message_id"])
+            for message in source_messages
+        }
+        if len(exchanges) == 1:
+            # One exchange cannot be split further, so it is always a valid
+            # Episode even when a large paste exceeds the size limits.
+            return
         if len(source_messages) > self.policy.max_episode_source_messages:
             raise ValueError(
                 "episode proposal exceeds the configured source message limit"

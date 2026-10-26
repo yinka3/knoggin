@@ -97,6 +97,14 @@ def _build(*, episodes=None):
     ), source_id
 
 
+def _assert_rejected(result, reason):
+    """An invalid model operation is dropped, never applied or fatal."""
+
+    assert result.materialization is None
+    assert len(result.rejected_operations) == 1
+    assert reason in result.rejected_operations[0]
+
+
 @pytest.mark.unit
 @pytest.mark.no_network
 def test_context_updater_derives_user_block_time_and_persists_only_user_support():
@@ -155,19 +163,19 @@ def test_source_grounded_blocks_require_assistant_source_handles_and_keep_owner(
     ]
     assert result.materialization.blocks[-1].source_time_ms == 120
 
-    with pytest.raises(ValueError, match="assistant source"):
-        build.apply(
-            LLMContextUpdate(
-                operations=[
-                    ContextAdd(
-                        section_key="current_state",
-                        markdown="Unsupported assistant claim.",
-                        assertion_kind=AssertionKind.SOURCE_GROUNDED,
-                        evidence=[{"handle": "M2"}],
-                    )
-                ]
-            )
+    rejected = build.apply(
+        LLMContextUpdate(
+            operations=[
+                ContextAdd(
+                    section_key="current_state",
+                    markdown="Unsupported assistant claim.",
+                    assertion_kind=AssertionKind.SOURCE_GROUNDED,
+                    evidence=[{"handle": "M2"}],
+                )
+            ]
         )
+    )
+    _assert_rejected(rejected, "assistant source")
 
 
 @pytest.mark.unit
@@ -214,19 +222,19 @@ def test_clarification_questions_cannot_establish_context_without_other_evidence
         assistant_source_refs=[],
         episodes=[],
     )
-    with pytest.raises(ValueError, match="Clarification questions alone"):
-        clarification_only.apply(
-            LLMContextUpdate(
-                operations=[
-                    ContextAdd(
-                        section_key="current_state",
-                        markdown="The project is local-only.",
-                        assertion_kind=AssertionKind.AGENT_DERIVED,
-                        evidence=[{"handle": "M1"}],
-                    )
-                ]
-            )
+    rejected = clarification_only.apply(
+        LLMContextUpdate(
+            operations=[
+                ContextAdd(
+                    section_key="current_state",
+                    markdown="The project is local-only.",
+                    assertion_kind=AssertionKind.AGENT_DERIVED,
+                    evidence=[{"handle": "M1"}],
+                )
+            ]
         )
+    )
+    _assert_rejected(rejected, "Clarification questions alone")
 
 
 @pytest.mark.unit
@@ -261,18 +269,18 @@ def test_episode_aid_expands_to_current_messages_and_cannot_be_terminal_evidence
         }
     )
     stale_build, _ = _build(episodes=[stale_episode])
-    with pytest.raises(ValueError, match="no current-window evidence"):
-        stale_build.apply(
-            LLMContextUpdate(
-                operations=[
-                    ContextAdd(
-                        section_key="active_work",
-                        markdown="Cannot use a stale episode alone.",
-                        evidence=[{"handle": "E1"}],
-                    )
-                ]
-            )
+    rejected = stale_build.apply(
+        LLMContextUpdate(
+            operations=[
+                ContextAdd(
+                    section_key="active_work",
+                    markdown="Cannot use a stale episode alone.",
+                    evidence=[{"handle": "E1"}],
+                )
+            ]
         )
+    )
+    _assert_rejected(rejected, "no current-window evidence")
 
 
 @pytest.mark.unit
@@ -298,19 +306,19 @@ def test_late_evidence_cannot_replace_newer_context_and_oversized_output_fails_c
         assistant_source_refs=_source_refs(source_id),
         episodes=[],
     )
-    with pytest.raises(ValueError, match="older or untimed"):
-        build.apply(
-            LLMContextUpdate(
-                operations=[
-                    ContextReplace(
-                        section_key="current_state",
-                        target={"handle": "C1"},
-                        markdown="Late older evidence must not win.",
-                        evidence=[{"handle": "M1"}],
-                    )
-                ]
-            )
+    rejected = build.apply(
+        LLMContextUpdate(
+            operations=[
+                ContextReplace(
+                    section_key="current_state",
+                    target={"handle": "C1"},
+                    markdown="Late older evidence must not win.",
+                    evidence=[{"handle": "M1"}],
+                )
+            ]
         )
+    )
+    _assert_rejected(rejected, "older or untimed")
     with pytest.raises(ValidationError, match="100000"):
         LLMContextUpdate(
             operations=[
@@ -386,3 +394,61 @@ async def test_context_updater_uses_the_structured_contract_and_server_prompt():
     assert llm.calls[0]["response_model"] is LLMContextUpdate
     assert "EPISODES are interpretation aids" in llm.calls[0]["system"]
     assert llm.calls[0]["temperature"] == 0.0
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_one_invalid_operation_does_not_discard_valid_operations():
+    build, _ = _build()
+
+    result = build.apply(
+        LLMContextUpdate(
+            operations=[
+                ContextAdd(
+                    section_key="current_state",
+                    markdown="Unknown evidence cannot ground this.",
+                    evidence=[{"handle": "M99"}],
+                ),
+                ContextReplace(
+                    section_key="current_state",
+                    target={"handle": "C9"},
+                    markdown="There is no ninth block.",
+                    evidence=[{"handle": "M1"}],
+                ),
+                ContextAdd(
+                    section_key="current_state",
+                    markdown="The user prefers a local-only project.",
+                    assertion_kind=AssertionKind.USER_ASSERTED,
+                    evidence=[{"handle": "M1"}],
+                ),
+            ]
+        )
+    )
+
+    assert result.materialization is not None
+    assert [block.markdown for block in result.materialization.blocks] == [
+        "The prior state.",
+        "The user prefers a local-only project.",
+    ]
+    assert [support.message_id for support in result.materialization.supports] == [11]
+    assert len(result.rejected_operations) == 2
+    assert "unknown evidence M99" in result.rejected_operations[0]
+    assert "unknown block C9" in result.rejected_operations[1]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_brief_names_the_section_keys_the_model_must_return():
+    build = ContextUpdateBuild(
+        project_id="project-1",
+        domain=_domain(),
+        snapshot=None,
+        messages=_messages(),
+        assistant_source_refs=[],
+        episodes=[],
+    )
+
+    brief = build.evidence_brief()
+
+    for section in _domain().context_sections:
+        assert f"- {section.key}: {section.title}" in brief

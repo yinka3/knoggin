@@ -227,8 +227,13 @@ class SemanticWindowWriter:
         next_retry_at_ms: int | None,
         expected_attempt_count: int | None = None,
         expected_episode_result_recorded: bool | None = None,
+        consume_attempt: bool = True,
     ) -> SemanticWindowRecord | None:
-        """Record a retryable failure without mutating the successful checkpoint."""
+        """Record a retryable failure without mutating the successful checkpoint.
+
+        ``consume_attempt=False`` records a transient failure without spending
+        the window's bounded automatic attempts.
+        """
 
         user_name = require_scope_value(user_name, "user_name", "record_failure")
         project_id = require_scope_value(project_id, "project_id", "record_failure")
@@ -262,7 +267,7 @@ class SemanticWindowWriter:
                 await cur.execute(
                     f"""
                     UPDATE public.project_semantic_windows
-                    SET attempt_count = attempt_count + 1,
+                    SET attempt_count = attempt_count + %s,
                         last_failure_stage = %s,
                         last_failure_code = %s,
                         last_failure_at_ms = %s,
@@ -278,6 +283,7 @@ class SemanticWindowWriter:
                     RETURNING {_WINDOW_COLUMNS}
                     """,
                     (
+                        1 if consume_attempt else 0,
                         failure_stage,
                         failure_code,
                         failed_at_ms,

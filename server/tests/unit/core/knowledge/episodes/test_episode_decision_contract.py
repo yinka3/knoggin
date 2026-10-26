@@ -29,8 +29,11 @@ def test_episode_generation_prompt_renders_window_source_limits():
         max_narrative_chars=4000,
         max_episode_source_messages=72,
         max_episode_source_tokens=12000,
+        max_proposals=11,
     )
 
+    assert "zero to 11" in prompt
+    assert "at most 11 new-episode proposals" in prompt
     assert "Ada" in prompt
     assert "3600" in prompt
     assert "4000" in prompt
@@ -83,14 +86,15 @@ def test_episode_decision_rejects_retired_or_invalid_shapes(payload):
         EpisodeDecision(**payload)
 
 
-def test_window_rejects_proposals_that_share_a_source_message():
+def test_window_schema_leaves_source_overlap_to_the_episode_build():
     proposal = LLMEpisodeDecision(
         summary="The project selected durable memory.",
         message_influences=["message:1"],
     )
 
-    with pytest.raises(ValidationError, match="cannot share source messages"):
-        LLMEpisodeWindowDecision(proposals=[proposal, proposal])
+    # ProjectEpisodeBuild drops the overlapping proposal; the schema must not
+    # fail the whole model response for it.
+    assert len(LLMEpisodeWindowDecision(proposals=[proposal, proposal]).proposals) == 2
 
 
 def test_empty_window_proposals_are_the_explicit_skip_result():

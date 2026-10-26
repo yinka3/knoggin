@@ -164,10 +164,32 @@ class LLMError(EngineError):
 
 
 class LLMProviderError(LLMError):
-    """Raised when the configured LLM provider cannot complete a request."""
+    """Raised when the configured LLM provider cannot complete a request.
+
+    ``transient`` marks outages, rate limits, and provider 5xx responses that
+    are expected to clear without any change to the request.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        details: Optional[Dict] = None,
+        *,
+        transient: bool = False,
+    ):
+        super().__init__(message, code="llm_provider_error", details=details)
+        self.transient = transient
+
+
+class LLMContextTruncatedError(LLMProviderError):
+    """The provider processed far fewer prompt tokens than were sent.
+
+    Its context window is smaller than the prompt, so it silently dropped part
+    of it. Retrying cannot help until the model or server is configured.
+    """
 
     def __init__(self, message: str, details: Optional[Dict] = None):
-        super().__init__(message, code="llm_provider_error", details=details)
+        super().__init__(message, details=details, transient=False)
 
 
 class LLMResponseError(LLMError):

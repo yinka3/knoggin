@@ -6,6 +6,8 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Protocol, TypeVar
 from uuid import UUID
 
+from loguru import logger
+
 from common.conf.domain_config import CompiledDomain
 from common.schema.context import (
     AssertionKind,
@@ -49,6 +51,8 @@ class ContextUpdateResult:
     materialization: ContextMaterialization | None
     edit_summary: str
     operation_count: int
+    # Reasons for model operations that failed validation and were dropped.
+    rejected_operations: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,7 +190,15 @@ class ContextUpdateBuild:
     def evidence_brief(self) -> str:
         """Render complete source catalogs without exposing durable identifiers."""
 
-        lines = ["CURRENT CONTEXT:", self._current_context_text(), "", "FROZEN MESSAGES:"]
+        lines = [
+            "CONTEXT SECTIONS (return one of these section_key values):",
+            *(f"- {section.key}: {section.title}" for section in self.domain.context_sections),
+            "",
+            "CURRENT CONTEXT:",
+            self._current_context_text(),
+            "",
+            "FROZEN MESSAGES:",
+        ]
         for handle, message in self._message_by_handle.items():
             raw = self.messages[int(handle[1:]) - 1]
             source_time = "unknown" if message.timestamp_ms is None else str(message.timestamp_ms)
@@ -242,10 +254,25 @@ class ContextUpdateBuild:
             raise TypeError("Context updater requires LLMContextUpdate")
         resolved_operations: list[ContextEditBase] = []
         evidence_by_operation: list[_ResolvedEvidence] = []
+        rejected: list[str] = []
         for operation in output.operations:
-            evidence = self._resolve_evidence(operation)
-            self._reject_stale_target(operation, evidence)
-            resolved_operations.append(self._with_derived_source_time(operation, evidence))
+            # One invalid model operation must not discard the valid ones or
+            # fail the whole window. Trial-apply with the kept operations so
+            # the edit rules stay owned by apply_context_edits.
+            try:
+                evidence = self._resolve_evidence(operation)
+                self._reject_stale_target(operation, evidence)
+                resolved = self._with_derived_source_time(operation, evidence)
+                apply_context_edits(
+                    self.snapshot,
+                    [*resolved_operations, resolved],
+                    self.domain,
+                    project_id=self.project_id,
+                )
+            except ValueError as exc:
+                rejected.append(str(exc))
+                continue
+            resolved_operations.append(resolved)
             evidence_by_operation.append(evidence)
 
         materialization = apply_context_edits(
@@ -259,6 +286,7 @@ class ContextUpdateBuild:
                 materialization=None,
                 edit_summary=output.edit_summary or "No Context changes",
                 operation_count=len(output.operations),
+                rejected_operations=tuple(rejected),
             )
         if len(materialization.operation_new_block_ids) != len(resolved_operations):
             raise RuntimeError("Context edit application did not retain operation mapping")
@@ -277,6 +305,7 @@ class ContextUpdateBuild:
             materialization=materialization,
             edit_summary=output.edit_summary or "Updated project Context",
             operation_count=len(output.operations),
+            rejected_operations=tuple(rejected),
         )
 
     def _current_context_text(self) -> str:
@@ -447,4 +476,7 @@ class ContextUpdater:
             user=build.evidence_brief(),
             temperature=0.0,
         )
-        return build.apply(output)
+        result = build.apply(output)
+        for reason in result.rejected_operations:
+            logger.warning("Dropped invalid Context operation: {}", reason)
+        return result
