@@ -204,7 +204,7 @@ class GlobalEntityMergeWriter:
                 active_cur,
                 """
                 SELECT project_id, entity_id, user_name, entity_type, topic,
-                       last_mentioned_ms
+                       last_mentioned_ms, human_correction_review_id
                 FROM public.project_entity_contexts
                 WHERE user_name = %s AND entity_id = ANY(%s)
                 ORDER BY project_id, entity_id
@@ -358,6 +358,15 @@ class GlobalEntityMergeWriter:
                 contexts_by_project.setdefault(context["project_id"], {})[
                     int(context["entity_id"])
                 ] = context
+            protected = [
+                {"project_id": context["project_id"],
+                 "entity_id": int(context["entity_id"]),
+                 "reason": "active_human_correction"}
+                for context in before["contexts"]
+                if context["human_correction_review_id"] is not None
+            ]
+            if protected:
+                raise EntityMergeConflict(protected)
             conflicts: list[dict[str, Any]] = []
             for project_id, project_contexts in contexts_by_project.items():
                 primary = project_contexts.get(survivor_id)

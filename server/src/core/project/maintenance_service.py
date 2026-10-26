@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 
 from loguru import logger
 
 from common.conf.relationship_config import normalize_relationship
+from common.exceptions import MaintenanceConflictError
+from common.schema.evidence import EvidencePointer
 from common.schema.maintenance import (
     MaintenanceImpactPreview,
     OrphanedExchangeBlockage,
@@ -45,6 +49,7 @@ from core.knowledge.db.writers.relationship_interpretation_writer import (
 from core.knowledge.evidence_service import EvidenceService
 from core.knowledge.maintenance.maintenance_impact import MaintenanceImpactPlanner
 from core.knowledge.maintenance.maintenance_reviews import (
+    EntityContextChangePlan,
     MaintenanceReviewDetail,
     RelationshipAdvisoryPlan,
     RelationshipInterpretationPlan,
@@ -352,6 +357,122 @@ class ProjectMaintenanceService:
             project_id=project_id,
         )
 
+    async def flag_jev_entity_context_decision(
+        self, project_id: str, *, capability: str, window_id: str,
+        pass_number: int, occurrence_key: str, entity_id: int,
+        entity_type: str | None, topic: str | None, reasoning: str,
+    ):
+        """Open a review for a typed correction to a decision-linked entity context."""
+
+        async with self._lock:
+            await self._require_domain_project(project_id, allow_archived=False)
+            if capability not in {"extraction", "classification"}:
+                raise ValueError("This decision cannot change entity type or topic")
+            row = await self._require_knowledge_store().get_jev_decision(
+                capability, window_id, pass_number, occurrence_key,
+                user_name=self.user_name, project_id=project_id,
+            )
+            if row is None:
+                raise FileNotFoundError("JEV decision not found")
+            observation = row["decision"]
+            linked_id = (
+                observation.get("entity_id") if capability == "classification"
+                else observation.get("operational_entity_id")
+            )
+            if linked_id != entity_id:
+                raise ValueError("JEV decision does not identify this entity")
+            current = await self.pg.fetch_one(
+                """SELECT entity_type, topic, human_correction_review_id
+                   FROM public.project_entity_contexts
+                   WHERE user_name = %s AND project_id = %s AND entity_id = %s""",
+                (self.user_name, project_id, entity_id),
+            )
+            if current is None:
+                raise FileNotFoundError("Entity context not found")
+            if current["human_correction_review_id"] is not None:
+                raise MaintenanceConflictError()
+            stored_domain = await self._domain_store.load(self.user_name, project_id)
+            domain = stored_domain.compile()
+            target_type = entity_type or current["entity_type"]
+            if target_type not in domain.active_entity_types:
+                raise ValueError("Entity type is not active in this project domain")
+            target_topic = topic or (
+                domain.topic_for_entity_type(target_type)
+                if target_type != current["entity_type"] else current["topic"]
+            )
+            if target_topic not in domain.allowed_topics_for_entity_type(target_type):
+                raise ValueError("Topic is not allowed for this entity type")
+            if (target_type, target_topic) == (current["entity_type"], current["topic"]):
+                raise ValueError("Correction leaves the entity unchanged")
+            block_ids = observation["record"]["evidence_block_ids"]
+            if not block_ids or len(block_ids) > 8:
+                raise ValueError("JEV decision evidence is unavailable or too large")
+            bundles = tuple([
+                await self._require_knowledge_store().get_context_block_evidence(
+                    block_id, user_name=self.user_name, project_id=project_id,
+                )
+                for block_id in block_ids
+            ])
+            if any(node.status == "missing" for bundle in bundles for node in bundle.nodes):
+                raise ValueError("JEV decision evidence is missing")
+            snapshot = EvidenceService.snapshot(bundles)
+            decision_hash = hashlib.sha256(json.dumps(
+                observation, sort_keys=True, separators=(",", ":")
+            ).encode()).hexdigest()
+            return await self._maintenance_reviews.open(
+                user_name=self.user_name, scope="project", project_id=project_id,
+                kind="jev_entity_context_correction", reasoning=reasoning,
+                proposed_plan=EntityContextChangePlan(
+                    entity_id=entity_id, project_id=project_id,
+                    entity_type=target_type, topic=target_topic,
+                ),
+                evidence_refs=[EvidencePointer(kind="context_block", identifier=block_id)
+                               for block_id in block_ids],
+                evidence_snapshot=snapshot,
+                expected_state={
+                    "decision_hash": decision_hash,
+                    "capability": capability, "window_id": window_id,
+                    "pass_number": pass_number, "occurrence_key": occurrence_key,
+                    "entity_type": current["entity_type"], "topic": current["topic"],
+                    "domain_version": stored_domain.version,
+                },
+                dedupe_key=f"jev-context:{window_id}:{pass_number}:{occurrence_key}:{entity_id}",
+            )
+
+    async def reopen_jev_entity_context_correction(
+        self, project_id: str, entity_id: int, *, expected_review_id: str,
+    ) -> dict:
+        """Release one confirmed context choice for future user or domain changes."""
+
+        async with self._lock:
+            await self._require_domain_project(project_id, allow_archived=False)
+            async with self.pg.transaction() as cur:
+                await cur.execute(
+                    """SELECT status FROM public.projects
+                       WHERE user_name = %s AND project_id = %s FOR UPDATE""",
+                    (self.user_name, project_id),
+                )
+                project = await cur.fetchone()
+                if project is None or project["status"] != "active":
+                    raise ValueError("Project is not active")
+                await cur.execute(
+                    """UPDATE public.project_entity_contexts
+                       SET human_correction_review_id = NULL,
+                           updated_at_ms = floor(extract(epoch from clock_timestamp()) * 1000)::bigint
+                       WHERE user_name = %s AND project_id = %s AND entity_id = %s
+                         AND human_correction_review_id = %s
+                       RETURNING entity_type, topic""",
+                    (self.user_name, project_id, entity_id, expected_review_id),
+                )
+                row = await cur.fetchone()
+                if row is None:
+                    raise MaintenanceConflictError()
+            runtime = self._active_projects.get(project_id)
+            if runtime is not None:
+                runtime.entities.remove_entities([entity_id])
+            return {"entity_id": entity_id, "entity_type": row["entity_type"],
+                    "topic": row["topic"], "human_correction_active": False}
+
     async def get_maintenance_review_detail(
         self,
         project_id: str,
@@ -389,7 +510,7 @@ class ProjectMaintenanceService:
                 observation_ids=observation_ids,
                 user_name=self.user_name,
                 project_id=project_id,
-            )
+            ) if observation_ids else ()
         )
         for block_id in context_ids:
             bundles.append(
@@ -428,7 +549,7 @@ class ProjectMaintenanceService:
         if detail.review.status != "open":
             raise ValueError("Only an open maintenance review can be previewed")
         if detail.evidence_state != "current":
-            raise ValueError("Maintenance review is stale; evidence changed")
+            raise MaintenanceConflictError()
         return detail, MaintenanceImpactPlanner.preview(detail.review)
 
     async def transition_maintenance_review(
@@ -487,6 +608,8 @@ class ProjectMaintenanceService:
             raise ValueError("Unknown or already-resolved maintenance review")
         if expected_state is not None and review.expected_state != expected_state:
             raise ValueError("Maintenance review expected state no longer matches")
+        if isinstance(review.proposed_plan, EntityContextChangePlan):
+            return await self._apply_jev_entity_context_review(project_id, review)
         if not isinstance(review.proposed_plan, RelationshipInterpretationPlan):
             raise ValueError(
                 "This review requires its dedicated maintenance operation and "
@@ -530,6 +653,80 @@ class ProjectMaintenanceService:
             review_id,
             user_name=self.user_name,
             project_id=project_id,
+        )
+
+    async def _apply_jev_entity_context_review(self, project_id, review):
+        plan = review.proposed_plan
+        if review.kind != "jev_entity_context_correction" or plan.project_id != project_id:
+            raise ValueError("Review is not an entity context correction")
+        await self._require_domain_project(project_id, allow_archived=False)
+        detail = await self.get_maintenance_review_detail(project_id, review.review_id)
+        if detail.evidence_state != "current":
+            raise ValueError("Maintenance review is stale; evidence changed")
+        expected = review.expected_state
+        decision_row = await self._require_knowledge_store().get_jev_decision(
+            expected["capability"], expected["window_id"], expected["pass_number"],
+            expected["occurrence_key"], user_name=self.user_name, project_id=project_id,
+        )
+        if decision_row is None or hashlib.sha256(json.dumps(
+            decision_row["decision"], sort_keys=True, separators=(",", ":")
+        ).encode()).hexdigest() != expected["decision_hash"]:
+            raise MaintenanceConflictError()
+        async with self.pg.transaction() as cur:
+            await cur.execute(
+                """SELECT status, domain_config ->> 'version' AS domain_version
+                   FROM public.projects WHERE user_name = %s AND project_id = %s
+                   FOR UPDATE""",
+                (self.user_name, project_id),
+            )
+            project = await cur.fetchone()
+            if (project is None or project["status"] != "active"
+                    or int(project["domain_version"]) != expected["domain_version"]):
+                raise MaintenanceConflictError()
+            await cur.execute(
+                """SELECT entity_type, topic, human_correction_review_id
+                   FROM public.project_entity_contexts
+                   WHERE user_name = %s AND project_id = %s AND entity_id = %s
+                   FOR UPDATE""",
+                (self.user_name, project_id, plan.entity_id),
+            )
+            current = await cur.fetchone()
+            if (current is None or current["entity_type"] != expected["entity_type"]
+                    or current["topic"] != expected["topic"]
+                    or current["human_correction_review_id"] is not None):
+                raise MaintenanceConflictError()
+            await cur.execute(
+                """UPDATE public.project_entity_contexts
+                   SET entity_type = %s, topic = %s,
+                       human_correction_review_id = %s,
+                       updated_at_ms = floor(extract(epoch from clock_timestamp()) * 1000)::bigint
+                   WHERE user_name = %s AND project_id = %s AND entity_id = %s""",
+                (plan.entity_type, plan.topic, review.review_id,
+                 self.user_name, project_id, plan.entity_id),
+            )
+            if plan.entity_type != current["entity_type"]:
+                await cur.execute(
+                    """SELECT observation_id FROM public.relationship_observations
+                       WHERE user_name = %s AND project_id = %s AND retired_at IS NULL
+                         AND (source_entity_id = %s OR target_entity_id = %s)""",
+                    (self.user_name, project_id, plan.entity_id, plan.entity_id),
+                )
+                observation_ids = [int(row["observation_id"]) for row in await cur.fetchall()]
+                await self._maintenance_reviews.mark_stale_for_observations(
+                    user_name=self.user_name, project_id=project_id,
+                    observation_ids=observation_ids,
+                    reason="Human-corrected relationship endpoint type", cur=cur,
+                )
+            await self._maintenance_reviews.transition(
+                review.review_id, user_name=self.user_name, project_id=project_id,
+                status="applied", expected_state=expected, actor=self.user_name,
+                reason="User confirmed JEV-linked entity correction", cur=cur,
+            )
+        runtime = self._active_projects.get(project_id)
+        if runtime is not None:
+            runtime.entities.remove_entities([plan.entity_id])
+        return await self._maintenance_reviews.get(
+            review.review_id, user_name=self.user_name, project_id=project_id,
         )
 
     async def get_conflict_group(self, project_id: str, conflict_id: str) -> dict:

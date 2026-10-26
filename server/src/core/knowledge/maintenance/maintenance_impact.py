@@ -85,11 +85,7 @@ class MaintenanceImpactPlanner:
         elif isinstance(plan, EntityContextChangePlan):
             key = f"{plan.project_id}:{plan.entity_id}"
             impacts.append(cls._item("project_entity_context", "direct_mutation", [key]))
-            impacts.extend(
-                cls._project_rebuilds(
-                    [plan.project_id], include_search=True, include_cache=True
-                )
-            )
+            impacts.append(cls._item("live_entity_cache", "cache_invalidation", [key]))
         elif isinstance(plan, RelationshipDomainChangePlan):
             impacts.append(
                 cls._item("domain_config", "direct_mutation", [plan.relationship_name])

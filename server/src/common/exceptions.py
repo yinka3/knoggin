@@ -130,6 +130,15 @@ class WorkspaceConflictError(EngineError, ValueError):
         )
 
 
+class MaintenanceConflictError(EngineError, ValueError):
+    """A reviewed correction no longer matches current project knowledge."""
+
+    def __init__(self):
+        EngineError.__init__(
+            self, "Maintenance review or knowledge changed", code="maintenance_conflict"
+        )
+
+
 class EpisodeEditConflictError(EngineError, ValueError):
     """An optimistic episode edit no longer matches the owned revision."""
 

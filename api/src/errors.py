@@ -7,6 +7,7 @@ from common.exceptions import (
     DependencyError,
     IdempotencyConflictError,
     LLMBudgetExceededError,
+    MaintenanceConflictError,
     NotFoundError,
     RequestInProgressError,
     SavedWebLinkAlreadyExistsError,
@@ -31,6 +32,8 @@ async def handle_error(_request, error: Exception) -> JSONResponse:
         status, code, message = 409, "link_exists", "Web link already saved"
     elif isinstance(error, WorkspaceConflictError):
         status, code, message = 409, "workspace_conflict", "Workspace changed"
+    elif isinstance(error, MaintenanceConflictError):
+        status, code, message = 409, "maintenance_conflict", "Review or knowledge changed"
     elif isinstance(error, LLMBudgetExceededError):
         status, code, message = 402, "llm_budget_exhausted", "Model budget is exhausted"
     elif isinstance(error, (ValidationError, ValueError, TypeError)):

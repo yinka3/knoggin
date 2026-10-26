@@ -748,6 +748,15 @@ class KnowledgeStore:
             entity_id, user_name=user_name, project_id=project_id, limit=limit,
         )
 
+    async def get_jev_decision(
+        self, capability: str, window_id: str, pass_number: int,
+        occurrence_key: str, *, user_name: str, project_id: str,
+    ) -> dict | None:
+        return await self._semantic_window_reader.get_jev_decision(
+            capability, window_id, pass_number, occurrence_key,
+            user_name=user_name, project_id=project_id,
+        )
+
     async def list_jev_extraction_decisions(
         self,
         window_id: str,

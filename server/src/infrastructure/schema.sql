@@ -753,6 +753,7 @@ CREATE TABLE public.project_entity_contexts (
     user_name text NOT NULL,
     entity_type text NOT NULL,
     topic text DEFAULT 'General'::text NOT NULL,
+    human_correction_review_id text,
     last_mentioned_ms bigint,
     created_at_ms bigint DEFAULT (floor((EXTRACT(epoch FROM clock_timestamp()) * (1000)::numeric)))::bigint NOT NULL,
     updated_at_ms bigint DEFAULT (floor((EXTRACT(epoch FROM clock_timestamp()) * (1000)::numeric)))::bigint NOT NULL,

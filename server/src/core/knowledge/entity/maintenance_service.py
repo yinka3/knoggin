@@ -157,6 +157,11 @@ class EntityMaintenanceService:
             raise ValueError("both active entities must exist in the user's scope")
         if any(row["status"] != "active" for row in entities.values()):
             raise ValueError("only active entities can be merged")
+        if any(
+            context["human_correction_review_id"] is not None
+            for context in snapshot["contexts"]
+        ):
+            raise ValueError("Reopen active human context corrections before merging")
         choices: dict[str, dict[str, str]] = {}
         for raw_choice in context_choices:
             choice = (

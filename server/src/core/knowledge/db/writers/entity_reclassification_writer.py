@@ -96,6 +96,7 @@ class EntityReclassificationWriter:
               ON context.entity_id = e.entity_id
             WHERE e.user_name = %s
               AND context.project_id = %s
+              AND context.human_correction_review_id IS NULL
               AND e.entity_id <> %s
               AND e.entity_id > %s
             ORDER BY e.entity_id
@@ -179,6 +180,7 @@ class EntityReclassificationWriter:
                   AND context.project_id = %s
                   AND e.entity_id = ANY(%s)
                   AND e.entity_id <> %s
+                  AND context.human_correction_review_id IS NULL
                 FOR UPDATE
                 """,
                 (user_name, project_id, entity_ids, IDENTITY_ENTITY_ID),
@@ -215,6 +217,7 @@ class EntityReclassificationWriter:
                     WHERE user_name = %s
                       AND project_id = %s
                       AND entity_id = %s
+                      AND human_correction_review_id IS NULL
                       AND entity_type IS NOT DISTINCT FROM %s
                       AND topic IS NOT DISTINCT FROM %s
                     RETURNING entity_id

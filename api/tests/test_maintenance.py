@@ -1,6 +1,7 @@
 import asyncio
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from uuid import uuid4
 
 import httpx
 from pydantic import BaseModel
@@ -30,6 +31,14 @@ def test_review_routes_enforce_scope_and_dispatch_decisions(monkeypatch, tmp_pat
         async def transition_maintenance_review(self, project_id, review_id, **kwargs):
             calls.append(("decide", project_id, review_id, kwargs))
             return review
+
+        async def flag_jev_entity_context_decision(self, project_id, **kwargs):
+            calls.append(("flag_jev", project_id, kwargs))
+            return review
+
+        async def reopen_jev_entity_context_correction(self, project_id, entity_id, **kwargs):
+            calls.append(("reopen_jev", project_id, entity_id, kwargs))
+            return {"entity_id": entity_id, "human_correction_active": False}
 
     class Projects:
         maintenance_service = Maintenance()
@@ -74,6 +83,27 @@ def test_review_routes_enforce_scope_and_dispatch_decisions(monkeypatch, tmp_pat
                 assert calls[-1] == (
                     "decide", "project-1", "review-1",
                     {"status": "dismissed", "expected_state": {"revision": 3}, "reason": None},
+                )
+                flag_url = "/v1/projects/project-1/maintenance/jev-context-corrections"
+                assert (await client.post(flag_url, json={
+                    "capability": "classification", "window_id": str(uuid4()),
+                    "pass_number": 1, "occurrence_key": "0:topic", "entity_id": 2,
+                    "reasoning": "Check this",
+                })).status_code == 422
+                flagged = await client.post(flag_url, json={
+                    "capability": "classification", "window_id": str(uuid4()),
+                    "pass_number": 1, "occurrence_key": "0:topic", "entity_id": 2,
+                    "topic": "Identity", "reasoning": "Check this",
+                })
+                assert flagged.status_code == 201
+                assert calls[-1][0] == "flag_jev"
+                reopened = await client.post(
+                    flag_url + "/2/reopen", json={"expected_review_id": "review-1"},
+                )
+                assert reopened.status_code == 200
+                assert calls[-1] == (
+                    "reopen_jev", "project-1", 2,
+                    {"expected_review_id": "review-1"},
                 )
 
     asyncio.run(exercise())

@@ -7,7 +7,13 @@ from pydantic import BaseModel, ValidationError
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from contracts.maintenance import AdvisoryDecision, Decision, RollbackSelection
+from contracts.maintenance import (
+    AdvisoryDecision,
+    Decision,
+    FlagJevContextDecision,
+    ReopenJevContextCorrection,
+    RollbackSelection,
+)
 from routes.project_settings import _error, _json, _project_error
 
 
@@ -88,6 +94,39 @@ async def project_reviews(request):
     return JSONResponse({"reviews": [_review(review) for review in reviews]})
 
 
+async def flag_jev_context_decision(request):
+    if error := await _scope(request, write=True):
+        return error
+    try:
+        body = FlagJevContextDecision.model_validate(await _json(request))
+    except ValidationError:
+        return _error("invalid_correction", "Invalid JEV correction", 422)
+    review = await request.app.state.runtime.projects.maintenance_service.flag_jev_entity_context_decision(
+        request.path_params["project_id"], capability=body.capability,
+        window_id=str(body.window_id), pass_number=body.pass_number,
+        occurrence_key=body.occurrence_key, entity_id=body.entity_id,
+        entity_type=body.entity_type, topic=body.topic, reasoning=body.reasoning,
+    )
+    return JSONResponse({"review": _review(review)}, status_code=201)
+
+
+async def reopen_jev_context_correction(request):
+    if error := await _scope(request, write=True):
+        return error
+    try:
+        entity_id = int(request.path_params["entity_id"])
+        if entity_id <= 0:
+            raise ValueError("invalid entity ID")
+        body = ReopenJevContextCorrection.model_validate(await _json(request))
+    except (ValidationError, ValueError):
+        return _error("invalid_reopen", "Invalid correction reopen request", 422)
+    result = await request.app.state.runtime.projects.maintenance_service.reopen_jev_entity_context_correction(
+        request.path_params["project_id"], entity_id,
+        expected_review_id=body.expected_review_id,
+    )
+    return JSONResponse(result)
+
+
 async def project_review(request):
     if error := await _scope(request):
         return error
@@ -162,6 +201,8 @@ routes = [
     Route("/v1/maintenance/merges/{merge_id}/rollback/preview", rollback_preview, methods=["GET"]),
     Route("/v1/maintenance/merges/{merge_id}/rollback", rollback, methods=["POST"]),
     Route("/v1/projects/{project_id}/maintenance/reviews", project_reviews, methods=["GET"]),
+    Route("/v1/projects/{project_id}/maintenance/jev-context-corrections", flag_jev_context_decision, methods=["POST"]),
+    Route("/v1/projects/{project_id}/maintenance/jev-context-corrections/{entity_id}/reopen", reopen_jev_context_correction, methods=["POST"]),
     Route("/v1/projects/{project_id}/maintenance/reviews/{review_id}", project_review, methods=["GET"]),
     Route("/v1/projects/{project_id}/maintenance/reviews/{review_id}/preview", project_preview, methods=["GET"]),
     Route("/v1/projects/{project_id}/maintenance/reviews/{review_id}/decision", project_decision, methods=["POST"]),

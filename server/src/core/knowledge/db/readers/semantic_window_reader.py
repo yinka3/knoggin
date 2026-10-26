@@ -192,6 +192,33 @@ class SemanticWindowReader:
             ),
         )
 
+    async def get_jev_decision(
+        self, capability: str, window_id: UUID | str, pass_number: int,
+        occurrence_key: str, *, user_name: str, project_id: str,
+    ) -> dict | None:
+        """Locate one immutable decision without exposing its private payload."""
+
+        user_name, project_id = self._scope(user_name, project_id, "get_jev_decision")
+        window_id = self._uuid(window_id, "window_id")
+        tables = {
+            "identity": "project_jev_identity_decisions",
+            "extraction": "project_jev_extraction_decisions",
+            "classification": "project_jev_classification_decisions",
+        }
+        if capability not in tables or pass_number not in {1, 2} or not occurrence_key:
+            raise ValueError("Invalid JEV decision locator")
+        return await self.client.fetch_one(
+            f"""SELECT item.decision
+                FROM public.{tables[capability]} AS item
+                JOIN public.project_semantic_windows AS semantic_window
+                  ON semantic_window.window_id = item.window_id
+                 AND semantic_window.project_id = item.project_id
+                WHERE item.window_id = %s AND item.project_id = %s
+                  AND item.pass_number = %s AND item.occurrence_key = %s
+                  AND semantic_window.user_name = %s""",
+            (window_id, project_id, pass_number, occurrence_key, user_name),
+        )
+
     async def list_jev_identity_decisions(
         self,
         window_id: UUID | str,
