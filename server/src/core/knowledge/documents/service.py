@@ -990,16 +990,17 @@ class DocumentService:
         self,
         *,
         folder_name: str,
-        entries: List[FolderUploadEntry],
+        entries: List[FolderUploadEntry | FolderScanPathEntry],
         settings: Optional[FolderScanSettings] = None,
         force_include_paths: Optional[List[str]] = None,
+        content_loader: Callable[[str, int], bytes] | None = None,
     ) -> FolderPreview:
         """Scan a virtual folder manifest without storing or indexing content."""
         if not isinstance(folder_name, str) or not folder_name.strip():
             raise ValueError("folder_name must not be empty")
         validated_entries = [
             entry
-            if isinstance(entry, FolderUploadEntry)
+            if isinstance(entry, (FolderUploadEntry, FolderScanPathEntry))
             else FolderUploadEntry.model_validate(entry)
             for entry in entries
         ]
@@ -1015,6 +1016,7 @@ class DocumentService:
             validated_entries,
             scan_settings,
             force_include_paths or [],
+            content_loader=content_loader,
         )
 
     async def get_scan_settings(self) -> FolderScanSettings:

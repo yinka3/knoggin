@@ -85,3 +85,18 @@ class FolderIntake(BaseModel):
     folder_name: str = Field(min_length=1, max_length=512)
     files: list[FolderFile] = Field(min_length=1, max_length=1000)
     force_include_paths: list[str] = Field(default_factory=list, max_length=1000)
+
+
+class StagedFolderFile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    relative_path: str = Field(min_length=1, max_length=2048)
+    size_bytes: int = Field(ge=1)
+
+
+class StagedFolderCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    folder_name: str = Field(min_length=1, max_length=512)
+    files: list[StagedFolderFile] = Field(min_length=1, max_length=1000)
+    force_include_paths: list[str] = Field(default_factory=list, max_length=1000)

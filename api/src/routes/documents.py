@@ -19,10 +19,11 @@ from common.schema.document import FolderUploadEntry
 from core.knowledge.documents.scanning import normalize_relative_path
 
 from contracts.documents import (
-    BatchDocument, BatchSources, FolderIntake, OcrPreflight, PromoteSource, SaveWebLink, UpdateWebLink,
+    BatchDocument, BatchSources, FolderIntake, OcrPreflight, PromoteSource, SaveWebLink, StagedFolderCreate, UpdateWebLink,
     UploadDocument,
 )
 from errors import handle_error
+from folder_staging import IntakeConflict, IntakeTooLarge
 from project_lease import project_documents, project_runtime, readable_project_documents
 from routes.project_settings import _error, _json, _project_error
 
@@ -289,6 +290,111 @@ async def folder_intake(request):
         return JSONResponse(result)
 
 
+def _staged_public(intake):
+    for item in intake["files"]:
+        if item["result"] is not None:
+            item["result"] = _public(item["result"], DOCUMENT_FIELDS)
+    return intake
+
+
+async def _staged_error(request, operation):
+    project_id = request.path_params["project_id"]
+    intake_id = request.path_params.get("intake_id")
+    try:
+        return await operation(request.app.state.folder_staging, project_id, intake_id)
+    except KeyError:
+        return _error("intake_not_found", "Folder intake not found", 404)
+    except IntakeConflict:
+        return _error("intake_conflict", "Folder intake state changed", 409)
+    except IntakeTooLarge:
+        return _error("payload_too_large", "Folder upload is too large", 413)
+    except ValueError:
+        return _error("invalid_folder", "Invalid folder intake", 422)
+
+
+async def create_staged_folder(request):
+    if error := await _project(request):
+        return error
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > 3 * 1024 * 1024:
+            return _error("payload_too_large", "Folder manifest is too large", 413)
+    try:
+        payload = StagedFolderCreate.model_validate(json.loads(body))
+    except (ValidationError, ValueError, TypeError):
+        return _error("invalid_folder", "Invalid folder manifest", 422)
+    result = await _staged_error(
+        request, lambda staging, project_id, _intake_id: staging.create(project_id, payload)
+    )
+    return result if isinstance(result, JSONResponse) else JSONResponse(result, status_code=201)
+
+
+async def get_staged_folder(request):
+    if error := await _project(request, write=False):
+        return error
+    result = await _staged_error(
+        request, lambda staging, project_id, intake_id: staging.get(project_id, intake_id)
+    )
+    return result if isinstance(result, JSONResponse) else JSONResponse(_staged_public(result))
+
+
+async def delete_staged_folder(request):
+    if error := await _project(request, write=False):
+        return error
+    result = await _staged_error(
+        request, lambda staging, project_id, intake_id: staging.delete(project_id, intake_id)
+    )
+    return result if isinstance(result, JSONResponse) else JSONResponse({"deleted": True})
+
+
+async def upload_staged_file(request):
+    if error := await _project(request):
+        return error
+    result = await _staged_error(
+        request,
+        lambda staging, project_id, intake_id: staging.upload(
+            project_id, intake_id, request.path_params["file_id"], request.stream()
+        ),
+    )
+    return result if isinstance(result, JSONResponse) else JSONResponse(result)
+
+
+async def preview_staged_folder(request):
+    if error := await _project(request):
+        return error
+    async with project_documents(request.app.state.runtime, request.path_params["project_id"]) as service:
+        result = await _staged_error(
+            request,
+            lambda staging, project_id, intake_id: staging.preview(project_id, intake_id, service),
+        )
+    return result if isinstance(result, JSONResponse) else JSONResponse(_folder_preview(result))
+
+
+async def commit_staged_folder(request):
+    if error := await _project(request):
+        return error
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw.extend(chunk)
+        if len(raw) > 1024:
+            return _error("payload_too_large", "Commit request is too large", 413)
+    try:
+        body = json.loads(raw or b"{}")
+        if not isinstance(body, dict) or set(body) - {"retry_failed"} or not isinstance(body.get("retry_failed", False), bool):
+            raise ValueError
+    except (ValueError, TypeError):
+        return _error("invalid_folder", "Invalid commit request", 422)
+    async with project_documents(request.app.state.runtime, request.path_params["project_id"]) as service:
+        result = await _staged_error(
+            request,
+            lambda staging, project_id, intake_id: staging.commit(
+                project_id, intake_id, service, retry_failed=body.get("retry_failed", False)
+            ),
+        )
+    return result if isinstance(result, JSONResponse) else JSONResponse(_staged_public(result))
+
+
 async def inspect_ocr(request):
     body = await _json(request)
     if isinstance(body, dict) and isinstance(body.get("content_base64"), str):
@@ -488,6 +594,12 @@ routes = [
     Route("/v1/projects/{project_id}/sources/batch", admit_batch, methods=["POST"]),
     Route("/v1/projects/{project_id}/folders/preview", folder_intake, methods=["POST"]),
     Route("/v1/projects/{project_id}/folders/intake", folder_intake, methods=["POST"]),
+    Route("/v1/projects/{project_id}/folders/intakes", create_staged_folder, methods=["POST"]),
+    Route("/v1/projects/{project_id}/folders/intakes/{intake_id}", get_staged_folder, methods=["GET"]),
+    Route("/v1/projects/{project_id}/folders/intakes/{intake_id}", delete_staged_folder, methods=["DELETE"]),
+    Route("/v1/projects/{project_id}/folders/intakes/{intake_id}/files/{file_id}", upload_staged_file, methods=["PUT"]),
+    Route("/v1/projects/{project_id}/folders/intakes/{intake_id}/preview", preview_staged_folder, methods=["POST"]),
+    Route("/v1/projects/{project_id}/folders/intakes/{intake_id}/commit", commit_staged_folder, methods=["POST"]),
     Route("/v1/projects/{project_id}/documents", list_documents, methods=["GET"]),
     Route("/v1/projects/{project_id}/documents", upload_document, methods=["POST"]),
     Route("/v1/projects/{project_id}/documents/search", search_documents, methods=["GET"]),

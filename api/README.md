@@ -224,8 +224,25 @@ CORS currently permits `localhost:3000` and `127.0.0.1:3000`.
   saving anything. Send the same manifest to `/folders/intake` to preview
   again and submit only included files; the response reports accepted and
   failed files separately. Both routes accept optional `force_include_paths`.
-  One request is capped at 50 MiB of decoded files, so larger folders require
-  a later chunked intake design.
+  This single-request form is capped at 50 MiB of decoded files.
+- For a larger folder, `POST /v1/projects/{project_id}/folders/intakes` with
+  `folder_name`, `files` containing `relative_path` and `size_bytes`, and
+  optional `force_include_paths`. The response assigns each file a `file_id`.
+  Upload each file's raw bytes with `PUT .../intakes/{intake_id}/files/{file_id}`;
+  retrying the same bytes is safe. Then `POST .../intakes/{intake_id}/preview`
+  runs one scan across the complete folder, including `.gitignore` rules.
+  Review its included/excluded paths before calling `POST
+  .../intakes/{intake_id}/commit` with `{}`. Each commit call handles one
+  included file and returns every file's status. Repeat until the intake is
+  `complete`; pass `{"retry_failed":true}` to retry a failed file. `GET` reads
+  progress and `DELETE` cancels and removes the intake. The API clears intakes
+  idle for two hours when another intake request arrives, and clears all
+  staging on shutdown. Staging is local
+  to the running API process, so an API restart requires a new intake.
+  Individual files retain the 50 MiB upload limit. Staging allows up to 2 GiB
+  per folder and two active intakes; the project's scan settings still decide
+  which files can be admitted (by default 25 MiB per file, 500 MiB total,
+  and 1,000 files).
 - `GET/PUT /v1/projects/{project_id}/episodes/{episode_id}` reads and edits an
   episode narrative. Edits require `expected_updated_at` and return a conflict
   when the episode changed.
