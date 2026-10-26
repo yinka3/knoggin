@@ -789,6 +789,18 @@ class GlobalEntityMergeWriter:
                     },
                 )
 
+            merged_episode_ids = [
+                row["episode_id"] for row in before["episode_entities"]
+                if int(row["entity_id"]) == retired_id
+            ]
+            if merged_episode_ids:
+                await active_cur.execute(
+                    """UPDATE public.episode_entities
+                       SET occurrence_provenance_complete = false
+                       WHERE episode_id = ANY(%s::text[]) AND entity_id = %s""",
+                    (merged_episode_ids, survivor_id),
+                )
+
             # Rewrite relationship evidence in place and collapse only derived
             # aggregate edges.  Evidence rows remain distinct unless the DB's
             # explicit source-evidence uniqueness says they are the same fact.

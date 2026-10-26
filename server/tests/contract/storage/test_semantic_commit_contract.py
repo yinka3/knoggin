@@ -804,6 +804,33 @@ async def test_carried_active_identity_persists_once_after_second_pass(real_post
            WHERE window_id = %s""",
         (window.window_id,),
     ) == {"message_id": 101, "resolved_entity_id": first.entity_ids[0]}
+    await real_postgres_client.execute(
+        """INSERT INTO public.episodes (episode_id, project_id, summary)
+           VALUES ('bob-episode', 'project-1', 'Bob joined the meeting.')"""
+    )
+    await real_postgres_client.execute(
+        """INSERT INTO public.episode_messages
+           (episode_id, project_id, session_id, message_id, message_position)
+           VALUES ('bob-episode', 'project-1', 'session-1', 101, 0)"""
+    )
+    await real_postgres_client.execute(
+        """INSERT INTO public.project_semantic_window_episodes
+           (window_id, project_id, episode_id, ordinal)
+           VALUES (%s, 'project-1', 'bob-episode', 0)""",
+        (window.window_id,),
+    )
+    await EpisodeWriter(real_postgres_client).enrich_project_semantic_window_episodes(
+        window_id=str(window.window_id), user_name="ada", project_id="project-1",
+    )
+    assert await real_postgres_client.fetch_one(
+        """SELECT occurrence_provenance_complete FROM public.episode_entities
+           WHERE episode_id = 'bob-episode' AND entity_id = %s""",
+        (first.entity_ids[0],),
+    ) == {"occurrence_provenance_complete": True}
+    assert await real_postgres_client.fetch_one(
+        """SELECT message_id, resolved_entity_id FROM public.episode_entity_occurrences
+           WHERE episode_id = 'bob-episode'"""
+    ) == {"message_id": 101, "resolved_entity_id": first.entity_ids[0]}
     by_entity = await SemanticWindowReader(real_postgres_client).list_jev_decisions_for_entity(
         first.entity_ids[0], user_name="ada", project_id="project-1",
     )

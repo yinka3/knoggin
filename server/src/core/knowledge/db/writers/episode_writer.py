@@ -206,7 +206,19 @@ class EpisodeWriter:
                            block_entity.entity_id,
                            count(DISTINCT support.message_id)::integer AS source_count,
                            min(message.timestamp_ms) AS first_timestamp_ms,
-                           max(message.timestamp_ms) AS last_timestamp_ms
+                           max(message.timestamp_ms) AS last_timestamp_ms,
+                           bool_and(
+                               block_entity.occurrence_provenance_complete
+                               AND EXISTS (
+                                   SELECT 1
+                                   FROM public.context_block_entity_occurrences AS occurrence
+                                   WHERE occurrence.block_id = block_entity.block_id
+                                     AND occurrence.project_id = block_entity.project_id
+                                     AND coalesce(occurrence.corrected_entity_id,
+                                                  occurrence.resolved_entity_id)
+                                         = block_entity.entity_id
+                               )
+                           ) AS provenance_complete
                     FROM public.project_semantic_window_episodes AS membership
                     JOIN public.episodes AS episode
                       ON episode.episode_id = membership.episode_id
@@ -235,14 +247,15 @@ class EpisodeWriter:
                 )
                 INSERT INTO public.episode_entities (
                     episode_id, project_id, entity_id, source_message_count,
-                    first_seen_at, last_seen_at
+                    first_seen_at, last_seen_at, occurrence_provenance_complete
                 )
                 SELECT episode_id,
                        %s,
                        entity_id,
                        source_count,
                        to_timestamp(first_timestamp_ms / 1000.0),
-                       to_timestamp(last_timestamp_ms / 1000.0)
+                       to_timestamp(last_timestamp_ms / 1000.0),
+                       provenance_complete
                 FROM links
                 ON CONFLICT (episode_id, entity_id) DO UPDATE
                 SET source_message_count = GREATEST(
@@ -254,11 +267,46 @@ class EpisodeWriter:
                     ),
                     last_seen_at = GREATEST(
                         episode_entities.last_seen_at, EXCLUDED.last_seen_at
-                    )
+                    ),
+                    occurrence_provenance_complete =
+                        episode_entities.occurrence_provenance_complete
+                        AND EXCLUDED.occurrence_provenance_complete
                 """,
                 (revision_id, window_id, project_id, project_id),
             )
             entity_links = cur.rowcount
+            await cur.execute(
+                """INSERT INTO public.episode_entity_occurrences
+                   (episode_id, project_id, window_id, pass_number, occurrence_index,
+                    block_id, message_id, resolved_entity_id)
+                   SELECT DISTINCT membership.episode_id, membership.project_id,
+                          occurrence.window_id, occurrence.pass_number,
+                          occurrence.occurrence_index, occurrence.block_id,
+                          support.message_id, occurrence.resolved_entity_id
+                   FROM public.project_semantic_window_episodes AS membership
+                   JOIN public.episode_messages AS episode_message
+                     ON episode_message.episode_id = membership.episode_id
+                    AND episode_message.project_id = membership.project_id
+                   JOIN public.project_context_block_supports AS support
+                     ON support.project_id = episode_message.project_id
+                    AND support.message_id = episode_message.message_id
+                    AND support.session_id = episode_message.session_id
+                   JOIN public.project_context_revision_blocks AS revision_block
+                     ON revision_block.revision_id = %s
+                    AND revision_block.project_id = support.project_id
+                    AND revision_block.block_id = support.block_id
+                   JOIN public.context_block_entity_occurrences AS occurrence
+                     ON occurrence.block_id = support.block_id
+                    AND occurrence.project_id = support.project_id
+                   JOIN public.context_block_entities AS association
+                     ON association.block_id = occurrence.block_id
+                    AND association.project_id = occurrence.project_id
+                    AND association.entity_id = coalesce(
+                        occurrence.corrected_entity_id, occurrence.resolved_entity_id)
+                   WHERE membership.window_id = %s AND membership.project_id = %s
+                   ON CONFLICT DO NOTHING""",
+                (revision_id, window_id, project_id),
+            )
             # Rebuild this window's relationship links from active, complete
             # observations. Earlier passes may have linked partial or since-
             # retired evidence; an upsert alone cannot remove those links.

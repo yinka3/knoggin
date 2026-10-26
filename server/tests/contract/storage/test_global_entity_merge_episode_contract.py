@@ -354,6 +354,11 @@ async def test_global_merge_ignores_support_outside_episode_context_revision(
            (message_id, entity_id, occurrence_provenance_complete)
            VALUES (104, 3, true)"""
     )
+    await real_postgres_client.execute(
+        """UPDATE public.episode_entities
+           SET occurrence_provenance_complete = true
+           WHERE episode_id = 'distinct-episode' AND entity_id IN (2, 3)"""
+    )
 
     await GlobalEntityMergeWriter(real_postgres_client).merge(
         user_name="ada", survivor_id=2, retired_id=3, merge_id=str(uuid4())
@@ -366,6 +371,10 @@ async def test_global_merge_ignores_support_outside_episode_context_revision(
     assert await real_postgres_client.fetch_one(
         """SELECT occurrence_provenance_complete FROM public.message_entity_refs
            WHERE message_id = 104 AND entity_id = 2"""
+    ) == {"occurrence_provenance_complete": False}
+    assert await real_postgres_client.fetch_one(
+        """SELECT occurrence_provenance_complete FROM public.episode_entities
+           WHERE episode_id = 'distinct-episode' AND entity_id = 2"""
     ) == {"occurrence_provenance_complete": False}
 
     assert await real_postgres_client.fetch_one(
