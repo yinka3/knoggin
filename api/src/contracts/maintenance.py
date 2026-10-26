@@ -62,6 +62,38 @@ class ReopenJevContextCorrection(BaseModel):
     expected_review_id: str = Field(min_length=1, max_length=200)
 
 
+class FlagJevIdentityDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    window_id: UUID
+    pass_number: int = Field(ge=1, le=2)
+    occurrence_key: str = Field(min_length=1, max_length=500)
+    source_entity_id: int = Field(gt=0)
+    target_entity_id: int | None = Field(default=None, gt=0)
+    new_entity_name: str | None = Field(default=None, min_length=1, max_length=200)
+    entity_type: str | None = Field(default=None, min_length=1, max_length=200)
+    topic: str | None = Field(default=None, min_length=1, max_length=200)
+    reasoning: str = Field(min_length=1, max_length=4000)
+
+    @model_validator(mode="after")
+    def valid_target(self):
+        if (self.target_entity_id is None) == (self.new_entity_name is None):
+            raise ValueError("Choose an existing or new identity")
+        if self.target_entity_id == self.source_entity_id:
+            raise ValueError("Target and source identities must differ")
+        if self.new_entity_name is not None and (self.entity_type is None or self.topic is None):
+            raise ValueError("A new identity needs a type and topic")
+        if self.target_entity_id is not None and (self.entity_type is not None or self.topic is not None):
+            raise ValueError("Existing identities keep their project classification")
+        return self
+
+
+class ApplyJevIdentityDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_state: dict[str, Any]
+
+
 class MergeContextChoice(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

@@ -40,6 +40,14 @@ def test_review_routes_enforce_scope_and_dispatch_decisions(monkeypatch, tmp_pat
             calls.append(("reopen_jev", project_id, entity_id, kwargs))
             return {"entity_id": entity_id, "human_correction_active": False}
 
+        async def flag_jev_identity_decision(self, project_id, **kwargs):
+            calls.append(("flag_identity", project_id, kwargs))
+            return review
+
+        async def apply_jev_identity_review(self, project_id, review_id, **kwargs):
+            calls.append(("apply_identity", project_id, review_id, kwargs))
+            return {"review": review, "target_entity_id": 3}
+
     class Projects:
         maintenance_service = Maintenance()
 
@@ -104,6 +112,29 @@ def test_review_routes_enforce_scope_and_dispatch_decisions(monkeypatch, tmp_pat
                 assert calls[-1] == (
                     "reopen_jev", "project-1", 2,
                     {"expected_review_id": "review-1"},
+                )
+                identity_url = "/v1/projects/project-1/maintenance/jev-identity-corrections"
+                assert (await client.post(identity_url, json={
+                    "window_id": str(uuid4()), "pass_number": 1,
+                    "occurrence_key": "0:mention", "source_entity_id": 2,
+                    "reasoning": "Wrong identity",
+                })).status_code == 422
+                flagged_identity = await client.post(identity_url, json={
+                    "window_id": str(uuid4()), "pass_number": 1,
+                    "occurrence_key": "0:mention", "source_entity_id": 2,
+                    "target_entity_id": 3, "reasoning": "Wrong identity",
+                })
+                assert flagged_identity.status_code == 201
+                assert calls[-1][0] == "flag_identity"
+                applied_identity = await client.post(
+                    identity_url + "/review-1/apply",
+                    json={"expected_state": {"revision": 3}},
+                )
+                assert applied_identity.status_code == 200
+                assert applied_identity.json()["target_entity_id"] == 3
+                assert calls[-1] == (
+                    "apply_identity", "project-1", "review-1",
+                    {"expected_state": {"revision": 3}},
                 )
 
     asyncio.run(exercise())

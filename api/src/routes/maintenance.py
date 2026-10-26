@@ -9,8 +9,10 @@ from starlette.routing import Route
 
 from contracts.maintenance import (
     AdvisoryDecision,
+    ApplyJevIdentityDecision,
     Decision,
     FlagJevContextDecision,
+    FlagJevIdentityDecision,
     MergeCandidates,
     MergeProposal,
     ReopenJevContextCorrection,
@@ -145,6 +147,40 @@ async def flag_jev_context_decision(request):
     return JSONResponse({"review": _review(review)}, status_code=201)
 
 
+async def flag_jev_identity_decision(request):
+    if error := await _scope(request, write=True):
+        return error
+    try:
+        body = FlagJevIdentityDecision.model_validate(await _json(request))
+    except ValidationError:
+        return _error("invalid_correction", "Invalid identity correction", 422)
+    review = await request.app.state.runtime.projects.maintenance_service.flag_jev_identity_decision(
+        request.path_params["project_id"], window_id=str(body.window_id),
+        pass_number=body.pass_number, occurrence_key=body.occurrence_key,
+        source_entity_id=body.source_entity_id, target_entity_id=body.target_entity_id,
+        new_entity_name=body.new_entity_name, entity_type=body.entity_type,
+        topic=body.topic, reasoning=body.reasoning,
+    )
+    return JSONResponse({"review": _review(review)}, status_code=201)
+
+
+async def apply_jev_identity_decision(request):
+    if error := await _scope(request, write=True):
+        return error
+    try:
+        body = ApplyJevIdentityDecision.model_validate(await _json(request))
+    except ValidationError:
+        return _error("invalid_correction", "Invalid identity correction approval", 422)
+    result = await request.app.state.runtime.projects.maintenance_service.apply_jev_identity_review(
+        request.path_params["project_id"], request.path_params["review_id"],
+        expected_state=body.expected_state,
+    )
+    return JSONResponse({
+        "review": _review(result["review"]),
+        "target_entity_id": result["target_entity_id"],
+    })
+
+
 async def reopen_jev_context_correction(request):
     if error := await _scope(request, write=True):
         return error
@@ -239,6 +275,8 @@ routes = [
     Route("/v1/maintenance/merges/{merge_id}/rollback", rollback, methods=["POST"]),
     Route("/v1/projects/{project_id}/maintenance/reviews", project_reviews, methods=["GET"]),
     Route("/v1/projects/{project_id}/maintenance/jev-context-corrections", flag_jev_context_decision, methods=["POST"]),
+    Route("/v1/projects/{project_id}/maintenance/jev-identity-corrections", flag_jev_identity_decision, methods=["POST"]),
+    Route("/v1/projects/{project_id}/maintenance/jev-identity-corrections/{review_id}/apply", apply_jev_identity_decision, methods=["POST"]),
     Route("/v1/projects/{project_id}/maintenance/jev-context-corrections/{entity_id}/reopen", reopen_jev_context_correction, methods=["POST"]),
     Route("/v1/projects/{project_id}/maintenance/reviews/{review_id}", project_review, methods=["GET"]),
     Route("/v1/projects/{project_id}/maintenance/reviews/{review_id}/preview", project_preview, methods=["GET"]),

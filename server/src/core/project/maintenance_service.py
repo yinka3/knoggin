@@ -53,6 +53,9 @@ from core.knowledge.db.writers.relationship_advisory_writer import (
 from core.knowledge.db.writers.relationship_interpretation_writer import (
     RelationshipInterpretationWriter,
 )
+from core.knowledge.entity.identity_reassignment_writer import (
+    IdentityReassignmentWriter,
+)
 from core.knowledge.evidence_service import EvidenceService
 from core.knowledge.maintenance.maintenance_impact import MaintenanceImpactPlanner
 from core.knowledge.maintenance.maintenance_reviews import (
@@ -511,11 +514,11 @@ class ProjectMaintenanceService:
 
     async def _identity_occurrence_state(
         self, project_id: str, plan: IdentityReassignmentPlan, observation: dict,
+        *, cur=None,
     ) -> dict:
         """Prove that stored occurrence rows cover the current associations."""
 
-        rows = await self.pg.fetch_all(
-            """SELECT occurrence.block_id::text AS block_id,
+        query = """SELECT occurrence.block_id::text AS block_id,
                       occurrence.pass_number, occurrence.occurrence_index,
                       occurrence.resolved_entity_id, occurrence.mention_text,
                       occurrence.source_start, occurrence.source_end,
@@ -548,11 +551,16 @@ class ProjectMaintenanceService:
                WHERE occurrence.window_id = %s AND occurrence.project_id = %s
                  AND occurrence.identity_decision_key = %s
                  AND semantic_window.user_name = %s
-               ORDER BY occurrence.block_id""",
-            (plan.window_id, project_id, plan.occurrence_key, self.user_name),
-        )
+               ORDER BY occurrence.block_id"""
+        args = (plan.window_id, project_id, plan.occurrence_key, self.user_name)
+        if cur is None:
+            rows = await self.pg.fetch_all(query, args)
+        else:
+            await cur.execute(query, args)
+            rows = await cur.fetchall()
         expected_blocks = {str(block_id) for block_id in plan.block_ids}
-        if not rows or {row["block_id"] for row in rows} != expected_blocks or any(
+        if (not rows or len(rows) != len(expected_blocks)
+                or {row["block_id"] for row in rows} != expected_blocks) or any(
             row["resolved_entity_id"] != plan.source_entity_id
             or row["corrected_entity_id"] is not None
             or row["human_correction_review_id"] is not None
@@ -566,16 +574,19 @@ class ProjectMaintenanceService:
             raise MaintenanceConflictError()
         target = None
         if plan.target_entity_id is not None:
-            target = await self.pg.fetch_one(
-                """SELECT entity.canonical_name, context.entity_type, context.topic
+            target_query = """SELECT entity.canonical_name, context.entity_type, context.topic
                    FROM public.entities AS entity
                    JOIN public.project_entity_contexts AS context
                      ON context.entity_id = entity.entity_id
                     AND context.user_name = entity.user_name
                    WHERE entity.entity_id = %s AND entity.user_name = %s
-                     AND entity.status = 'active' AND context.project_id = %s""",
-                (plan.target_entity_id, self.user_name, project_id),
-            )
+                     AND entity.status = 'active' AND context.project_id = %s"""
+            target_args = (plan.target_entity_id, self.user_name, project_id)
+            if cur is None:
+                target = await self.pg.fetch_one(target_query, target_args)
+            else:
+                await cur.execute(target_query, target_args)
+                target = await cur.fetchone()
             if target is None:
                 raise ValueError("Target entity needs an active context in this project")
         fingerprint = hashlib.sha256(json.dumps(
@@ -806,21 +817,65 @@ class ProjectMaintenanceService:
             (self.user_name, project_id, blocks, plan.source_entity_id, plan.source_entity_id),
         )
         messages, message_count = await affected(
-            """SELECT DISTINCT support.message_id::text AS id
-               FROM public.project_context_block_supports AS support
-               WHERE support.project_id = %s AND support.block_id = ANY(%s::uuid[])""",
-            (project_id, blocks),
+            """SELECT DISTINCT link.message_id::text AS id
+               FROM public.message_entity_occurrences AS link
+               JOIN public.context_block_entity_occurrences AS occurrence
+                 ON occurrence.window_id = link.window_id
+                AND occurrence.pass_number = link.pass_number
+                AND occurrence.occurrence_index = link.occurrence_index
+                AND occurrence.block_id = link.block_id
+               WHERE occurrence.window_id = %s AND occurrence.project_id = %s
+                 AND occurrence.identity_decision_key = %s""",
+            (plan.window_id, project_id, plan.occurrence_key),
         )
         episodes, episode_count = await affected(
-            """SELECT DISTINCT episode_message.episode_id AS id
-               FROM public.project_context_block_supports AS support
-               JOIN public.episode_messages AS episode_message
-                 ON episode_message.project_id = support.project_id
-                AND episode_message.message_id = support.message_id
-                AND episode_message.session_id = support.session_id
-               WHERE support.project_id = %s AND support.block_id = ANY(%s::uuid[])""",
-            (project_id, blocks),
+            """SELECT DISTINCT link.episode_id AS id
+               FROM public.episode_entity_occurrences AS link
+               JOIN public.context_block_entity_occurrences AS occurrence
+                 ON occurrence.window_id = link.window_id
+                AND occurrence.pass_number = link.pass_number
+                AND occurrence.occurrence_index = link.occurrence_index
+                AND occurrence.block_id = link.block_id
+               WHERE occurrence.window_id = %s AND occurrence.project_id = %s
+                 AND occurrence.identity_decision_key = %s""",
+            (plan.window_id, project_id, plan.occurrence_key),
         )
+        if observation_count:
+            other = await self.pg.fetch_one(
+                """SELECT 1 FROM public.context_block_entity_occurrences
+                   WHERE project_id = %s AND block_id = ANY(%s::uuid[])
+                     AND coalesce(corrected_entity_id, resolved_entity_id) = %s
+                     AND NOT (window_id = %s AND identity_decision_key = %s)
+                   LIMIT 1""",
+                (project_id, blocks, plan.source_entity_id,
+                 plan.window_id, plan.occurrence_key),
+            )
+            if other is not None:
+                raise MaintenanceConflictError()
+        for message_id in messages:
+            rows = await self.pg.fetch_all(
+                """SELECT entity_id, occurrence_provenance_complete
+                   FROM public.message_entity_refs
+                   WHERE message_id = %s AND entity_id = ANY(%s)""",
+                (int(message_id), [plan.source_entity_id, plan.target_entity_id or -1]),
+            )
+            by_entity = {row["entity_id"]: row["occurrence_provenance_complete"] for row in rows}
+            if not by_entity.get(plan.source_entity_id) or (
+                plan.target_entity_id in by_entity and not by_entity[plan.target_entity_id]
+            ):
+                raise MaintenanceConflictError()
+        for episode_id in episodes:
+            rows = await self.pg.fetch_all(
+                """SELECT entity_id, occurrence_provenance_complete
+                   FROM public.episode_entities
+                   WHERE episode_id = %s AND entity_id = ANY(%s)""",
+                (episode_id, [plan.source_entity_id, plan.target_entity_id or -1]),
+            )
+            by_entity = {row["entity_id"]: row["occurrence_provenance_complete"] for row in rows}
+            if not by_entity.get(plan.source_entity_id) or (
+                plan.target_entity_id in by_entity and not by_entity[plan.target_entity_id]
+            ):
+                raise MaintenanceConflictError()
         def impact(kind, mode, ids, total):
             return MaintenanceImpactItem(
                 kind=kind, mode=mode, identifiers=ids,
@@ -835,10 +890,95 @@ class ProjectMaintenanceService:
                 impact("message_entity_ref", "direct_mutation", messages, message_count),
                 impact("episode_entity_link", "derived_rebuild", episodes, episode_count),
                 impact("age_projection", "derived_rebuild", (project_id,), 1),
-                impact("search_projection", "derived_rebuild", (project_id,), 1),
                 impact("live_entity_cache", "cache_invalidation", (project_id,), 1),
             ),
         )
+
+    async def apply_jev_identity_review(
+        self, project_id: str, review_id: str, *, expected_state: dict,
+    ) -> dict:
+        """Apply a reviewed occurrence correction with all derived links in one transaction."""
+
+        async with self._lock:
+            await self._require_domain_project(project_id, allow_archived=False)
+            detail, _impact = await self.preview_maintenance_review(project_id, review_id)
+            review = detail.review
+            if not isinstance(review.proposed_plan, IdentityReassignmentPlan):
+                raise ValueError("Review is not an identity reassignment")
+            if review.expected_state != expected_state:
+                raise MaintenanceConflictError()
+            plan = review.proposed_plan
+            decision = await self._require_knowledge_store().get_jev_decision(
+                "identity", plan.window_id, review.expected_state["pass_number"],
+                plan.occurrence_key, user_name=self.user_name, project_id=project_id,
+            )
+            if decision is None:
+                raise MaintenanceConflictError()
+            observation = decision["decision"]
+            async with self.pg.transaction() as cur:
+                await cur.execute(
+                    """SELECT status, domain_config FROM public.projects
+                       WHERE user_name = %s AND project_id = %s FOR UPDATE""",
+                    (self.user_name, project_id),
+                )
+                project = await cur.fetchone()
+                if project is None or project["status"] != "active" or (
+                    project["domain_config"].get("version")
+                    != review.expected_state["domain_version"]
+                ):
+                    raise MaintenanceConflictError()
+                await cur.execute(
+                    """SELECT current_revision_id FROM public.project_contexts
+                       WHERE user_name = %s AND project_id = %s FOR UPDATE""",
+                    (self.user_name, project_id),
+                )
+                if await cur.fetchone() is None:
+                    raise MaintenanceConflictError()
+                await cur.execute(
+                    """SELECT status FROM public.maintenance_reviews
+                       WHERE review_id = %s AND user_name = %s AND project_id = %s
+                       FOR UPDATE""",
+                    (review_id, self.user_name, project_id),
+                )
+                locked_review = await cur.fetchone()
+                if locked_review is None or locked_review["status"] != "open":
+                    raise MaintenanceConflictError()
+                await cur.execute(
+                    """SELECT block_id FROM public.context_block_entity_occurrences
+                       WHERE window_id = %s AND project_id = %s
+                         AND identity_decision_key = %s FOR UPDATE""",
+                    (plan.window_id, project_id, plan.occurrence_key),
+                )
+                if len(await cur.fetchall()) != len(plan.block_ids):
+                    raise MaintenanceConflictError()
+                await cur.execute(
+                    """SELECT block_id FROM public.context_block_entities
+                       WHERE project_id = %s AND block_id = ANY(%s::uuid[])
+                         AND entity_id = %s FOR UPDATE""",
+                    (project_id, [str(block_id) for block_id in plan.block_ids],
+                     plan.source_entity_id),
+                )
+                if len(await cur.fetchall()) != len(plan.block_ids):
+                    raise MaintenanceConflictError()
+                state = await self._identity_occurrence_state(
+                    project_id, plan, observation, cur=cur,
+                )
+                if state["fingerprint"] != review.expected_state["occurrence_hash"]:
+                    raise MaintenanceConflictError()
+                target_id = await IdentityReassignmentWriter(self.pg).apply(
+                    cur, user_name=self.user_name, project_id=project_id,
+                    review_id=review_id, plan=plan,
+                )
+                applied = await self._maintenance_reviews.transition(
+                    review_id, user_name=self.user_name, project_id=project_id,
+                    status="applied", expected_state=expected_state,
+                    actor=self.user_name, reason="User confirmed identity reassignment",
+                    cur=cur,
+                )
+            runtime = self._active_projects.get(project_id)
+            if runtime is not None:
+                runtime.entities.remove_entities([plan.source_entity_id, target_id])
+            return {"review": applied, "target_entity_id": target_id}
 
     async def transition_maintenance_review(
         self,
