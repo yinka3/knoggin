@@ -1,6 +1,8 @@
 -- One-time upgrade for existing local databases. Fresh databases use schema.sql.
 ALTER TABLE public.context_block_entities
     ADD COLUMN IF NOT EXISTS occurrence_provenance_complete boolean DEFAULT false NOT NULL;
+ALTER TABLE public.message_entity_refs
+    ADD COLUMN IF NOT EXISTS occurrence_provenance_complete boolean DEFAULT false NOT NULL;
 CREATE TABLE IF NOT EXISTS public.context_block_entity_occurrences (
     window_id uuid NOT NULL,
     project_id text NOT NULL,
@@ -37,3 +39,27 @@ ALTER TABLE public.context_block_entity_occurrences
     FOREIGN KEY (corrected_entity_id) REFERENCES public.entities(entity_id);
 CREATE INDEX IF NOT EXISTS context_block_entity_occurrences_entity_idx
     ON public.context_block_entity_occurrences (project_id, block_id, resolved_entity_id);
+CREATE TABLE IF NOT EXISTS public.message_entity_occurrences (
+    window_id uuid NOT NULL,
+    project_id text NOT NULL,
+    pass_number integer NOT NULL,
+    occurrence_index integer NOT NULL,
+    block_id uuid NOT NULL,
+    message_id bigint NOT NULL,
+    resolved_entity_id bigint NOT NULL,
+    corrected_entity_id bigint,
+    human_correction_review_id text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT message_entity_occurrences_pkey PRIMARY KEY
+        (window_id, pass_number, occurrence_index, block_id, message_id),
+    CONSTRAINT message_entity_occurrences_context_fk FOREIGN KEY
+        (window_id, pass_number, occurrence_index, block_id)
+        REFERENCES public.context_block_entity_occurrences
+        (window_id, pass_number, occurrence_index, block_id) ON DELETE CASCADE,
+    CONSTRAINT message_entity_occurrences_message_fk FOREIGN KEY (message_id)
+        REFERENCES public.messages(message_id) ON DELETE CASCADE,
+    CONSTRAINT message_entity_occurrences_corrected_entity_fk FOREIGN KEY (corrected_entity_id)
+        REFERENCES public.entities(entity_id)
+);
+CREATE INDEX IF NOT EXISTS message_entity_occurrences_ref_idx
+    ON public.message_entity_occurrences (message_id, resolved_entity_id);

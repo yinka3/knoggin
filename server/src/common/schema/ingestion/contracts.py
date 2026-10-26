@@ -442,6 +442,22 @@ class ResolvedContextBlockMention:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class ResolvedMessageEntityOccurrence:
+    """One literal message mention traced to a resolved Context occurrence."""
+
+    block_id: UUID
+    occurrence_index: int
+    message_id: int
+    entity_id: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.block_id, UUID) or self.occurrence_index < 0:
+            raise ValueError("Message occurrence needs a Context block and occurrence index")
+        _require_positive_id(self.message_id, "ResolvedMessageEntityOccurrence.message_id")
+        _require_positive_id(self.entity_id, "ResolvedMessageEntityOccurrence.entity_id")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ContextEntityResult:
     """The non-persisted entity portion of one Context-first semantic build."""
 
@@ -454,6 +470,7 @@ class ContextEntityResult:
     block_entity_associations: tuple[ContextBlockEntityAssociation, ...]
     message_entity_refs: tuple[MessageEntityRef, ...]
     resolved_mentions: tuple[ResolvedContextBlockMention, ...] = ()
+    message_occurrence_links: tuple[ResolvedMessageEntityOccurrence, ...] = ()
 
     def __post_init__(self) -> None:
         entity_ids = tuple(
@@ -552,3 +569,20 @@ class ContextEntityResult:
             }
             if mention_associations != persisted_associations:
                 raise ValueError("Resolved mentions must cover exactly the block associations")
+        if self.message_occurrence_links:
+            known_occurrences = {
+                (block_id, resolved.occurrence_index, resolved.entity_id)
+                for resolved in self.resolved_mentions
+                for block_id in resolved.mention.block_ids
+            }
+            if any(
+                not isinstance(link, ResolvedMessageEntityOccurrence)
+                or (link.block_id, link.occurrence_index, link.entity_id)
+                not in known_occurrences
+                for link in self.message_occurrence_links
+            ):
+                raise ValueError("Message occurrence links must use resolved Context mentions")
+            if {(link.message_id, link.entity_id) for link in self.message_occurrence_links} != {
+                (ref.message_id, ref.entity_id) for ref in self.message_entity_refs
+            }:
+                raise ValueError("Message occurrence links must cover the message entity refs")

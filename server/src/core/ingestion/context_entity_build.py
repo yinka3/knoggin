@@ -11,6 +11,7 @@ from common.schema.ingestion.contracts import (
     ContextEntityResult,
     MessageEntityRef,
     ResolvedContextBlockMention,
+    ResolvedMessageEntityOccurrence,
 )
 from core.ingestion.batch import SemanticWindowBuild
 from core.ingestion.text_processor import TextProcessor
@@ -77,6 +78,7 @@ def assemble_context_entity_result(
     ):
         raise TypeError("Context resolution must contain typed resolved mentions")
     message_refs: dict[tuple[int, int], MessageEntityRef] = {}
+    message_occurrences: dict[tuple, ResolvedMessageEntityOccurrence] = {}
     for resolved in resolved_mentions:
         for block_id in resolved.mention.block_ids:
             for support in build.block_supports.get(block_id, ()):
@@ -89,6 +91,13 @@ def assemble_context_entity_result(
                         message_id=support.message_id,
                         entity_id=resolved.entity_id,
                     )
+                    occurrence_key = (
+                        block_id, resolved.occurrence_index, support.message_id,
+                    )
+                    message_occurrences[occurrence_key] = ResolvedMessageEntityOccurrence(
+                        block_id=block_id, occurrence_index=resolved.occurrence_index,
+                        message_id=support.message_id, entity_id=resolved.entity_id,
+                    )
 
     result = ContextEntityResult(
         entity_ids=resolution.entity_ids,
@@ -100,6 +109,7 @@ def assemble_context_entity_result(
         block_entity_associations=resolution.block_entity_associations,
         message_entity_refs=tuple(message_refs.values()),
         resolved_mentions=resolved_mentions,
+        message_occurrence_links=tuple(message_occurrences.values()),
     )
     for observation in build.trace.extraction_decisions:
         if observation.get("accepted_entity_type") is None:

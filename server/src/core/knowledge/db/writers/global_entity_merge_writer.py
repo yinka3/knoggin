@@ -709,6 +709,17 @@ class GlobalEntityMergeWriter:
                         "created": not survivor_ref_existed,
                     },
                 )
+            merged_message_ids = [
+                int(ref["message_id"]) for ref in before["message_refs"]
+                if int(ref["entity_id"]) == retired_id
+            ]
+            if merged_message_ids:
+                await active_cur.execute(
+                    """UPDATE public.message_entity_refs
+                       SET occurrence_provenance_complete = false
+                       WHERE message_id = ANY(%s) AND entity_id = %s""",
+                    (merged_message_ids, survivor_id),
+                )
 
             for row in before["episode_entities"]:
                 if int(row["entity_id"]) != retired_id:

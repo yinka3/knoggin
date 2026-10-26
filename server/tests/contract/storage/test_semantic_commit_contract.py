@@ -715,6 +715,9 @@ async def test_jev_identity_decision_commits_once_and_is_owner_scoped(
 @pytest.mark.requires_postgres
 async def test_carried_active_identity_persists_once_after_second_pass(real_postgres_client):
     await _seed_message(real_postgres_client)
+    await real_postgres_client.execute(
+        "UPDATE public.messages SET content = 'Bob joined the meeting.' WHERE message_id = 101"
+    )
     await _seed_merge_entities(real_postgres_client)
     await real_postgres_client.execute(
         "INSERT INTO public.entity_aliases (entity_id, alias) VALUES (2, 'Bob'), (3, 'Bob')"
@@ -762,6 +765,7 @@ async def test_carried_active_identity_persists_once_after_second_pass(real_post
     build = _build(_WindowContext(window.window_id, context), impact=(block.block_id,),
         entity_ids=second.entity_ids, entities={}, existing_classifications={entity_id: "Person" for entity_id in second.entity_ids},
         associations=second.block_entity_associations, ingestion_policy=frozen)
+    build.message_text_by_id[101] = "Bob joined the meeting."
     assemble_context_entity_result(build, second)
     build.identity_pass_number = 2
     build.trace.identity_decisions.extend(second.identity_decisions)
@@ -790,6 +794,16 @@ async def test_carried_active_identity_persists_once_after_second_pass(real_post
            WHERE block_id = %s AND entity_id = %s""",
         (block.block_id, first.entity_ids[0]),
     ) == {"occurrence_provenance_complete": True}
+    assert await real_postgres_client.fetch_one(
+        """SELECT occurrence_provenance_complete FROM public.message_entity_refs
+           WHERE message_id = 101 AND entity_id = %s""",
+        (first.entity_ids[0],),
+    ) == {"occurrence_provenance_complete": True}
+    assert await real_postgres_client.fetch_one(
+        """SELECT message_id, resolved_entity_id FROM public.message_entity_occurrences
+           WHERE window_id = %s""",
+        (window.window_id,),
+    ) == {"message_id": 101, "resolved_entity_id": first.entity_ids[0]}
     by_entity = await SemanticWindowReader(real_postgres_client).list_jev_decisions_for_entity(
         first.entity_ids[0], user_name="ada", project_id="project-1",
     )

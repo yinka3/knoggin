@@ -185,6 +185,12 @@ class SemanticCommitWriter:
                         user_name=user_name,
                         project_id=project_id,
                     )
+                    await self._write_message_occurrences(
+                        cur, entity_result, window_id=build.window_id,
+                        pass_number=build.identity_pass_number,
+                        project_id=project_id,
+                        eligible_blocks=context_input.eligible_blocks,
+                    )
                     retired_observation_ids = await self._retire_noncurrent_observations(
                         cur,
                         user_name=user_name,
@@ -866,6 +872,7 @@ class SemanticCommitWriter:
             or result.block_entity_associations
             or result.message_entity_refs
             or result.resolved_mentions
+            or result.message_occurrence_links
         ):
             raise ValueError("Reused Context revision requires an empty Knowledge build")
 
@@ -1391,6 +1398,10 @@ class SemanticCommitWriter:
         project_id: str,
     ) -> int:
         references = {(ref.message_id, ref.entity_id) for ref in result.message_entity_refs}
+        proved = {
+            (link.message_id, link.entity_id)
+            for link in result.message_occurrence_links
+        }
         if not references:
             return 0
         message_ids = sorted({message_id for message_id, _ in references})
@@ -1408,14 +1419,34 @@ class SemanticCommitWriter:
         for message_id, entity_id in sorted(references):
             await cur.execute(
                 """
-                INSERT INTO public.message_entity_refs (message_id, entity_id)
-                VALUES (%s, %s)
+                INSERT INTO public.message_entity_refs
+                    (message_id, entity_id, occurrence_provenance_complete)
+                VALUES (%s, %s, %s)
                 ON CONFLICT (message_id, entity_id) DO NOTHING
                 """,
-                (message_id, entity_id),
+                (message_id, entity_id, (message_id, entity_id) in proved),
             )
             count += cur.rowcount
         return count
+
+    @staticmethod
+    async def _write_message_occurrences(
+        cur, result: ContextEntityResult, *, window_id: UUID, pass_number: int,
+        project_id: str, eligible_blocks: set[UUID],
+    ) -> None:
+        if result.message_occurrence_links and pass_number not in {1, 2}:
+            raise ValueError("Message occurrences require a final identity pass")
+        for link in result.message_occurrence_links:
+            if link.block_id not in eligible_blocks:
+                raise ValueError("Message occurrence cites an ineligible Context block")
+            await cur.execute(
+                """INSERT INTO public.message_entity_occurrences
+                   (window_id, project_id, pass_number, occurrence_index,
+                    block_id, message_id, resolved_entity_id)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                (window_id, project_id, pass_number, link.occurrence_index,
+                 link.block_id, link.message_id, link.entity_id),
+            )
 
     async def _retire_noncurrent_observations(
         self,

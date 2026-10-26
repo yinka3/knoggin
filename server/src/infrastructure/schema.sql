@@ -490,7 +490,8 @@ CREATE TABLE public.maintenance_reviews (
 );
 CREATE TABLE public.message_entity_refs (
     message_id bigint NOT NULL,
-    entity_id bigint NOT NULL
+    entity_id bigint NOT NULL,
+    occurrence_provenance_complete boolean DEFAULT false NOT NULL
 );
 CREATE SEQUENCE public.message_id_seq
     START WITH 1
@@ -993,6 +994,22 @@ CREATE TABLE public.context_block_entity_occurrences (
 );
 CREATE INDEX context_block_entity_occurrences_entity_idx
     ON public.context_block_entity_occurrences (project_id, block_id, resolved_entity_id);
+CREATE TABLE public.message_entity_occurrences (
+    window_id uuid NOT NULL,
+    project_id text NOT NULL,
+    pass_number integer NOT NULL,
+    occurrence_index integer NOT NULL,
+    block_id uuid NOT NULL,
+    message_id bigint NOT NULL,
+    resolved_entity_id bigint NOT NULL,
+    corrected_entity_id bigint,
+    human_correction_review_id text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT message_entity_occurrences_pkey PRIMARY KEY
+        (window_id, pass_number, occurrence_index, block_id, message_id)
+);
+CREATE INDEX message_entity_occurrences_ref_idx
+    ON public.message_entity_occurrences (message_id, resolved_entity_id);
 CREATE TABLE public.relationship_observation_blocks (
     observation_id bigint NOT NULL,
     project_id text NOT NULL,
@@ -1484,6 +1501,17 @@ ALTER TABLE ONLY public.context_block_entity_occurrences
         REFERENCES public.project_context_blocks(block_id, project_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.context_block_entity_occurrences
     ADD CONSTRAINT context_block_entity_occurrences_corrected_entity_fk FOREIGN KEY (corrected_entity_id)
+        REFERENCES public.entities(entity_id);
+ALTER TABLE ONLY public.message_entity_occurrences
+    ADD CONSTRAINT message_entity_occurrences_context_fk FOREIGN KEY
+        (window_id, pass_number, occurrence_index, block_id)
+        REFERENCES public.context_block_entity_occurrences
+        (window_id, pass_number, occurrence_index, block_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.message_entity_occurrences
+    ADD CONSTRAINT message_entity_occurrences_message_fk FOREIGN KEY (message_id)
+        REFERENCES public.messages(message_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.message_entity_occurrences
+    ADD CONSTRAINT message_entity_occurrences_corrected_entity_fk FOREIGN KEY (corrected_entity_id)
         REFERENCES public.entities(entity_id);
 ALTER TABLE ONLY public.project_semantic_windows
     ADD CONSTRAINT project_semantic_windows_project_scope_fk FOREIGN KEY (user_name, project_id) REFERENCES public.projects(user_name, project_id) ON DELETE CASCADE;
