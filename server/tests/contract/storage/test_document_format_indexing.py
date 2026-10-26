@@ -156,14 +156,15 @@ def _document_samples():
             ),
             [
                 {
-                    "content": "# Overview\n\nAlpha paragraph.",
+                    # Docling renders Word "Heading 1" as "##" ("#" is the title).
+                    "content": "## Overview\n\nAlpha paragraph.",
                     "chunk_kind": "text",
                     "section_path": ["Overview"],
                     "start_line": 1,
                     "end_line": 3,
                 },
                 {
-                    "content": "## Risks\n\nBeta paragraph.",
+                    "content": "### Risks\n\nBeta paragraph.",
                     "chunk_kind": "text",
                     "section_path": ["Overview", "Risks"],
                     "start_line": 5,

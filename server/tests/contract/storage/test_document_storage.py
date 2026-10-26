@@ -175,6 +175,7 @@ async def test_document_catalog_records_direct_and_scan_admission(real_postgres_
         size_bytes=5,
         content_hash="a" * 64,
         extraction_mode="standard",
+        extraction_strategy="auto",
         created_at="2026-10-16T00:00:00+00:00",
     )
     await writer.apply_filesystem_reconciliation(

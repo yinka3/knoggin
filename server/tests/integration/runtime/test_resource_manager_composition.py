@@ -5,6 +5,7 @@ import os
 
 import pytest
 
+from common.conf.manager import ConfigManager
 from core.ingestion import vp01
 from infrastructure.model_work import ModelWorkPriority
 from runtime.resources import RuntimeResources
@@ -34,7 +35,7 @@ def _local_snapshot(
 
 
 @pytest.fixture
-async def real_resource_manager(monkeypatch):
+async def real_resource_manager(monkeypatch, tmp_path):
     huggingface_hub = pytest.importorskip("huggingface_hub")
     embedding_model = _local_snapshot(
         huggingface_hub,
@@ -78,7 +79,11 @@ async def real_resource_manager(monkeypatch):
     )
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
 
-    manager = await RuntimeResources.create(thread_workers=2)
+    # Resources read live settings from an application-owned ConfigManager.
+    monkeypatch.setattr(ConfigManager, "_instance", None)
+    config_manager = ConfigManager(tmp_path)
+    config_manager.load(require_valid=True)
+    manager = await RuntimeResources.create(thread_workers=2, config_manager=config_manager)
     try:
         yield manager
     finally:
@@ -137,15 +142,18 @@ async def test_real_runtime_shutdown_cancels_background_and_drains_model_work(
     await agent_tool_started.wait()
 
     shutdown_task = asyncio.create_task(manager.shutdown())
-    await asyncio.sleep(0)
-    ingestion_release.set()
+    # Model work drains; background ingestion is never released, so only
+    # shutdown cancelling it can end it (no race on event-loop ticks).
     agent_tool_release.set()
 
-    shutdown_result, ingestion_result, agent_tool_result = await asyncio.gather(
-        shutdown_task,
-        ingestion_task,
-        agent_tool_task,
-        return_exceptions=True,
+    shutdown_result, ingestion_result, agent_tool_result = await asyncio.wait_for(
+        asyncio.gather(
+            shutdown_task,
+            ingestion_task,
+            agent_tool_task,
+            return_exceptions=True,
+        ),
+        timeout=60,
     )
 
     assert shutdown_result is None

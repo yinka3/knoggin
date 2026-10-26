@@ -138,7 +138,7 @@ async def test_store_edit_preserves_long_narrative_across_embedding_chunks():
 @pytest.mark.parametrize(
     ("embedding", "error", "match"),
     [
-        ([0.25] * 3, None, "768-dimensional"),
+        ([0.25] * 3, None, "canonical vector dimension"),
         (None, RuntimeError("embedding unavailable"), "embedding unavailable"),
     ],
 )
