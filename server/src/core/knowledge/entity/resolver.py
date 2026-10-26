@@ -17,6 +17,7 @@ from loguru import logger
 from rapidfuzz import fuzz, process
 from wordfreq import word_frequency
 
+from common.exceptions import MaintenanceConflictError
 from common.schema.ingestion.contracts import (
     ContextBlockEntityAssociation,
     ContextBlockMention,
@@ -240,6 +241,7 @@ class EntityResolver:
 
             candidate_snapshot: EntityCandidateSnapshot | None = None
             candidate_entries: list[Optional[Tuple[str, Any]]] = []
+            human_overrides = await self._human_identity_overrides(mentions)
             if mentions:
                 candidate_snapshot = await self._load_candidate_snapshot()
                 candidate_entries = self._candidate_entries_for_context_block_mentions(
@@ -250,7 +252,8 @@ class EntityResolver:
 
             for index, mention in enumerate(mentions):
                 entry = candidate_entries[index]
-                if entry is None:
+                forced_id = human_overrides.get(index)
+                if entry is None and forced_id is None:
                     continue
                 surface_key = self._candidate_search_key(mention.name)
                 entity_id: int | None = None
@@ -259,7 +262,20 @@ class EntityResolver:
                     block_text_by_id.get(block_id, "") for block_id in mention.block_ids
                 )
 
-                if entry[0] == "candidates":
+                if forced_id is not None:
+                    profile = await self.get_profile(forced_id)
+                    if profile is None or not self.is_profile_visible(profile):
+                        raise MaintenanceConflictError()
+                    entity_id = forced_id
+                    selected_profile = profile
+                    decision = {
+                        "mention": mention.name,
+                        "candidate_id": forced_id,
+                        "outcome": "reused",
+                        "selection_source": "human_correction",
+                    }
+                    state.identity_decisions.append(decision)
+                elif entry[0] == "candidates":
                     if candidate_snapshot is None:
                         raise RuntimeError("Context candidate snapshot is unavailable")
                     ranked = []
@@ -457,7 +473,7 @@ class EntityResolver:
                         state.pending_support_by_id[entity_id] = support_text
 
                 if (
-                    entry[0] == "candidates"
+                    entry is not None and entry[0] == "candidates"
                     and "jev" in decision
                     and decision["jev"].get("accepted_entity_id") is None
                 ):
@@ -507,7 +523,7 @@ class EntityResolver:
 
                 if entity_id not in state.entity_ids:
                     state.entity_ids.append(entity_id)
-                if entry[0] == "candidates" and "jev" in decision:
+                if entry is not None and entry[0] == "candidates" and "jev" in decision:
                     decision["jev"]["operational_entity_id"] = entity_id
                     decision["jev"]["mention_text"] = mention.name
                 state.resolved_mentions.append(
@@ -610,6 +626,39 @@ class EntityResolver:
                 classification_decisions=tuple(state.classification_decisions),
                 classification_aggregates=tuple(state.classification_aggregates),
             )
+
+    async def _human_identity_overrides(
+        self, mentions: list[ContextBlockMention],
+    ) -> dict[int, int]:
+        reader = getattr(self.knowledge_store, "get_active_identity_corrections", None)
+        if reader is None or not mentions:
+            return {}
+        block_ids = sorted({str(block_id) for mention in mentions for block_id in mention.block_ids})
+        rows = await reader(self.project_id, block_ids)
+        by_key: dict[tuple, list[dict]] = {}
+        for row in rows:
+            key = (
+                row["block_id"], row["mention_text"].casefold(),
+                row["source_start"], row["source_end"],
+            )
+            by_key.setdefault(key, []).append(row)
+        overrides = {}
+        for index, mention in enumerate(mentions):
+            matches = [
+                by_key.get((str(block_id), mention.name.casefold(),
+                            mention.source_start, mention.source_end), [])
+                for block_id in mention.block_ids
+            ]
+            if not any(matches):
+                continue
+            if any(len(group) != 1 for group in matches):
+                raise MaintenanceConflictError()
+            targets = {int(group[0]["corrected_entity_id"]) for group in matches}
+            reviews = {group[0]["human_correction_review_id"] for group in matches}
+            if len(targets) != 1 or len(reviews) != 1:
+                raise MaintenanceConflictError()
+            overrides[index] = targets.pop()
+        return overrides
 
     @asynccontextmanager
     async def _measured_resolution_lock(self, timing):

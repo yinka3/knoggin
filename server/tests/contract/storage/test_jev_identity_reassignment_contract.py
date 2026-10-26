@@ -7,9 +7,15 @@ from uuid import uuid4
 import pytest
 
 from common.exceptions import MaintenanceConflictError
+from common.schema.ingestion.contracts import ContextBlockMention
+from common.schema.settings import EntityResolutionSettings, TextProcessorSettings
+from core.ingestion.policy import IngestionPolicy
+from core.knowledge.db.readers.entity_reader import EntityReader
 from core.knowledge.db.readers.evidence_traversal_reader import EvidenceTraversalReader
 from core.knowledge.db.readers.semantic_window_reader import SemanticWindowReader
+from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.evidence_service import EvidenceService
+from core.project.domain_config_store import DomainConfigStore
 from core.project.maintenance_service import ProjectMaintenanceService
 
 
@@ -401,3 +407,37 @@ async def test_new_identity_keeps_another_mention_on_the_old_entity(real_postgre
         {"occurrence_index": 0, "corrected_entity_id": target_id},
         {"occurrence_index": 1, "corrected_entity_id": None},
     ]
+    policy = IngestionPolicy.capture(
+        text_processor=TextProcessorSettings(),
+        entity_resolution=EntityResolutionSettings(),
+        compiled_domain=(await DomainConfigStore(client).load("ada", "project-1")).compile(),
+    )
+    async def allocate():
+        return int((await client.fetch_one("SELECT nextval('public.entity_id_seq') AS id"))["id"])
+
+    mentions = [
+        ContextBlockMention(
+            block_ids=(block_id,), name="Orion", entity_type="Concept", topic="General",
+            origin="vp01", source_start=start, source_end=start + 5,
+        ) for start in (0, 10)
+    ]
+    resolved = await EntityResolver(
+        EntityReader(client), "project-1", ["project-1"],
+    ).resolve_context_block_mentions(
+        mentions, block_text_by_id={block_id: "Orion met Orion."},
+        policy=policy, allocate_entity_id=allocate,
+    )
+    assert resolved.resolved_mentions[0].entity_id == target_id
+    assert resolved.identity_decisions[0]["selection_source"] == "human_correction"
+    assert resolved.identity_decisions[1].get("selection_source") != "human_correction"
+    with pytest.raises(MaintenanceConflictError):
+        await service.reopen_jev_identity_correction(
+            "project-1", review.review_id, expected_target_entity_id=target_id + 1,
+        )
+    reopened = await service.reopen_jev_identity_correction(
+        "project-1", review.review_id, expected_target_entity_id=target_id,
+    )
+    assert reopened["human_correction_active"] is False
+    assert await EntityReader(client).get_active_identity_corrections(
+        "project-1", [block_id],
+    ) == []

@@ -1140,6 +1140,13 @@ class KnowledgeStore:
             visible_project_ids=visible_project_ids,
         )
 
+    async def get_active_identity_corrections(
+        self, project_id: str, block_ids: list[str],
+    ) -> list[dict]:
+        return await self._entity_reader.get_active_identity_corrections(
+            project_id, block_ids,
+        )
+
     async def list_entities(
         self,
         limit: int = 20,

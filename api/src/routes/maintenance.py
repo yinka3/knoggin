@@ -16,6 +16,7 @@ from contracts.maintenance import (
     MergeCandidates,
     MergeProposal,
     ReopenJevContextCorrection,
+    ReopenJevIdentityCorrection,
     RollbackSelection,
 )
 from routes.project_settings import _error, _json, _project_error
@@ -181,6 +182,20 @@ async def apply_jev_identity_decision(request):
     })
 
 
+async def reopen_jev_identity_correction(request):
+    if error := await _scope(request, write=True):
+        return error
+    try:
+        body = ReopenJevIdentityCorrection.model_validate(await _json(request))
+    except ValidationError:
+        return _error("invalid_reopen", "Invalid identity correction reopen request", 422)
+    result = await request.app.state.runtime.projects.maintenance_service.reopen_jev_identity_correction(
+        request.path_params["project_id"], request.path_params["review_id"],
+        expected_target_entity_id=body.expected_target_entity_id,
+    )
+    return JSONResponse(result)
+
+
 async def reopen_jev_context_correction(request):
     if error := await _scope(request, write=True):
         return error
@@ -277,6 +292,7 @@ routes = [
     Route("/v1/projects/{project_id}/maintenance/jev-context-corrections", flag_jev_context_decision, methods=["POST"]),
     Route("/v1/projects/{project_id}/maintenance/jev-identity-corrections", flag_jev_identity_decision, methods=["POST"]),
     Route("/v1/projects/{project_id}/maintenance/jev-identity-corrections/{review_id}/apply", apply_jev_identity_decision, methods=["POST"]),
+    Route("/v1/projects/{project_id}/maintenance/jev-identity-corrections/{review_id}/reopen", reopen_jev_identity_correction, methods=["POST"]),
     Route("/v1/projects/{project_id}/maintenance/jev-context-corrections/{entity_id}/reopen", reopen_jev_context_correction, methods=["POST"]),
     Route("/v1/projects/{project_id}/maintenance/reviews/{review_id}", project_review, methods=["GET"]),
     Route("/v1/projects/{project_id}/maintenance/reviews/{review_id}/preview", project_preview, methods=["GET"]),

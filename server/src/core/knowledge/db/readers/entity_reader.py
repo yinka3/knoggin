@@ -23,6 +23,34 @@ class EntityReader:
         self.client = client
         self.graph_name = graph_name
 
+    async def get_active_identity_corrections(
+        self, project_id: str, block_ids: list[str],
+    ) -> list[dict]:
+        """Return exact current-block overrides confirmed by the user."""
+
+        if not block_ids:
+            return []
+        return await self.client.fetch_all(
+            """SELECT occurrence.block_id::text AS block_id,
+                      occurrence.mention_text, occurrence.source_start,
+                      occurrence.source_end, occurrence.corrected_entity_id,
+                      occurrence.human_correction_review_id
+               FROM public.context_block_entity_occurrences AS occurrence
+               JOIN public.entities AS target
+                 ON target.entity_id = occurrence.corrected_entity_id
+                AND target.status = 'active'
+               JOIN public.project_entity_contexts AS context
+                 ON context.project_id = occurrence.project_id
+                AND context.entity_id = target.entity_id
+                AND context.user_name = target.user_name
+               WHERE occurrence.project_id = %s
+                 AND occurrence.block_id = ANY(%s::uuid[])
+                 AND occurrence.human_correction_review_id IS NOT NULL
+               ORDER BY occurrence.block_id, occurrence.mention_text,
+                        occurrence.source_start, occurrence.occurrence_index""",
+            (project_id, block_ids),
+        )
+
     def _parse_agtype(self, val):
         """Unwrap agtype returned by psycopg when needed."""
         if not val:

@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 from psycopg import Error as PsycopgError
 
 from common.conf.relationship_config import normalize_relationship
-from common.exceptions import StorageWriteError
+from common.exceptions import MaintenanceConflictError, StorageWriteError
 from common.schema.ingestion.contracts import (
     ContextEntityResult,
     ContextRelationshipWrite,
@@ -1276,6 +1276,33 @@ class SemanticCommitWriter:
         project_id: str,
         eligible_blocks: set[UUID],
     ) -> int:
+        await cur.execute(
+            """SELECT block_id::text AS block_id, mention_text,
+                      source_start, source_end, corrected_entity_id
+               FROM public.context_block_entity_occurrences
+               WHERE project_id = %s AND block_id = ANY(%s::uuid[])
+                 AND human_correction_review_id IS NOT NULL""",
+            (project_id, [str(block_id) for block_id in eligible_blocks]),
+        )
+        protected = await cur.fetchall()
+        if protected and not result.resolved_mentions:
+            raise MaintenanceConflictError()
+        protected_by_mention: dict[tuple, list[int]] = {}
+        for row in protected:
+            key = (
+                row["block_id"], row["mention_text"].casefold(),
+                row["source_start"], row["source_end"],
+            )
+            protected_by_mention.setdefault(key, []).append(int(row["corrected_entity_id"]))
+        for resolved in result.resolved_mentions:
+            for block_id in resolved.mention.block_ids:
+                key = (
+                    str(block_id), resolved.mention.name.casefold(),
+                    resolved.mention.source_start, resolved.mention.source_end,
+                )
+                targets = protected_by_mention.get(key, [])
+                if targets and (len(targets) != 1 or targets[0] != resolved.entity_id):
+                    raise MaintenanceConflictError()
         count = 0
         for association in result.block_entity_associations:
             if association.block_id not in eligible_blocks:

@@ -980,6 +980,62 @@ class ProjectMaintenanceService:
                 runtime.entities.remove_entities([plan.source_entity_id, target_id])
             return {"review": applied, "target_entity_id": target_id}
 
+    async def reopen_jev_identity_correction(
+        self, project_id: str, review_id: str, *, expected_target_entity_id: int,
+    ) -> dict:
+        """Release one occurrence override while retaining the applied history."""
+
+        async with self._lock:
+            await self._require_domain_project(project_id, allow_archived=False)
+            review = await self._maintenance_reviews.get(
+                review_id, user_name=self.user_name, project_id=project_id,
+            )
+            if review is None or review.status != "applied" or not isinstance(
+                review.proposed_plan, IdentityReassignmentPlan,
+            ):
+                raise ValueError("Applied identity correction not found")
+            async with self.pg.transaction() as cur:
+                await cur.execute(
+                    """SELECT status FROM public.projects
+                       WHERE user_name = %s AND project_id = %s FOR UPDATE""",
+                    (self.user_name, project_id),
+                )
+                project = await cur.fetchone()
+                if project is None or project["status"] != "active":
+                    raise MaintenanceConflictError()
+                await cur.execute(
+                    """SELECT block_id FROM public.context_block_entity_occurrences
+                       WHERE window_id = %s AND project_id = %s
+                         AND identity_decision_key = %s
+                         AND human_correction_review_id = %s
+                         AND corrected_entity_id = %s FOR UPDATE""",
+                    (review.proposed_plan.window_id, project_id,
+                     review.proposed_plan.occurrence_key, review_id,
+                     expected_target_entity_id),
+                )
+                rows = await cur.fetchall()
+                if {str(row["block_id"]) for row in rows} != {
+                    str(block_id) for block_id in review.proposed_plan.block_ids
+                } or len(rows) != len(review.proposed_plan.block_ids):
+                    raise MaintenanceConflictError()
+                for table in (
+                    "context_block_entity_occurrences",
+                    "message_entity_occurrences",
+                    "episode_entity_occurrences",
+                ):
+                    await cur.execute(
+                        f"""UPDATE public.{table}
+                            SET human_correction_review_id = NULL
+                            WHERE project_id = %s AND human_correction_review_id = %s
+                              AND corrected_entity_id = %s""",
+                        (project_id, review_id, expected_target_entity_id),
+                    )
+            return {
+                "review_id": review_id,
+                "target_entity_id": expected_target_entity_id,
+                "human_correction_active": False,
+            }
+
     async def transition_maintenance_review(
         self,
         project_id: str,

@@ -94,6 +94,12 @@ class ApplyJevIdentityDecision(BaseModel):
     expected_state: dict[str, Any]
 
 
+class ReopenJevIdentityCorrection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_target_entity_id: int = Field(gt=0)
+
+
 class MergeContextChoice(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

@@ -48,6 +48,11 @@ def test_review_routes_enforce_scope_and_dispatch_decisions(monkeypatch, tmp_pat
             calls.append(("apply_identity", project_id, review_id, kwargs))
             return {"review": review, "target_entity_id": 3}
 
+        async def reopen_jev_identity_correction(self, project_id, review_id, **kwargs):
+            calls.append(("reopen_identity", project_id, review_id, kwargs))
+            return {"review_id": review_id, "target_entity_id": 3,
+                    "human_correction_active": False}
+
     class Projects:
         maintenance_service = Maintenance()
 
@@ -135,6 +140,16 @@ def test_review_routes_enforce_scope_and_dispatch_decisions(monkeypatch, tmp_pat
                 assert calls[-1] == (
                     "apply_identity", "project-1", "review-1",
                     {"expected_state": {"revision": 3}},
+                )
+                reopened_identity = await client.post(
+                    identity_url + "/review-1/reopen",
+                    json={"expected_target_entity_id": 3},
+                )
+                assert reopened_identity.status_code == 200
+                assert reopened_identity.json()["human_correction_active"] is False
+                assert calls[-1] == (
+                    "reopen_identity", "project-1", "review-1",
+                    {"expected_target_entity_id": 3},
                 )
 
     asyncio.run(exercise())
