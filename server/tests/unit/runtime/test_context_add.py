@@ -917,7 +917,8 @@ async def test_run_agent_stream_persists_the_final_answer_and_sources_before_res
         events.append(event)
 
     assert [event["event"] for event in events] == ["token", "response"]
-    assert history_calls == [(10_000, 0)]
+    # History is read in pages, newest first, only as far as the budget needs.
+    assert history_calls == [(200, 0)]
     assert orchestrator.calls[0]["user_query"] == "What did we decide?"
     assert orchestrator.calls[0]["conversation_history"] == [
         {"role": "assistant", "content": "A prior durable answer."}
@@ -1780,3 +1781,29 @@ async def test_cancelling_one_session_run_does_not_cancel_another(context):
     second_events = await second
 
     assert second_events[-1]["data"]["content"] == "second session answer"
+
+
+async def test_history_pages_stop_once_they_could_fill_the_budget():
+    ctx = object.__new__(SessionRuntime)
+    calls = []
+
+    async def history(limit, up_to_msg_id=None):
+        calls.append(up_to_msg_id)
+        newest = up_to_msg_id
+        return [
+            {"message_id": message_id, "content": "x" * 100}
+            for message_id in range(newest - limit + 1, newest + 1)
+        ]
+
+    ctx.get_conversation_context = history
+
+    # 1,000 tokens is about 4,000 characters, so one 200-message page of
+    # 100 characters each already could fill it.
+    turns = await ctx._recent_history_within(1_000, up_to_msg_id=5_000)
+    assert calls == [5_000]
+    assert len(turns) == 200
+
+    calls.clear()
+    turns = await ctx._recent_history_within(40_000, up_to_msg_id=5_000)
+    assert calls == [5_000, 4_800, 4_600, 4_400, 4_200, 4_000, 3_800, 3_600]
+    assert [turn["message_id"] for turn in turns][:2] == [3_401, 3_402]

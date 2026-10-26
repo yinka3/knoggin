@@ -351,25 +351,28 @@ async def test_packet_caps_total_provenance_work_before_loading_trimmed_neighbor
 
 @pytest.mark.unit
 @pytest.mark.no_network
-async def test_packet_fails_when_one_seed_and_its_provenance_cannot_fit():
-    seed = _observation(101, 1, 2, observed_at_ms=100)
-    loader = PacketEvidenceLoader()
+async def test_packet_skips_a_seed_that_cannot_fit_and_reviews_the_next():
+    # A seed too large for any packet can never be reviewed; failing on it
+    # would stop conflict discovery for every later observation.
+    oversized = _observation(101, 1, 2, observed_at_ms=100)
+    following = _observation(102, 3, 4, observed_at_ms=110)
 
-    with pytest.raises(
-        ValueError,
-        match=r"seed 101 with required provenance requires 42 tokens; ceiling is 10",
-    ):
-        await ConflictPacketBuilder(
-            PacketReader([seed], {1: [seed], 2: [seed]}),
-            token_counter=lambda _prompt: 42,
-            evidence_loader=loader,
-        ).build(
-            ConflictDiscoveryCursor("ada", "project-1", 0),
-            max_span_days=60,
-            max_tokens=10,
-        )
+    def count_tokens(prompt):
+        return 42 if '"observation_id":101' in prompt else 1
 
-    assert loader.calls == [(101,)]
+    package = await ConflictPacketBuilder(
+        PacketReader([oversized, following], {1: [oversized], 2: [oversized], 3: [following], 4: [following]}),
+        token_counter=count_tokens,
+        evidence_loader=PacketEvidenceLoader(),
+    ).build(
+        ConflictDiscoveryCursor("ada", "project-1", 0),
+        max_span_days=60,
+        max_tokens=10,
+    )
+
+    assert package is not None
+    assert {row["observation_id"] for row in package.observations} == {102}
+    assert package.next_observation_id == 102
 
 
 class JobStore:

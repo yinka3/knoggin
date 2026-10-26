@@ -2144,3 +2144,26 @@ def test_context_entity_result_requires_durable_block_coverage_for_each_entity()
 
 async def _async_value(value):
     return value
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_llm_fallback_names_only_known_aliases_present_in_its_gap_blocks():
+    import json as _json
+
+    compiled_domain = domain()
+    current = block("Zephyr Dynamics replaced Orion Labs as the provider.")
+    semantic_build = build(blocks=(current,), compiled_domain=compiled_domain)
+    llm = FakeEntityLLM(
+        [{"block_id": "b1", "name": "Zephyr Dynamics", "type": "Company"}]
+    )
+    text_processor = processor(FakeVP01(), llm=llm)
+    # Sixty unrelated aliases sort before the one that is actually present.
+    aliases = {f"Aardvark {index:02}": index for index in range(60)}
+    aliases["Orion Labs"] = 900
+    text_processor.get_known_aliases = lambda: aliases
+
+    await text_processor.extract_context_mentions(semantic_build)
+
+    prompt = _json.loads(llm.calls[0]["user"])
+    assert prompt["known_candidate_names"] == ["Orion Labs"]

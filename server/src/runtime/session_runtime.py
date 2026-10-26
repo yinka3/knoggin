@@ -623,20 +623,18 @@ class SessionRuntime:
             if shutting_down:
                 raise asyncio.CancelledError
             prompt_memory = run_settings.config.developer_settings.prompt_memory
-            # At least one token is needed to represent each retained turn.
             # Fetch against the largest admitted budget; the chosen run budget
             # makes the final selection at prompt assembly.
-            history_turns = min(
-                10_000,
+            history_budget_tokens = (
                 run_settings.prompt_memory_budget.input_tokens
                 if run_settings.prompt_memory_budget is not None
                 else max([
                     prompt_memory.default.input_tokens,
                     *(row.budget.input_tokens for row in prompt_memory.overrides),
-                ]),
+                ])
             )
-            history = await self.get_conversation_context(
-                history_turns, up_to_msg_id=accepted.id - 1,
+            history = await self._recent_history_within(
+                history_budget_tokens, up_to_msg_id=accepted.id - 1,
             )
             orchestrator = orchestrator or self.agent_orchestrator
             if orchestrator is None:
@@ -1250,6 +1248,33 @@ class SessionRuntime:
                 logger.exception(
                     "Failed to signal semantic work for {}", self.session_id
                 )
+
+    _HISTORY_PAGE = 200
+    _HISTORY_MAX_TURNS = 10_000
+
+    async def _recent_history_within(
+        self, budget_tokens: int, *, up_to_msg_id: int
+    ) -> List[Dict]:
+        """Fetch newest-first pages until they could fill the prompt budget.
+
+        Prompt assembly makes the exact cut. Text at or under four characters
+        per token (English, code, CJK) cannot fill the budget with fewer
+        characters than this, so older pages could never be used.
+        """
+
+        collected: List[Dict] = []
+        characters = 0
+        cursor = up_to_msg_id
+        while len(collected) < self._HISTORY_MAX_TURNS:
+            page = await self.get_conversation_context(self._HISTORY_PAGE, up_to_msg_id=cursor)
+            if not page:
+                break
+            collected = page + collected
+            characters += sum(len(str(turn.get("content") or "")) for turn in page)
+            if len(page) < self._HISTORY_PAGE or characters >= budget_tokens * 4:
+                break
+            cursor = int(page[0]["message_id"]) - 1
+        return collected
 
     async def get_conversation_context(
         self, num_turns: int, up_to_msg_id: Optional[int] = None

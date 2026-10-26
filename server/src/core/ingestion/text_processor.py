@@ -490,7 +490,18 @@ class TextProcessor:
 
         local_to_block = {f"b{index}": gap.block for index, gap in enumerate(gaps, 1)}
         support_text_by_block = {gap.block.block_id: gap.support_text for gap in gaps}
-        known_names = sorted(self.get_known_aliases())[:50]
+        # Name the known entities that actually occur in these gap blocks or
+        # their support, so the model does not re-propose them; an arbitrary
+        # alphabetical slice of all aliases tells it nothing.
+        gap_text = "\n".join(f"{gap.block.markdown}\n{gap.support_text}" for gap in gaps)
+        known_names = sorted(
+            {
+                name
+                for name in self.get_known_aliases()
+                if name.strip()
+                and re.search(self._literal_expression(name), gap_text, re.IGNORECASE)
+            }
+        )[:50]
         supporting_excerpts = []
         local_message_ref_by_id: dict[int, str] = {}
         local_message_text_by_ref: dict[str, str] = {}
