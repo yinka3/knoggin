@@ -35,7 +35,7 @@ def _local_snapshot(
 
 
 @pytest.fixture
-async def real_resource_manager(monkeypatch, tmp_path):
+async def real_resource_manager(monkeypatch, tmp_path, test_database_url):
     huggingface_hub = pytest.importorskip("huggingface_hub")
     embedding_model = _local_snapshot(
         huggingface_hub,
@@ -60,13 +60,7 @@ async def real_resource_manager(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(vp01, "GLINER25_ENGLISH_MODEL", vp01_model)
 
-    monkeypatch.setenv(
-        "DATABASE_URL",
-        os.environ.get(
-            "TEST_DATABASE_URL",
-            "postgresql://knoggin:knoggin@localhost:5432/knoggin_db",
-        ),
-    )
+    monkeypatch.setenv("DATABASE_URL", test_database_url)
     monkeypatch.setenv("EMBEDDING_MODEL", embedding_model)
     monkeypatch.setenv("RERANKER_MODEL", reranker_model)
     monkeypatch.setenv(

@@ -1,14 +1,8 @@
 import asyncio
-import os
 
 import pytest
 
 from infrastructure.postgres_client import PostgresClient
-
-DB_URL = os.environ.get(
-    "TEST_DATABASE_URL",
-    "postgresql://knoggin:knoggin@localhost:5432/knoggin_db",
-)
 
 
 @pytest.mark.integration
@@ -16,9 +10,9 @@ DB_URL = os.environ.get(
 @pytest.mark.requires_pgvector
 @pytest.mark.requires_async_psycopg
 @pytest.mark.slow
-async def test_postgres_client_async_pool_executes_real_reads():
+async def test_postgres_client_async_pool_executes_real_reads(test_database_url):
     client = PostgresClient(
-        DB_URL,
+        test_database_url,
         min_size=1,
         max_size=2,
     )
@@ -36,10 +30,10 @@ async def test_postgres_client_async_pool_executes_real_reads():
 @pytest.mark.requires_async_psycopg
 @pytest.mark.slow
 @pytest.mark.no_network
-async def test_postgres_pool_replaces_a_closed_established_connection():
+async def test_postgres_pool_replaces_a_closed_established_connection(test_database_url):
     """A broken idle connection is discarded and replaced on the next query."""
 
-    client = PostgresClient(DB_URL, min_size=1, max_size=1)
+    client = PostgresClient(test_database_url, min_size=1, max_size=1)
     await client.connect()
     pool = client._pool
     assert pool is not None
@@ -61,10 +55,10 @@ async def test_postgres_pool_replaces_a_closed_established_connection():
 @pytest.mark.requires_async_psycopg
 @pytest.mark.slow
 @pytest.mark.no_network
-async def test_postgres_pool_recovers_after_single_slot_exhaustion():
+async def test_postgres_pool_recovers_after_single_slot_exhaustion(test_database_url):
     """A queued query completes once the only checked-out slot is released."""
 
-    client = PostgresClient(DB_URL, min_size=1, max_size=1)
+    client = PostgresClient(test_database_url, min_size=1, max_size=1)
     await client.connect()
     pool = client._pool
     assert pool is not None

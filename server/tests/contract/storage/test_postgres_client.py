@@ -13,7 +13,7 @@ from infrastructure.postgres_client import (
 
 DB_URL = os.environ.get(
     "TEST_DATABASE_URL",
-    "postgresql://knoggin:knoggin@localhost:5432/knoggin_db",
+    "postgresql://knoggin:knoggin@localhost:5432/postgres",
 )
 
 
@@ -157,8 +157,8 @@ def test_agtype_loader_decodes_age_json_values():
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
 @pytest.mark.no_network
-async def test_age_connection_configuration_registers_the_agtype_loader():
-    conn = await psycopg.AsyncConnection.connect(DB_URL, row_factory=dict_row)
+async def test_age_connection_configuration_registers_the_agtype_loader(test_database_url):
+    conn = await psycopg.AsyncConnection.connect(test_database_url, row_factory=dict_row)
     try:
         await _configure_async_conn(conn)
         cursor = await conn.execute("SELECT 'false'::agtype AS value;")
@@ -447,9 +447,11 @@ async def test_explicit_query_helpers_preserve_params_and_result_shapes(recordin
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
 @pytest.mark.slow
-async def test_postgres_client_connects_when_test_database_is_configured():
+async def test_postgres_client_connects_when_test_database_is_configured(
+    test_database_url,
+):
     client = PostgresClient(
-        DB_URL,
+        test_database_url,
         min_size=1,
         max_size=2,
     )

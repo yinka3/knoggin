@@ -17,7 +17,7 @@ from tests.fixtures.factories import make_domain_config
 
 DB_URL = os.environ.get(
     "TEST_DATABASE_URL",
-    "postgresql://knoggin:knoggin@127.0.0.1:5432/knoggin_db",
+    "postgresql://knoggin:knoggin@127.0.0.1:5432/postgres",
 )
 
 

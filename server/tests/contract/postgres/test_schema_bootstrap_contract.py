@@ -13,7 +13,7 @@ from infrastructure.postgres_client import PostgresClient
 
 DB_URL = os.environ.get(
     "TEST_DATABASE_URL",
-    "postgresql://knoggin:knoggin@127.0.0.1:5432/knoggin_db",
+    "postgresql://knoggin:knoggin@127.0.0.1:5432/postgres",
 )
 SCHEMA_SQL = (
     Path(__file__).resolve().parents[3] / "src" / "infrastructure" / "schema.sql"
