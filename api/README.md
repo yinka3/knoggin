@@ -66,14 +66,17 @@ version is still required for `pg_dump` and `pg_restore`.
   are represented only by `*_configured` flags.
 - `GET /v1/settings/status` returns publication failures and fields that need
   a runtime restart to take effect.
+- `GET /v1/settings/spending` returns LLM spend against the configured limit and
+  `prompt_cache`: per-model prompt and cached token counts with a hit rate,
+  counted since the API started.
 - `PATCH /v1/settings/{section}` updates one section with a partial JSON body.
   Sections are `user_aliases` (a JSON array), `llm`, `search`, `jev`, and
   `developer_settings` (JSON objects). Updates are validated and saved by the
   engine's `ConfigManager`.
-- `PUT /v1/settings/{section}/secrets/{field}` with `{"value":"..."}` sets a
-  credential; `DELETE` on the same path clears it. Supported pairs are
-  `llm/api_key`, `search/brave_api_key`, `search/tavily_api_key`, and
-  `jev/api_key`. Credentials cannot be changed by the section PATCH route.
+- Credentials are never saved in settings. Set them in the environment (or
+  the repository `.env`): `OPENROUTER_API_KEY` for the LLM, `BRAVE_API_KEY` and
+  `TAVILY_API_KEY` for web search, and `JEV_API_KEY` for JEV. Restart the API
+  after changing one.
 - `POST /v1/settings/reload` reloads the managed YAML file, and
   `POST /v1/settings/retry-applies` retries failed subscribers.
 
@@ -83,7 +86,7 @@ For example, after starting the API:
 curl http://127.0.0.1:8000/v1/settings
 curl -X PATCH http://127.0.0.1:8000/v1/settings/llm \
   -H 'Content-Type: application/json' \
-  -d '{"agent_model":"google/gemini-2.5-flash-preview"}'
+  -d '{"agent_model":"google/gemini-2.5-flash"}'
 curl http://127.0.0.1:8000/v1/settings/status
 ```
 

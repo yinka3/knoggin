@@ -1,6 +1,6 @@
 # Knoggin
 
-Knoggin is a local memory engine for AI agents. It turns conversations and project files into entities, relationships, and Episodes, while keeping links to the original sources. Each project supplies its own domain configuration for entity types, topics, aliases, and matching rules.
+Knoggin is a memory engine for AI agents that stores and indexes everything on your machine. It turns conversations and project files into entities, relationships, and Episodes, while keeping links to the original sources. Each project supplies its own domain configuration for entity types, topics, aliases, and matching rules.
 
 The project is under active development and is not yet released.
 
@@ -80,9 +80,51 @@ uv run --package server python server/scripts/prefetch_models.py
 
 Stop Postgres with `docker compose down`. This keeps the database volume; `docker compose down -v` deletes it.
 
+## Where your data goes
+
+Knoggin stores your memory locally: the database, your project files, search indexes, embeddings, reranking, entity extraction (GLiNER), and document parsing all run on your machine.
+
+The language model is the exception. By default Knoggin uses OpenRouter, so this text is sent to the model provider you configure:
+
+- each agent step: the system prompt, Project Context, retrieved results, and recent conversation;
+- memory building: each conversation window, for Episodes, Context updates, and relationship extraction;
+- web search queries, when web tools are enabled;
+- JEV requests, when JEV is enabled (it is off by default).
+
+To keep everything on your machine, point Knoggin at a local model server (see below).
+
+## Using a local model
+
+Knoggin works with any OpenAI-compatible server, such as Ollama, LM Studio, or vLLM. With Ollama:
+
+1. Start Ollama with a context window large enough for Knoggin's prompts. Ollama's default is about 2K tokens and it silently drops anything longer, so set it explicitly:
+
+   ```bash
+   OLLAMA_CONTEXT_LENGTH=65536 ollama serve
+   ```
+
+   A larger context uses more GPU memory; choose the largest your hardware handles. If a model processes far fewer tokens than Knoggin sent, Knoggin stops with an error that names this setting instead of continuing with a cut prompt.
+
+2. Pick a model that supports tool calling (for example Qwen 2.5/3 or Llama 3.1 and later) and set it in the `llm` settings, either through `PATCH /v1/settings/llm` or in `knoggin.yml`:
+
+   ```yaml
+   llm:
+     base_url: http://localhost:11434/v1
+     agent_model: qwen3:14b
+     extraction_model: qwen3:14b
+     merge_model: qwen3:14b
+     request_timeout_seconds: 900
+   ```
+
+   No API key is needed for a local server. Large models on limited hardware can take minutes per call, so raise `request_timeout_seconds` if requests time out.
+
+3. Thinking is limited by default. Local servers can only turn a model's thinking on or off, so Knoggin uses `thinking: planning_only`: the model thinks on the agent's planning step and final answer, and not on tool steps or memory building. On a 27B Qwen this was several times faster with the same results. Set `thinking: off` to disable it everywhere, or `thinking: provider_default` to let the model think on every step; Knoggin then warns that responses will be several times slower.
+
+Repeated agent steps reuse the model's work on the unchanged start of the prompt, so steps after the first in a run are much faster.
+
 ## Configuration
 
-`.env.example` lists database and model settings. The application runtime also takes a configuration directory and manages `knoggin.yml` there. See [server/README.md](server/README.md) for its runtime entry point.
+`.env.example` lists database, model, and credential settings. Provider API keys (`OPENROUTER_API_KEY`, `BRAVE_API_KEY`, `TAVILY_API_KEY`, `JEV_API_KEY`) are read only from the environment or `.env`; they are never saved in settings. The application runtime also takes a configuration directory and manages `knoggin.yml` there. See [server/README.md](server/README.md) for its runtime entry point.
 
 ## Development
 
