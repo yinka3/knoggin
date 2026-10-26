@@ -292,23 +292,26 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         report["error"] = {"type": type(exc).__name__, "message": str(exc)}
         raise
     finally:
-        timings["total_seconds"] = time.perf_counter() - started
-        report["timings"] = {key: round(value, 3) for key, value in timings.items()}
-        monitor.stop()
-        report["peak_rss_mib"] = round(monitor.peak_rss_bytes / 1024 / 1024, 1)
-        report["memory_phases"] = monitor.phase_stats_mib()
-        if embedding is not None:
-            embedding.cleanup()
-        if client is not None:
-            await client.close()
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(
-            json.dumps(report, indent=2, default=str) + "\n", encoding="utf-8"
-        )
-        if database_created and not args.keep_artifacts:
-            _drop_database(args.database_url, database)
-        if not args.keep_artifacts:
-            shutil.rmtree(project_root)
+        try:
+            timings["total_seconds"] = time.perf_counter() - started
+            report["timings"] = {key: round(value, 3) for key, value in timings.items()}
+            monitor.stop()
+            report["peak_rss_mib"] = round(monitor.peak_rss_bytes / 1024 / 1024, 1)
+            report["memory_phases"] = monitor.phase_stats_mib()
+            if embedding is not None:
+                embedding.cleanup()
+            if client is not None:
+                await client.close()
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(
+                json.dumps(report, indent=2, default=str) + "\n", encoding="utf-8"
+            )
+        finally:
+            # Remove artifacts even when an earlier cleanup step fails.
+            if database_created and not args.keep_artifacts:
+                _drop_database(args.database_url, database)
+            if not args.keep_artifacts:
+                shutil.rmtree(project_root, ignore_errors=True)
     return report
 
 
