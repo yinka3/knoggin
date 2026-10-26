@@ -1,10 +1,31 @@
 # Knoggin
 
-Knoggin is a memory engine for AI agents that stores and indexes everything on your machine. It turns conversations and project files into entities, relationships, and Episodes, while keeping links to the original sources. Each project supplies its own domain configuration for entity types, topics, aliases, and matching rules.
+Knoggin gives an AI assistant a long-term memory for your projects.
+
+As you chat and add files, Knoggin keeps a short, readable summary of where each project stands: the current state, decisions, preferences, and open questions. It also writes up what happened in each conversation and remembers the people, tools, and other things you mention and how they connect. When you come back days later, the assistant starts from that summary and can look up the details, and every remembered fact links back to the message or file it came from so you can check it.
+
+Your memory is stored on your machine. See [Where your data goes](#where-your-data-goes) for what is sent to the language model.
 
 The project is under active development and is not yet released.
 
-## How it works
+## How it works, in short
+
+1. **You work in a project.** You chat with the assistant and add files such as notes, PDFs, and code.
+2. **Knoggin builds memory in the background.** When a conversation pauses, Knoggin reads it and updates the project's memory: a write-up of what happened, the project summary, and the things you mentioned and how they relate.
+3. **The assistant starts from memory.** On your next question it gets the project summary up front, and it can search past conversations, project files, and (if enabled) the web for details.
+4. **Everything is traceable.** Each piece of memory points to its source, and notes the assistant inferred on its own are kept apart from what you actually said.
+
+### Key terms
+
+- **Project brief (`PROJECT.md`):** what you write about the project: goals, background, and preferences.
+- **Context (`CONTEXT.md`):** Knoggin's running summary of the project. You can read and edit it like any Markdown file.
+- **Episode:** a short write-up of one stretch of conversation: what happened, what changed, and what is still open.
+- **Entity and relationship:** a person, tool, organization, or other thing you mention, and how two of them are connected.
+- **Run notebook:** the assistant's scratch pad while it answers one question; it is not kept afterwards.
+
+## Under the hood
+
+This section is for developers who want the details.
 
 ### Main information structures
 
@@ -47,7 +68,7 @@ Entity identity is shared across a user's projects. Project context, documents, 
 
 ### Retrieval
 
-Conversation search combines full-text and embedding matches and can rerank candidates before returning surrounding message context. Episode search returns compact summaries first; an agent can then open an Episode to read its source messages. Entity search and graph traversal expose related entities and the evidence for their connections.
+Conversation search combines full-text and embedding matches and can rerank candidates before returning surrounding message context. Each finished exchange gets its own embedding as soon as it closes, so recent conversation is searchable before any Episode covers it. Episode search returns compact summaries first; an agent can then open an Episode to read its source messages. Entity search and graph traversal expose related entities and the evidence for their connections.
 
 Document search is a separate path. It combines text and embedding matches over indexed chunks, can rerank results, and supports narrowing the search to a document or project subtree. Reads respect the project's configured visibility into other projects.
 
@@ -105,18 +126,22 @@ Knoggin works with any OpenAI-compatible server, such as Ollama, LM Studio, or v
 
    A larger context uses more GPU memory; choose the largest your hardware handles. If a model processes far fewer tokens than Knoggin sent, Knoggin stops with an error that names this setting instead of continuing with a cut prompt.
 
-2. Pick a model that supports tool calling (for example Qwen 2.5/3 or Llama 3.1 and later) and set it in the `llm` settings, either through `PATCH /v1/settings/llm` or in `knoggin.yml`:
+2. Choose models in the `llm` settings, either through `PATCH /v1/settings/llm` or in `knoggin.yml`. Knoggin uses a separate model for each kind of work, so you can match each one to the job:
+
+   - `agent_model` answers your questions and calls tools. It needs tool-calling support (for example Qwen 2.5/3 or Llama 3.1 and later), and a stronger model gives better answers.
+   - `extraction_model` builds memory in the background: Episodes, Context updates, and relationships. It runs often, so a smaller, faster model is usually a good trade.
+   - `merge_model` gives advice when you review possible duplicate entities. It runs rarely, so a stronger model costs little.
 
    ```yaml
    llm:
      base_url: http://localhost:11434/v1
      agent_model: qwen3:14b
-     extraction_model: qwen3:14b
+     extraction_model: qwen3:8b
      merge_model: qwen3:14b
      request_timeout_seconds: 900
    ```
 
-   No API key is needed for a local server. Large models on limited hardware can take minutes per call, so raise `request_timeout_seconds` if requests time out.
+   All three models are served by the same `base_url`. No API key is needed for a local server. Large models on limited hardware can take minutes per call, so raise `request_timeout_seconds` if requests time out.
 
 3. Thinking is limited by default. Local servers can only turn a model's thinking on or off, so Knoggin uses `thinking: planning_only`: the model thinks on the agent's planning step and final answer, and not on tool steps or memory building. On a 27B Qwen this was several times faster with the same results. Set `thinking: off` to disable it everywhere, or `thinking: provider_default` to let the model think on every step; Knoggin then warns that responses will be several times slower.
 
