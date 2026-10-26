@@ -228,6 +228,28 @@ CORS currently permits `localhost:3000` and `127.0.0.1:3000`.
   review history, evidence preview, and explicit decisions. Global merge
   rollback has separate preview and apply routes.
 
+## JEV decisions and corrections
+
+`GET /v1/projects/{project_id}/knowledge/entities/{entity_id}/jev-decisions`
+and `GET /v1/projects/{project_id}/knowledge/context-blocks/{block_id}/jev-decisions`
+explain committed JEV decisions. Add `?advanced=true` for bounded provenance.
+An older decision without a final entity link can still appear under its
+Context block; it does not prove which entity was ultimately selected.
+
+To correct a type or topic decision, flag it through
+`POST /v1/projects/{project_id}/maintenance/jev-context-corrections`, inspect
+the maintenance review and preview, then apply an explicit review decision.
+To correct one reused identity, use `.../jev-identity-corrections` to flag it,
+inspect its review and impact preview, then call
+`.../jev-identity-corrections/{review_id}/apply` with the expected state. The
+review can move the exact mention to an existing entity or a new one. Later
+semantic processing honors that occurrence correction until
+`.../jev-identity-corrections/{review_id}/reopen` is called with the expected
+target entity ID. Reopening permits later automatic evaluation; it keeps the
+applied review in history. Corrections require current, exact occurrence
+provenance, so some older decisions cannot be corrected this way. A global
+merge remains the path when the whole entities are duplicates.
+
 The old server API adapter was removed in Phase 5. Live checks for newer routes
 still need PostgreSQL to be running.
 
