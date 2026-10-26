@@ -181,17 +181,27 @@ class AgentExecutor:
     ) -> AsyncGenerator[AgentExecutionEvent, None]:
         """Run one execution from the policy captured on ``AgentRun``."""
 
-        with diagnostic_scope(
-            user_name=self.ctx.user_name,
-            project_id=self.ctx.project_id,
-            session_id=self.ctx.session_id,
-            agent_run_id=self.ctx.run_id,
-        ):
+        scope = {
+            "user_name": self.ctx.user_name,
+            "project_id": self.ctx.project_id,
+            "session_id": self.ctx.session_id,
+            "agent_run_id": self.ctx.run_id,
+        }
+        run = self._execute_run(user_timezone=user_timezone)
+        try:
+            while True:
+                # A stream can be closed by a different task after yielding.
+                # Keep each ContextVar token within one generator step.
+                with diagnostic_scope(**scope):
+                    try:
+                        event = await anext(run)
+                    except StopAsyncIteration:
+                        break
+                yield event
+        finally:
             try:
-                async for event in self._execute_run(
-                    user_timezone=user_timezone,
-                ):
-                    yield event
+                with diagnostic_scope(**scope):
+                    await run.aclose()
             finally:
                 self.ctx.release()
 
