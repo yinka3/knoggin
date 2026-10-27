@@ -989,6 +989,16 @@ class RunNotebook:
         section = self._ref_section(reference)
         return section != "web_discoveries" and self._known_reference(reference)
 
+    def research_record(self, reference: str) -> dict[str, Any] | None:
+        """The admitted evidence record a reference (or shown handle) names."""
+
+        internal = self._record_reference(reference)
+        if not self.validates_research_reference(internal):
+            return None
+        section = self._ref_section(internal)
+        record = self._records.get(section, {}).get(internal) if section else None
+        return deepcopy(record) if record is not None else None
+
     def _record_reference(self, reference: str) -> str:
         if not isinstance(reference, str) or self._known_reference(reference):
             return reference
@@ -1096,7 +1106,7 @@ class RunNotebook:
         )
         actions = [ref for ref in self._actions if ref in bounded]
         bounded.difference_update(
-            ref for ref in bounded if self._ref_section(ref) == "action"
+            [ref for ref in bounded if self._ref_section(ref) == "action"]
         )
         bounded.update(actions[-self.capacity.max_actions :])
         return bounded

@@ -948,6 +948,94 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "record_finding",
+            "description": (
+                "Record one research finding as soon as a source you read supports "
+                "it. Each source needs its notebook reference (such as WR1) and a "
+                "short exact quote from what you read there. Recorded findings are "
+                "shown on every step and fill research_coverage."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "subquestion": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "The planned subquestion this answers: its exact text or number.",
+                    },
+                    "claim": {"type": "string", "minLength": 1, "maxLength": 600},
+                    "sources": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 3,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "reference": {"type": "string", "minLength": 1},
+                                "quote": {"type": "string", "minLength": 1, "maxLength": 500},
+                            },
+                            "required": ["reference", "quote"],
+                            "additionalProperties": False,
+                        },
+                    },
+                    "reference": {
+                        "type": "string",
+                        "description": "For a single source, its reference instead of sources.",
+                    },
+                    "quote": {
+                        "type": "string",
+                        "maxLength": 500,
+                        "description": "For a single source, its quote instead of sources.",
+                    },
+                    "strength": {
+                        "type": "string",
+                        "enum": ["supported", "partial", "contested"],
+                        "default": "supported",
+                        "description": "contested when sources disagree.",
+                    },
+                    "gap": {
+                        "type": "string",
+                        "maxLength": 600,
+                        "description": "What remains unknown about this, if anything.",
+                    },
+                },
+                "required": ["subquestion", "claim"],
+                # Models often repeat a quote at the top level; it is ignored
+                # rather than failing the whole finding.
+                "additionalProperties": True,
+            },
+            "tags": ["research"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_findings",
+            "description": (
+                "Save this run's recorded findings, with their quotes and sources, "
+                "to a new project file, and list the file in the project's "
+                "'Research findings' notebook. Use it when the user asked for the "
+                "findings to be saved."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 512,
+                        "description": "New project file path, such as research/topic.md.",
+                    },
+                },
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+            "tags": ["research", "project-files:write"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "set_research_plan",
             "description": (
                 "Set the material subquestions for this research run before "
@@ -1461,6 +1549,7 @@ _TOOL_CAPABILITIES = {
     "move_project_file": REVERSIBLE_WRITE_CAPABILITY,
     "delete_project_file": REVERSIBLE_WRITE_CAPABILITY,
     "create_project_folder": REVERSIBLE_WRITE_CAPABILITY,
+    "save_findings": REVERSIBLE_WRITE_CAPABILITY,
 }
 
 for _schema in TOOL_SCHEMAS:

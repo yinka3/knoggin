@@ -99,6 +99,8 @@ class AgentLimitSettings(ConfigModel):
     # pages (30-40K on Wikipedia); showing 1.2K made models reread the same
     # range in a loop. A longer passage says the line to continue from.
     max_passage_chars: StrictInt = Field(12_000, ge=200)
+    # Findings a research run may record with record_finding.
+    max_research_findings: StrictInt = Field(30, ge=1)
     # ``adaptive`` only skips persistent Project material for a deliberately
     # narrow conversational fast path. All uncertain or substantive prompts
     # retain the Brief/Context before the first model step.

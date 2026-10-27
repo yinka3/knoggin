@@ -54,6 +54,21 @@ def build_user_message(
             "**Research plan** (in research_coverage, use each subquestion's "
             f"exact text):\n{plan}\n"
         )
+        if ctx.findings:
+            numbers = {question: index for index, question
+                       in enumerate(ctx.research_subquestions, 1)}
+            recorded = "\n".join(
+                f"{finding['id']} [{numbers[finding['subquestion']]}, "
+                f"{finding['strength']}] {finding['claim']} ("
+                + "; ".join(
+                    f"{source['reference']}: \"{source['quote']}\""
+                    for source in finding["sources"]
+                )
+                + ")"
+                + (f" Still unknown: {finding['gap']}" if finding["gap"] else "")
+                for finding in ctx.findings
+            )
+            msg += f"**Findings recorded so far:**\n{recorded}\n"
     msg += f"**Calls remaining:** {ctx.limits.max_calls - ctx.call_count}\n"
 
     if ctx.last_error:

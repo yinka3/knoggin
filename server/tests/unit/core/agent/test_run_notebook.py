@@ -380,3 +380,21 @@ def test_the_last_passage_of_a_page_says_the_source_ended():
     )
 
     assert "end of source: this passage reaches its last line (96)." in rendered
+
+
+def test_rollover_with_recorded_actions_keeps_them_bounded():
+    notebook = RunNotebook()
+    for index in range(3):
+        notebook.apply(
+            "create_project_file",
+            {"data": {"status": "created", "relative_path": f"notes/{index}.md"}},
+        )
+    notebook.apply("read_web_page", {"data": [{
+        "title": "Guide", "url": "https://example.com/guide", "content": "Text.",
+        "start_line": 1, "end_line": 1, "total_lines": 1,
+        "content_hash": "a" * 64, "source_kind": "web_page",
+    }]})
+
+    notebook.rollover()
+
+    assert len(notebook.actions) <= notebook.capacity.max_actions

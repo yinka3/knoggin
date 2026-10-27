@@ -9,6 +9,7 @@ from common.schema.agent.tool_contracts import (
     TOOL_SCHEMAS,
     get_schema_capability,
 )
+from core.agent.tools.findings import ResearchFindingTools
 from core.agent.tools.health import HealthTools
 from core.agent.tools.jobs import ResearchJobTools
 from core.agent.tools.maintenance import MaintenanceTools
@@ -106,6 +107,16 @@ _WEB_READ_RUNTIME_INSTRUCTION = (
     "[SYSTEM NOTICE: read_web_page reads a bounded web or PDF passage. Read "
     "important sources before making important web-based claims, retain material "
     "qualifications, and state remaining evidence gaps plainly.]"
+)
+_RECORD_FINDING_RUNTIME_INSTRUCTION = (
+    "[SYSTEM NOTICE: Call record_finding whenever a page or document you read "
+    "answers part of the plan, quoting a short exact line from it. Findings stay "
+    "visible on every step, so record them instead of rereading sources.]"
+)
+_SAVE_FINDINGS_RUNTIME_INSTRUCTION = (
+    "[SYSTEM NOTICE: When the user asked for the findings to be saved, call "
+    "save_findings with the path once the findings are recorded and before "
+    "submit_answer.]"
 )
 _RESEARCH_JOB_RUNTIME_INSTRUCTION = (
     "[SYSTEM NOTICE: start_research_job runs research in the background. Use it "
@@ -295,6 +306,13 @@ TOOL_DEFINITIONS = {
         "read_web_page",
         default_limit=6,
         runtime_instruction=_WEB_READ_RUNTIME_INSTRUCTION,
+    ),
+    "record_finding": _definition(
+        "record_finding", runtime_instruction=_RECORD_FINDING_RUNTIME_INSTRUCTION,
+    ),
+    "save_findings": _definition(
+        "save_findings", default_limit=2,
+        runtime_instruction=_SAVE_FINDINGS_RUNTIME_INSTRUCTION,
     ),
     "start_research_job": _definition(
         "start_research_job",
@@ -604,6 +622,7 @@ class Tools(
     HealthTools,
     ProjectFileTools,
     ResearchJobTools,
+    ResearchFindingTools,
 ):
     def __init__(
         self,
@@ -651,6 +670,7 @@ class Tools(
         self.entity_maintenance_service = entity_maintenance_service
         self.project_maintenance_service = project_maintenance_service
         self.research_jobs = research_jobs
+        self.agent_run = None
 
         self._http_client = None
         self._web_page_client = None

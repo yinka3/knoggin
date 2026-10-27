@@ -61,6 +61,7 @@ from core.agent.system_prompt import (
 )
 from core.agent.tool_references import localize_agent_tool_result
 from core.agent.tool_runtime import execute_tool, summarize_result
+from core.agent.tools.findings import findings_table
 from core.agent.tools.registry import (
     Tools,
     get_runtime_instructions,
@@ -172,6 +173,7 @@ class AgentExecutor:
             ctx.short_uuid_references,
         )
         tools.run_notebook = ctx.notebook
+        tools.agent_run = ctx
         for candidate in ctx.initial_source_candidates:
             ctx.record_source(candidate)
 
@@ -421,9 +423,10 @@ class AgentExecutor:
                             )
                             step_failed = True
                             break
-                        coverage_error = self.ctx.validate_research_coverage(
-                            submit.args.get("research_coverage")
-                        )
+                        coverage = submit.args.get("research_coverage")
+                        if not coverage and self.ctx.findings:
+                            coverage = self.ctx.coverage_from_findings()
+                        coverage_error = self.ctx.validate_research_coverage(coverage)
                         if coverage_error is not None:
                             self._record_step_error(coverage_error, "research")
                             step_failed = True
@@ -1257,7 +1260,12 @@ class AgentExecutor:
                         "reason": "unknown_or_wrong_type",
                     },
                 )
-            self.ctx.record_error(message)
+            if failure.details.get("nonfatal"):
+                # Feedback such as a rejected quote: shown to the model, but it
+                # does not count toward ending the run.
+                self.ctx.note_nonfatal_error(message)
+            else:
+                self.ctx.record_error(message)
         else:
             message = "Internal tool failure"
             logger.exception(
@@ -1321,6 +1329,10 @@ class AgentExecutor:
         elif artifact is not None and expected_kind is not None:
             if artifact.kind != expected_kind:
                 artifact = artifact.model_copy(update={"kind": expected_kind})
+        if artifact is not None and self.ctx.findings and len(artifact.blocks) < 50:
+            artifact = artifact.model_copy(update={
+                "blocks": (*artifact.blocks, findings_table(self.ctx.findings)),
+            })
         return artifact
 
     async def _finalize_successfully(self, content: str) -> None:

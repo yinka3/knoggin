@@ -26,8 +26,10 @@ JOB_TOOL_NAMES = frozenset(
 )
 # The only writes research may make: saving its findings to project files.
 RESEARCH_WRITE_TOOL_NAMES = frozenset(
-    {"create_project_file", "append_project_file", "create_project_folder"}
+    {"create_project_file", "append_project_file", "create_project_folder", "save_findings"}
 )
+# Tools that only make sense inside a research run.
+RESEARCH_ONLY_TOOL_NAMES = frozenset({"record_finding", "save_findings"})
 _NOT_FOR_RESEARCH_JOBS = frozenset({"runtime:health", "maintenance", "jobs"})
 
 

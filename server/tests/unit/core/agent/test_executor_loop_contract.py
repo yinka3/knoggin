@@ -2459,3 +2459,27 @@ async def test_parallel_batch_propagates_process_level_failures_and_cleans_up(
         await task
 
     assert sibling_finished is True
+
+
+@pytest.mark.no_network
+async def test_feedback_errors_reach_the_model_without_ending_the_run(monkeypatch):
+    run = make_run(limits=AgentRunLimits(max_consecutive_errors=1))
+    executor = AgentExecutor(run, ScriptedLLM([]), SimpleNamespace())
+
+    async def reject(_tools, name, _args):
+        raise ToolExecutionError(name, "The quote for WR1 is not in what was read from it", {"nonfatal": True})
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", reject)
+    results = []
+    events = [
+        event
+        async for event in executor._execute_tools(
+            [ToolCall("search_knowledge_messages", {"query": "q"}, call_id="c1")],
+            results,
+        )
+    ]
+
+    assert events[-1]["event"] == "tool_error"
+    assert "not in what was read" in results[-1]["error"]
+    assert run.consecutive_errors == 0
+    assert "not in what was read" in run.last_error

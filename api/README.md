@@ -162,7 +162,14 @@ For an existing project, replace `{project_id}` in these routes:
   link. Research runs, foreground or background, may read and may save findings
   by creating or appending project files (include the path in the question);
   they cannot edit the agent's Brain, run maintenance actions, overwrite, move,
-  or delete files, or start jobs. When it ends, the starting session gets an
+  or delete files, or start jobs. While researching, the agent records each
+  finding with `record_finding`: a claim under one planned subquestion, its
+  strength, and short quotes that must appear in pages or documents the run
+  read. Findings are shown on every step, fill the answer's research coverage,
+  and add a findings table to the report artifact. `save_findings` writes them,
+  grouped by subquestion with quotes and sources, to a new project file and
+  lists that file in the project's "Research findings" notebook
+  (`developer_settings.limits.max_research_findings`, default 30). When it ends, the starting session gets an
   automatic turn with the report (it appears in `/follow-ups`), and the agent
   there summarizes it. That turn is not added to memory; the job's own session
   is. `GET` on the same path lists the session's jobs; `DELETE
