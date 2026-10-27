@@ -24,11 +24,14 @@ class PromptMemoryBudget(ConfigModel):
     """The input budget for an admitted agent run."""
 
     # When the provider reports the model's context size, the budget is
-    # rescaled so input uses 60% of it, up to the ceiling, and each share grows
-    # or shrinks by the same factor. These numbers then only set the
-    # proportions. Turn off to use them exactly. The ceiling (60% of 256K)
-    # keeps 1M-token models from sending huge, slow prompts on every step.
+    # rescaled so input uses input_share_of_context of it, up to the ceiling,
+    # and each share grows or shrinks by the same factor. These numbers then
+    # only set the proportions. Turn off to use them exactly. The rest of the
+    # context is room for the response, thinking, and tokenizer differences.
+    # The ceiling (60% of 256K) keeps 1M-token models from sending huge, slow
+    # prompts on every step.
     fit_to_model: StrictBool = True
+    input_share_of_context: FiniteFloat = Field(0.6, gt=0, le=1)
     max_fitted_input_tokens: StrictInt = Field(157_286, ge=1_024)
     # About 6K tokens are fixed (system prompt and tool schemas) before any
     # memory is added.

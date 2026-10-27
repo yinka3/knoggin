@@ -4,10 +4,6 @@ from collections.abc import Callable, Mapping
 
 from common.schema.agent.settings import PromptMemoryBudget
 
-# Input may use this share of the model's context; the rest is room for the
-# response, thinking, and tokenizer differences between Knoggin and the model.
-INPUT_SHARE_OF_CONTEXT = 0.6
-
 
 def fit_to_context(
     budget: PromptMemoryBudget, context_window: int | None
@@ -16,7 +12,8 @@ def fit_to_context(
     if not budget.fit_to_model or not context_window:
         return budget
     input_tokens = max(1_024, min(
-        int(context_window * INPUT_SHARE_OF_CONTEXT), budget.max_fitted_input_tokens
+        int(context_window * budget.input_share_of_context),
+        budget.max_fitted_input_tokens,
     ))
     if input_tokens == budget.input_tokens:
         return budget

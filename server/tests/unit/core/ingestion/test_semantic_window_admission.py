@@ -1071,3 +1071,32 @@ async def test_small_extraction_model_lowers_the_window_target():
     assert selected.close_reason == "target_crossed"
     assert [member.message_id for member in selected.messages] == [1, 10_001, 2, 10_002]
     assert selected.window.policy_snapshot["admission_policy"]["semantic_window_tokens"] == 12
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_window_share_and_idle_wait_are_settings():
+    rows = [_row(1, user_content="x" * 5, assistant_content="x" * 5, closed_at_ms=0)]
+
+    async def window():
+        return 100
+
+    admission = SemanticWindowAdmission(
+        RecordingStore(rows),
+        IngestionSettings(window_share_of_model_context=0.5, idle_flush_seconds=60),
+        token_counter=lambda text: text.count("x"),
+        now_ms=lambda: 59_999,
+        model_context_window=window,
+    )
+    domain = make_domain_config().compile()
+
+    # One 10-token exchange is under the 50-token target and only 59.999 s idle.
+    assert await admission.select(user_name="ada", project_id="project-1", domain=domain) is None
+    admission._now_ms = lambda: 60_000
+    selected = await admission.select(user_name="ada", project_id="project-1", domain=domain)
+
+    assert selected is not None
+    assert selected.close_reason == "idle_flush"
+    policy = selected.window.policy_snapshot["admission_policy"]
+    assert policy["semantic_window_tokens"] == 50
+    assert policy["idle_flush_seconds"] == 60

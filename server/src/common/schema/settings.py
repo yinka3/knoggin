@@ -58,11 +58,15 @@ class SemanticWindowRetrySettings(ConfigModel):
 
 class IngestionSettings(ConfigModel):
     message_edit_window_seconds: int = Field(600, ge=1, le=86_400)
-    # This is the sole user-configurable admission-size control for the new
-    # project-level semantic windows. It is a ceiling: a smaller extraction
-    # model lowers it to 40% of that model's context. Idle flush and
-    # unavoidable whole-exchange overfill remain fixed runtime policy.
+    # The admission-size ceiling for project-level semantic windows. A smaller
+    # extraction model lowers it to window_share_of_model_context of that
+    # model's context, because the Context stage sends the whole window, the
+    # current Context, and its instructions in one call.
     semantic_window_tokens: int = Field(128_000, ge=1, le=1_000_000)
+    window_share_of_model_context: float = Field(0.4, gt=0, le=1)
+    # A window smaller than the ceiling closes after this long with no new
+    # finished exchange.
+    idle_flush_seconds: int = Field(300, ge=1, le=86_400)
     semantic_window_retry: SemanticWindowRetrySettings = Field(
         default_factory=SemanticWindowRetrySettings
     )

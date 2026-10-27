@@ -70,12 +70,6 @@ class SemanticWindowAdmission:
     documents an unavoidable boundary rather than a second configurable cap.
     """
 
-    # The Context stage sends the whole window plus the current Context and
-    # its instructions in one call, so the window may use this share of the
-    # extraction model's context.
-    WINDOW_SHARE_OF_CONTEXT = 0.4
-
-    IDLE_FLUSH_SECONDS = 300
     TOKEN_ESTIMATOR = "llm.count_tokens"
     TOKEN_ESTIMATOR_VERSION = "runtime-v1"
     POLICY_VERSION = 1
@@ -111,7 +105,12 @@ class SemanticWindowAdmission:
         window = await self._model_context_window()
         if not window:
             return target
-        return max(1, min(target, int(window * self.WINDOW_SHARE_OF_CONTEXT)))
+        share = self._settings.window_share_of_model_context
+        return max(1, min(target, int(window * share)))
+
+    @property
+    def idle_flush_seconds(self) -> int:
+        return self._settings.idle_flush_seconds
 
     def update_settings(self, settings: IngestionSettings) -> None:
         if not isinstance(settings, IngestionSettings):
@@ -208,7 +207,7 @@ class SemanticWindowAdmission:
             latest_close = max(exchange.closed_at_ms for exchange in selected)
             if force_flush:
                 close_reason = "explicit_flush"
-            elif self._now_ms() >= latest_close + (self.IDLE_FLUSH_SECONDS * 1000):
+            elif self._now_ms() >= latest_close + (self.idle_flush_seconds * 1000):
                 close_reason = "idle_flush"
             else:
                 return None
@@ -236,7 +235,7 @@ class SemanticWindowAdmission:
             "admission_policy": {
                 "version": self.POLICY_VERSION,
                 "semantic_window_tokens": target,
-                "idle_flush_seconds": self.IDLE_FLUSH_SECONDS,
+                "idle_flush_seconds": self.idle_flush_seconds,
                 "close_reason": close_reason,
                 "whole_exchange_only": True,
             },

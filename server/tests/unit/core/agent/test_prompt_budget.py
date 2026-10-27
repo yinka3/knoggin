@@ -94,6 +94,10 @@ def test_budget_scales_to_the_model_context_and_keeps_proportions():
     assert small.input_tokens == int(8_192 * 0.6)
     assert small.run_notebook_tokens < budget.run_notebook_tokens
 
+    assert fit_to_context(
+        PromptMemoryBudget(input_share_of_context=0.5), 100_000
+    ).input_tokens == 50_000
+
     # Unknown size, or the user opted out: the configured numbers stand.
     assert fit_to_context(budget, None) is budget
     fixed = PromptMemoryBudget(fit_to_model=False)

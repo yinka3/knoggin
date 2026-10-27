@@ -289,7 +289,8 @@ class RuntimeHealthService:
             and oldest_due_age > delay_grace
             and not semantic_job_active
         )
-        idle_flush_grace = 300 + delay_grace
+        admission = getattr(semantic_processor, "admission", None)
+        idle_flush_grace = getattr(admission, "idle_flush_seconds", 300) + delay_grace
         unclaimed_stalled = (
             pending_count == 0
             and ready_exchange_count > 0
