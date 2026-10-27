@@ -596,7 +596,9 @@ class LLMService:
             reported = usage.get("prompt_tokens")
         else:
             reported = getattr(usage, "prompt_tokens", None)
-        if not isinstance(reported, int) or isinstance(reported, bool):
+        # Zero means the provider did not count this call (measured on
+        # OpenRouter between normal calls); a cut prompt reports what was read.
+        if not isinstance(reported, int) or isinstance(reported, bool) or reported <= 0:
             return None
         estimate = self.count_tokens(f"{system}\n{user}") + max(additional_prompt_tokens, 0)
         # Tokenizers differ by model, so only a large gap means truncation.

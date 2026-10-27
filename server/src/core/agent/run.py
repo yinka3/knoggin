@@ -412,6 +412,8 @@ class AgentRun:
     history: List[Dict] = field(default_factory=list)
     # Summary of this chat's turns that no longer fit the prompt.
     history_summary: str = ""
+    # The last save_findings call: its requested path and result.
+    saved_findings: Optional[Dict[str, Any]] = None
     document_focus: Optional[DocumentFocus] = None
     document_selection_context: Optional[Dict[str, Any]] = None
     selected_notebook: Optional[Dict[str, Any]] = None

@@ -212,3 +212,44 @@ def test_a_source_may_name_several_reads_and_keeps_the_one_quoted():
 
     assert finding["sources"][0]["reference"] == "WR2"
     assert finding["sources"][0]["title"] == "PostgreSQL: About"
+
+
+@pytest.mark.no_network
+def test_findings_title_keeps_only_the_first_sentence():
+    from core.agent.tools.findings import findings_title
+
+    run = _run()
+    run.user_query = "When is SQLite better? Save the findings to research/db.md.\nRead these links:"
+    assert findings_title(run) == "When is SQLite better?"
+    run.user_query = "x" * 300
+    assert len(findings_title(run)) == 120
+
+
+@pytest.mark.no_network
+async def test_saving_findings_twice_returns_the_first_save():
+    from core.agent.tools.findings import ResearchFindingTools
+
+    class NoCatalog:
+        async def fetch_one(self, *_args):
+            return None
+
+    class Tools(ResearchFindingTools):
+        def __init__(self, run):
+            self.agent_run, self.postgres, self.project_id = run, NoCatalog(), "project-1"
+            self.created = []
+
+        async def create_project_file(self, path, content):
+            if path in self.created:
+                raise FileExistsError(path)
+            self.created.append(path)
+            return {"relative_path": path}
+
+    run = _run()
+    _record(run)
+    tools = Tools(run)
+
+    first = await tools.save_findings("research/db.md")
+    second = await tools.save_findings("research/db.md")
+
+    assert first["status"] == "saved" and second["status"] == "already_saved"
+    assert second["path"] == "research/db.md" and tools.created == ["research/db.md"]

@@ -768,6 +768,18 @@ async def test_silently_truncated_prompt_fails_loudly(llm_service):
         "include_usage": True
     }
 
+    # A usage of zero prompt tokens is an uncounted call, not a cut prompt.
+    raw_client.chat.completions.create.return_value = async_chunks(
+        stream_chunk(content="whole"),
+        stream_chunk(usage=SimpleNamespace(prompt_tokens=0, completion_tokens=1, total_tokens=1)),
+    )
+    events = [
+        event async for event in service.stream_with_tools(
+            system=long_prompt, user="user", tools=[],
+        )
+    ]
+    assert events[-1]["event"] != "step_error"
+
 
 @pytest.mark.unit
 @pytest.mark.no_network

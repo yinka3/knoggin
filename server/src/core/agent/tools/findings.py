@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Dict
 
 from loguru import logger
@@ -49,14 +50,20 @@ class ResearchFindingTools:
             raise ToolExecutionError(
                 "save_findings", "No findings are recorded yet; use record_finding first."
             )
+        previous = getattr(run, "saved_findings", None)
+        if previous is not None and previous["requested_path"] == path:
+            # Measured runs call it twice; the second would fail on the existing file.
+            return {**previous["result"], "status": "already_saved"}
         saved = await self.create_project_file(path, findings_markdown(run))
         pointer = await self._point_notebook_at(saved["relative_path"], run)
-        return {
+        result = {
             "status": "saved",
             "path": saved["relative_path"],
             "findings": len(run.findings),
             "notebook": pointer,
         }
+        run.saved_findings = {"requested_path": path, "result": result}
+        return result
 
     async def _point_notebook_at(self, relative_path: str, run) -> str:
         """List the file in the project's findings notebook. The file is the
@@ -72,7 +79,7 @@ class ResearchFindingTools:
                 return "not listed: the file is not in the document catalog yet"
             entry = NotebookEntryInput(
                 kind="document", target_id=row["document_id"],
-                note=f"Findings: {run.user_query.splitlines()[0][:300]}",
+                note=f"Findings: {findings_title(run)}",
             )
             store = ProjectNotebookStore(self.postgres, self.user_name)
             notebook = next(
@@ -104,11 +111,20 @@ class ResearchFindingTools:
             return "not listed: the notebook could not be updated"
 
 
+def findings_title(run) -> str:
+    """The request's first sentence, so a title does not repeat instructions
+    such as where to save the file."""
+
+    first_line = (run.user_query.strip().splitlines() or [""])[0]
+    sentence = re.split(r"(?<=[.?!])\s", first_line, maxsplit=1)[0].strip()
+    return sentence[:117] + "..." if len(sentence) > 120 else sentence
+
+
 def findings_markdown(run) -> str:
     """The findings as a readable file, grouped by planned subquestion."""
 
     lines = [
-        f"# Research findings: {run.user_query.splitlines()[0]}",
+        f"# Research findings: {findings_title(run)}",
         "",
         f"_Saved {get_now_iso()} from research run {run.run_id}._",
     ]
