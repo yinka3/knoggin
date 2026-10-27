@@ -41,6 +41,14 @@ def _public_history_message(row):
     if metadata.get("fallback") is True:
         public_metadata["fallback"] = True
 
+    annotations = metadata.get("response_annotations")
+    if isinstance(annotations, list):
+        public_metadata["response_annotations"] = [
+            {key: item[key] for key in ("message_id", "start", "end", "quote")}
+            for item in annotations if isinstance(item, dict)
+            and all(key in item for key in ("message_id", "start", "end", "quote"))
+        ][:5]
+
     terminal_error = metadata.get("terminal_error")
     if isinstance(terminal_error, dict):
         public_metadata["terminal_error"] = {
@@ -53,7 +61,7 @@ def _public_history_message(row):
     if isinstance(steer, dict):
         public_metadata["run_steer"] = {
             key: steer[key]
-            for key in ("steer_id", "instruction", "state")
+            for key in ("steer_id", "instruction", "state", "response_annotations")
             if key in steer
         }
 

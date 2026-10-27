@@ -31,8 +31,19 @@ class StartResearchJob(BaseModel):
     depth: Literal["research", "deep_research"] = "research"
 
 
+class ResponseAnnotation(BaseModel):
+    """A selected span of a completed assistant message in this session."""
+
+    model_config = ConfigDict(extra="forbid")
+    message_id: int = Field(gt=0)
+    start: int = Field(ge=0)
+    end: int = Field(gt=0)
+    quote: str = Field(min_length=1, max_length=4000)
+
+
 class StartRun(SessionPreferences):
     query: str = Field(min_length=1, max_length=100_000)
+    annotations: list["ResponseAnnotation"] = Field(default_factory=list, max_length=5)
     research_mode: Literal["normal", "research", "deep_research"] = "normal"
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
     notebook_id: UUID | None = None
@@ -53,6 +64,7 @@ class SteerRun(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     instruction: str = Field(min_length=1, max_length=4000)
+    annotations: list["ResponseAnnotation"] = Field(default_factory=list, max_length=5)
 
     @field_validator("instruction")
     @classmethod
@@ -67,6 +79,7 @@ class QueueFollowUp(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     query: str = Field(min_length=1, max_length=100_000)
+    annotations: list["ResponseAnnotation"] = Field(default_factory=list, max_length=5)
 
     @field_validator("query")
     @classmethod
@@ -114,3 +127,5 @@ class RunSubtreeFocus(BaseModel):
 
 
 StartRun.model_rebuild()
+SteerRun.model_rebuild()
+QueueFollowUp.model_rebuild()

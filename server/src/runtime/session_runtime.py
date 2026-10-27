@@ -249,7 +249,7 @@ class SessionRuntime:
             "steer": deepcopy(self._active_steer),
         }
 
-    async def queue_follow_up(self, run_id: str, query: str) -> dict[str, Any] | None:
+    async def queue_follow_up(self, run_id: str, query: str, *, annotations: list[dict] | None = None) -> dict[str, Any] | None:
         """Accept one later user turn for this live session's active run."""
 
         query = query.strip()
@@ -273,6 +273,7 @@ class SessionRuntime:
             item = {
                 "queue_id": queue_id, "after_run_id": run_id,
                 "run_id": str(uuid4()), "query": query,
+                "metadata": {"response_annotations": annotations or []},
                 "state": "queued", "assistant_message_id": None,
                 "error_code": None,
             }
@@ -397,7 +398,7 @@ class SessionRuntime:
                     if not self._agent_run_reserved:
                         self._run_idle.set()
 
-    async def submit_steer(self, run_id: str, instruction: str) -> dict[str, str] | None:
+    async def submit_steer(self, run_id: str, instruction: str, *, annotations: list[dict] | None = None) -> dict[str, str] | None:
         if not instruction or not instruction.strip() or len(instruction) > 4000:
             raise ValueError("Steer instruction must contain 1 to 4000 characters")
         async with self._agent_run_lock:
@@ -408,6 +409,7 @@ class SessionRuntime:
             steer = {
                 "steer_id": str(uuid4()),
                 "instruction": instruction.strip(),
+                "response_annotations": annotations or [],
                 "state": "pending",
             }
             if self._active_user_message_id is None or not await self.knowledge_store.record_run_steer(

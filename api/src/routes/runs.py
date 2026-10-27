@@ -21,6 +21,7 @@ from common.utils.streams import ClosingAsyncIterator
 from core.project.notebook_store import NotebookConflict
 
 from contracts.sessions import QueueFollowUp, StartRun, SteerRun
+from annotations import resolve_annotations, with_annotations
 from runtime.session_runtime import FollowUpQueueFull
 from routes.project_settings import _error, _json
 
@@ -165,8 +166,9 @@ async def start_run(request):
         if body.notebook_id is not None and selected_notebook is None:
             return _error("notebook_not_found", "Notebook not found", 404)
         run_id = str(uuid4())
+        annotations = await resolve_annotations(runtime, session_id, metadata["project_id"], body.annotations)
         raw = await session.open_agent_run_stream(
-            Message(content=body.query), model=body.model, agent_id=body.agent_id,
+            Message(content=with_annotations(body.query, annotations), metadata={"response_annotations": annotations}), model=body.model, agent_id=body.agent_id,
             enabled_tools=body.enabled_tools, document_focus=focus,
             idempotency_key=body.idempotency_key,
             research_mode=body.research_mode,
@@ -324,7 +326,10 @@ async def steer_run(request):
     if session is None:
         return _error("run_not_found", "Run not found", 404)
     try:
-        result = await session.submit_steer(request.path_params["run_id"], body.instruction)
+        annotations = await resolve_annotations(request.app.state.runtime, session.session_id, session.project_id, body.annotations)
+        result = await session.submit_steer(request.path_params["run_id"], with_annotations(body.instruction, annotations), annotations=annotations)
+    except ValueError:
+        return _error("invalid_annotation", "Selected response text is unavailable or changed", 422)
     except SessionBusyError:
         return _error("steer_exists", "This run already has an instruction", 409)
     if result is None:
@@ -353,7 +358,10 @@ async def queue_follow_up(request):
     if session is None:
         return _error("run_not_found", "Run not found", 404)
     try:
-        result = await session.queue_follow_up(request.path_params["run_id"], body.query)
+        annotations = await resolve_annotations(request.app.state.runtime, session.session_id, session.project_id, body.annotations)
+        result = await session.queue_follow_up(request.path_params["run_id"], with_annotations(body.query, annotations), annotations=annotations)
+    except ValueError:
+        return _error("invalid_annotation", "Selected response text is unavailable or changed", 422)
     except FollowUpQueueFull:
         return _error("follow_up_queue_full", "Follow-up queue is full", 409)
     if result is None:

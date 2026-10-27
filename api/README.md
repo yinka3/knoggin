@@ -156,7 +156,8 @@ For an existing project, replace `{project_id}` in these routes:
   model, agent, tool, research mode, document focus, notebook, and idempotency choices.
   Set `notebook_id` to a project notebook UUID to pass its current, bounded
   snapshot to this run. Missing or changed sources are marked; changed passages
-  are withheld until verified. The saved user query remains unchanged.
+  are withheld until verified. The saved user query remains unchanged unless
+  it includes response annotations described below.
   Tool choices (`enabled_tools` on a run, session, or agent) accept tool names
   and the groups `core`, `web` (web search, page reads, research jobs), and
   `maintenance` (health checks, duplicate and conflict repair). The run's
@@ -197,6 +198,15 @@ For an existing project, replace `{project_id}` in these routes:
   answer in session history. The queue is in memory and pending items are
   cancelled on session unload or API shutdown. Stopping one run does not
   cancel its queued follow-ups.
+- A normal run, steer, or queued follow-up may include up to five
+  `annotations`: `{"message_id":42,"start":0,"end":12,"quote":"selected text"}`.
+  Offsets use Unicode code point positions in the stored assistant response
+  (JavaScript clients must convert from UTF-16 selection offsets). The API
+  checks that each excerpt exactly matches a completed assistant message in
+  the same session before accepting the instruction. The excerpt is attached
+  to the outgoing instruction and its source coordinates are kept in user
+  message metadata. Session history returns these coordinates for the client
+  to reconstruct a quoted reply. This works for a new run with no prior run.
 - `POST /v1/sessions/{session_id}/research-jobs` with
   `{"question":"...","links":["https://..."],"depth":"research"}` starts
   research in the background (`depth` may be `deep_research`). The agent can

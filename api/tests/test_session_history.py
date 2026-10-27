@@ -22,6 +22,8 @@ def test_history_exposes_only_public_message_metadata():
                     "idempotency_key": "private-request-key",
                     "request_fingerprint": "private-fingerprint",
                     "internal_future_field": {"secret": True},
+                    "response_annotations": [{"message_id": 2, "start": 0, "end": 5,
+                                               "quote": "Earlier", "private": "hidden"}],
                     "run_steer": {
                         "steer_id": "steer-1",
                         "instruction": "Check the retry path",
@@ -64,11 +66,15 @@ def test_history_exposes_only_public_message_metadata():
         "content": "Focus on recovery",
         "timestamp": 1234,
         "user_msg_id": 4,
-        "metadata": {"run_steer": {
-            "steer_id": "steer-1",
-            "instruction": "Check the retry path",
-            "state": "applied",
-        }},
+        "metadata": {
+            "response_annotations": [{"message_id": 2, "start": 0, "end": 5,
+                                      "quote": "Earlier"}],
+            "run_steer": {
+                "steer_id": "steer-1",
+                "instruction": "Check the retry path",
+                "state": "applied",
+            },
+        },
     }
     assert payload[1]["metadata"] == {
         "usage": {
