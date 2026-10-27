@@ -105,6 +105,15 @@ class ConflictDiscoverySettings(ConfigModel):
     max_package_tokens: int = Field(50_000, ge=1_000, le=200_000)
 
 
+class DuplicateReviewSettings(ConfigModel):
+    # In the background, the merge model checks likely duplicate entities and
+    # opens a merge review for each it confirms; the user approves each one.
+    # One model call per pair, and an unchanged pair is not checked again.
+    enabled: bool = True
+    interval_hours: int = Field(24, ge=1)
+    max_pairs_per_run: int = Field(10, ge=1, le=100)
+
+
 class JobSettings(ConfigModel):
     document_indexing: DocumentIndexingSettings = Field(
         default_factory=DocumentIndexingSettings
@@ -112,6 +121,9 @@ class JobSettings(ConfigModel):
     episode: EpisodeSettings = Field(default_factory=EpisodeSettings)
     conflict_discovery: ConflictDiscoverySettings = Field(
         default_factory=ConflictDiscoverySettings
+    )
+    duplicate_review: DuplicateReviewSettings = Field(
+        default_factory=DuplicateReviewSettings
     )
 
 

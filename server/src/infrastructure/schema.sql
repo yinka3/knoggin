@@ -245,6 +245,14 @@ CREATE TABLE public.background_work (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT background_work_kind_check CHECK ((kind = ANY (ARRAY['research_job'::text, 'folder_notice'::text])))
 );
+CREATE TABLE public.entity_duplicate_checks (
+    user_name text NOT NULL,
+    entity_a_id bigint NOT NULL,
+    entity_b_id bigint NOT NULL,
+    state_hash text NOT NULL,
+    verdict text NOT NULL,
+    checked_at timestamp with time zone DEFAULT now() NOT NULL
+);
 CREATE TABLE public.document_chunks (
     chunk_id uuid NOT NULL,
     document_id uuid NOT NULL,
@@ -1136,6 +1144,8 @@ ALTER TABLE ONLY public.aac_discussions
     ADD CONSTRAINT aac_discussions_pkey PRIMARY KEY (discussion_id);
 ALTER TABLE ONLY public.background_work
     ADD CONSTRAINT background_work_pkey PRIMARY KEY (work_id);
+ALTER TABLE ONLY public.entity_duplicate_checks
+    ADD CONSTRAINT entity_duplicate_checks_pkey PRIMARY KEY (user_name, entity_a_id, entity_b_id);
 ALTER TABLE ONLY public.aac_insight_votes
     ADD CONSTRAINT aac_insight_votes_pkey PRIMARY KEY (insight_id, voter_agent_id);
 ALTER TABLE ONLY public.aac_insights

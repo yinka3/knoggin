@@ -308,7 +308,15 @@ CORS currently permits `localhost:3000` and `127.0.0.1:3000`.
   when the episode changed.
 - `/v1/maintenance/reviews` and project maintenance review routes expose
   review history, evidence preview, and explicit decisions. Global merge
-  rollback has separate preview and apply routes.
+  rollback has separate preview and apply routes. In the background, the merge
+  model checks likely duplicate entities (same name or alias) and opens an
+  `entity_merge` review for each it confirms; nothing merges until the user
+  applies it. A pair is checked again only after its entities change, and
+  never while it has an open or dismissed review.
+  `developer_settings.jobs.duplicate_review` sets `enabled` (default true),
+  `interval_hours` (24) and `max_pairs_per_run` (10, one model call each).
+  Existing databases need
+  `server/src/infrastructure/entity_duplicate_checks_upgrade.sql`.
 
 ## JEV decisions and corrections
 

@@ -207,3 +207,56 @@ async def test_stop_cancels_artifact_owner_but_not_unrelated_background_work():
         await asyncio.gather(other, return_exceptions=True)
         await scheduler.stop()
         await coordinator.shutdown()
+
+
+class DuplicateService:
+    def __init__(self, candidates):
+        self.candidates = candidates
+        self.reviews = []
+
+    async def preflight(self, *, user_name):
+        return {"llm_required": self.candidates}
+
+    async def review_duplicates(self, *, max_pairs):
+        self.reviews.append(max_pairs)
+        return {"checked": 1}
+
+
+def _duplicate_scheduler(service, **settings):
+    from common.schema.settings import RootConfig
+
+    config = RootConfig()
+    config.developer_settings.jobs.duplicate_review = (
+        config.developer_settings.jobs.duplicate_review.model_copy(update=settings)
+    )
+    return ApplicationMaintenanceScheduler(
+        maintenance_service=service, user_name="ada",
+        config_manager=SimpleNamespace(config=config), interval_seconds=3600,
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_duplicate_review_runs_once_per_interval_and_only_with_candidates(monkeypatch):
+    clock = [1_000.0]
+    monkeypatch.setattr(
+        "core.knowledge.jobs.application_maintenance_scheduler.time.monotonic", lambda: clock[0]
+    )
+    idle = _duplicate_scheduler(DuplicateService(candidates=False))
+    await idle.run_once()
+    assert await idle.review_duplicates_if_due() is None
+
+    service = DuplicateService(candidates=True)
+    scheduler = _duplicate_scheduler(service, interval_hours=24, max_pairs_per_run=7)
+    await scheduler.run_once()
+    assert await scheduler.review_duplicates_if_due() == {"checked": 1}
+    clock[0] += 23 * 3600
+    assert await scheduler.review_duplicates_if_due() is None
+    clock[0] += 3600
+    await scheduler.review_duplicates_if_due()
+    assert service.reviews == [7, 7]
+    assert scheduler.snapshot()["last_duplicate_review"] == {"checked": 1}
+
+    disabled = _duplicate_scheduler(DuplicateService(candidates=True), enabled=False)
+    await disabled.run_once()
+    assert await disabled.review_duplicates_if_due() is None

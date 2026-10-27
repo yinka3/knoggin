@@ -142,6 +142,7 @@ class ProjectManager:
                 else None
             ),
             background_work=getattr(resources, "background_work", None),
+            config_manager=config_manager,
         )
         self._closed = False
 

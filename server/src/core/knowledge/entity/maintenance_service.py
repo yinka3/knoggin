@@ -8,6 +8,8 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Any, Iterable
 
+from loguru import logger
+
 from common.schema.evidence import EvidencePointer, EvidenceSnapshot
 from core.knowledge.db.readers.semantic_window_reader import SemanticWindowReader
 from core.knowledge.db.writers.global_entity_merge_writer import (
@@ -343,6 +345,95 @@ class EntityMaintenanceService:
                 "definition_versions": preview["definition_versions"],
             },
             dedupe_key=f"{survivor_entity_id}:{retired_entity_id}",
+        )
+
+    async def review_duplicates(self, *, max_pairs: int) -> dict[str, Any]:
+        """Ask the merge model about up to `max_pairs` duplicate candidates and
+        open a merge review for each one it confirms. Nothing is merged: the
+        user approves each review.
+
+        A pair is checked again only once its entities change, and never while
+        it has an open or dismissed review, so a pair the user rejected is
+        not proposed again and an unchanged pair costs nothing.
+        """
+
+        result = {"checked": 0, "proposed": 0, "blocked": 0, "failed": 0}
+        if self.merge_advisor is None:
+            return {**result, "reason": "no merge model configured"}
+        candidates = await self.discover_duplicate_candidates(limit=100)
+        if not candidates:
+            return result
+        pairs = [(c["entity_a_id"], c["entity_b_id"]) for c in candidates]
+        reviewed = {
+            row["dedupe_key"] for row in await self.postgres.fetch_all(
+                """SELECT dedupe_key FROM public.maintenance_reviews
+                   WHERE user_name = %s AND kind = 'entity_merge'
+                     AND status IN ('open', 'dismissed') AND dedupe_key = ANY(%s)""",
+                (self.user_name, [f"{a}:{b}" for a, b in pairs] + [f"{b}:{a}" for a, b in pairs]),
+            )
+        }
+        checked = {
+            (int(row["entity_a_id"]), int(row["entity_b_id"])): row["state_hash"]
+            for row in await self.postgres.fetch_all(
+                """SELECT entity_a_id, entity_b_id, state_hash
+                   FROM public.entity_duplicate_checks WHERE user_name = %s""",
+                (self.user_name,),
+            )
+        }
+        for a, b in pairs:
+            if result["checked"] >= max_pairs:
+                break
+            if f"{a}:{b}" in reviewed or f"{b}:{a}" in reviewed:
+                continue
+            try:
+                preview = await self.preview_merge(survivor_entity_id=a, retired_entity_id=b)
+            except (ValueError, RuntimeError):
+                # Not mergeable yet (recent messages not yet in memory, or a
+                # human correction to reopen); try again next run.
+                continue
+            if checked.get((a, b)) == preview["state_hash"]:
+                continue
+            result["checked"] += 1
+            try:
+                advice = await self.advise_merge(survivor_entity_id=a, retired_entity_id=b)
+            except Exception:
+                # Not recorded, so a provider outage does not hide the pair.
+                logger.exception("Duplicate check failed for entities {} and {}", a, b)
+                result["failed"] += 1
+                continue
+            verdict = advice["verdict"]
+            if verdict == "merge":
+                survivor = advice.get("preferred_survivor_id") or a
+                try:
+                    await self.propose(
+                        survivor_entity_id=survivor,
+                        retired_entity_id=b if survivor == a else a,
+                        reasoning=advice["reasoning"],
+                        evidence_refs=[
+                            *({"kind": "message", "identifier": str(message_id)}
+                              for message_id in advice["evidence_message_ids"]),
+                            *({"kind": "episode", "identifier": str(episode_id)}
+                              for episode_id in advice["evidence_episode_ids"]),
+                        ],
+                    )
+                    result["proposed"] += 1
+                except ValueError:
+                    # Differing types or topics in a project need a choice the
+                    # model cannot make; the Maintenance agent can propose it.
+                    verdict = "blocked"
+                    result["blocked"] += 1
+            await self._record_duplicate_check(a, b, preview["state_hash"], verdict)
+        return result
+
+    async def _record_duplicate_check(self, a: int, b: int, state_hash: str, verdict: str) -> None:
+        await self.postgres.execute(
+            """INSERT INTO public.entity_duplicate_checks
+                   (user_name, entity_a_id, entity_b_id, state_hash, verdict)
+               VALUES (%s, %s, %s, %s, %s)
+               ON CONFLICT (user_name, entity_a_id, entity_b_id) DO UPDATE
+               SET state_hash = EXCLUDED.state_hash, verdict = EXCLUDED.verdict,
+                   checked_at = now()""",
+            (self.user_name, a, b, state_hash, verdict),
         )
 
     async def merge(
