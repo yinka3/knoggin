@@ -149,3 +149,64 @@ async def test_a_pair_waiting_on_memory_is_skipped_without_a_model_call(real_pos
     assert (await service.review_duplicates(max_pairs=10))["checked"] == 0
     assert llm.calls == 0
     assert await pg.fetch_all("SELECT 1 FROM public.entity_duplicate_checks") == []
+
+
+def _confirmed():
+    return MergeLLM(EntityMergeAdvice(
+        verdict="merge", preferred_survivor_id=3,
+        reasoning="Message 902 says they are the same person.",
+        evidence_message_ids=[901, 902],
+    ))
+
+
+async def _blocked_pair(pg):
+    """A confirmed pair whose types differ in project-1: only the user can choose."""
+
+    await _seed_duplicates(pg)
+    await pg.execute("UPDATE public.project_entity_contexts SET entity_type = 'Person' WHERE entity_id = 2")
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_a_pair_needing_a_type_choice_waits_in_the_inbox_until_the_user_submits_it(real_postgres_client):
+    pg = real_postgres_client
+    await _blocked_pair(pg)
+    service = EntityMaintenanceService(pg, "ada", llm=_confirmed())
+
+    assert (await service.review_duplicates(max_pairs=10))["blocked"] == 1
+    assert await _reviews(pg) == []
+    [item] = await service.list_blocked_duplicates()
+    assert (item["survivor_entity_id"], item["retired_entity_id"]) == (3, 2)
+    assert item["survivor_name"] == "Augusta Ada King"
+    assert item["reasoning"].startswith("Message 902")
+    assert item["evidence_refs"] == [
+        {"kind": "message", "identifier": "901"}, {"kind": "message", "identifier": "902"},
+    ]
+
+    # The user picks the type; the ordinary merge proposal accepts it.
+    await service.propose(
+        survivor_entity_id=3, retired_entity_id=2, reasoning=item["reasoning"],
+        evidence_refs=item["evidence_refs"],
+        context_choices=[{"project_id": "project-1", "entity_type": "Person", "topic": "General"}],
+    )
+    assert await service.list_blocked_duplicates() == []
+    assert await _reviews(pg) == [{"dedupe_key": "3:2", "status": "open"}]
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_a_dismissed_pair_leaves_the_inbox_and_is_never_checked_again(real_postgres_client):
+    pg = real_postgres_client
+    await _blocked_pair(pg)
+    llm = _confirmed()
+    service = EntityMaintenanceService(pg, "ada", llm=llm)
+    await service.review_duplicates(max_pairs=10)
+
+    assert await service.dismiss_duplicate(3, 2) is True
+    assert await service.list_blocked_duplicates() == []
+    await _mention(pg, 903, "Augusta Ada King again.", 3)
+    assert (await service.review_duplicates(max_pairs=10))["checked"] == 0
+    assert llm.calls == 1
+    assert await service.dismiss_duplicate(7, 8) is False

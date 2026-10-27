@@ -373,9 +373,9 @@ class EntityMaintenanceService:
             )
         }
         checked = {
-            (int(row["entity_a_id"]), int(row["entity_b_id"])): row["state_hash"]
+            (int(row["entity_a_id"]), int(row["entity_b_id"])): row
             for row in await self.postgres.fetch_all(
-                """SELECT entity_a_id, entity_b_id, state_hash
+                """SELECT entity_a_id, entity_b_id, state_hash, verdict
                    FROM public.entity_duplicate_checks WHERE user_name = %s""",
                 (self.user_name,),
             )
@@ -383,7 +383,10 @@ class EntityMaintenanceService:
         for a, b in pairs:
             if result["checked"] >= max_pairs:
                 break
-            if f"{a}:{b}" in reviewed or f"{b}:{a}" in reviewed:
+            if (
+                f"{a}:{b}" in reviewed or f"{b}:{a}" in reviewed
+                or (checked.get((a, b)) or {}).get("verdict") == "dismissed"
+            ):
                 continue
             try:
                 preview = await self.preview_merge(survivor_entity_id=a, retired_entity_id=b)
@@ -391,7 +394,7 @@ class EntityMaintenanceService:
                 # Not mergeable yet (recent messages not yet in memory, or a
                 # human correction to reopen); try again next run.
                 continue
-            if checked.get((a, b)) == preview["state_hash"]:
+            if (checked.get((a, b)) or {}).get("state_hash") == preview["state_hash"]:
                 continue
             result["checked"] += 1
             try:
@@ -419,22 +422,77 @@ class EntityMaintenanceService:
                     result["proposed"] += 1
                 except ValueError:
                     # Differing types or topics in a project need a choice the
-                    # model cannot make; the Maintenance agent can propose it.
+                    # model cannot make; the pair waits in the user's inbox.
                     verdict = "blocked"
                     result["blocked"] += 1
-            await self._record_duplicate_check(a, b, preview["state_hash"], verdict)
+            await self._record_duplicate_check(a, b, preview["state_hash"], verdict, advice)
         return result
 
-    async def _record_duplicate_check(self, a: int, b: int, state_hash: str, verdict: str) -> None:
+    async def _record_duplicate_check(
+        self, a: int, b: int, state_hash: str, verdict: str, advice: dict[str, Any],
+    ) -> None:
+        kept = {key: advice.get(key) for key in (
+            "preferred_survivor_id", "reasoning", "evidence_message_ids", "evidence_episode_ids",
+        )}
         await self.postgres.execute(
             """INSERT INTO public.entity_duplicate_checks
-                   (user_name, entity_a_id, entity_b_id, state_hash, verdict)
-               VALUES (%s, %s, %s, %s, %s)
+                   (user_name, entity_a_id, entity_b_id, state_hash, verdict, advice)
+               VALUES (%s, %s, %s, %s, %s, %s::jsonb)
                ON CONFLICT (user_name, entity_a_id, entity_b_id) DO UPDATE
                SET state_hash = EXCLUDED.state_hash, verdict = EXCLUDED.verdict,
-                   checked_at = now()""",
-            (self.user_name, a, b, state_hash, verdict),
+                   advice = EXCLUDED.advice, checked_at = now()""",
+            (self.user_name, a, b, state_hash, verdict, json.dumps(kept)),
         )
+
+    async def list_blocked_duplicates(self) -> list[dict[str, Any]]:
+        """Pairs the merge model confirmed but that need the user to pick a
+        type or topic per project. Preview a pair with its choices, then
+        propose it, through the ordinary merge routes."""
+
+        rows = await self.postgres.fetch_all(
+            """SELECT check_row.entity_a_id, check_row.entity_b_id, check_row.advice,
+                      check_row.checked_at, a.canonical_name AS name_a, b.canonical_name AS name_b
+               FROM public.entity_duplicate_checks check_row
+               JOIN public.entities a ON a.entity_id = check_row.entity_a_id AND a.status = 'active'
+               JOIN public.entities b ON b.entity_id = check_row.entity_b_id AND b.status = 'active'
+               WHERE check_row.user_name = %s AND check_row.verdict = 'blocked'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM public.maintenance_reviews review
+                     WHERE review.user_name = check_row.user_name AND review.kind = 'entity_merge'
+                       AND review.status IN ('open', 'dismissed', 'applied')
+                       AND review.dedupe_key IN (
+                           check_row.entity_a_id || ':' || check_row.entity_b_id,
+                           check_row.entity_b_id || ':' || check_row.entity_a_id))
+               ORDER BY check_row.checked_at DESC""",
+            (self.user_name,),
+        )
+        items = []
+        for row in rows:
+            a, b, advice = int(row["entity_a_id"]), int(row["entity_b_id"]), row["advice"] or {}
+            survivor = advice.get("preferred_survivor_id") or a
+            names = {a: row["name_a"], b: row["name_b"]}
+            items.append({
+                "survivor_entity_id": survivor, "survivor_name": names[survivor],
+                "retired_entity_id": b if survivor == a else a,
+                "retired_name": names[b if survivor == a else a],
+                "reasoning": advice.get("reasoning"),
+                "evidence_refs": [
+                    *({"kind": "message", "identifier": str(i)} for i in advice.get("evidence_message_ids") or ()),
+                    *({"kind": "episode", "identifier": str(i)} for i in advice.get("evidence_episode_ids") or ()),
+                ],
+                "checked_at": row["checked_at"],
+            })
+        return items
+
+    async def dismiss_duplicate(self, entity_id: int, other_entity_id: int) -> bool:
+        """The user says these are not the same: never check the pair again."""
+
+        a, b = sorted((entity_id, other_entity_id))
+        return bool(await self.postgres.execute(
+            """UPDATE public.entity_duplicate_checks SET verdict = 'dismissed', checked_at = now()
+               WHERE user_name = %s AND entity_a_id = %s AND entity_b_id = %s""",
+            (self.user_name, a, b),
+        ))
 
     async def merge(
         self,

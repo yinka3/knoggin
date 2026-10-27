@@ -72,6 +72,22 @@ async def global_reviews(request):
     return JSONResponse({"reviews": [_review(review) for review in reviews]})
 
 
+async def blocked_duplicates(request):
+    service = request.app.state.runtime.projects.entity_maintenance_service
+    return JSONResponse({"duplicates": _wire(await service.list_blocked_duplicates())})
+
+
+async def dismiss_duplicate(request):
+    try:
+        ids = int(request.path_params["entity_id"]), int(request.path_params["other_entity_id"])
+    except ValueError:
+        return _error("duplicate_not_found", "Duplicate pair not found", 404)
+    service = request.app.state.runtime.projects.entity_maintenance_service
+    if not await service.dismiss_duplicate(*ids):
+        return _error("duplicate_not_found", "Duplicate pair not found", 404)
+    return JSONResponse({"dismissed": True})
+
+
 async def global_merge_preview(request):
     try:
         body = MergeCandidates.model_validate(await _json(request))
@@ -283,6 +299,11 @@ async def rollback(request):
 
 routes = [
     Route("/v1/maintenance/reviews", global_reviews, methods=["GET"]),
+    Route("/v1/maintenance/duplicates", blocked_duplicates, methods=["GET"]),
+    Route(
+        "/v1/maintenance/duplicates/{entity_id}/{other_entity_id}/dismiss",
+        dismiss_duplicate, methods=["POST"],
+    ),
     Route("/v1/maintenance/merges/preview", global_merge_preview, methods=["POST"]),
     Route("/v1/maintenance/merges", global_merge_proposal, methods=["POST"]),
     Route("/v1/maintenance/reviews/{review_id}/decision", global_decision, methods=["POST"]),

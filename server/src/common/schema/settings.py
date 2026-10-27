@@ -110,7 +110,7 @@ class DuplicateReviewSettings(ConfigModel):
     # opens a merge review for each it confirms; the user approves each one.
     # One model call per pair, and an unchanged pair is not checked again.
     enabled: bool = True
-    interval_hours: int = Field(24, ge=1)
+    interval_hours: int = Field(5, ge=1)
     max_pairs_per_run: int = Field(10, ge=1, le=100)
 
 

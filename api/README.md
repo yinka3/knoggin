@@ -312,9 +312,16 @@ CORS currently permits `localhost:3000` and `127.0.0.1:3000`.
   model checks likely duplicate entities (same name or alias) and opens an
   `entity_merge` review for each it confirms; nothing merges until the user
   applies it. A pair is checked again only after its entities change, and
-  never while it has an open or dismissed review.
+  never while it has an open or dismissed review. A confirmed pair whose
+  entities have different types or topics in a project needs the user's
+  choice: `GET /v1/maintenance/duplicates` lists those pairs with the model's
+  reasoning and evidence. Preview one with `context_choices` through
+  `/v1/maintenance/merges/preview`, then submit it with
+  `POST /v1/maintenance/merges`; `POST
+  /v1/maintenance/duplicates/{entity_id}/{other_entity_id}/dismiss` marks the
+  pair as not duplicates so it is never checked again.
   `developer_settings.jobs.duplicate_review` sets `enabled` (default true),
-  `interval_hours` (24) and `max_pairs_per_run` (10, one model call each).
+  `interval_hours` (5) and `max_pairs_per_run` (10, one model call each).
   Existing databases need
   `server/src/infrastructure/entity_duplicate_checks_upgrade.sql`.
 

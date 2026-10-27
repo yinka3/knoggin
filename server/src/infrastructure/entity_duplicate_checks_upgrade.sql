@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS public.entity_duplicate_checks (
     entity_b_id bigint NOT NULL,
     state_hash text NOT NULL,
     verdict text NOT NULL,
+    advice jsonb DEFAULT '{}'::jsonb NOT NULL,
     checked_at timestamp with time zone DEFAULT now() NOT NULL
 );
 ALTER TABLE ONLY public.entity_duplicate_checks
