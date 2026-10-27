@@ -67,7 +67,10 @@ required for `pg_dump` and `pg_restore`.
   a runtime restart to take effect.
 - `GET /v1/settings/spending` returns LLM spend against the configured limit and
   `prompt_cache`: per-model prompt and cached token counts with a hit rate,
-  counted since the API started.
+  counted since the API started. Spend uses the cost the provider billed when
+  it reports one (OpenRouter does, cache discounts included), so it is recorded
+  without configured prices; `model_pricing` and `fallback_pricing` cover
+  providers that do not report cost.
 - `PATCH /v1/settings/{section}` updates one section with a partial JSON body.
   Sections are `user_aliases` (a JSON array), `llm`, `search`, `jev`, and
   `developer_settings` (JSON objects). Updates are validated and saved by the

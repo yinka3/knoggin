@@ -1,5 +1,6 @@
 import asyncio
 import json
+import math
 from contextlib import asynccontextmanager
 from typing import (
     Any,
@@ -77,6 +78,16 @@ def _reported_window(row: Any) -> int | None:
 
 def system_text(system: SystemPrompt) -> str:
     return system if isinstance(system, str) else "".join(system)
+
+
+def reported_cost(usage: Any) -> float | None:
+    """The cost in USD the provider billed for one call, when it says.
+    OpenRouter reports it, cache discounts included; local servers do not."""
+
+    value = usage.get("cost_usd", usage.get("cost")) if isinstance(usage, dict) else getattr(usage, "cost", None)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if math.isfinite(value) and value >= 0 else None
 
 
 def prompt_cache_tokens(usage: Any) -> tuple[int, int]:
@@ -561,6 +572,7 @@ class LLMService:
             completion_tokens=int(completion_tokens or 0),
             approximate_usage=approximate,
             failed=failed,
+            reported_cost_usd=None if approximate else reported_cost(provider_usage),
         )
         if aac_budget is not None:
             aac_budget.record(
@@ -1068,6 +1080,7 @@ class LLMService:
                             "total_tokens": chunk.usage.total_tokens,
                             "cached_prompt_tokens": prompt_cache_tokens(chunk.usage)[0],
                             "cache_write_tokens": prompt_cache_tokens(chunk.usage)[1],
+                            "cost_usd": reported_cost(chunk.usage),
                             "approximate": False,
                         }
                     if not chunk.choices:

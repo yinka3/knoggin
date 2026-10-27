@@ -365,6 +365,7 @@ async def test_stream_with_tools_preserves_ids_and_exact_usage(llm_service):
                 "total_tokens": 14,
                 "cached_prompt_tokens": 0,
                 "cache_write_tokens": 0,
+                "cost_usd": None,
                 "approximate": False,
             },
         },

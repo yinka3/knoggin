@@ -148,7 +148,11 @@ class ExternalModelSpendingLedger:
         completion_tokens: int,
         approximate_usage: bool,
         failed: bool,
+        reported_cost_usd: float | None = None,
     ) -> None:
+        """Record one attempt. A provider-reported cost is what was billed,
+        so it wins over a price from settings."""
+
         async with self._lock:
             if reservation.storage == "postgres":
                 if self._postgres is None:
@@ -157,6 +161,7 @@ class ExternalModelSpendingLedger:
                     reservation,
                     prompt_tokens=prompt_tokens,
                     completion_tokens=completion_tokens,
+                    reported_cost_usd=reported_cost_usd,
                 )
                 return
             # A reset explicitly starts a new user-controlled accounting period.
@@ -169,10 +174,10 @@ class ExternalModelSpendingLedger:
                 0.0,
                 self._reserved_usd - reservation.reserved_cost_usd,
             )
-            cost = self._cost_for(
-                prompt_tokens,
-                completion_tokens,
-                reservation.price,
+            cost = (
+                reported_cost_usd
+                if reported_cost_usd is not None
+                else self._cost_for(prompt_tokens, completion_tokens, reservation.price)
             )
             self._spent_usd += cost
             self._records.append(
@@ -258,8 +263,13 @@ class ExternalModelSpendingLedger:
         *,
         prompt_tokens: int,
         completion_tokens: int,
+        reported_cost_usd: float | None = None,
     ) -> None:
-        actual = self._cost_for(prompt_tokens, completion_tokens, reservation.price)
+        actual = (
+            reported_cost_usd
+            if reported_cost_usd is not None
+            else self._cost_for(prompt_tokens, completion_tokens, reservation.price)
+        )
         async with self._postgres.transaction() as cur:
             # Same lock order as reservation admission/expiry, including callers
             # in other processes: window first, then reservation rows.
