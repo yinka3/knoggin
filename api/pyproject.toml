@@ -17,7 +17,7 @@ requires = ["setuptools>=75.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["app", "errors", "folder_staging", "instance_backup", "project_lease"]
+py-modules = ["app", "errors", "folder_staging", "instance_backup", "project_lease", "run_events"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -3,47 +3,61 @@ import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
-import pytest
-
-from routes.runs import OwnedStreamResponse, _events, _request_focus, start_run
+from routes.runs import _events, _request_focus, start_run
 from routes.runs import _selected_notebook
-from common.utils.streams import ClosingAsyncIterator
+from run_events import RunEvents
 
 
-def test_disconnect_closes_admitted_run_even_before_iteration():
-    class Run:
-        def __init__(self):
-            self.closed = False
-
-        def __aiter__(self):
-            return self
-
-        async def __anext__(self):
-            await asyncio.sleep(100)
-
-        async def aclose(self):
-            self.closed = True
-
+def test_run_continues_after_event_subscriber_disconnects():
     async def exercise():
-        run = Run()
-        response = OwnedStreamResponse(
-            ClosingAsyncIterator(_events(run, "run-1"), run)
+        release = asyncio.Event()
+        finished = asyncio.Event()
+        settings = SimpleNamespace(
+            max_buffered_events=10, max_buffered_bytes=4096, max_retained_runs=2
         )
+        events = RunEvents(lambda: settings)
 
-        async def receive():
-            await asyncio.sleep(100)
+        async def frames():
+            yield b'event: run_started\ndata: {"sequence":0}\n\n'
+            await release.wait()
+            yield b'event: run_completed\ndata: {"sequence":1}\n\n'
+            finished.set()
 
-        async def send(message):
-            if message["type"] == "http.response.start":
-                raise asyncio.CancelledError()
+        events.start("session-1", "run-1", frames())
+        run = events.get("session-1", "run-1")
+        subscriber = events.stream(run)
+        assert b"run_started" in await anext(subscriber)
+        await subscriber.aclose()
+        release.set()
+        await asyncio.wait_for(finished.wait(), timeout=1)
+        replay = [frame async for frame in events.stream(run, after=0)]
+        assert len(replay) == 1
+        assert b"run_completed" in replay[0]
+        await events.close()
 
-        with pytest.raises(asyncio.CancelledError):
-            await response(
-                {"type": "http", "http_version": "1.1", "method": "POST",
-                 "path": "/", "headers": [], "asgi": {"spec_version": "2.4"}},
-                receive, send,
-            )
-        assert run.closed
+    asyncio.run(exercise())
+
+
+def test_cancelled_process_owned_run_reports_a_terminal_event():
+    async def exercise():
+        settings = SimpleNamespace(
+            max_buffered_events=10, max_buffered_bytes=4096, max_retained_runs=2
+        )
+        events = RunEvents(lambda: settings)
+
+        async def frames():
+            yield b'event: run_started\ndata: {"sequence":0}\n\n'
+            await asyncio.Event().wait()
+
+        events.start("session-1", "run-1", frames())
+        run = events.get("session-1", "run-1")
+        assert b"run_started" in await anext(events.stream(run))
+        run.task.cancel()
+        await asyncio.gather(run.task, return_exceptions=True)
+        replay = [frame async for frame in events.stream(run, after=0)]
+        assert len(replay) == 1
+        assert b"run_cancelled" in replay[0]
+        await events.close()
 
     asyncio.run(exercise())
 
@@ -214,19 +228,21 @@ def test_start_run_passes_selected_notebook_without_changing_query():
         path_params = {"session_id": "session-1"}
         app = SimpleNamespace(state=SimpleNamespace(runtime=SimpleNamespace(
             projects=Projects(), sessions=Sessions(),
-        )))
+        ), run_events=RunEvents(lambda: SimpleNamespace(
+            max_buffered_events=10, max_buffered_bytes=4096, max_retained_runs=2,
+        ))))
 
         async def json(self):
             return {"query": "What changed?", "notebook_id": notebook_id}
 
     async def exercise():
         response = await start_run(Request())
-        assert isinstance(response, OwnedStreamResponse)
+        assert response.media_type == "text/event-stream"
         assert calls[0][0].content == "What changed?"
         assert calls[0][1]["selected_notebook"] == {
             "notebook_id": notebook_id, "revision": 2, "context": "",
         }
-        await response.owned_stream.aclose()
+        await Request.app.state.run_events.close()
 
         async def disappeared(_session_id):
             return None
@@ -318,6 +334,11 @@ def test_run_steer_and_stop_routes_target_only_the_active_run(monkeypatch, tmp_p
         stopped = False
         follow_up = None
 
+        async def list_run_statuses(self):
+            return {"active": None if self.stopped else {
+                "run_id": "run-1", "state": "running", "steer": None,
+            }, "recent": None}
+
         async def get_run_status(self, run_id):
             return {"run_id": run_id, "state": "cancelled" if self.stopped else "running", "steer": None} if run_id == "run-1" else None
 
@@ -371,8 +392,21 @@ def test_run_steer_and_stop_routes_target_only_the_active_run(monkeypatch, tmp_p
 
     async def exercise():
         async with app.router.lifespan_context(app):
+            app.state.run_events._settings = lambda: SimpleNamespace(
+                max_buffered_events=1, max_buffered_bytes=4096, max_retained_runs=2,
+            )
+
+            async def frames():
+                yield b'event: run_started\ndata: {"sequence":0}\n\n'
+                yield b'event: run_completed\ndata: {"sequence":1}\n\n'
+
+            app.state.run_events.start("session-1", "run-1", frames())
+            await app.state.run_events.get("session-1", "run-1").task
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
                 base = "/v1/sessions/session-1/runs/run-1"
+                assert (await client.get("/v1/sessions/session-1/runs")).json()["active"]["run_id"] == "run-1"
+                assert (await client.get(base + "/events?after=0")).status_code == 200
+                assert (await client.get(base + "/events?after=-1")).status_code == 409
                 assert (await client.get(base)).json()["state"] == "running"
                 assert (await client.post(base + "/steers", json={"instruction": "  Focus  "})).status_code == 202
                 assert (await client.post(base + "/steers", json={"instruction": " "})).status_code == 422

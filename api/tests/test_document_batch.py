@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import httpx
 
 from app import create_app
+from common.schema.settings import DocumentSettings
 
 
 def test_batch_reports_each_result_and_releases_lease(monkeypatch, tmp_path):
@@ -37,7 +38,12 @@ def test_batch_reports_each_result_and_releases_lease(monkeypatch, tmp_path):
         async def shutdown():
             pass
 
-        return SimpleNamespace(projects=Projects(), shutdown=shutdown)
+        return SimpleNamespace(
+            projects=Projects(), shutdown=shutdown,
+            config_manager=SimpleNamespace(config=SimpleNamespace(
+                developer_settings=SimpleNamespace(documents=DocumentSettings())
+            )),
+        )
 
     monkeypatch.setattr("app.ApplicationRuntime.start", start)
     app = create_app(user_name="ada", config_dir=tmp_path)
@@ -60,6 +66,17 @@ def test_batch_reports_each_result_and_releases_lease(monkeypatch, tmp_path):
                 assert "Private backend detail" not in str(rows)
                 assert submitted[0]["content"] == b"text"
                 assert not active_leases
+                app.state.runtime.config_manager.config.developer_settings.documents = (
+                    DocumentSettings(max_source_batch_items=1)
+                )
+                oversized = await client.post("/v1/projects/project-1/sources/batch", json={
+                    "items": [
+                        {"source_type": "web_link", "url": "https://example.com/1"},
+                        {"source_type": "web_link", "url": "https://example.com/2"},
+                    ]
+                })
+                assert oversized.status_code == 413
+                assert oversized.json()["error"]["code"] == "batch_too_large"
                 assert (await client.post("/v1/documents/ocr-preflight", json={
                     "original_name": "a.txt", "content_base64": "dGV4dA==",
                 })).status_code == 422

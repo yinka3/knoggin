@@ -145,6 +145,12 @@ For an existing project, replace `{project_id}` in these routes:
   turn ends, and the summary leads the next prompts
   (`developer_settings.chat_compaction`: `min_dropped_tokens` 4,000,
   `summary_max_tokens` 2,000, `max_input_tokens` 60,000; `enabled` turns it off).
+  `developer_settings.prompt_memory.default` sets the input, conversation,
+  Project Context, run notebook, and selected notebook token budgets and the
+  order that gets spare space. `prompt_memory.overrides` can replace that
+  budget for one agent/model pair. The separate
+  `developer_settings.limits.max_notebook_render_tokens` bounds rendered run
+  notebook content, up to the selected input budget.
   Existing databases need `server/src/infrastructure/chat_summary_upgrade.sql`.
 - `POST /v1/sessions/{session_id}/runs` accepts `{"query":"..."}` plus optional
   model, agent, tool, research mode, document focus, notebook, and idempotency choices.
@@ -160,17 +166,25 @@ For an existing project, replace `{project_id}` in these routes:
   `["core", "maintenance"]` is created at startup.
   It returns an SSE stream with `run_started`, `message_delta`, `tool`,
   `source_added`, `usage_updated`, `steer_applied`, `run_completed`,
-  `clarification_required`, and `run_failed` events. A clarification ends the
-  run with the saved question and assistant message ID so the user can answer
-  it in a new turn.
-  Closing the HTTP stream closes the owned engine run.
+  `clarification_required`, `run_cancelled`, and `run_failed` events. A
+  clarification ends the run with the saved question and assistant message ID
+  so the user can answer it in a new turn.
+  The API process owns the engine run. Closing the HTTP stream leaves it
+  running. Reconnect with `GET /v1/sessions/{session_id}/runs/{run_id}/events`
+  and `?after={last_sequence}` to receive later events. Omitting `after`
+  replays the retained buffer. An expired sequence returns 409; a connected
+  client that falls behind receives `run_events_gap`. Event history is
+  process-local and bounded by `developer_settings.run_events`.
+- `GET /v1/sessions/{session_id}/runs` returns the active and most recent live
+  run statuses, including an active run ID if the client missed its first
+  stream event.
 - `GET /v1/sessions/{session_id}/runs/{run_id}` reads the active or most recent
   run status while its session runtime remains loaded. `POST .../steers` accepts
   `{"instruction":"..."}` for one active run and returns `pending`; the next
   model step applies it and emits `steer_applied`. If the run finishes first,
-  the status becomes `undelivered`. These live statuses do not survive a
-  process restart. The owning user message records the steer and its delivery
-  state; applied instructions appear in later agent context.
+  the status becomes `undelivered`. Live runs, statuses, and event buffers do
+  not survive a process restart. The owning user message records the steer and
+  its delivery state; applied instructions appear in later agent context.
   `DELETE /v1/sessions/{session_id}/runs/{run_id}` stops that
   active run.
 - `POST /v1/sessions/{session_id}/runs/{run_id}/follow-ups` with
@@ -310,13 +324,17 @@ CORS currently permits `localhost:3000` and `127.0.0.1:3000`.
   included file and returns every file's status. Repeat until the intake is
   `complete`; pass `{"retry_failed":true}` to retry a failed file. `GET` reads
   progress and `DELETE` cancels and removes the intake. The API clears intakes
-  idle for two hours when another intake request arrives, and clears all
+  idle for `developer_settings.documents.folder_intake_idle_seconds` (default
+  two hours) when another intake request arrives, and clears all
   staging on shutdown. Staging is local
   to the running API process, so an API restart requires a new intake.
-  Individual files retain the 50 MiB upload limit. Staging allows up to 2 GiB
-  per folder and two active intakes; the project's scan settings still decide
-  which files can be admitted (by default 25 MiB per file, 500 MiB total,
-  and 1,000 files).
+  Individual files retain the 50 MiB upload limit. Staging defaults to 2 GiB
+  per folder and two active intakes; `developer_settings.documents` exposes
+  `max_staged_folder_bytes` and `max_active_folder_intakes`. The project's
+  scan settings still decide which files can be admitted (by default 25 MiB
+  per file, 500 MiB total, and 1,000 files).
+  `developer_settings.documents.max_source_batch_items` controls the number
+  of links and documents in one source batch (default 20, maximum 1,000).
 - `GET/PUT /v1/projects/{project_id}/episodes/{episode_id}` reads and edits an
   episode narrative. Edits require `expected_updated_at` and return a conflict
   when the episode changed.

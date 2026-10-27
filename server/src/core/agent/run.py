@@ -336,7 +336,10 @@ class AgentRunLimits:
             max_accumulated_summary_chars=settings.max_accumulated_summary_chars,
             max_passage_chars=settings.max_passage_chars,
             max_research_findings=settings.max_research_findings,
-            max_notebook_render_tokens=(memory_budget or PromptMemoryBudget()).input_tokens,
+            max_notebook_render_tokens=min(
+                settings.max_notebook_render_tokens,
+                (memory_budget or PromptMemoryBudget()).input_tokens,
+            ),
             max_consecutive_errors=settings.max_consecutive_errors,
             empty_replans_before_answer=settings.empty_replans_before_answer,
             project_briefing_mode=briefing_mode,

@@ -16,11 +16,6 @@ import anyio
 from common.document_limits import MAX_DOCUMENT_SIZE
 from core.knowledge.documents.scanning import FolderScanPathEntry, normalize_relative_path
 
-MAX_STAGED_FOLDER_BYTES = 2 * 1024 * 1024 * 1024
-MAX_ACTIVE_INTAKES = 2
-INTAKE_IDLE_SECONDS = 2 * 60 * 60
-
-
 class IntakeConflict(Exception):
     pass
 
@@ -79,7 +74,8 @@ class _Intake:
 class FolderStaging:
     """One-process staging; retries are per file and restarts abandon the intake."""
 
-    def __init__(self):
+    def __init__(self, settings):
+        self._settings = settings
         self._temporary = tempfile.TemporaryDirectory(prefix="knoggin-folder-intake-")
         self._root = Path(self._temporary.name)
         self._intakes: dict[str, _Intake] = {}
@@ -93,7 +89,7 @@ class FolderStaging:
     async def _expire(self) -> None:
         now = time.monotonic()
         for intake_id, intake in tuple(self._intakes.items()):
-            if now - intake.last_activity > INTAKE_IDLE_SECONDS:
+            if now - intake.last_activity > self._settings().folder_intake_idle_seconds:
                 self._intakes.pop(intake_id)
                 await asyncio.to_thread(shutil.rmtree, intake.directory, ignore_errors=True)
 
@@ -113,7 +109,7 @@ class FolderStaging:
                 any(item.status not in {"accepted", "excluded"} for item in intake.files.values())
                 for intake in self._intakes.values()
             )
-            if active >= MAX_ACTIVE_INTAKES:
+            if active >= self._settings().max_active_folder_intakes:
                 raise IntakeConflict("Too many active folder intakes")
             paths = []
             seen_paths = set()
@@ -125,7 +121,7 @@ class FolderStaging:
                 if item.size_bytes > MAX_DOCUMENT_SIZE:
                     raise IntakeTooLarge("An individual file exceeds the upload limit")
                 total += item.size_bytes
-                if total > MAX_STAGED_FOLDER_BYTES:
+                if total > self._settings().max_staged_folder_bytes:
                     raise IntakeTooLarge("Folder exceeds the staged upload limit")
                 paths.append(path)
                 seen_paths.add(path)

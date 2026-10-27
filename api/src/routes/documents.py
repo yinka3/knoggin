@@ -480,6 +480,9 @@ async def admit_batch(request):
         return error
     payload = await _json(request)
     if isinstance(payload, dict) and isinstance(payload.get("items"), list):
+        maximum = request.app.state.runtime.config_manager.config.developer_settings.documents.max_source_batch_items
+        if len(payload["items"]) > maximum:
+            return _error("batch_too_large", "Batch has too many sources", 413)
         encoded_bytes = sum(
             len(item.get("content_base64", ""))
             for item in payload["items"]

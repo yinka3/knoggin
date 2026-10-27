@@ -25,18 +25,10 @@ from runtime.session_runtime import FollowUpQueueFull
 from routes.project_settings import _error, _json
 
 
-class OwnedStreamResponse(StreamingResponse):
-    def __init__(self, stream: ClosingAsyncIterator):
-        super().__init__(stream, media_type="text/event-stream", headers={
-            "Cache-Control": "no-cache", "X-Accel-Buffering": "no",
-        })
-        self.owned_stream = stream
-
-    async def __call__(self, scope, receive, send):
-        try:
-            await super().__call__(scope, receive, send)
-        finally:
-            await self.owned_stream.aclose()
+def _stream_response(frames: AsyncIterator[bytes]) -> StreamingResponse:
+    return StreamingResponse(frames, media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+    })
 
 
 def _frame(event: str, data: dict) -> bytes:
@@ -191,9 +183,11 @@ async def start_run(request):
         return _error("notebook_conflict", "Notebook changed while starting the run", 409)
     except ValueError:
         return _error("invalid_run", "Invalid run request", 422)
-    return OwnedStreamResponse(ClosingAsyncIterator(
+    events = request.app.state.run_events
+    events.start(session_id, run_id, ClosingAsyncIterator(
         _events(raw, run_id, runtime=runtime, session=session, selected_notebook=selected_notebook), raw,
     ))
+    return _stream_response(events.stream(events.get(session_id, run_id)))
 
 
 async def _selected_notebook(runtime, project_id, notebook_id):
@@ -295,6 +289,32 @@ async def get_run(request):
     return JSONResponse(status)
 
 
+async def list_runs(request):
+    session = await _active_session(request)
+    if session is None:
+        return _error("session_not_loaded", "Session has no live run state", 404)
+    return JSONResponse(await session.list_run_statuses())
+
+
+async def run_events(request):
+    session_id = request.path_params["session_id"]
+    run_id = request.path_params["run_id"]
+    events = request.app.state.run_events
+    run = events.get(session_id, run_id)
+    if run is None:
+        return _error("run_events_not_found", "Run events are unavailable", 404)
+    try:
+        after_value = request.query_params.get("after")
+        after = int(after_value) if after_value is not None else None
+    except ValueError:
+        return _error("invalid_sequence", "Invalid event sequence", 422)
+    if after is not None and after < -1:
+        return _error("invalid_sequence", "Invalid event sequence", 422)
+    if after is not None and after < run.first_sequence - 1:
+        return _error("run_events_expired", "Earlier run events are no longer available", 409)
+    return _stream_response(events.stream(run, after=after))
+
+
 async def steer_run(request):
     try:
         body = SteerRun.model_validate(await _json(request))
@@ -394,7 +414,9 @@ async def _request_focus(session, body):
 
 routes = [
     Route("/v1/sessions/{session_id}/runs", start_run, methods=["POST"]),
+    Route("/v1/sessions/{session_id}/runs", list_runs, methods=["GET"]),
     Route("/v1/sessions/{session_id}/runs/{run_id}", get_run, methods=["GET"]),
+    Route("/v1/sessions/{session_id}/runs/{run_id}/events", run_events, methods=["GET"]),
     Route("/v1/sessions/{session_id}/runs/{run_id}", stop_run, methods=["DELETE"]),
     Route("/v1/sessions/{session_id}/runs/{run_id}/steers", steer_run, methods=["POST"]),
     Route("/v1/sessions/{session_id}/runs/{run_id}/follow-ups", queue_follow_up, methods=["POST"]),

@@ -4,7 +4,7 @@ from typing import Annotated, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from common.document_limits import MAX_DOCUMENT_BASE64_LENGTH, MAX_SOURCE_BATCH_ITEMS
+from common.document_limits import MAX_DOCUMENT_BASE64_LENGTH
 from common.schema.document import DocumentExtractionMode, DocumentExtractionStrategy
 
 
@@ -53,7 +53,7 @@ class BatchSources(BaseModel):
 
     items: tuple[
         Annotated[Union[BatchDocument, BatchWebLink], Field(discriminator="source_type")], ...
-    ] = Field(min_length=1, max_length=MAX_SOURCE_BATCH_ITEMS)
+    ] = Field(min_length=1, max_length=1_000)
 
     @field_validator("items")
     @classmethod

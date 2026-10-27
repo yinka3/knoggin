@@ -81,6 +81,10 @@ class DocumentSettings(ConfigModel):
     rerank_enabled: bool = True
     rerank_candidates: int = Field(15, ge=1, le=50)
     max_workspaces_per_project: int = Field(3, ge=1, le=20)
+    max_staged_folder_bytes: int = Field(2 * 1024 * 1024 * 1024, ge=1)
+    max_active_folder_intakes: int = Field(2, ge=1)
+    folder_intake_idle_seconds: int = Field(2 * 60 * 60, ge=1)
+    max_source_batch_items: int = Field(20, ge=1, le=1_000)
 
 
 class EpisodeSettings(ConfigModel):
@@ -259,6 +263,14 @@ class ToolSettings(ConfigModel):
     )
 
 
+class RunEventSettings(ConfigModel):
+    """Process-local event history used when a client reconnects to a run."""
+
+    max_buffered_events: int = Field(10_000, ge=1)
+    max_buffered_bytes: int = Field(8 * 1024 * 1024, ge=1_024)
+    max_retained_runs: int = Field(20, ge=1)
+
+
 class DeveloperSettings(ConfigModel):
     ingestion: IngestionSettings = Field(default_factory=IngestionSettings)
     jobs: JobSettings = Field(default_factory=JobSettings)
@@ -268,6 +280,7 @@ class DeveloperSettings(ConfigModel):
     tools: ToolSettings = Field(default_factory=ToolSettings)
     chat_compaction: ChatCompactionSettings = Field(default_factory=ChatCompactionSettings)
     ingestion_notices: IngestionNoticeSettings = Field(default_factory=IngestionNoticeSettings)
+    run_events: RunEventSettings = Field(default_factory=RunEventSettings)
     entity_resolution: EntityResolutionSettings = Field(
         default_factory=EntityResolutionSettings
     )

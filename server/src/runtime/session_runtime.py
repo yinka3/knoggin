@@ -233,6 +233,15 @@ class SessionRuntime:
                 return deepcopy(self._last_run_status)
             return None
 
+    async def list_run_statuses(self) -> dict[str, Any]:
+        """Expose the live run ID when the client missed the first stream event."""
+
+        async with self._agent_run_lock:
+            return {
+                "active": self._run_status_unlocked() if self._active_run_id else None,
+                "recent": deepcopy(self._last_run_status),
+            }
+
     def _run_status_unlocked(self) -> dict[str, Any]:
         return {
             "run_id": self._active_run_id,

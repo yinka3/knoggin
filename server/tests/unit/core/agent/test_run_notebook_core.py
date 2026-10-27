@@ -1,5 +1,16 @@
+from common.schema.agent.settings import AgentLimitSettings, PromptMemoryBudget
 from core.agent.notebook import NotebookCapacity, RunNotebook
 from core.agent.run import AgentRunLimits
+
+
+def test_configured_notebook_render_limit_cannot_exceed_input_budget():
+    settings = AgentLimitSettings(max_notebook_render_tokens=12_000)
+    assert AgentRunLimits.from_settings(
+        settings, PromptMemoryBudget(input_tokens=20_000)
+    ).max_notebook_render_tokens == 12_000
+    assert AgentRunLimits.from_settings(
+        settings, PromptMemoryBudget(input_tokens=8_000)
+    ).max_notebook_render_tokens == 8_000
 
 
 def test_notebook_deduplicates_entities_and_creates_reference_pages_and_hints():

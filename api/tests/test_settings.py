@@ -36,6 +36,36 @@ def secret_not_saved(manager):
     return "test-private-api-key" not in manager.config_file.read_text()
 
 
+def test_intake_and_notebook_limits_are_editable_through_settings(settings_app):
+    app, _manager = settings_app
+
+    async def exercise():
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                changed = await client.patch("/v1/settings/developer_settings", json={
+                    "documents": {
+                        "max_staged_folder_bytes": 1_000_000,
+                        "max_active_folder_intakes": 3,
+                        "folder_intake_idle_seconds": 900,
+                        "max_source_batch_items": 30,
+                    },
+                    "limits": {"max_notebook_render_tokens": 12_000},
+                    "run_events": {"max_buffered_events": 500},
+                })
+                assert changed.status_code == 200
+                settings = (await client.get("/v1/settings")).json()["settings"]["developer_settings"]
+                assert settings["documents"]["max_staged_folder_bytes"] == 1_000_000
+                assert settings["documents"]["max_active_folder_intakes"] == 3
+                assert settings["documents"]["folder_intake_idle_seconds"] == 900
+                assert settings["documents"]["max_source_batch_items"] == 30
+                assert settings["limits"]["max_notebook_render_tokens"] == 12_000
+                assert settings["run_events"]["max_buffered_events"] == 500
+
+    asyncio.run(exercise())
+
+
 def test_settings_http_round_trip_redacts_secrets_and_reports_restart(
     settings_app, monkeypatch
 ):

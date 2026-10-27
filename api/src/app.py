@@ -26,6 +26,7 @@ from routes.projects import routes as project_routes
 from routes.settings import routes as settings_routes
 from errors import handle_error
 from folder_staging import FolderStaging
+from run_events import RunEvents
 from routes.sessions import routes as session_routes
 from routes.runs import routes as run_routes
 from routes.research_jobs import routes as research_job_routes
@@ -51,23 +52,33 @@ def create_app(
             user_name=user_name, config_dir=config_path
         )
         try:
-            folder_staging = FolderStaging()
+            folder_staging = FolderStaging(
+                lambda: runtime.config_manager.config.developer_settings.documents
+            )
+            run_events = RunEvents(
+                lambda: runtime.config_manager.config.developer_settings.run_events
+            )
         except Exception:
             await runtime.shutdown()
             raise
         app.state.runtime = runtime
         app.state.folder_staging = folder_staging
+        app.state.run_events = run_events
         try:
             yield
         finally:
             try:
-                await runtime.shutdown()
+                await run_events.close()
             finally:
                 try:
-                    await folder_staging.close()
+                    await runtime.shutdown()
                 finally:
-                    del app.state.folder_staging
-                    del app.state.runtime
+                    try:
+                        await folder_staging.close()
+                    finally:
+                        del app.state.run_events
+                        del app.state.folder_staging
+                        del app.state.runtime
 
     app = Starlette(
         routes=[*health_routes, *settings_routes, *project_routes, *project_settings_routes, *project_control_routes, *notebook_routes, *agent_routes, *session_routes, *run_routes, *research_job_routes, *community_routes, *document_routes, *artifact_routes, *maintenance_routes, *episode_routes, *knowledge_routes, *workspace_routes, *context_note_routes],

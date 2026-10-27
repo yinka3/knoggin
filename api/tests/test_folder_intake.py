@@ -6,6 +6,7 @@ import httpx
 
 from app import create_app
 from common.schema.document import FolderScanSettings
+from common.schema.settings import DocumentSettings
 from core.knowledge.documents.scanning import build_folder_preview
 
 
@@ -54,6 +55,9 @@ def test_folder_preview_and_intake_apply_scan_rules_before_admission(monkeypatch
         return SimpleNamespace(
             projects=Projects(), shutdown=shutdown,
             sessions=SimpleNamespace(document_notices=Notices()),
+            config_manager=SimpleNamespace(config=SimpleNamespace(
+                developer_settings=SimpleNamespace(documents=DocumentSettings())
+            )),
         )
 
     monkeypatch.setattr("app.ApplicationRuntime.start", start)
@@ -162,6 +166,9 @@ def test_staged_folder_uses_one_preview_across_separate_uploads(monkeypatch, tmp
         return SimpleNamespace(
             projects=Projects(), shutdown=shutdown,
             sessions=SimpleNamespace(document_notices=Notices()),
+            config_manager=SimpleNamespace(config=SimpleNamespace(
+                developer_settings=SimpleNamespace(documents=DocumentSettings())
+            )),
         )
 
     monkeypatch.setattr("app.ApplicationRuntime.start", start)
