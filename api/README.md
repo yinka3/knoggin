@@ -191,8 +191,13 @@ For an existing project, replace `{project_id}` in these routes:
   .../research-jobs/{job_id}` cancels one. Up to
   `developer_settings.research_jobs.max_running_per_project` (default 3) run at
   once per project and the rest wait; `max_links` (default 50) bounds one job.
-  Jobs are recorded in `background_work`: after a restart, a job that was cut
-  off runs again from the start, and a finished job's report whose turn is not
+  Jobs are recorded in `background_work`. After a restart, a job that was
+  still waiting runs; one cut off mid-research is listed as `interrupted`,
+  because running it again starts over and pays for its model calls again.
+  `POST .../research-jobs/{job_id}/resume` reruns it (202; 409
+  `research_job_not_interrupted` otherwise) and `DELETE` drops it;
+  `developer_settings.research_jobs.resume_after_restart` (default false)
+  reruns them automatically instead. A finished job's report whose turn is not
   saved in its chat is sent again. `report_delivered` means the report was
   queued in the chat; it can still be lost to a restart until that turn runs. Existing databases need
   `server/src/infrastructure/background_work_upgrade.sql`.

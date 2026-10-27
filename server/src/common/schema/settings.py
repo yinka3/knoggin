@@ -215,6 +215,9 @@ class ResearchJobSettings(ConfigModel):
     max_running_per_project: int = Field(3, ge=1, le=100)
     # One page read is budgeted per link, so this bounds a job's size.
     max_links: int = Field(50, ge=1, le=1_000)
+    # A job cut off by a restart reruns from the start and pays for its model
+    # calls again, so by default it waits as `interrupted` for the user.
+    resume_after_restart: bool = False
 
 
 class ChatCompactionSettings(ConfigModel):

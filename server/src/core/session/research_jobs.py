@@ -32,8 +32,10 @@ class ResearchJobs:
 
     The job's chat holds the full research and sources and becomes memory like
     any chat. When it ends, the starting chat gets a report turn. Jobs are
-    recorded at each change: after a restart, a job that was cut off runs
-    again from the start, and a report that was not handed to its chat is.
+    recorded at each change. After a restart, a job that never started runs;
+    one cut off mid-research waits as `interrupted` for the user to resume it,
+    since it reruns from the start and pays again (unless
+    `resume_after_restart`); a report not saved in its chat is sent again.
     """
 
     def __init__(self, sessions: SessionManager, config_manager) -> None:
@@ -97,14 +99,16 @@ class ResearchJobs:
 
         if self._store is None:
             return
+        rerun = self._settings().resume_after_restart
         for row in await self._store.load("research_job", limit=_KEPT_FINISHED_JOBS):
             job = dict(row["payload"])
             report = job.pop("report", None)
-            if job["state"] in _UNFINISHED:
-                job.update(state="queued", session_id=None, error_code=None)
+            if job["state"] == "queued" or (job["state"] in _UNFINISHED and rerun):
+                await self._requeue(job)
+            elif job["state"] in _UNFINISHED:
+                job["state"] = "interrupted"
                 self._remember(job)
                 await self._persist(job)
-                self._launch(job)
             else:
                 self._remember(job)
                 if job["state"] != "cancelled" and not await self._store.report_in_chat(
@@ -113,6 +117,26 @@ class ResearchJobs:
                     self._tasks[job["job_id"]] = asyncio.create_task(
                         self._deliver(job, report), name=f"research-report:{job['job_id']}"
                     )
+
+    async def resume_job(self, job_id: str) -> dict[str, Any] | None:
+        """Run an interrupted job again from the start. None if unknown;
+        ValueError if it is not interrupted."""
+
+        if self._closed:
+            raise RuntimeError("Research jobs are shutting down")
+        job = self._jobs.get(job_id)
+        if job is None:
+            return None
+        if job["state"] != "interrupted":
+            raise ValueError(f"Only an interrupted job can be resumed; this one is {job['state']}")
+        await self._requeue(job)
+        return self._public(job)
+
+    async def _requeue(self, job: dict[str, Any]) -> None:
+        job.update(state="queued", session_id=None, error_code=None)
+        self._remember(job)
+        await self._persist(job)
+        self._launch(job)
 
     async def _deliver(self, job: dict[str, Any], report: str | None) -> None:
         await self._report(job, report)
@@ -150,6 +174,9 @@ class ResearchJobs:
         if task is not None and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        elif job["state"] == "interrupted":
+            job.update(state="cancelled", finished_at=get_now_iso())
+            await self._persist(job)
         return self._public(job)
 
     async def shutdown(self) -> None:
@@ -168,8 +195,13 @@ class ResearchJobs:
                 await self._persist(job)
                 content = await self._research(job)
         except asyncio.CancelledError:
-            # A shutdown is not the user's choice: the job runs again on start.
-            job["state"] = "interrupted" if self._closed else "cancelled"
+            # A shutdown is not the user's choice. A job still waiting for a
+            # slot has cost nothing and stays queued; one cut off mid-research
+            # is interrupted.
+            if not self._closed:
+                job["state"] = "cancelled"
+            elif job["state"] == "running":
+                job["state"] = "interrupted"
             job["finished_at"] = None if self._closed else get_now_iso()
             self._tasks.pop(job["job_id"], None)
             await asyncio.shield(self._persist(job))

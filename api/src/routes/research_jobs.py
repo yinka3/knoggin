@@ -54,8 +54,27 @@ async def cancel_job(request):
     return JSONResponse(await jobs.cancel(job["job_id"]))
 
 
+async def resume_job(request):
+    runtime = request.app.state.runtime
+    jobs = runtime.sessions.research_jobs
+    job = jobs.get(request.path_params["job_id"])
+    if job is None or job["parent_session_id"] != request.path_params["session_id"]:
+        return _error("research_job_not_found", "Research job not found", 404)
+    project = await runtime.projects.get_project(job["project_id"])
+    if project is None or project["status"] != "active":
+        return _error("project_unavailable", "Project is unavailable", 409)
+    try:
+        resumed = await jobs.resume_job(job["job_id"])
+    except ValueError as exc:
+        return _error("research_job_not_interrupted", str(exc), 409)
+    return JSONResponse(resumed, status_code=202)
+
+
 routes = [
     Route("/v1/sessions/{session_id}/research-jobs", start_job, methods=["POST"]),
     Route("/v1/sessions/{session_id}/research-jobs", list_jobs, methods=["GET"]),
     Route("/v1/sessions/{session_id}/research-jobs/{job_id}", cancel_job, methods=["DELETE"]),
+    Route(
+        "/v1/sessions/{session_id}/research-jobs/{job_id}/resume", resume_job, methods=["POST"]
+    ),
 ]

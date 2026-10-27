@@ -203,3 +203,21 @@ async def test_link_count_and_scheme_are_checked_before_starting():
             links=["file:///etc/passwd"],
         )
     assert sessions.created == []
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_cancelling_an_interrupted_job_closes_it_so_it_cannot_be_resumed():
+    sessions = _Sessions([_answer("never")], gate=asyncio.Event())
+    jobs = _jobs(sessions)
+    job = await jobs.start(project_id="project-1", parent_session_id="parent", question="q")
+    await asyncio.sleep(0)
+    jobs._closed = True  # a shutdown cuts the run off
+    await jobs.cancel(job["job_id"])
+    jobs._closed = False
+    assert jobs.get(job["job_id"])["state"] == "interrupted"
+
+    cancelled = await jobs.cancel(job["job_id"])
+    assert cancelled["state"] == "cancelled" and cancelled["finished_at"]
+    with pytest.raises(ValueError):
+        await jobs.resume_job(job["job_id"])

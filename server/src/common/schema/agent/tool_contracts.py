@@ -919,7 +919,9 @@ TOOL_SCHEMAS = [
             "name": "list_research_jobs",
             "description": (
                 "List the background research jobs started from this chat and "
-                "their states."
+                "their states. An interrupted job was cut off by a restart; "
+                "running it again starts over and costs a full job, so ask the "
+                "user before starting it again."
             ),
             "parameters": {
                 "type": "object",
