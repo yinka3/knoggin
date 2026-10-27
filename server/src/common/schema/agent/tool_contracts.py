@@ -874,6 +874,78 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "start_research_job",
+            "description": (
+                "Start research that runs in the background in its own chat, "
+                "so the user can keep talking. Its report arrives in this chat "
+                "when it finishes. Use it for research needing many searches or "
+                "page reads, or for a long list of links to read."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 4000,
+                        "description": (
+                            "The complete research request, with any context "
+                            "from this chat it needs; the job cannot see this chat."
+                        ),
+                    },
+                    "links": {
+                        "type": "array",
+                        "items": {"type": "string", "minLength": 1},
+                        "description": "Links the job must read, if the user gave any.",
+                    },
+                    "depth": {
+                        "type": "string",
+                        "enum": ["research", "deep_research"],
+                        "default": "research",
+                        "description": "deep_research reads more sources and takes longer.",
+                    },
+                },
+                "required": ["question"],
+                "additionalProperties": False,
+            },
+            "tags": ["jobs", "external:read"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_research_jobs",
+            "description": (
+                "List the background research jobs started from this chat and "
+                "their states."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+            "tags": ["jobs"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cancel_research_job",
+            "description": "Stop one background research job started from this chat.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "string", "minLength": 1, "maxLength": 64},
+                },
+                "required": ["job_id"],
+                "additionalProperties": False,
+            },
+            "tags": ["jobs"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "set_research_plan",
             "description": (
                 "Set the material subquestions for this research run before "

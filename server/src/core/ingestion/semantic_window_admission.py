@@ -339,6 +339,9 @@ class SemanticWindowAdmission:
         assistant_id = row.get("assistant_message_id")
         if outcome in {"failed", "cancelled"}:
             return _SkippedExchange()
+        if row.get("user_origin") == "research_job_report":
+            # A job report repeats the job's own chat, which is memory already.
+            return _SkippedExchange()
         if outcome in {"assistant_final", "clarification"}:
             if (
                 assistant_id is None

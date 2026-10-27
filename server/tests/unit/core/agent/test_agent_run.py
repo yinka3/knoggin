@@ -726,6 +726,44 @@ def test_agent_run_can_finish_without_a_final_response():
 
 
 @pytest.mark.no_network
+def test_a_list_of_links_adds_one_read_and_one_call_per_link():
+    limits = AgentRunLimits(
+        max_calls=24,
+        max_attempts=30,
+        max_accumulated_web_reads=24,
+        tool_limits=(("read_web_page", 12), ("search_web", 8)),
+    )
+
+    grown = limits.with_extra_web_reads(20)
+
+    assert grown.max_calls == 44
+    assert grown.max_attempts == 50
+    assert grown.max_accumulated_web_reads == 44
+    assert grown.get_tool_limit("read_web_page") == 32
+    assert grown.get_tool_limit("search_web") == 8
+    assert limits.with_extra_web_reads(0) is limits
+
+
+@pytest.mark.no_network
+def test_research_runs_cannot_start_background_jobs():
+    def tool_names(run):
+        return {schema["function"]["name"] for schema in run.tool_runtime.schemas}
+
+    normal = make_run()
+    research = make_run(research_profile=resolve_research_profile("research"))
+    chosen = make_run(
+        research_profile=resolve_research_profile("deep_research"),
+        enabled_tools=["read_web_page", "start_research_job"],
+    )
+
+    assert "start_research_job" in tool_names(normal)
+    assert not tool_names(research) & {"start_research_job", "list_research_jobs"}
+    assert "search_web" in tool_names(research)
+    assert "read_web_page" in tool_names(chosen)
+    assert "start_research_job" not in tool_names(chosen)
+
+
+@pytest.mark.no_network
 def test_research_coverage_accepts_the_handles_the_notebook_shows():
     run = make_run(research_profile=resolve_research_profile("research"))
     assert run.set_research_plan(["When is SQLite better?"]) is None

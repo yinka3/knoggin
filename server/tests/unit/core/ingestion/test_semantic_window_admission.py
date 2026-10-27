@@ -1100,3 +1100,20 @@ async def test_window_share_and_idle_wait_are_settings():
     policy = selected.window.policy_snapshot["admission_policy"]
     assert policy["semantic_window_tokens"] == 50
     assert policy["idle_flush_seconds"] == 60
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_research_report_turns_are_not_memory():
+    report = _row(2, user_content="x" * 5, assistant_content="x" * 5)
+    report["user_origin"] = "research_job_report"
+    rows = [_row(1, user_content="x" * 5, assistant_content="x" * 5), report]
+    admission = _admission(rows, target=1_000)
+
+    selected = await admission.select(
+        user_name="ada", project_id="project-1",
+        domain=make_domain_config().compile(), force_flush=True,
+    )
+
+    assert selected is not None
+    assert [member.message_id for member in selected.messages] == [1, 10_001]

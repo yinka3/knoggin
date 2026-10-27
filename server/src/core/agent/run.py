@@ -24,6 +24,7 @@ from common.schema.agent.settings import (
     validate_tool_limit_overrides,
 )
 from common.schema.agent.stream import StreamUsage
+from common.schema.agent.tool_names import JOB_TOOL_NAMES
 from common.schema.document import DocumentFocus
 from common.schema.source.references import SourceReferenceCandidate
 from core.agent.notebook import (
@@ -287,6 +288,22 @@ class AgentRunLimits:
             tool_limits=tuple((defaults | overrides).items()),
         )
 
+    def with_extra_web_reads(self, count: int) -> "AgentRunLimits":
+        """Add room for a given number of page reads, one call each."""
+
+        if count <= 0:
+            return self
+        return replace(
+            self,
+            max_calls=self.max_calls + count,
+            max_attempts=self.max_attempts + count,
+            max_accumulated_web_reads=self.max_accumulated_web_reads + count,
+            tool_limits=tuple(
+                (name, limit + count if name == "read_web_page" else limit)
+                for name, limit in self.tool_limits
+            ),
+        )
+
     def for_research_profile(self, profile: ResearchProfile) -> "AgentRunLimits":
         """Scale the existing executor budget for a selected research mode."""
 
@@ -431,6 +448,20 @@ class AgentRun:
             raise TypeError(
                 "initial_source_candidates must contain validated source references"
             )
+        effective_research_profile = (
+            research_profile or DEFAULT_RESEARCH_PROFILES["normal"]
+        )
+        if effective_research_profile.mode != "normal":
+            # A research run must not hand its work to background copies of
+            # itself; measured runs did that when replanning.
+            effective_enabled_tools = tuple(
+                name for name in (
+                    effective_enabled_tools
+                    if effective_enabled_tools is not None
+                    else sorted(get_registered_tool_names())
+                )
+                if name not in JOB_TOOL_NAMES
+            )
         tool_runtime = build_tool_runtime(
             enabled_tools=effective_enabled_tools,
             additional_schemas=effective_additional_schemas,
@@ -441,9 +472,6 @@ class AgentRun:
             session_id=session_id,
             run_id=effective_run_id,
             max_graph_results=limits.max_accumulated_graph,
-        )
-        effective_research_profile = (
-            research_profile or DEFAULT_RESEARCH_PROFILES["normal"]
         )
         return cls(
             run_id=effective_run_id,

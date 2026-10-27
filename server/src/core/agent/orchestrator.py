@@ -133,7 +133,9 @@ class AgentOrchestrator:
             agent_cfg = identity.config
             run_limits = AgentRunLimits.from_settings(
                 limits, memory_budget
-            ).for_research_profile(research_profile)
+            ).for_research_profile(research_profile).with_extra_web_reads(
+                getattr(run_settings, "extra_web_reads", 0)
+            )
             effective_temperature = (
                 agent_cfg.temperature
                 if agent_cfg and agent_cfg.temperature is not None
@@ -319,6 +321,7 @@ class AgentOrchestrator:
             health_service=getattr(context, "health_service", None),
             entity_maintenance_service=self._entity_maintenance_service,
             project_maintenance_service=self._project_maintenance_service,
+            research_jobs=getattr(context, "research_jobs", None),
         )
 
         return tools

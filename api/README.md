@@ -154,6 +154,20 @@ For an existing project, replace `{project_id}` in these routes:
   answer in session history. The queue is in memory and pending items are
   cancelled on session unload or API shutdown. Stopping one run does not
   cancel its queued follow-ups.
+- `POST /v1/sessions/{session_id}/research-jobs` with
+  `{"question":"...","links":["https://..."],"depth":"research"}` starts
+  research in the background (`depth` may be `deep_research`). The agent can
+  also start one itself with its `start_research_job` tool. Each job runs as a
+  research turn in its own new session, using only read tools, with one extra
+  page read budgeted per link. When it ends, the starting session gets an
+  automatic turn with the report (it appears in `/follow-ups`), and the agent
+  there summarizes it. That turn is not added to memory; the job's own session
+  is. `GET` on the same path lists the session's jobs; `DELETE
+  .../research-jobs/{job_id}` cancels one. Up to
+  `developer_settings.research_jobs.max_running_per_project` (default 3) run at
+  once per project and the rest wait; `max_links` (default 50) bounds one job.
+  Jobs are in memory: after a restart a job's session remains, but its report
+  is not sent.
 
 CORS currently permits `localhost:3000` and `127.0.0.1:3000`.
 

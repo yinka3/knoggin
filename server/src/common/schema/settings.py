@@ -209,11 +209,20 @@ class CoordinationLogSettings(ConfigModel):
     rotation_mb: int = Field(10, ge=1)
 
 
+class ResearchJobSettings(ConfigModel):
+    # Each job makes many model calls; more at once costs more and loads the
+    # machine more. Extra jobs wait their turn.
+    max_running_per_project: int = Field(3, ge=1, le=100)
+    # One page read is budgeted per link, so this bounds a job's size.
+    max_links: int = Field(50, ge=1, le=1_000)
+
+
 class DeveloperSettings(ConfigModel):
     ingestion: IngestionSettings = Field(default_factory=IngestionSettings)
     jobs: JobSettings = Field(default_factory=JobSettings)
     limits: AgentLimitSettings = Field(default_factory=AgentLimitSettings)
     prompt_memory: PromptMemorySettings = Field(default_factory=PromptMemorySettings)
+    research_jobs: ResearchJobSettings = Field(default_factory=ResearchJobSettings)
     entity_resolution: EntityResolutionSettings = Field(
         default_factory=EntityResolutionSettings
     )

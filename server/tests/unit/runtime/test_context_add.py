@@ -1807,3 +1807,33 @@ async def test_history_pages_stop_once_they_could_fill_the_budget():
     turns = await ctx._recent_history_within(40_000, up_to_msg_id=5_000)
     assert calls == [5_000, 4_800, 4_600, 4_400, 4_200, 4_000, 3_800, 3_600]
     assert [turn["message_id"] for turn in turns][:2] == [3_401, 3_402]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_research_report_runs_on_an_idle_chat_and_is_marked(context):
+    ctx, resources = context
+
+    async def handler(kwargs):
+        yield _response_event("Here is what the research found.")
+
+    orchestrator = _FakeTurnOrchestrator(handler)
+    ctx.agent_orchestrator = orchestrator
+
+    # No run is active: a follow-up would be refused, a report is not.
+    queued = await ctx.queue_research_report("Background research job-1 finished.", job_id="job-1")
+    assert queued is not None
+
+    async def completed():
+        while (await ctx.get_follow_up(queued["queue_id"]))["state"] != "completed":
+            await asyncio.sleep(0.01)
+    await asyncio.wait_for(completed(), 2)
+
+    assert [call["user_query"] for call in orchestrator.calls] == [
+        "Background research job-1 finished."
+    ]
+    user_rows = [
+        row for batch in resources.knowledge_store.saved_message_logs
+        for row in batch if row.get("role") == "user"
+    ]
+    assert user_rows[-1]["metadata"] == {"origin": "research_job_report", "job_id": "job-1"}

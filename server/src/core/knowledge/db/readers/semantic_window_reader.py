@@ -44,6 +44,7 @@ _ELIGIBLE_CONVERSATION_EXCHANGES_CTE = """
             user_message.exchange_state AS user_exchange_state,
             user_message.exchange_outcome AS user_exchange_outcome,
             user_message.exchange_closed_at_ms,
+            user_message.metadata ->> 'origin' AS user_origin,
             assistant_message.message_id AS assistant_message_id,
             assistant_message.content AS assistant_content,
             assistant_message.timestamp_ms AS assistant_timestamp_ms,

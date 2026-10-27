@@ -23,6 +23,14 @@ class CreateSession(SessionPreferences):
     project_id: str = Field(min_length=1)
 
 
+class StartResearchJob(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    question: str = Field(min_length=1, max_length=4000)
+    links: list[str] = Field(default_factory=list)
+    depth: Literal["research", "deep_research"] = "research"
+
+
 class StartRun(SessionPreferences):
     query: str = Field(min_length=1, max_length=100_000)
     research_mode: Literal["normal", "research", "deep_research"] = "normal"

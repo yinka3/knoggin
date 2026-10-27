@@ -52,6 +52,8 @@ class SessionRunSettings:
     resolved_identity: AgentIdentity | None = None
     resolved_model: str | None = None
     prompt_memory_budget: PromptMemoryBudget | None = None
+    # Extra page reads for a run given a list of links to read.
+    extra_web_reads: int = 0
 
 
 class _AdmittedAgentStream:
@@ -144,8 +146,10 @@ class SessionRuntime:
         health_service: Any | None = None,
         agent_orchestrator: Any | None = None,
         config_manager: ConfigManager | None = None,
+        research_jobs: Any | None = None,
     ):
         self.resources = resources
+        self.research_jobs = research_jobs
         self.health_service = health_service
         self.agent_orchestrator = agent_orchestrator
         self._config_manager = config_manager
@@ -263,6 +267,34 @@ class SessionRuntime:
                 self._follow_up_task = asyncio.create_task(self._drain_follow_ups())
             return self._public_follow_up(item)
 
+    async def queue_research_report(
+        self, content: str, *, job_id: str,
+    ) -> dict[str, Any] | None:
+        """Queue a finished research job's report as a turn in this chat.
+
+        It runs once the chat is idle. Unlike a follow-up it needs no active
+        run and is never refused for a full queue: job concurrency already
+        bounds how many arrive. The turn is marked so it is not memory; the
+        job's own chat already is.
+        """
+
+        async with self._agent_run_lock:
+            if self._agent_runs_closed or self._closed:
+                return None
+            queue_id = str(uuid4())
+            item = {
+                "queue_id": queue_id, "after_run_id": None,
+                "run_id": str(uuid4()), "query": content,
+                "metadata": {"origin": "research_job_report", "job_id": job_id},
+                "state": "queued", "assistant_message_id": None,
+                "error_code": None,
+            }
+            self._follow_ups[queue_id] = item
+            self._follow_up_queue.append(queue_id)
+            if self._follow_up_task is None or self._follow_up_task.done():
+                self._follow_up_task = asyncio.create_task(self._drain_follow_ups())
+            return self._public_follow_up(item)
+
     @staticmethod
     def _public_follow_up(item: dict[str, Any]) -> dict[str, Any]:
         return {key: item[key] for key in (
@@ -307,7 +339,8 @@ class SessionRuntime:
             stream = None
             try:
                 stream = await self.open_agent_run_stream(
-                    Message(content=item["query"]), run_id=item["run_id"],
+                    Message(content=item["query"], metadata=item.get("metadata", {})),
+                    run_id=item["run_id"],
                     _from_follow_up=True,
                 )
                 async with self._agent_run_lock:
@@ -397,6 +430,7 @@ class SessionRuntime:
         research_mode: ResearchMode = "normal",
         selected_notebook: dict | None = None,
         run_id: str | None = None,
+        extra_web_reads: int = 0,
         _from_follow_up: bool = False,
     ) -> AsyncGenerator[AgentExecutionEvent, None]:
         """Admit and persist a run before returning its event stream.
@@ -473,6 +507,7 @@ class SessionRuntime:
                 else None,
                 document_focus=deepcopy(self.document_focus),
                 readable_project_ids=tuple(self.project.readable_project_ids),
+                extra_web_reads=extra_web_reads,
             )
             enabled_tools = list(enabled_tools) if enabled_tools is not None else None
             document_focus = deepcopy(document_focus)

@@ -19,3 +19,21 @@ def get_configurable_tool_names() -> frozenset[str]:
         if isinstance(schema.get("function"), dict)
         and isinstance(schema["function"].get("name"), str)
     )
+
+
+JOB_TOOL_NAMES = frozenset(
+    {"start_research_job", "list_research_jobs", "cancel_research_job"}
+)
+_NOT_FOR_RESEARCH_JOBS = frozenset({"runtime:health", "maintenance", "jobs"})
+
+
+def research_job_tool_names() -> tuple[str, ...]:
+    """Tools a background research run may use: reads only, no health or
+    maintenance tools, and no starting further jobs."""
+
+    return tuple(
+        schema["function"]["name"]
+        for schema in TOOL_SCHEMAS
+        if schema["function"]["capability"] == "read"
+        and not _NOT_FOR_RESEARCH_JOBS & set(schema["function"].get("tags", ()))
+    )

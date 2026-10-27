@@ -10,6 +10,7 @@ from common.schema.agent.tool_contracts import (
     get_schema_capability,
 )
 from core.agent.tools.health import HealthTools
+from core.agent.tools.jobs import ResearchJobTools
 from core.agent.tools.maintenance import MaintenanceTools
 from core.agent.tools.memory import MemoryTools
 from core.agent.tools.search import SearchTools
@@ -105,6 +106,13 @@ _WEB_READ_RUNTIME_INSTRUCTION = (
     "[SYSTEM NOTICE: read_web_page reads a bounded web or PDF passage. Read "
     "important sources before making important web-based claims, retain material "
     "qualifications, and state remaining evidence gaps plainly.]"
+)
+_RESEARCH_JOB_RUNTIME_INSTRUCTION = (
+    "[SYSTEM NOTICE: start_research_job runs research in the background. Use it "
+    "when the user asks for research that needs many searches or page reads, or "
+    "gives a long list of links, and not for questions a few steps can answer. "
+    "After starting it, tell the user it is running and that the report will "
+    "arrive in this chat; do not wait for it.]"
 )
 _READ_BRAIN_RUNTIME_INSTRUCTION = (
     "[SYSTEM NOTICE: read_agent_brain returns the current durable Brain and revision. "
@@ -288,6 +296,13 @@ TOOL_DEFINITIONS = {
         default_limit=6,
         runtime_instruction=_WEB_READ_RUNTIME_INSTRUCTION,
     ),
+    "start_research_job": _definition(
+        "start_research_job",
+        default_limit=3,
+        runtime_instruction=_RESEARCH_JOB_RUNTIME_INSTRUCTION,
+    ),
+    "list_research_jobs": _definition("list_research_jobs", default_limit=2),
+    "cancel_research_job": _definition("cancel_research_job", default_limit=3),
     "set_research_plan": _definition(
         "set_research_plan", executor_protocol=True
     ),
@@ -588,6 +603,7 @@ class Tools(
     MaintenanceTools,
     HealthTools,
     ProjectFileTools,
+    ResearchJobTools,
 ):
     def __init__(
         self,
@@ -605,6 +621,7 @@ class Tools(
         health_service=None,
         entity_maintenance_service: Optional[EntityMaintenanceService] = None,
         project_maintenance_service=None,
+        research_jobs=None,
     ):
         if knowledge_store is None or postgres is None:
             raise ValueError("Tools requires explicit knowledge_store and postgres")
@@ -633,6 +650,7 @@ class Tools(
         # constructing an uncoordinated service instance here.
         self.entity_maintenance_service = entity_maintenance_service
         self.project_maintenance_service = project_maintenance_service
+        self.research_jobs = research_jobs
 
         self._http_client = None
         self._web_page_client = None
