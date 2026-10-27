@@ -284,6 +284,32 @@ def test_run_stream_emits_scoped_sources_before_completion():
     asyncio.run(exercise())
 
 
+def test_run_stream_exposes_saved_clarification_as_a_question():
+    async def raw():
+        yield {"event": "clarification", "data": {
+            "question": "Which profile should I use?",
+            "assistant_message_id": 42,
+            "source_ref_ids": [],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 0, "total_tokens": 3},
+        }}
+
+    async def exercise():
+        frames = [frame async for frame in _events(raw(), "run-1")]
+        assert [frame.decode().split("\n", 1)[0] for frame in frames] == [
+            "event: run_started", "event: clarification_required",
+        ]
+        question = json.loads(frames[-1].decode().split("data: ", 1)[1])
+        assert question == {
+            "run_id": "run-1", "sequence": 1,
+            "question": "Which profile should I use?",
+            "assistant_message_id": 42,
+            "source_ref_ids": [],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 0, "total_tokens": 3},
+        }
+
+    asyncio.run(exercise())
+
+
 def test_run_steer_and_stop_routes_target_only_the_active_run(monkeypatch, tmp_path):
     import httpx
     from app import create_app

@@ -120,8 +120,11 @@ async def _events(raw: AsyncIterator, run_id: str, *, runtime=None, session=None
                 }
                 terminal = True
             elif name == "clarification":
-                event, public = "run_failed", {
-                    "code": "clarification_required", "message": "The agent needs clarification."
+                event, public = "clarification_required", {
+                    "question": str(data["question"]),
+                    "assistant_message_id": data["assistant_message_id"],
+                    "source_ref_ids": data.get("source_ref_ids", []),
+                    "usage": data.get("usage"),
                 }
                 terminal = True
             elif name == "error":

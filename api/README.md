@@ -159,7 +159,10 @@ For an existing project, replace `{project_id}` in these routes:
   Research mode adds `web` for that run. A "Maintenance" agent with
   `["core", "maintenance"]` is created at startup.
   It returns an SSE stream with `run_started`, `message_delta`, `tool`,
-  `source_added`, `usage_updated`, `steer_applied`, `run_completed`, and `run_failed` events.
+  `source_added`, `usage_updated`, `steer_applied`, `run_completed`,
+  `clarification_required`, and `run_failed` events. A clarification ends the
+  run with the saved question and assistant message ID so the user can answer
+  it in a new turn.
   Closing the HTTP stream closes the owned engine run.
 - `GET /v1/sessions/{session_id}/runs/{run_id}` reads the active or most recent
   run status while its session runtime remains loaded. `POST .../steers` accepts
