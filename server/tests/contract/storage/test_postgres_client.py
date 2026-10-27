@@ -1,4 +1,7 @@
+import asyncio
+import logging
 import os
+import random
 
 import pytest
 
@@ -22,8 +25,7 @@ class RecordingAsyncPool:
         self.close_calls = 0
         self.connection_enters = 0
         self.connection_exits = 0
-        self.transaction_enters = 0
-        self.transaction_exits = []
+        self.endings = []
         self.cursor_enters = 0
         self.cursor_exits = 0
         self.execute_calls = []
@@ -75,19 +77,6 @@ class RecordingCursor:
         return self.pool.fetch_all_results.pop(0)
 
 
-class RecordingTransaction:
-    def __init__(self, pool):
-        self.pool = pool
-
-    async def __aenter__(self):
-        self.pool.transaction_enters += 1
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        self.pool.transaction_exits.append(exc_type)
-        return False
-
-
 class RecordingConnection:
     def __init__(self, pool):
         self.pool = pool
@@ -100,8 +89,11 @@ class RecordingConnection:
         self.pool.connection_exits += 1
         return False
 
-    def transaction(self):
-        return RecordingTransaction(self.pool)
+    async def commit(self):
+        self.pool.endings.append("commit")
+
+    async def rollback(self):
+        self.pool.endings.append("rollback")
 
     def cursor(self):
         return RecordingCursor(self.pool)
@@ -314,7 +306,7 @@ async def test_transaction_requires_connected_client():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_transaction_manages_connection_transaction_and_cursor(recording_pool):
+async def test_transaction_commits_on_its_connection_and_cursor(recording_pool):
     client = PostgresClient("postgresql://example")
     await client.connect()
     pool = recording_pool.instances[0]
@@ -325,8 +317,7 @@ async def test_transaction_manages_connection_transaction_and_cursor(recording_p
     assert pool.execute_calls == [("SELECT 1", None)]
     assert pool.connection_enters == 1
     assert pool.connection_exits == 1
-    assert pool.transaction_enters == 1
-    assert pool.transaction_exits == [None]
+    assert pool.endings == ["commit"]
     assert pool.cursor_enters == 1
     assert pool.cursor_exits == 1
 
@@ -342,7 +333,7 @@ async def test_transaction_rolls_back_when_exception_escapes(recording_pool):
         async with client.transaction():
             raise ValueError("abort")
 
-    assert pool.transaction_exits == [ValueError]
+    assert pool.endings == ["rollback"]
     assert pool.connection_exits == 1
     assert pool.cursor_exits == 1
 
@@ -388,3 +379,22 @@ async def test_postgres_client_connects_when_test_database_is_configured(
         assert client._pool is not None
     finally:
         await client.close()
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_a_cancelled_query_returns_its_connection_cleanly(real_postgres_client, caplog):
+    """Cancelling a task mid-query (a chat closing) used to cut a commit off
+    halfway; the pool then logged "rollback failed" and threw the connection away."""
+
+    caplog.set_level(logging.WARNING, logger="psycopg")
+    random.seed(7)
+    for _ in range(300):
+        task = asyncio.create_task(real_postgres_client.execute("SELECT 1"))
+        await asyncio.sleep(random.random() * 0.002)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert await real_postgres_client.fetch_one("SELECT 42 AS v") == {"v": 42}
+    assert [r.getMessage() for r in caplog.records if r.name.startswith("psycopg")] == []

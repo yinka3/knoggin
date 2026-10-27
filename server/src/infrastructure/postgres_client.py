@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import Any, Optional, TypeAlias
@@ -119,9 +120,13 @@ class PostgresClient:
             raise RuntimeError("PostgresClient is not connected")
 
         async with self._pool.connection() as conn:
-            async with conn.transaction():
-                async with conn.cursor() as cur:
+            async with conn.cursor() as cur:
+                try:
                     yield cur
+                except BaseException:
+                    await _finish(conn.rollback())
+                    raise
+                await _finish(conn.commit())
 
     async def fetch_all(
         self, query: str, params: Optional[QueryParams] = None
@@ -145,3 +150,17 @@ class PostgresClient:
             await cur.execute(query, params)
             return cur.rowcount
 
+
+
+async def _finish(ending) -> None:
+    """Run a commit or rollback to the end even if the task is cancelled.
+    Cut off halfway, it leaves the connection mid-transaction and the pool
+    throws it away ("rollback failed"); a cut-off commit may also have
+    landed without the caller knowing."""
+
+    task = asyncio.ensure_future(ending)
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await task
+        raise
