@@ -18,7 +18,7 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo  # noqa: E402
 # TEST_DATABASE_URL only selects the Postgres server. Tests that need a
 # standing database always use this name, so they can never touch the
 # application database (knoggin_db) or another database on the server.
-TEST_DATABASE_NAME = "knoggin_test_db"
+TEST_DATABASE_NAME = "knoggin_testdb"
 _SERVER_URL = os.environ.get(
     "TEST_DATABASE_URL", "postgresql://knoggin:knoggin@127.0.0.1:5432/postgres"
 )
@@ -32,7 +32,7 @@ def server_database_url(database: str) -> str:
 
 @pytest.fixture(scope="session")
 def test_database_url():
-    """Recreate knoggin_test_db from schema.sql once per test session."""
+    """Recreate knoggin_testdb from schema.sql once per test session."""
 
     schema_sql = (SRC_ROOT / "infrastructure" / "schema.sql").read_text(encoding="utf-8")
     with psycopg.connect(server_database_url("postgres"), autocommit=True) as admin:
