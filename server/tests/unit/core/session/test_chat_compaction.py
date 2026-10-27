@@ -1,7 +1,7 @@
 import pytest
 
 from common.schema.settings import ChatCompactionSettings
-from core.session.chat_compaction import ChatCompaction
+from core.session.chat_compaction import _SYSTEM, ChatCompaction
 
 
 class FakePostgres:
@@ -90,6 +90,22 @@ async def test_one_pass_reads_at_most_the_input_cap_oldest_first():
         _turns(30), conversation_tokens=400, settings=SETTINGS
     )
 
-    # ~102 tokens a turn and a 1,000 token cap: turns 1-9 now, the rest later.
-    assert "turn9 " in llm.prompts[0] and "turn10 " not in llm.prompts[0]
-    assert postgres.row["chat_summary_through_message_id"] == 9
+    # System instructions, framing, and summary instructions consume part of
+    # the cap; only complete turns can advance the checkpoint.
+    assert "turn8 " in llm.prompts[0] and "turn9 " not in llm.prompts[0]
+    assert postgres.row["chat_summary_through_message_id"] == 8
+    assert len((_SYSTEM + llm.prompts[0]).split()) + 64 <= 1_000
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_compaction_keeps_previous_summary_when_it_cannot_fit():
+    postgres, llm = FakePostgres(), FakeLLM()
+    postgres.row = {"chat_summary": "previous " * 950,
+                    "chat_summary_through_message_id": 0}
+    changed = await _compaction(postgres, llm).extend(
+        _turns(10), conversation_tokens=400, settings=SETTINGS
+    )
+    assert changed is False
+    assert llm.prompts == []
+    assert postgres.row["chat_summary_through_message_id"] == 0

@@ -32,6 +32,10 @@ class StreamingLLM:
         self.raises = raises
         self.calls = []
 
+    async def generate_text(self, system, user, **kwargs):
+        self.calls.append({"system": system, "user": user, **kwargs})
+        return "summary"
+
     async def stream_with_tools(self, **kwargs):
         # Record the joined system prompt; the executor sends cacheable parts.
         self.calls.append({**kwargs, "system": system_text(kwargs["system"])})
@@ -87,6 +91,19 @@ def test_prompt_assembly_bounds_all_memory_while_retaining_current_query():
     assert "project" in system
     assert "prior" in user
     assert "source" in user
+
+
+@pytest.mark.no_network
+async def test_fallback_summary_bounds_accumulated_evidence(monkeypatch):
+    llm = StreamingLLM()
+    executor = make_executor(llm)
+    executor.ctx.memory_budget = PromptMemoryBudget(input_tokens=4_000)
+    executor.ctx.user_query = "Explain the finding"
+    monkeypatch.setattr("core.agent.executor.build_evidence_context", lambda _ctx: "evidence " * 8_000)
+
+    assert await executor._generate_fallback_summary() == "summary"
+    call = llm.calls[0]
+    assert token_count(call["system"], None) + token_count(call["user"], None) + 64 <= 4_000
 
 
 @pytest.mark.no_network

@@ -62,18 +62,26 @@ class ChatCompaction:
         dropped = self._dropped(history, conversation_tokens, through)
         if sum(self._tokens(turn) for turn in dropped) < settings.min_dropped_tokens:
             return False
+        def request_text(previous: str, turns: str) -> str:
+            return (
+                f"Previous summary:\n{previous or '(none yet)'}\n\nTurns that follow it:\n{turns}\n\n"
+                f"Write the new summary in at most {settings.summary_max_tokens * 3 // 4} words."
+            )
+
+        # Never drop the previous summary or checkpoint a partially read turn.
         batch: List[Dict] = []
-        used = 0
         for turn in dropped:
-            used += self._tokens(turn)
-            if batch and used > settings.max_input_tokens:
+            candidate = batch + [turn]
+            turns = "\n\n".join(_render(item) for item in candidate)
+            if token_count(_SYSTEM, self._count) + token_count(request_text(summary, turns), self._count) + 64 > settings.max_input_tokens:
                 break
-            batch.append(turn)
+            batch = candidate
+        if not batch:
+            return False
         turns = "\n\n".join(_render(turn) for turn in batch)
         updated = await self._llm.generate_text(
             _SYSTEM,
-            f"Previous summary:\n{summary or '(none yet)'}\n\nTurns that follow it:\n{turns}\n\n"
-            f"Write the new summary in at most {settings.summary_max_tokens * 3 // 4} words.",
+            request_text(summary, turns),
             temperature=0.2,
         )
         updated = trim_to_tokens((updated or "").strip(), settings.summary_max_tokens, self._count)

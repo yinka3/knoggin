@@ -1455,16 +1455,26 @@ class AgentExecutor:
     async def _generate_fallback_summary(self) -> Optional[str]:
         """Generate a final response summary from accumulated evidence."""
         evidence_ctx = build_evidence_context(self.ctx)
-
-        prompt = get_fallback_summary_prompt(
-            self.ctx.user_name, self.ctx.user_query, evidence_ctx
-        )
+        counter = getattr(self.llm, "count_tokens", None)
+        counter = counter if callable(counter) else None
+        system = "You are a helpful assistant providing a summary of found information."
+        def prompt(context: str) -> str:
+            return get_fallback_summary_prompt(
+                self.ctx.user_name, self.ctx.user_query, context
+            )
+        fixed = token_count(system, counter) + token_count(prompt(""), counter) + 64
+        available = self.ctx.memory_budget.input_tokens - fixed
+        if available < 0:
+            return None
+        evidence_ctx = trim_to_tokens(evidence_ctx, available, counter)
+        while evidence_ctx and token_count(system, counter) + token_count(prompt(evidence_ctx), counter) + 64 > self.ctx.memory_budget.input_tokens:
+            evidence_ctx = trim_to_tokens(evidence_ctx, max(0, token_count(evidence_ctx, counter) - 1), counter)
+        if token_count(system, counter) + token_count(prompt(evidence_ctx), counter) + 64 > self.ctx.memory_budget.input_tokens:
+            return None
 
         return await self.llm.generate_text(
-            system=(
-                "You are a helpful assistant providing a summary of found information."
-            ),
-            user=prompt,
+            system=system,
+            user=prompt(evidence_ctx),
             temperature=0.3,
             aac_budget=self._aac_budget,
         )
