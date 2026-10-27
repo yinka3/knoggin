@@ -39,10 +39,22 @@ def test_folder_preview_and_intake_apply_scan_rules_before_admission(monkeypatch
         async def release_project_for_session(self, project_id, lease_id):
             leases.remove(lease_id)
 
+    watched = []
+
+    class Notices:
+        async def check_chat(self, *, project_id, session_id):
+            pass
+
+        async def watch(self, **kwargs):
+            watched.append(kwargs)
+
     async def start(**_kwargs):
         async def shutdown():
             pass
-        return SimpleNamespace(projects=Projects(), shutdown=shutdown)
+        return SimpleNamespace(
+            projects=Projects(), shutdown=shutdown,
+            sessions=SimpleNamespace(document_notices=Notices()),
+        )
 
     monkeypatch.setattr("app.ApplicationRuntime.start", start)
     app = create_app(user_name="ada", config_dir=tmp_path)
@@ -84,6 +96,10 @@ def test_folder_preview_and_intake_apply_scan_rules_before_admission(monkeypatch
                 }]}
                 assert (await client.post(base + "/intake", json=duplicate)).status_code == 422
                 assert len(saved) == 2
+                assert watched == []
+                told = await client.post(base + "/intake", json={**body, "session_id": "chat-1"})
+                assert told.status_code == 200
+                assert watched[0]["document_ids"] == ["doc-3", "doc-4"]
                 status = "archived"
                 assert (await client.post(base + "/preview", json=body)).status_code == 409
                 assert (await client.post(base + "/intake", json=body)).status_code == 409
@@ -130,10 +146,23 @@ def test_staged_folder_uses_one_preview_across_separate_uploads(monkeypatch, tmp
         async def release_project_for_session(self, project_id, lease_id):
             leases.remove(lease_id)
 
+    watched = []
+
+    class Notices:
+        async def check_chat(self, *, project_id, session_id):
+            if (project_id, session_id) != ("project-1", "chat-1"):
+                raise ValueError("not this project's chat")
+
+        async def watch(self, **kwargs):
+            watched.append(kwargs)
+
     async def start(**_kwargs):
         async def shutdown():
             pass
-        return SimpleNamespace(projects=Projects(), shutdown=shutdown)
+        return SimpleNamespace(
+            projects=Projects(), shutdown=shutdown,
+            sessions=SimpleNamespace(document_notices=Notices()),
+        )
 
     monkeypatch.setattr("app.ApplicationRuntime.start", start)
     app = create_app(user_name="ada", config_dir=tmp_path)
@@ -150,11 +179,14 @@ def test_staged_folder_uses_one_preview_across_separate_uploads(monkeypatch, tmp
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
-                created = await client.post(base, json={
-                    "folder_name": "repo",
+                manifest = {
+                    "folder_name": "repo", "session_id": "chat-1",
                     "files": [{"relative_path": path, "size_bytes": len(content)}
                               for path, content in files],
-                })
+                }
+                other_chat = await client.post(base, json={**manifest, "session_id": "chat-9"})
+                assert other_chat.json()["error"]["code"] == "session_not_found"
+                created = await client.post(base, json=manifest)
                 assert created.status_code == 201, created.text
                 intake = created.json()
                 url = base + "/" + intake["intake_id"]
@@ -179,9 +211,15 @@ def test_staged_folder_uses_one_preview_across_separate_uploads(monkeypatch, tmp
                 assert second.status_code == 200, second.text
                 assert second.json()["status"] == "complete"
                 assert second.json()["files"][-1]["status"] == "failed"
+                # Complete: the chat hears about the accepted file once.
+                assert [w["document_ids"] for w in watched] == [["doc-1"]]
+                assert watched[0]["session_id"] == "chat-1" and watched[0]["label"] == "repo"
                 retried = await client.post(url + "/commit", json={"retry_failed": True})
                 assert retried.status_code == 200, retried.text
                 assert retried.json()["files"][-1]["status"] == "accepted"
+                # The retried file gets its own notice; committing again adds none.
+                assert (await client.post(url + "/commit", json={})).json()["status"] == "complete"
+                assert [w["document_ids"] for w in watched] == [["doc-1"], ["doc-2"]]
                 assert [item["relative_path"] for item in saved] == [
                     "repo/sub/first.md", "repo/sub/second.md",
                 ]

@@ -18,6 +18,7 @@ from common.utils.json_utils import safe_json_loads
 from common.utils.time_utils import get_now_iso
 from core.knowledge.db.writers.session_deletion_writer import SessionDeletionWriter
 from core.project.project_manager import ProjectManager
+from core.session.document_batch_notices import DocumentBatchNotices
 from core.session.research_jobs import ResearchJobs
 from runtime.session_runtime import SessionRuntime
 
@@ -59,6 +60,7 @@ class SessionManager:
         self._closing_sessions: set[str] = set()
         self._bootstrap_cleanup: dict[str, _BootstrapCleanup] = {}
         self.research_jobs = ResearchJobs(self, config_manager)
+        self.document_notices = DocumentBatchNotices(self, config_manager)
 
     def attach_health_service(self, health_service: Any) -> None:
         """Attach the application-owned health service before sessions are exposed."""
@@ -398,6 +400,7 @@ class SessionManager:
         """Unload every live session before global infrastructure shuts down."""
         # Jobs unload their own chats, which needs the lifecycle lock.
         await self.research_jobs.shutdown()
+        await self.document_notices.shutdown()
         async with self._lifecycle_lock:
             if self._closed:
                 return

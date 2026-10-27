@@ -265,6 +265,15 @@ CORS currently permits `localhost:3000` and `127.0.0.1:3000`.
   again and submit only included files; the response reports accepted and
   failed files separately. Both routes accept optional `force_include_paths`.
   This single-request form is capped at 50 MiB of decoded files.
+  Both `/folders/intake` and `/folders/intakes` accept an optional
+  `session_id` (an open chat in the same project, else `session_not_found`).
+  When every accepted file is indexed, deleted, or failed with no retry left,
+  that chat gets an automatic turn reporting how many files are ready and
+  which failed (it appears in `/follow-ups` and is not memory). A staged
+  intake reports once when it completes and again for files a retry accepts.
+  `developer_settings.ingestion_notices` sets `poll_seconds` (default 10) and
+  `max_wait_minutes` (default 1,440), after which the chat is told the import
+  is still running. Watches are in memory and do not survive a restart.
 - For a larger folder, `POST /v1/projects/{project_id}/folders/intakes` with
   `folder_name`, `files` containing `relative_path` and `size_bytes`, and
   optional `force_include_paths`. The response assigns each file a `file_id`.

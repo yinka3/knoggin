@@ -24,6 +24,7 @@ from common.schema.agent.settings import PromptMemoryBudget
 from common.schema.agent.stream import AgentExecutionEvent
 from common.schema.artifacts import ArtifactDraft
 from common.schema.document import DocumentFocus
+from common.schema.message_origins import BACKGROUND_REPORT_ORIGINS
 from common.schema.primitives import Message
 from common.schema.settings import RootConfig
 from common.schema.source.references import SourceReferenceCandidate
@@ -272,16 +273,19 @@ class SessionRuntime:
                 self._follow_up_task = asyncio.create_task(self._drain_follow_ups())
             return self._public_follow_up(item)
 
-    async def queue_research_report(
-        self, content: str, *, job_id: str,
+    async def queue_report(
+        self, content: str, *, origin: str, metadata: dict[str, Any],
     ) -> dict[str, Any] | None:
-        """Queue a finished research job's report as a turn in this chat.
+        """Queue a background report (a research job, a folder import) as a
+        turn in this chat.
 
         It runs once the chat is idle. Unlike a follow-up it needs no active
-        run and is never refused for a full queue: job concurrency already
-        bounds how many arrive. The turn is marked so it is not memory; the
-        job's own chat already is.
+        run and is never refused for a full queue: the background work already
+        bounds how many arrive. The turn is marked so it is not memory.
         """
+
+        if origin not in BACKGROUND_REPORT_ORIGINS:
+            raise ValueError(f"Unknown report origin: {origin}")
 
         async with self._agent_run_lock:
             if self._agent_runs_closed or self._closed:
@@ -290,7 +294,7 @@ class SessionRuntime:
             item = {
                 "queue_id": queue_id, "after_run_id": None,
                 "run_id": str(uuid4()), "query": content,
-                "metadata": {"origin": "research_job_report", "job_id": job_id},
+                "metadata": {"origin": origin, **metadata},
                 "state": "queued", "assistant_message_id": None,
                 "error_code": None,
             }

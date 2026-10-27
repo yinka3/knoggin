@@ -7,6 +7,7 @@ from dataclasses import asdict
 from datetime import datetime
 from uuid import UUID
 
+from loguru import logger
 from pydantic import ValidationError
 from starlette.responses import JSONResponse
 from starlette.routing import Route
@@ -247,6 +248,31 @@ def _folder_preview(preview):
     }
 
 
+async def _check_notice_chat(request, session_id):
+    """None when the chat may receive the import notice, else the error."""
+
+    if session_id is None:
+        return None
+    try:
+        await request.app.state.runtime.sessions.document_notices.check_chat(
+            project_id=request.path_params["project_id"], session_id=session_id,
+        )
+    except ValueError:
+        return _error("session_not_found", "Session is not an open chat in this project", 422)
+    return None
+
+
+async def _notify_when_indexed(request, session_id, folder_name, document_ids):
+    # The documents are admitted either way; a lost notice must not fail the upload.
+    try:
+        await request.app.state.runtime.sessions.document_notices.watch(
+            project_id=request.path_params["project_id"], session_id=session_id,
+            label=folder_name, document_ids=document_ids,
+        )
+    except Exception:
+        logger.exception("Folder import notice was not started")
+
+
 async def folder_intake(request):
     if error := await _project(request):
         return error
@@ -265,6 +291,8 @@ async def folder_intake(request):
         result = _folder_preview(preview)
         if request.url.path.endswith("/preview"):
             return JSONResponse(result)
+        if error := await _check_notice_chat(request, payload.session_id):
+            return error
 
         content_by_path = {
             normalize_relative_path(entry.relative_path, entry.relative_path): entry.content
@@ -287,7 +315,12 @@ async def folder_intake(request):
                     "error": json.loads(public_error.body)["error"],
                 })
         result.update({"accepted": accepted, "failed": failed})
-        return JSONResponse(result)
+    if payload.session_id and accepted:
+        await _notify_when_indexed(
+            request, payload.session_id, payload.folder_name,
+            [row["document_id"] for row in accepted],
+        )
+    return JSONResponse(result)
 
 
 def _staged_public(intake):
@@ -324,6 +357,8 @@ async def create_staged_folder(request):
         payload = StagedFolderCreate.model_validate(json.loads(body))
     except (ValidationError, ValueError, TypeError):
         return _error("invalid_folder", "Invalid folder manifest", 422)
+    if error := await _check_notice_chat(request, payload.session_id):
+        return error
     result = await _staged_error(
         request, lambda staging, project_id, _intake_id: staging.create(project_id, payload)
     )
@@ -392,7 +427,14 @@ async def commit_staged_folder(request):
                 project_id, intake_id, service, retry_failed=body.get("retry_failed", False)
             ),
         )
-    return result if isinstance(result, JSONResponse) else JSONResponse(_staged_public(result))
+    if isinstance(result, JSONResponse):
+        return result
+    batch = await request.app.state.folder_staging.take_finished_batch(
+        request.path_params["project_id"], request.path_params["intake_id"]
+    )
+    if batch is not None:
+        await _notify_when_indexed(request, *batch)
+    return JSONResponse(_staged_public(result))
 
 
 async def inspect_ocr(request):

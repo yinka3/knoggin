@@ -8,6 +8,7 @@ from typing import Awaitable, Callable, Protocol
 from uuid import uuid4
 
 from common.conf.domain_config import CompiledDomain
+from common.schema.message_origins import BACKGROUND_REPORT_ORIGINS
 from common.schema.semantic_window import (
     SemanticWindowClaimResult,
     SemanticWindowMessage,
@@ -339,8 +340,8 @@ class SemanticWindowAdmission:
         assistant_id = row.get("assistant_message_id")
         if outcome in {"failed", "cancelled"}:
             return _SkippedExchange()
-        if row.get("user_origin") == "research_job_report":
-            # A job report repeats the job's own chat, which is memory already.
+        if row.get("user_origin") in BACKGROUND_REPORT_ORIGINS:
+            # A report repeats work recorded elsewhere, such as a job's chat.
             return _SkippedExchange()
         if outcome in {"assistant_final", "clarification"}:
             if (

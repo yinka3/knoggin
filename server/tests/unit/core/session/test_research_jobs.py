@@ -41,8 +41,9 @@ class _Chat:
         self.runs.append({"content": message.content, **kwargs})
         return _Stream(self._events, self._gate)
 
-    async def queue_research_report(self, content, *, job_id):
-        self.reports.append((job_id, content))
+    async def queue_report(self, content, *, origin, metadata):
+        assert origin == "research_job_report"
+        self.reports.append((metadata["job_id"], content))
         return {"queue_id": "q"}
 
 

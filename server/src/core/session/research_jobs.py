@@ -199,7 +199,9 @@ class ResearchJobs:
                 "and offer to start it again."
             )
         try:
-            queued = await parent.queue_research_report(text, job_id=job["job_id"])
+            queued = await parent.queue_report(
+                text, origin="research_job_report", metadata={"job_id": job["job_id"]}
+            )
         except Exception:
             logger.exception("Research job {} report was not queued", job["job_id"])
             return

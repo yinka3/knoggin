@@ -85,6 +85,8 @@ class FolderIntake(BaseModel):
     folder_name: str = Field(min_length=1, max_length=512)
     files: list[FolderFile] = Field(min_length=1, max_length=1000)
     force_include_paths: list[str] = Field(default_factory=list, max_length=1000)
+    # A chat in this project to tell when the imported files finish indexing.
+    session_id: str | None = Field(None, min_length=1, max_length=200)
 
 
 class StagedFolderFile(BaseModel):
@@ -100,3 +102,5 @@ class StagedFolderCreate(BaseModel):
     folder_name: str = Field(min_length=1, max_length=512)
     files: list[StagedFolderFile] = Field(min_length=1, max_length=1000)
     force_include_paths: list[str] = Field(default_factory=list, max_length=1000)
+    # A chat in this project to tell when the imported files finish indexing.
+    session_id: str | None = Field(None, min_length=1, max_length=200)

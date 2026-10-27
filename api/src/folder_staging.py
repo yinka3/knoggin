@@ -64,6 +64,8 @@ class _Intake:
     preview: object | None = None
     scan_settings: object | None = None
     last_activity: float = field(default_factory=time.monotonic)
+    session_id: str | None = None
+    announced_document_ids: set[str] = field(default_factory=set)
 
     def public(self) -> dict:
         return {
@@ -147,7 +149,7 @@ class FolderStaging:
                 intake_id=intake_id, project_id=project_id,
                 folder_name=payload.folder_name.strip(),
                 force_include_paths=force_include_paths,
-                files=files, directory=directory,
+                files=files, directory=directory, session_id=payload.session_id,
             )
             self._intakes[intake_id] = intake
             return intake.public()
@@ -234,6 +236,31 @@ class FolderStaging:
             intake.scan_settings = settings
             intake.status = "previewed"
             return preview
+
+    async def take_finished_batch(
+        self, project_id: str, intake_id: str
+    ) -> tuple[str, str, list[str]] | None:
+        """Once the intake is complete, its accepted documents not yet handed
+        out, with the chat to tell. Commit returns "complete" again on later
+        calls, and a retry can accept more files after that, so each document
+        is handed out once."""
+
+        async with self._lock:
+            intake = self._intakes.get(intake_id)
+            if (
+                intake is None or intake.project_id != project_id
+                or intake.status != "complete" or intake.session_id is None
+            ):
+                return None
+            document_ids = [
+                str(item.result["document_id"]) for item in intake.files.values()
+                if item.status == "accepted" and item.result
+                and str(item.result["document_id"]) not in intake.announced_document_ids
+            ]
+            if not document_ids:
+                return None
+            intake.announced_document_ids.update(document_ids)
+            return intake.session_id, intake.folder_name, document_ids
 
     async def commit(self, project_id: str, intake_id: str, service, *, retry_failed: bool):
         async with self._lock:

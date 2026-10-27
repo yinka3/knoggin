@@ -228,6 +228,13 @@ class ChatCompactionSettings(ConfigModel):
     max_input_tokens: int = Field(60_000, ge=1_000, le=500_000)
 
 
+class IngestionNoticeSettings(ConfigModel):
+    # How often a folder import's documents are checked, and how long a chat
+    # waits for them before it is told the import is still running.
+    poll_seconds: float = Field(10.0, ge=1.0, le=3_600.0, allow_inf_nan=False)
+    max_wait_minutes: int = Field(24 * 60, ge=1, le=7 * 24 * 60)
+
+
 class ToolSettings(ConfigModel):
     # Groups a chat gets when neither it nor its agent picks tools. Web stays
     # opt-in (research mode adds it); maintenance belongs to the Maintenance agent.
@@ -244,6 +251,7 @@ class DeveloperSettings(ConfigModel):
     research_jobs: ResearchJobSettings = Field(default_factory=ResearchJobSettings)
     tools: ToolSettings = Field(default_factory=ToolSettings)
     chat_compaction: ChatCompactionSettings = Field(default_factory=ChatCompactionSettings)
+    ingestion_notices: IngestionNoticeSettings = Field(default_factory=IngestionNoticeSettings)
     entity_resolution: EntityResolutionSettings = Field(
         default_factory=EntityResolutionSettings
     )

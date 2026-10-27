@@ -1821,7 +1821,10 @@ async def test_research_report_runs_on_an_idle_chat_and_is_marked(context):
     ctx.agent_orchestrator = orchestrator
 
     # No run is active: a follow-up would be refused, a report is not.
-    queued = await ctx.queue_research_report("Background research job-1 finished.", job_id="job-1")
+    queued = await ctx.queue_report(
+        "Background research job-1 finished.",
+        origin="research_job_report", metadata={"job_id": "job-1"},
+    )
     assert queued is not None
 
     async def completed():
