@@ -22,6 +22,17 @@ async def _seed(pg):
     )
 
 
+async def _report_turn_ran(pg, key, value):
+    """What a report turn leaves behind once it runs: its saved message."""
+
+    await pg.execute(
+        """INSERT INTO public.messages
+               (user_name, session_id, message_id, project_id, role, content, metadata)
+           VALUES ('ada', 'parent', 1, 'p1', 'user', 'report', %s::jsonb)""",
+        (f'{{"{key}": "{value}"}}',),
+    )
+
+
 def _with_pg(sessions, pg):
     sessions.pg = pg
     sessions.user_name = "ada"
@@ -48,12 +59,19 @@ async def test_a_job_cut_off_by_shutdown_runs_again_after_restart(real_postgres_
     [(job_id, report)] = restarted_sessions.parent.reports
     assert job_id == job["job_id"] and "Postgres wins on joins." in report
 
-    # A third start finds nothing left to do.
+    # Queued is not delivered: a restart before the report turn ran sends it again.
     again = _with_pg(_Sessions(), real_postgres_client)
     third = ResearchJobs(again, SimpleNamespace(config=RootConfig()))
     await third.resume()
-    assert third._tasks == {} and again.parent.reports == []
-    assert third.get(job["job_id"])["report_delivered"] is True
+    await asyncio.gather(*list(third._tasks.values()))
+    assert [job_id for job_id, _ in again.parent.reports] == [job["job_id"]]
+
+    # Once the turn ran, the next start finds nothing left to do.
+    await _report_turn_ran(real_postgres_client, "job_id", job["job_id"])
+    last = _with_pg(_Sessions(), real_postgres_client)
+    fourth = ResearchJobs(last, SimpleNamespace(config=RootConfig()))
+    await fourth.resume()
+    assert fourth._tasks == {} and last.parent.reports == []
 
 
 @pytest.mark.storage
@@ -77,7 +95,7 @@ async def test_a_folder_notice_survives_a_restart(real_postgres_client, monkeypa
 
     class Chat:
         async def queue_report(self, content, *, origin, metadata):
-            reports.append(content)
+            reports.append((content, metadata))
 
     async def chat(_session_id):
         return Chat()
@@ -93,5 +111,17 @@ async def test_a_folder_notice_survives_a_restart(real_postgres_client, monkeypa
     await after.resume()
     await asyncio.wait_for(asyncio.gather(*after._tasks), timeout=5)
 
-    assert reports and "1 of 1 files are ready" in reports[0]
+    assert len(reports) == 1 and "1 of 1 files are ready" in reports[0][0]
+
+    # Queued is not delivered: a restart before the notice turn ran sends it again.
+    again = DocumentBatchNotices(sessions, config)
+    await again.resume()
+    await asyncio.wait_for(asyncio.gather(*again._tasks), timeout=5)
+    assert len(reports) == 2
+
+    # Once the turn ran, the next start just clears the record.
+    await _report_turn_ran(pg, "work_id", reports[-1][1]["work_id"])
+    last = DocumentBatchNotices(sessions, config)
+    await last.resume()
+    assert not last._tasks and len(reports) == 2
     assert await pg.fetch_all("SELECT 1 FROM public.background_work WHERE kind = 'folder_notice'") == []

@@ -20,7 +20,7 @@ _MAX_LISTED_FAILURES = 20
 class DocumentBatchNotices:
     """Watch documents until each is indexed, deleted, or failed with no retry
     left, then queue one report turn in the chat that asked. Each watch is
-    recorded until its notice is queued, so a restart resumes it."""
+    recorded until its notice is saved in the chat, so a restart resumes it."""
 
     def __init__(self, sessions: SessionManager, config_manager=None) -> None:
         self._sessions = sessions
@@ -52,10 +52,16 @@ class DocumentBatchNotices:
         self._launch(work_id, project_id, session_id, label, document_ids)
 
     async def resume(self) -> None:
-        """After a restart, keep watching every batch not yet reported."""
+        """After a restart, keep watching every batch whose notice is not
+        saved in its chat yet."""
 
         for row in await self._store.load("folder_notice"):
             payload = row["payload"]
+            if row["state"] == "reported" and await self._store.report_in_chat(
+                row["session_id"], "work_id", row["work_id"]
+            ):
+                await self._store.delete(row["work_id"])
+                continue
             self._launch(
                 row["work_id"], row["project_id"], row["session_id"],
                 payload["label"], payload["document_ids"],
@@ -106,8 +112,16 @@ class DocumentBatchNotices:
                     break
                 await asyncio.sleep(settings.poll_seconds)
                 waited += settings.poll_seconds
-            await self._report(session_id, label, _report_text(label, document_ids, rows))
-            await self._store.delete(work_id)
+            text = _report_text(label, document_ids, rows)
+            if not await self._report(work_id, session_id, label, text):
+                await self._store.delete(work_id)  # The chat was deleted.
+                return
+            # Queued only in memory until the turn runs; the next start checks
+            # the chat and sends it again if a restart came first.
+            await self._store.save(
+                "folder_notice", work_id, project_id=project_id, session_id=session_id,
+                state="reported", payload={"label": label, "document_ids": document_ids},
+            )
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -122,13 +136,18 @@ class DocumentBatchNotices:
             (project_id, document_ids),
         )
 
-    async def _report(self, session_id: str, label: str, text: str) -> None:
+    async def _report(self, work_id: str, session_id: str, label: str, text: str) -> bool:
+        """Queue the notice; False when the chat is gone (the documents are
+        still in the project)."""
+
         session = await self._sessions.get_or_resume_session(session_id)
         if session is None:
-            return  # The chat was deleted; the documents are still in the project.
+            return False
         await session.queue_report(
-            text, origin="folder_ingestion_report", metadata={"label": label[:200]},
+            text, origin="folder_ingestion_report",
+            metadata={"label": label[:200], "work_id": work_id},
         )
+        return True
 
 
 def _finished(row: dict) -> bool:

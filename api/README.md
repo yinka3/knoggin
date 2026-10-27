@@ -192,8 +192,9 @@ For an existing project, replace `{project_id}` in these routes:
   `developer_settings.research_jobs.max_running_per_project` (default 3) run at
   once per project and the rest wait; `max_links` (default 50) bounds one job.
   Jobs are recorded in `background_work`: after a restart, a job that was cut
-  off runs again from the start, and a finished job's report that had not
-  reached its chat is sent. Existing databases need
+  off runs again from the start, and a finished job's report whose turn is not
+  saved in its chat is sent again. `report_delivered` means the report was
+  queued in the chat; it can still be lost to a restart until that turn runs. Existing databases need
   `server/src/infrastructure/background_work_upgrade.sql`.
 
 CORS currently permits `localhost:3000` and `127.0.0.1:3000`.

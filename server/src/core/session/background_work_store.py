@@ -47,3 +47,17 @@ class BackgroundWorkStore:
             (self._user_name, kind, limit),
         )
         return list(reversed(rows))
+
+    async def report_in_chat(self, session_id: str, key: str, value: str) -> bool:
+        """Whether a report turn tagged `key=value` was saved in the chat. A
+        report is only queued in memory until its turn runs, so after a
+        restart this, not the queued flag, says whether it arrived."""
+
+        row = await self._postgres.fetch_one(
+            """SELECT 1 FROM public.messages
+               WHERE user_name = %s AND session_id = %s AND role = 'user'
+                 AND metadata->>%s = %s
+               LIMIT 1""",
+            (self._user_name, session_id, key, value),
+        )
+        return row is not None

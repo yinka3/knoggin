@@ -66,7 +66,7 @@ async def test_the_chat_hears_once_every_file_is_indexed_or_out_of_retries(monke
     await asyncio.gather(*notices._tasks)
 
     [(origin, metadata, text)] = chat.reports
-    assert origin == "folder_ingestion_report" and metadata == {"label": "notes"}
+    assert origin == "folder_ingestion_report" and metadata["label"] == "notes"
     assert "1 of 2 files are ready" in text
     assert "notes/b.md: PDF is encrypted" in text
 

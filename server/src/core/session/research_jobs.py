@@ -107,7 +107,9 @@ class ResearchJobs:
                 self._launch(job)
             else:
                 self._remember(job)
-                if not job["report_delivered"] and job["state"] != "cancelled":
+                if job["state"] != "cancelled" and not await self._store.report_in_chat(
+                    job["parent_session_id"], "job_id", job["job_id"]
+                ):
                     self._tasks[job["job_id"]] = asyncio.create_task(
                         self._deliver(job, report), name=f"research-report:{job['job_id']}"
                     )
