@@ -498,6 +498,7 @@ class SessionRuntime:
                     requested_model=model,
                     session_model=run_settings.model,
                     fallback_model=self.resources.llm_service.agent_model,
+                    llm=self.resources.llm_service,
                 )
                 run_settings = replace(
                     run_settings,

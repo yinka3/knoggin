@@ -12,6 +12,7 @@ from typing import (
     Union,
 )
 
+import httpx
 import instructor
 import tiktoken
 from instructor.core import AsyncInstructor, InstructorRetryException
@@ -63,6 +64,15 @@ def local_thinking_warning(base_url: str | None, thinking: str) -> str | None:
         "agent step and memory call, so responses will be several times slower. "
         "Use planning_only for faster responses."
     )
+
+
+def _reported_window(row: Any) -> int | None:
+    # OpenRouter says context_length; vLLM says max_model_len.
+    for key in ("context_length", "max_model_len", "context_window"):
+        value = getattr(row, key, None)
+        if isinstance(value, int) and value > 0:
+            return value
+    return None
 
 
 def system_text(system: SystemPrompt) -> str:
@@ -135,6 +145,9 @@ class LLMService:
         # Process-lifetime prompt cache counters per model, for visibility.
         self._prompt_cache: dict[str, dict[str, int]] = {}
         self._client_usage: dict[AsyncOpenAI, int] = {}
+        # Context sizes from the provider's model list, fetched once.
+        self._listed_windows: dict[str, int | None] | None = None
+        self._serves_ollama_ps: bool | None = None
         self._active_requests: set[asyncio.Task] = set()
         self._closed = False
         self._close_lock = asyncio.Lock()
@@ -321,6 +334,8 @@ class LLMService:
         if connection_changed:
             self._raw_client = replacement_raw
             self._client = replacement_instructor
+            self._listed_windows = None
+            self._serves_ollama_ps = None
             self._retire_client(previous_raw)
             logger.info(f"LLMService: API configuration updated ({self._base_url})")
 
@@ -415,6 +430,49 @@ class LLMService:
         elif reasoning not in (None, "low"):
             raise ValueError(f"Unsupported reasoning level: {reasoning}")
         return body
+
+    async def context_window(self, model: str) -> int | None:
+        """The model's context size in tokens, or None when the provider
+        does not say. Ollama reports the size it actually serves only while
+        the model is loaded, so that answer is read fresh each time."""
+
+        client = self._raw_client
+        if client is None:
+            return None
+        if not self._is_openrouter and self._serves_ollama_ps is not False:
+            loaded = await self._ollama_loaded_window(model)
+            if loaded is not None:
+                return loaded
+        if self._listed_windows is None:
+            try:
+                page = await client.models.list()
+            except Exception as exc:
+                logger.debug("LLMService: model list unavailable ({})", exc)
+                return None
+            self._listed_windows = {
+                str(row.id): _reported_window(row) for row in page.data
+            }
+        return self._listed_windows.get(model)
+
+    async def _ollama_loaded_window(self, model: str) -> int | None:
+        root = self._base_url.rstrip("/").removesuffix("/v1")
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as http:
+                response = await http.get(f"{root}/api/ps")
+            response.raise_for_status()
+            rows = response.json()["models"]
+        except Exception:
+            # Not Ollama (or not reachable); stop asking until the URL changes.
+            if self._serves_ollama_ps is None:
+                self._serves_ollama_ps = False
+            return None
+        self._serves_ollama_ps = True
+        names = {model, f"{model}:latest"}
+        for row in rows:
+            if row.get("name") in names or row.get("model") in names:
+                value = row.get("context_length")
+                return value if isinstance(value, int) and value > 0 else None
+        return None
 
     def count_tokens(self, text: str) -> int:
         if not text:

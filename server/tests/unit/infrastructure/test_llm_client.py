@@ -799,3 +799,68 @@ def test_local_models_are_fast_by_default_and_full_thinking_is_warned():
     assert "slower" in local_thinking_warning(local, "provider_default")
     # OpenRouter is unaffected by local thinking control.
     assert local_thinking_warning(None, "provider_default") is None
+
+
+def _service_over(monkeypatch, base_url, respond):
+    """An LLMService whose OpenAI client and Ollama probe share one fake server."""
+    from openai import AsyncOpenAI as RealAsyncOpenAI
+
+    transport = httpx.MockTransport(respond)
+
+    class FakeServerClient(httpx.AsyncClient):
+        def __init__(self, **kwargs):
+            super().__init__(transport=transport, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeServerClient)
+    monkeypatch.setattr(
+        "infrastructure.llm_client.AsyncOpenAI",
+        lambda **kwargs: RealAsyncOpenAI(**kwargs, http_client=FakeServerClient()),
+    )
+    return LLMService(api_key="key", base_url=base_url)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_ollama_context_window_is_the_loaded_size_not_the_model_maximum(monkeypatch):
+    loaded = []
+    paths = []
+
+    def respond(request):
+        paths.append(request.url.path)
+        if request.url.path == "/api/ps":
+            return httpx.Response(200, json={"models": loaded})
+        return httpx.Response(200, json={"object": "list", "data": [
+            {"id": "qwen3:latest", "object": "model", "created": 0, "owned_by": "library"},
+        ]})
+
+    service = _service_over(monkeypatch, "http://localhost:11434/v1", respond)
+
+    # Not loaded yet: Ollama's model list has no size, so the size is unknown.
+    assert await service.context_window("qwen3") is None
+    loaded.append({"name": "qwen3:latest", "model": "qwen3:latest", "context_length": 8192})
+    assert await service.context_window("qwen3") == 8192
+    assert paths.count("/v1/models") == 1
+    await service.close()
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_listed_context_window_is_fetched_once_and_ollama_probe_stops(monkeypatch):
+    paths = []
+
+    def respond(request):
+        paths.append(request.url.path)
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"object": "list", "data": [
+                {"id": "big", "object": "model", "created": 0, "owned_by": "x",
+                 "max_model_len": 262_144},
+            ]})
+        return httpx.Response(404)
+
+    service = _service_over(monkeypatch, "http://vllm.local/v1", respond)
+
+    assert await service.context_window("big") == 262_144
+    assert await service.context_window("big") == 262_144
+    assert await service.context_window("unknown") is None
+    assert paths == ["/api/ps", "/v1/models"]
+    await service.close()

@@ -3,7 +3,14 @@
 from collections.abc import Mapping
 from typing import Dict, Literal
 
-from pydantic import Field, FiniteFloat, StrictInt, field_validator, model_validator
+from pydantic import (
+    Field,
+    FiniteFloat,
+    StrictBool,
+    StrictInt,
+    field_validator,
+    model_validator,
+)
 
 from common.schema.config import ConfigModel
 
@@ -14,11 +21,17 @@ PromptCategory = Literal[
 
 
 class PromptMemoryBudget(ConfigModel):
-    """One model-independent input budget for an admitted agent run."""
+    """The input budget for an admitted agent run."""
 
+    # When the provider reports the model's context size, the budget is
+    # rescaled so input uses 60% of it, up to the ceiling, and each share grows
+    # or shrinks by the same factor. These numbers then only set the
+    # proportions. Turn off to use them exactly. The ceiling (60% of 256K)
+    # keeps 1M-token models from sending huge, slow prompts on every step.
+    fit_to_model: StrictBool = True
+    max_fitted_input_tokens: StrictInt = Field(157_286, ge=1_024)
     # About 6K tokens are fixed (system prompt and tool schemas) before any
-    # memory is added; the shares below leave real room for Context, the run's
-    # own results, and history on long-context models.
+    # memory is added.
     input_tokens: StrictInt = Field(48_000, ge=1_024)
     response_reserve_tokens: StrictInt = Field(2_000, ge=256)
     project_context_tokens: StrictInt = Field(12_000, ge=0)

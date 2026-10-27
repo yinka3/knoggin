@@ -4,6 +4,29 @@ from collections.abc import Callable, Mapping
 
 from common.schema.agent.settings import PromptMemoryBudget
 
+# Input may use this share of the model's context; the rest is room for the
+# response, thinking, and tokenizer differences between Knoggin and the model.
+INPUT_SHARE_OF_CONTEXT = 0.6
+
+
+def fit_to_context(
+    budget: PromptMemoryBudget, context_window: int | None
+) -> PromptMemoryBudget:
+    """Scale the budget to the model, keeping the configured proportions."""
+    if not budget.fit_to_model or not context_window:
+        return budget
+    input_tokens = max(1_024, min(
+        int(context_window * INPUT_SHARE_OF_CONTEXT), budget.max_fitted_input_tokens
+    ))
+    if input_tokens == budget.input_tokens:
+        return budget
+    scale = input_tokens / budget.input_tokens
+    shares = {
+        f"{key}_tokens": int(getattr(budget, f"{key}_tokens") * scale)
+        for key in budget.spare_priority
+    }
+    return budget.model_copy(update={"input_tokens": input_tokens, **shares})
+
 
 class PromptBudgetExceeded(ValueError):
     """The fixed prompt alone cannot fit the configured input budget."""

@@ -23,6 +23,7 @@ from common.schema.document import (
 from common.schema.source.references import SourceReferenceCandidate
 from core.agent.agent_manager import AgentManager
 from core.agent.executor import AgentExecutor
+from core.agent.prompt_budget import fit_to_context
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 from core.agent.sources.document_selection import build_document_selection_candidate
 from core.agent.sources.pasted_text import build_pasted_text_candidates
@@ -60,7 +61,7 @@ class AgentOrchestrator:
     async def resolve_run_policy(
         self, *, config, requested_agent_id: str | None,
         session_agent_id: str | None, requested_model: str | None,
-        session_model: str | None, fallback_model: str,
+        session_model: str | None, fallback_model: str, llm=None,
     ) -> tuple[AgentIdentity, str, PromptMemoryBudget]:
         """Freeze the identity, model, and prompt budget before accepting a run."""
         identity = deepcopy(await self._resolve_agent_identity(
@@ -72,6 +73,8 @@ class AgentOrchestrator:
         budget = config.developer_settings.prompt_memory.for_run(
             identity.config.id, selected_model
         )
+        if llm is not None and hasattr(llm, "context_window"):
+            budget = fit_to_context(budget, await llm.context_window(selected_model))
         return identity, selected_model, budget
 
     async def run_stream(
@@ -125,6 +128,7 @@ class AgentOrchestrator:
                     requested_model=model,
                     session_model=defaults.model,
                     fallback_model=context.llm.agent_model,
+                    llm=context.llm,
                 )
             agent_cfg = identity.config
             run_limits = AgentRunLimits.from_settings(

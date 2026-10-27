@@ -9,6 +9,7 @@ from common.schema.agent.settings import (
 from core.agent.prompt_budget import (
     PromptBudgetExceeded,
     allocate_memory,
+    fit_to_context,
     token_count,
 )
 
@@ -74,3 +75,26 @@ def test_trimmed_memory_tells_the_model_content_was_omitted():
     retrimmed = trim_to_tokens(head, 60, None)
     assert retrimmed.count("omitted to fit the prompt budget") == 1
     assert token_count(retrimmed, None) <= 60
+
+
+def test_budget_scales_to_the_model_context_and_keeps_proportions():
+    budget = PromptMemoryBudget()
+    large = fit_to_context(budget, 262_144)
+
+    assert large.input_tokens == int(262_144 * 0.6)
+    scale = large.input_tokens / budget.input_tokens
+    assert large.project_context_tokens == int(budget.project_context_tokens * scale)
+    assert large.conversation_tokens == int(budget.conversation_tokens * scale)
+    assert large.response_reserve_tokens == budget.response_reserve_tokens
+
+    # A 1M-token model stops at the ceiling instead of 629K per step.
+    assert fit_to_context(budget, 1_048_576).input_tokens == budget.max_fitted_input_tokens
+
+    small = fit_to_context(budget, 8_192)
+    assert small.input_tokens == int(8_192 * 0.6)
+    assert small.run_notebook_tokens < budget.run_notebook_tokens
+
+    # Unknown size, or the user opted out: the configured numbers stand.
+    assert fit_to_context(budget, None) is budget
+    fixed = PromptMemoryBudget(fit_to_model=False)
+    assert fit_to_context(fixed, 262_144) is fixed

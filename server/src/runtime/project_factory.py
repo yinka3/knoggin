@@ -278,6 +278,7 @@ class ProjectRuntimeFactory:
             token_counter=token_counter,
             token_counter_batch=getattr(resources.llm_service, "count_tokens_batch", None),
             episode_settings=developer_settings.jobs.episode,
+            model_context_window=self._extraction_context_window(resources.llm_service),
         )
         episode_generator = EpisodeGenerator(
             llm=resources.llm_service,
@@ -318,6 +319,18 @@ class ProjectRuntimeFactory:
                 "relationship_advisories"
             ),
         )
+
+    @staticmethod
+    def _extraction_context_window(llm):
+        lookup = getattr(llm, "context_window", None)
+        if lookup is None:
+            return None
+
+        async def window():
+            # Read the model at admission time; settings can change it.
+            return await lookup(llm.extraction_model)
+
+        return window
 
     def _create_conflict_discovery_job(
         self,

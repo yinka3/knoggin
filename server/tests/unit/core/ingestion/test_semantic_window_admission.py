@@ -1041,3 +1041,33 @@ async def test_explicit_retry_reuses_the_exhausted_window_without_reselection():
     assert completed.success is True
     assert admission_store.claims == []
     assert store.writes[0]["window_id"] == str(selected.window.window_id)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_small_extraction_model_lowers_the_window_target():
+    rows = [
+        _row(1, user_content="x" * 5, assistant_content="x" * 5),
+        _row(2, user_content="x" * 5, assistant_content="x" * 5),
+        _row(3, user_content="x" * 5, assistant_content="x" * 5),
+    ]
+
+    async def window():
+        return 30  # 40% of 30 tokens = a 12-token window
+
+    admission = SemanticWindowAdmission(
+        RecordingStore(rows),
+        IngestionSettings(semantic_window_tokens=128_000),
+        token_counter=lambda text: text.count("x"),
+        now_ms=lambda: 1_000,
+        model_context_window=window,
+    )
+
+    selected = await admission.select(
+        user_name="ada", project_id="project-1", domain=make_domain_config().compile(),
+    )
+
+    assert selected is not None
+    assert selected.close_reason == "target_crossed"
+    assert [member.message_id for member in selected.messages] == [1, 10_001, 2, 10_002]
+    assert selected.window.policy_snapshot["admission_policy"]["semantic_window_tokens"] == 12

@@ -126,6 +126,8 @@ Knoggin works with any OpenAI-compatible server, such as Ollama, LM Studio, or v
 
    A larger context uses more GPU memory; choose the largest your hardware handles. If a model processes far fewer tokens than Knoggin sent, Knoggin stops with an error that names this setting instead of continuing with a cut prompt.
 
+   Knoggin sizes its prompts to the model. Once a model is loaded, Ollama reports the context it serves, and Knoggin gives the agent 60% of it for input and shrinks memory-building windows to fit the extraction model. OpenRouter and vLLM report sizes for every model, so this works from the first request. With large models, agent input stops growing at about 157K tokens, so 1M-token models stay fast.
+
 2. Choose models in the `llm` settings, either through `PATCH /v1/settings/llm` or in `knoggin.yml`. Knoggin uses a separate model for each kind of work, so you can match each one to the job:
 
    - `agent_model` answers your questions and calls tools. It needs tool-calling support (for example Qwen 2.5/3 or Llama 3.1 and later), and a stronger model gives better answers.

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from itertools import batched
 from time import time
-from typing import Callable, Protocol
+from typing import Awaitable, Callable, Protocol
 from uuid import uuid4
 
 from common.conf.domain_config import CompiledDomain
@@ -35,6 +35,7 @@ class SemanticWindowStore(Protocol):
 
 TokenCounter = Callable[[str], int]
 BatchTokenCounter = Callable[[list[str]], list[int]]
+ContextWindowLookup = Callable[[], Awaitable[int | None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,10 +64,16 @@ class _SkippedExchange:
 class SemanticWindowAdmission:
     """Select whole, FIFO-safe exchanges without becoming a semantic writer.
 
-    The 128K setting is the only size control.  A crossing exchange is included
-    whole and ends selection immediately; the retained overfill documents an
-    unavoidable boundary rather than a second configurable cap.
+    The 128K setting is the size control, lowered to fit the extraction model
+    when the provider reports a smaller context.  A crossing exchange is
+    included whole and ends selection immediately; the retained overfill
+    documents an unavoidable boundary rather than a second configurable cap.
     """
+
+    # The Context stage sends the whole window plus the current Context and
+    # its instructions in one call, so the window may use this share of the
+    # extraction model's context.
+    WINDOW_SHARE_OF_CONTEXT = 0.4
 
     IDLE_FLUSH_SECONDS = 300
     TOKEN_ESTIMATOR = "llm.count_tokens"
@@ -83,6 +90,7 @@ class SemanticWindowAdmission:
         token_counter_batch: BatchTokenCounter | None = None,
         episode_settings: EpisodeSettings | None = None,
         now_ms: Callable[[], int] | None = None,
+        model_context_window: ContextWindowLookup | None = None,
     ) -> None:
         if not callable(token_counter):
             raise TypeError("Semantic window admission requires an LLM token counter")
@@ -92,8 +100,18 @@ class SemanticWindowAdmission:
         self._token_counter = token_counter
         self._token_counter_batch = token_counter_batch
         self._now_ms = now_ms or (lambda: int(time() * 1000))
+        self._model_context_window = model_context_window
         self.update_settings(settings)
         self.update_episode_settings(episode_settings or EpisodeSettings())
+
+    async def _target_tokens(self) -> int:
+        target = self._settings.semantic_window_tokens
+        if self._model_context_window is None:
+            return target
+        window = await self._model_context_window()
+        if not window:
+            return target
+        return max(1, min(target, int(window * self.WINDOW_SHARE_OF_CONTEXT)))
 
     def update_settings(self, settings: IngestionSettings) -> None:
         if not isinstance(settings, IngestionSettings):
@@ -132,7 +150,7 @@ class SemanticWindowAdmission:
             return None
 
         selected: list[_Exchange] = []
-        target = self._settings.semantic_window_tokens
+        target = await self._target_tokens()
         close_reason: str | None = None
         selected_token_count = 0
         if self._token_counter_batch is None:
