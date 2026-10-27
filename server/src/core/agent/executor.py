@@ -230,6 +230,9 @@ class AgentExecutor:
         # The executor, not the model, owns phase transitions.
         needs_replan = False
         needs_final_synthesis = False
+        # The answer submitted before synthesis was scheduled. Synthesis only
+        # improves it; if that pass fails, this answer is still the result.
+        synthesis_draft: tuple[str, ArtifactDraft | None] | None = None
         needs_deep_research_gap_review = self.ctx.needs_deep_research_gap_review()
 
         while (
@@ -455,22 +458,11 @@ class AgentExecutor:
                             logger.info(
                                 "AgentExecutor: evidence is ready; scheduling synthesis."
                             )
+                            synthesis_draft = (content, artifact)
                             needs_final_synthesis = True
                             break
 
-                        artifact = self._complete_artifact(content, artifact)
-                        response = self._wrap_final_response(
-                            content=content,
-                            usage=dict(self.ctx.usage),
-                            sources_consulted=list(self.ctx.source_candidates),
-                            artifact=(
-                                artifact.model_dump(mode="json")
-                                if artifact is not None
-                                else None
-                            ),
-                        )
-                        await self._finalize_successfully(content)
-                        yield response
+                        yield await self._final_response(content, artifact)
                         return
 
                     clarification = next(
@@ -562,6 +554,13 @@ class AgentExecutor:
                 )
                 step_failed = True
 
+            if step_failed and is_final_synthesis and synthesis_draft is not None:
+                # Measured runs called tools that do not exist while synthesizing
+                # and then failed the whole run; the draft was a valid answer.
+                logger.info("AgentExecutor: synthesis failed; keeping the submitted answer.")
+                yield await self._final_response(*synthesis_draft)
+                return
+
             if step_failed:
                 if (
                     self.ctx.consecutive_errors
@@ -572,11 +571,27 @@ class AgentExecutor:
                 needs_replan = True
                 continue
 
+        if synthesis_draft is not None:
+            yield await self._final_response(*synthesis_draft)
+            return
         # Fallback if max attempts reached
         if self.ctx.consecutive_errors:
             yield self._terminal_error()
             return
         yield await self._fallback()
+
+    async def _final_response(
+        self, content: str, artifact: ArtifactDraft | None
+    ) -> InternalAgentStreamEvent:
+        artifact = self._complete_artifact(content, artifact)
+        response = self._wrap_final_response(
+            content=content,
+            usage=dict(self.ctx.usage),
+            sources_consulted=list(self.ctx.source_candidates),
+            artifact=artifact.model_dump(mode="json") if artifact is not None else None,
+        )
+        await self._finalize_successfully(content)
+        return response
 
     def _tool_schemas_for_phase(self, phase: _AgentPhase) -> list[dict]:
         """Return the model-visible tools allowed for one executor phase."""

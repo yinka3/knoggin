@@ -1783,21 +1783,21 @@ async def test_executor_rejects_hidden_synthesis_write_without_dispatch(monkeypa
 
     events = [event async for event in executor._execute_run()]
 
-    assert events[-1]["event"] == "clarification"
+    # The rejected synthesis falls back to the answer submitted before it.
+    assert events[-1]["event"] == "response"
+    assert events[-1]["data"]["content"] == "Draft answer."
+    assert secret not in str(events[-1]["data"])
     assert [
         event["data"]["tool"] for event in events if event["event"] == "tool_start"
     ] == ["search_knowledge_messages"]
     assert dispatched == [("search_knowledge_messages", {"query": "profile", "limit": 3})]
     assert run.call_count == 1
-    assert len(llm.calls) == 4
+    assert len(llm.calls) == 3
     assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[2]["user"]
     assert [schema["function"]["name"] for schema in llm.calls[2]["tools"]] == [
         "request_clarification",
         "submit_answer",
     ]
-    assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[3]["user"]
-    assert "Returned tool is not allowed during SYNTHESIZE." in llm.calls[3]["user"]
-    assert secret not in llm.calls[3]["user"]
 
 
 @pytest.mark.no_network
