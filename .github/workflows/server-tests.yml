@@ -5,9 +5,11 @@ on:
     branches:
       - main
       - aadedewe/refactor
+      - aadedewe/api
   pull_request:
     paths:
       - "server/**"
+      - "api/**"
       - "docker/**"
       - "docker-compose.yml"
       - "pyproject.toml"
@@ -29,9 +31,6 @@ permissions:
 concurrency:
   group: server-ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-
-env:
-  KNOGGIN_TEST_DATABASE_URL: postgresql://knoggin:knoggin@localhost:5432/knoggin_db
 
 jobs:
   package:
@@ -142,6 +141,36 @@ jobs:
           name: server-coverage-fast
           path: server/coverage-fast.xml
           if-no-files-found: ignore
+
+  # The API tests use fake runtimes, so they need no database or models.
+  api:
+    name: API tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install workspace dependencies
+        run: uv sync --frozen --dev
+
+      - name: Run API tests
+        working-directory: api
+        run: uv run pytest -q
+
+      - name: Run API Ruff
+        working-directory: api
+        run: uv run ruff check src tests
 
   # Run the same service-free contracts on Windows so handle-based filesystem
   # behavior contributes coverage and receives its own test gate.
