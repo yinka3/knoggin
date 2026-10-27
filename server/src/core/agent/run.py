@@ -239,6 +239,7 @@ class AgentRunLimits:
     max_accumulated_actions: int = 12
     max_accumulated_next_steps: int = 12
     max_accumulated_summary_chars: int = 4000
+    max_passage_chars: int = 12_000
     max_notebook_render_tokens: int = 10000
     max_consecutive_errors: int = 3
     project_briefing_mode: ProjectBriefingMode = "adaptive"
@@ -279,6 +280,7 @@ class AgentRunLimits:
             max_accumulated_actions=settings.max_accumulated_actions,
             max_accumulated_next_steps=settings.max_accumulated_next_steps,
             max_accumulated_summary_chars=settings.max_accumulated_summary_chars,
+            max_passage_chars=settings.max_passage_chars,
             max_notebook_render_tokens=(memory_budget or PromptMemoryBudget()).input_tokens,
             max_consecutive_errors=settings.max_consecutive_errors,
             project_briefing_mode=briefing_mode,

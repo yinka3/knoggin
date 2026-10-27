@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -74,6 +75,7 @@ class NotebookCapacity:
     max_actions: int = 12
     max_next_steps: int = 12
     max_summary_chars: int = 4000
+    max_passage_chars: int = 12_000
     max_render_tokens: int = 10000
 
     @classmethod
@@ -100,6 +102,7 @@ class NotebookCapacity:
             max_summary_chars=_positive_limit(
                 limits, "max_accumulated_summary_chars", 4000
             ),
+            max_passage_chars=_positive_limit(limits, "max_passage_chars", 12_000),
             max_render_tokens=_positive_limit(
                 limits, "max_notebook_render_tokens", 10000
             ),
@@ -976,10 +979,27 @@ class RunNotebook:
         )
 
     def validates_research_reference(self, reference: str) -> bool:
-        """Accept admitted evidence references but reject discovery-only snippets."""
+        """Accept admitted evidence references but reject discovery-only snippets.
 
+        The model cites what the rendered notebook shows (WR1, often followed by
+        a title), so those handles resolve to their records here.
+        """
+
+        reference = self._record_reference(reference)
         section = self._ref_section(reference)
         return section != "web_discoveries" and self._known_reference(reference)
+
+    def _record_reference(self, reference: str) -> str:
+        if not isinstance(reference, str) or self._known_reference(reference):
+            return reference
+        from core.agent.notebook_renderer import rendered_handles
+
+        handles = rendered_handles(self)
+        text = reference.strip()
+        for candidate in (text, re.split(r"[\s:,]", text, maxsplit=1)[0]):
+            if candidate in handles:
+                return handles[candidate]
+        return reference
 
     def _dependency_references(self, section: str, item: dict[str, Any]) -> set[str]:
         dependencies: set[str] = set()

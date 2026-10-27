@@ -53,7 +53,7 @@ _REFERENCE_PREFIXES = {
 }
 
 _SHORT_TEXT_LIMIT = 320
-_PASSAGE_TEXT_LIMIT = 1_200
+_PASSAGE_TEXT_LIMIT = 12_000
 
 NOTEBOOK_TEMPLATE = """RUN NOTEBOOK
 {% if summary.text %}Summary: {{ summary.text }}{% if summary.references %} ({{ summary.references|join(', ') }}){% endif %}
@@ -226,13 +226,15 @@ def _safe_text(value: object, *, limit: int = _SHORT_TEXT_LIMIT) -> str:
     return text if len(text) <= limit else f"{text[: limit - 1]}…"
 
 
-def _passage_text(value: object) -> tuple[str, bool]:
+def _passage_text(
+    value: object, limit: int = _PASSAGE_TEXT_LIMIT
+) -> tuple[str, bool]:
     """Render a useful but bounded evidence passage and report display clipping."""
 
     if value is None:
         return "", False
     text = str(value).strip()
-    return _safe_text(text, limit=_PASSAGE_TEXT_LIMIT), len(text) > _PASSAGE_TEXT_LIMIT
+    return _safe_text(text, limit=limit), len(text) > limit
 
 
 def _bounded_text_items(
@@ -336,13 +338,40 @@ def _document_handle(item: Mapping[str, Any]) -> str:
     return document_id if isinstance(document_id, str) and document_id.startswith("doc_") else ""
 
 
+def _start_line(item: Mapping[str, Any]) -> int | None:
+    start = item.get("start_line")
+    if type(start) is int:
+        return start
+    locator = item.get("locator")
+    if isinstance(locator, Mapping) and type(locator.get("start_line")) is int:
+        return locator["start_line"]
+    return None
+
+
 def _source_continuation(
     item: Mapping[str, Any],
     *,
     display_clipped: bool,
+    shown: str = "",
 ) -> str:
-    """Tell the model when a bounded view should be expanded through a tool."""
+    """Tell the model when a bounded view should be expanded through a tool.
 
+    A clipped display is checked first: the source may say more text starts
+    after the read range, but the unseen part of the range comes before it.
+    The hint names the exact line to continue from, so the next read is not a
+    duplicate of this one.
+    """
+
+    if display_clipped:
+        start = _start_line(item)
+        if start is not None:
+            stop = start + shown.count("\n")
+            if stop > start:
+                return (
+                    f"the passage shown stops partway through line {stop}; "
+                    f"continue reading with start_line {stop}."
+                )
+        return "the displayed passage is clipped; reread a narrower range or use a targeted query."
     next_start_line = item.get("next_start_line")
     if type(next_start_line) is not int:
         end_line = item.get("end_line")
@@ -361,8 +390,10 @@ def _source_continuation(
         )
     if item.get("has_more") is True or item.get("truncated") is True:
         return "more source text is available; reread a narrower range or use a targeted query."
-    if display_clipped:
-        return "the displayed passage is clipped; reread a narrower range or use a targeted query."
+    total_lines = item.get("total_lines")
+    end_line = item.get("end_line")
+    if type(total_lines) is int and type(end_line) is int and end_line >= total_lines:
+        return f"end of source: this passage reaches its last line ({total_lines})."
     return ""
 
 
@@ -472,6 +503,7 @@ def _record_list(
     localizer: _ReferenceLocalizer,
     *,
     section: str,
+    passage_limit: int = _PASSAGE_TEXT_LIMIT,
 ) -> list[dict[str, Any]]:
     values = []
     for reference, record in records.items():
@@ -534,7 +566,7 @@ def _record_list(
                     for context in item["context"]
                     if isinstance(context, dict) and context.get("content")
                 )
-            item["content"], display_clipped = _passage_text(content)
+            item["content"], display_clipped = _passage_text(content, passage_limit)
             item["name"] = _safe_text(
                 item.get("document_name") or item.get("original_name") or ""
             )
@@ -544,6 +576,7 @@ def _record_list(
                 item["continuation"] = _source_continuation(
                     item,
                     display_clipped=display_clipped,
+                    shown=item["content"],
                 )
         elif section in {"web_discoveries", "web_reads"}:
             item["title"] = _safe_text(item.get("title") or "")
@@ -551,12 +584,13 @@ def _record_list(
             item["snippet"] = _safe_text(item.get("snippet") or "")
             if section == "web_reads":
                 item["content"], display_clipped = _passage_text(
-                    item.get("content") or ""
+                    item.get("content") or "", passage_limit
                 )
                 item["locator"] = _result_locator(item)
                 item["continuation"] = _source_continuation(
                     item,
                     display_clipped=display_clipped,
+                    shown=item["content"],
                 )
             else:
                 item["content"] = _safe_text(item.get("content") or "")
@@ -577,6 +611,7 @@ def _render_context(
     knowledge = snapshot["knowledge"]
     evidence = snapshot["evidence"]
     web = evidence["web"]
+    passage_limit = notebook.capacity.max_passage_chars
     observation_supports = [
         item
         for item in _record_list(
@@ -641,18 +676,31 @@ def _render_context(
         ),
         "episodes": _record_list(knowledge["episodes"], localizer, section="episodes"),
         "paths": _record_list(knowledge["paths"], localizer, section="paths"),
-        "messages": _record_list(evidence["messages"], localizer, section="messages"),
+        "messages": _record_list(
+            evidence["messages"], localizer, section="messages",
+            passage_limit=passage_limit,
+        ),
         "documents": _record_list(
-            evidence["documents"], localizer, section="documents"
+            evidence["documents"], localizer, section="documents",
+            passage_limit=passage_limit,
         ),
         "observation_supports": observation_supports,
         "web_discoveries": _record_list(
             web["discoveries"], localizer, section="web_discoveries"
         ),
-        "web_reads": _record_list(web["reads"], localizer, section="web_reads"),
+        "web_reads": _record_list(
+            web["reads"], localizer, section="web_reads", passage_limit=passage_limit,
+        ),
         "actions": actions,
         "possible_next_steps": possible_next_steps,
     }
+
+
+def rendered_handles(notebook: RunNotebook) -> dict[str, str]:
+    """Map each handle the rendered notebook shows (WR1, D2, ...) to its record."""
+
+    localizer = _ReferenceLocalizer(notebook.as_dict())
+    return {handle: reference for reference, handle in localizer._handles.items()}
 
 
 def render_notebook(

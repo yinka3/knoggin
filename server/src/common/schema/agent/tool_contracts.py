@@ -3,6 +3,76 @@
 import math
 import re
 
+_OPTIONAL_TITLE = {"type": "string", "maxLength": 200}
+_BLOCK_CONTENT = {"type": "string", "minLength": 1, "maxLength": 20_000}
+# Mirrors common.schema.artifacts; without these shapes models guessed
+# {"type": ..., "body": ...} and every artifact was rejected.
+_ARTIFACT_BLOCK_SCHEMAS = [
+    {
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "enum": ["markdown"]},
+            "content": _BLOCK_CONTENT,
+        },
+        "required": ["kind", "content"],
+        "additionalProperties": False,
+    },
+    {
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "enum": ["callout"]},
+            "tone": {"type": "string", "enum": ["info", "success", "warning", "critical"]},
+            "title": _OPTIONAL_TITLE,
+            "content": _BLOCK_CONTENT,
+        },
+        "required": ["kind", "content"],
+        "additionalProperties": False,
+    },
+    {
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "enum": ["checklist"]},
+            "title": _OPTIONAL_TITLE,
+            "items": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 100,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "minLength": 1, "maxLength": 2_000},
+                        "completed": {"type": "boolean"},
+                    },
+                    "required": ["label"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["kind", "items"],
+        "additionalProperties": False,
+    },
+    {
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "enum": ["table"]},
+            "title": _OPTIONAL_TITLE,
+            "columns": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 20,
+                "items": {"type": "string"},
+            },
+            "rows": {
+                "type": "array",
+                "maxItems": 100,
+                "items": {"type": "array", "items": {"type": "string"}},
+            },
+        },
+        "required": ["kind", "columns"],
+        "additionalProperties": False,
+    },
+]
+
 TOOL_SCHEMAS = [
     {
         "type": "function",
@@ -855,10 +925,14 @@ TOOL_SCHEMAS = [
                                 "type": "array",
                                 "minItems": 1,
                                 "maxItems": 50,
-                                "items": {
-                                    "type": "object",
-                                    "additionalProperties": True,
-                                },
+                                "description": (
+                                    "Ordered blocks. Each has a kind: markdown "
+                                    "{kind, content}, callout {kind, tone, title, "
+                                    "content}, checklist {kind, title, items: "
+                                    "[{label, completed}]}, or table {kind, title, "
+                                    "columns, rows}."
+                                ),
+                                "items": {"anyOf": _ARTIFACT_BLOCK_SCHEMAS},
                             },
                             "status": {
                                 "type": "string",

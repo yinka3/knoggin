@@ -723,3 +723,32 @@ def test_agent_run_can_finish_without_a_final_response():
     assert run.final_content is None
     with pytest.raises(RuntimeError, match="finalized"):
         run.record_error("too late")
+
+
+@pytest.mark.no_network
+def test_research_coverage_accepts_the_handles_the_notebook_shows():
+    run = make_run(research_profile=resolve_research_profile("research"))
+    assert run.set_research_plan(["When is SQLite better?"]) is None
+    run.accumulate_tool_result("search_web", {"data": [
+        {"title": "Search hit", "url": "https://example.test/hit", "snippet": "A snippet."},
+    ]})
+    run.accumulate_tool_result("read_web_page", {"data": [{
+        "title": "Appropriate Uses For SQLite", "url": "https://www.sqlite.org/whentouse.html",
+        "content": "SQLite works well for local storage.", "start_line": 1, "end_line": 1,
+        "total_lines": 1, "content_hash": "a" * 64, "source_kind": "web_page",
+    }]})
+    rendered = run.notebook.render()
+    assert "WR1 Appropriate Uses For SQLite" in rendered
+    assert "W1 Search hit" in rendered
+
+    def cover(*references):
+        return run.validate_research_coverage([
+            {"subquestion": "When is SQLite better?", "supporting_references": list(references)},
+        ])
+
+    assert cover("WR1") is None
+    # Models often echo the handle with its title.
+    assert cover("WR1: Appropriate Uses For SQLite") is None
+    # A discovery snippet is still not evidence, by handle or otherwise.
+    assert "discovery-only" in cover("W1")
+    assert "unknown" in cover("WR9")

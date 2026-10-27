@@ -3,7 +3,7 @@ from copy import deepcopy
 import pytest
 from jinja2 import StrictUndefined, UndefinedError
 
-from core.agent.notebook import RunNotebook
+from core.agent.notebook import NotebookCapacity, RunNotebook
 from core.agent.notebook_renderer import (
     _passage_text,
     _result_locator,
@@ -257,7 +257,7 @@ def test_notebook_renderer_marks_a_clipped_read_passage_for_follow_up():
                 {
                     "document_id": "doc_abc123",
                     "document_name": "long-decision.md",
-                    "content": ("leading evidence " * 90) + "TAIL_IS_NOT_RENDERED",
+                    "content": ("leading evidence " * 900) + "TAIL_IS_NOT_RENDERED",
                     "locator": {
                         "kind": "text_lines",
                         "start_line": 1,
@@ -323,3 +323,60 @@ def test_notebook_renderer_defensively_formats_optional_source_metadata():
         "search result 2"
     )
     assert _source_continuation({}, display_clipped=False) == ""
+
+
+def _web_read(content, *, start_line, end_line, total_lines):
+    notebook = RunNotebook()
+    notebook.apply(
+        "read_web_page",
+        {
+            "data": [
+                {
+                    "title": "Guide",
+                    "url": "https://example.com/guide",
+                    "content": content,
+                    "start_line": start_line,
+                    "end_line": end_line,
+                    "total_lines": total_lines,
+                    "has_more": end_line < total_lines,
+                    "next_start_line": end_line + 1 if end_line < total_lines else None,
+                    "content_hash": "a" * 64,
+                    "source_kind": "web_page",
+                }
+            ]
+        },
+    )
+    return notebook
+
+
+def test_a_full_150_line_page_read_is_shown_whole():
+    lines = "\n".join(f"line {number} " + "word " * 10 for number in range(1, 151))
+    rendered = render_notebook(_web_read(lines, start_line=1, end_line=150, total_lines=300))
+
+    assert "line 150 " in rendered
+    assert "more source text is available from line 151" in rendered
+
+
+def test_a_clipped_read_names_the_line_to_continue_from_not_the_next_range():
+    lines = "\n".join(f"line {number} " + "word " * 60 for number in range(1, 151))
+    notebook = RunNotebook(capacity=NotebookCapacity(max_passage_chars=3000))
+    notebook.apply("read_web_page", {"data": [{
+        "title": "Guide", "url": "https://example.com/guide", "content": lines,
+        "start_line": 1, "end_line": 150, "total_lines": 300, "has_more": True,
+        "next_start_line": 151, "content_hash": "a" * 64, "source_kind": "web_page",
+    }]})
+
+    rendered = render_notebook(notebook)
+
+    # About 3000 characters is under 10 of these lines; the rest of the range
+    # comes before line 151, so the hint must not skip to it.
+    assert "continue reading with start_line 10." in rendered
+    assert "from line 151" not in rendered
+
+
+def test_the_last_passage_of_a_page_says_the_source_ended():
+    rendered = render_notebook(
+        _web_read("closing words", start_line=90, end_line=96, total_lines=96)
+    )
+
+    assert "end of source: this passage reaches its last line (96)." in rendered

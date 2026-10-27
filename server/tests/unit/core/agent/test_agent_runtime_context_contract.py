@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from common.schema.agent.research import resolve_research_profile
 from common.utils.time_utils import frozen_time
 from core.agent.prompt_context import build_evidence_context, build_user_message
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
@@ -831,3 +832,15 @@ def test_notebook_ignores_errors_and_empty_results():
 )
 def test_summarize_result_returns_stable_summaries(tool_name, result, expected):
     assert summarize_result(tool_name, result) == expected
+
+
+@pytest.mark.no_network
+def test_every_step_shows_the_frozen_research_plan():
+    ctx = make_ctx(research_profile=resolve_research_profile("research"))
+    assert "Research plan" not in build_user_message(ctx)
+
+    assert ctx.set_research_plan(["When is SQLite better?", "When is Postgres better?"]) is None
+    prompt = build_user_message(ctx)
+
+    assert "1. When is SQLite better?\n2. When is Postgres better?" in prompt
+    assert "exact text" in prompt

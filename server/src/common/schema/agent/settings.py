@@ -94,6 +94,11 @@ class AgentLimitSettings(ConfigModel):
     max_accumulated_actions: StrictInt = Field(12, ge=1)
     max_accumulated_next_steps: StrictInt = Field(12, ge=1)
     max_accumulated_summary_chars: StrictInt = Field(4000, ge=1)
+    # How much of each read passage (web page, document, message) the model
+    # sees. A 150-line read_web_page call measured 5-9K characters on docs
+    # pages (30-40K on Wikipedia); showing 1.2K made models reread the same
+    # range in a loop. A longer passage says the line to continue from.
+    max_passage_chars: StrictInt = Field(12_000, ge=200)
     # ``adaptive`` only skips persistent Project material for a deliberately
     # narrow conversational fast path. All uncertain or substantive prompts
     # retain the Brief/Context before the first model step.
