@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from time import time
 from typing import Awaitable, Callable, Protocol
 
 from loguru import logger
@@ -17,6 +16,7 @@ from common.schema.semantic_window import (
     SemanticWindowStage,
 )
 from common.schema.settings import EpisodeSettings, IngestionSettings
+from common.utils.time_utils import get_now_ms
 from core.ingestion.batch import SemanticWindowBuild
 from core.ingestion.context_entity_build import ContextEntityBuildService
 from core.ingestion.policy import IngestionPolicy
@@ -220,7 +220,7 @@ class ProjectSemanticProcessor(BaseJob):
         self._publish_committed_entity_ids = publish_committed_entity_ids
         self._signal_relationship_advisories = signal_relationship_advisories
         self._capture_semantic_policy = capture_semantic_policy
-        self._now_ms = now_ms or (lambda: int(time() * 1000))
+        self._now_ms = now_ms or get_now_ms
         self._timeout_stage: tuple[SemanticWindowRecord, str] | None = None
         self._flush_requested = False
         self.update_settings(settings)

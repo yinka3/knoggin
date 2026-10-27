@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from time import time
 from typing import Any, Dict
 
 from common.exceptions import IdempotencyConflictError
 from common.scoping import require_scope_value
+from common.utils.time_utils import get_now_ms
 from core.knowledge.db.writers.message_writer import MessageWriter
 from infrastructure.postgres_client import PostgresClient
 
@@ -43,7 +43,7 @@ class MessageLifecycleWriter:
 
     @staticmethod
     def _now_ms() -> int:
-        return int(time() * 1000)
+        return get_now_ms()
 
     async def record_run_steer(
         self, *, user_name: str, project_id: str, session_id: str,

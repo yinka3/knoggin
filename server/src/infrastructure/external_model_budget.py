@@ -3,11 +3,12 @@
 import asyncio
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 from common.exceptions import ConfigurationError, LLMBudgetExceededError
 from common.schema.settings import LLMSpendingBudgetSettings
+from common.utils.time_utils import get_now
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,7 +183,7 @@ class ExternalModelSpendingLedger:
                     cost_usd=cost,
                     approximate_usage=approximate_usage,
                     failed=failed,
-                    recorded_at=datetime.now(timezone.utc),
+                    recorded_at=get_now(),
                 )
             )
             if len(self._records) > self.MAX_RECORDS:

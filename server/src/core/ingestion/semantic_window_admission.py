@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import batched
-from time import time
 from typing import Awaitable, Callable, Protocol
 from uuid import uuid4
 
@@ -17,6 +16,7 @@ from common.schema.semantic_window import (
     SemanticWindowStage,
 )
 from common.schema.settings import EpisodeSettings, IngestionSettings
+from common.utils.time_utils import get_now_ms
 from core.ingestion.policy import IngestionPolicy
 from core.knowledge.episodes.policy import EpisodeGenerationPolicy
 
@@ -93,7 +93,7 @@ class SemanticWindowAdmission:
         self.knowledge_store = knowledge_store
         self._token_counter = token_counter
         self._token_counter_batch = token_counter_batch
-        self._now_ms = now_ms or (lambda: int(time() * 1000))
+        self._now_ms = now_ms or get_now_ms
         self._model_context_window = model_context_window
         self.update_settings(settings)
         self.update_episode_settings(episode_settings or EpisodeSettings())

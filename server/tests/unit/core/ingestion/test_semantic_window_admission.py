@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -12,6 +13,7 @@ from common.schema.settings import (
     IngestionSettings,
     TextProcessorSettings,
 )
+from common.utils.time_utils import frozen_time
 from core.ingestion.policy import IngestionPolicy
 from core.ingestion.project_semantic_processor import ProjectSemanticProcessor
 from core.ingestion.semantic_window_admission import SemanticWindowAdmission
@@ -1117,3 +1119,71 @@ async def test_research_report_turns_are_not_memory():
 
     assert selected is not None
     assert [member.message_id for member in selected.messages] == [1, 10_001]
+
+
+_REPLAY_START = datetime(2023, 5, 20, 2, 21, tzinfo=timezone.utc)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_idle_flush_follows_the_replay_clock_not_the_real_one():
+    closed_at_ms = int(_REPLAY_START.timestamp() * 1000)
+    rows = [_row(1, user_content="x", assistant_content="x", closed_at_ms=closed_at_ms)]
+    admission = SemanticWindowAdmission(
+        RecordingStore(rows),
+        IngestionSettings(semantic_window_tokens=100, idle_flush_seconds=300),
+        token_counter=lambda text: text.count("x"),
+    )
+    domain = make_domain_config().compile()
+
+    with frozen_time(_REPLAY_START) as clock:
+        assert await admission.claim_next(
+            user_name="ada", project_id="project-1", domain=domain
+        ) is None
+
+        clock.advance(seconds=300)
+        claimed = await admission.claim_next(
+            user_name="ada", project_id="project-1", domain=domain
+        )
+
+    assert claimed is not None
+    assert claimed[0].policy_snapshot["admission_policy"]["close_reason"] == "idle_flush"
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_semantic_retry_waits_on_the_replay_clock():
+    admission_store = RecordingStore([_row(1, user_content="x", assistant_content="x")])
+    settings = IngestionSettings(semantic_window_tokens=1)
+    admission = SemanticWindowAdmission(
+        admission_store, settings, token_counter=lambda text: text.count("x"),
+        episode_settings=EpisodeSettings(),
+    )
+    domain = make_domain_config().compile()
+    selected = await admission.select(
+        user_name="ada", project_id="project-1", domain=domain,
+        ingestion_policy=_policy(domain),
+    )
+    store = _SemanticEpisodeStore(selected.window)
+    generator = _FailThenZeroEpisodeGenerator()
+
+    async def capture_semantic_policy():
+        return _policy(domain)
+
+    job = _job(
+        admission, store, generator,
+        settings=settings, capture_semantic_policy=capture_semantic_policy,
+    )
+    job.enabled = True
+    context = JobContext(user_name="ada", project_id="project-1")
+
+    with frozen_time(_REPLAY_START) as clock:
+        assert (await job.execute(context)).success is False
+        assert store.window.next_retry_at_ms == int(_REPLAY_START.timestamp() * 1000) + 30_000
+        assert await job.should_run(context) is False
+
+        clock.advance(seconds=30)
+        assert await job.should_run(context) is True
+        await job.execute(context)
+
+    assert len(generator.calls) == 2

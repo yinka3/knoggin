@@ -23,6 +23,7 @@ from common.schema.project_notebook import (
     NotebookEntryInput,
     NotebookWrite,
 )
+from common.utils.time_utils import get_now
 from core.knowledge.db.writers.maintenance_review_writer import MaintenanceReviewWriter
 from core.knowledge.maintenance.maintenance_reviews import HypothesisEvaluationPlan
 
@@ -311,7 +312,7 @@ class ProjectNotebookStore:
                             confirmed is not None and not claim.judgment.stale and review_active
                             and (
                                 claim.judgment.verdict != "conflict"
-                                or confirmed + timedelta(hours=48) > datetime.now(timezone.utc)
+                                or confirmed + timedelta(hours=48) > get_now()
                             )
                         )
         visible["board_state"] = board.model_dump(mode="json")
@@ -435,7 +436,7 @@ class ProjectNotebookStore:
             )
             claim.judgment = BoardJudgment(
                 verdict=verdict, reason=reason, confidence=confidence,
-                evaluated_at=datetime.now(timezone.utc), fingerprint=fingerprint,
+                evaluated_at=get_now(), fingerprint=fingerprint,
                 citation_versions=snapshot["citation_versions"],
                 dependency_fingerprint=snapshot["dependency_fingerprint"],
             )
@@ -514,7 +515,7 @@ class ProjectNotebookStore:
                     reason="User confirmed ruled-out claim", cur=cursor,
                 )
                 review_id = review.review_id
-            judgment.confirmed_at = datetime.now(timezone.utc)
+            judgment.confirmed_at = get_now()
             judgment.review_id = UUID(review_id) if review_id is not None else None
             await cursor.execute(
                 """UPDATE public.project_notebooks
