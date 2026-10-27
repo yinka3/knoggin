@@ -83,6 +83,9 @@ class AgentLimitSettings(ConfigModel):
     tool_timeout: FiniteFloat = Field(30.0, gt=0)
     max_attempts: StrictInt = Field(15, ge=1)
     max_consecutive_errors: StrictInt = Field(3, ge=1)
+    # Replans that may find nothing before the run answers with what it has;
+    # measured runs on an empty memory searched the same query 15 times.
+    empty_replans_before_answer: StrictInt = Field(2, ge=1)
     max_accumulated_messages: StrictInt = Field(30, ge=1)
     max_accumulated_profiles: StrictInt = Field(20, ge=1)
     max_accumulated_graph: StrictInt = Field(40, ge=1)

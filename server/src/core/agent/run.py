@@ -297,6 +297,7 @@ class AgentRunLimits:
     max_consecutive_errors: int = 3
     project_briefing_mode: ProjectBriefingMode = "adaptive"
     empty_result_replan_threshold: int = 3
+    empty_replans_before_answer: int = 2
     tool_timeout: float = 30.0
     tool_limits: Tuple[Tuple[str, int], ...] = field(
         default_factory=lambda: tuple(get_default_tool_limits().items())
@@ -337,6 +338,7 @@ class AgentRunLimits:
             max_research_findings=settings.max_research_findings,
             max_notebook_render_tokens=(memory_budget or PromptMemoryBudget()).input_tokens,
             max_consecutive_errors=settings.max_consecutive_errors,
+            empty_replans_before_answer=settings.empty_replans_before_answer,
             project_briefing_mode=briefing_mode,
             tool_limits=tuple((defaults | overrides).items()),
         )
@@ -437,6 +439,8 @@ class AgentRun:
     findings: List[Dict[str, Any]] = field(default_factory=list)
     consecutive_errors: int = 0
     consecutive_empty_results: int = 0
+    # Forced replans in a row that found nothing new.
+    empty_replans: int = 0
     empty_retrieval_signatures: Set[Tuple[str, str]] = field(default_factory=set)
     previous_calls: Set[Tuple[str, str]] = field(default_factory=set)
     last_error: Optional[str] = None

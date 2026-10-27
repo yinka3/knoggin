@@ -177,7 +177,8 @@ The executor controls the phase transition. Do not request or invent a phase-cha
 
 PLAN: choose a grounded retrieval or action strategy.
 EXECUTE: use the selected tools and assess their returned evidence.
-SYNTHESIZE: provide the final answer from the gathered evidence.
+SYNTHESIZE: provide the final answer from the gathered evidence. If memory had
+nothing relevant, say so; answer from general knowledge when the question allows.
 </execution_phase>
 """
     project = f"{project_brief_block}{project_context_block}{persistent_context}"

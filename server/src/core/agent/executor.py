@@ -535,15 +535,26 @@ class AgentExecutor:
                         if self.ctx.record_empty_result(
                             [(call.name, call.args) for call in pending_tool_calls]
                         ):
-                            logger.info(
-                                f"AgentExecutor: "
-                                f"{self.ctx.consecutive_empty_results} "
-                                "consecutive empty results. Forcing replan."
-                            )
-                            needs_replan = True
                             self.ctx.clear_empty_results()
+                            self.ctx.empty_replans += 1
+                            if (
+                                self.ctx.empty_replans
+                                >= self.ctx.limits.empty_replans_before_answer
+                            ):
+                                # Replanning keeps finding nothing: answer with
+                                # what the run has instead of searching again.
+                                logger.info("AgentExecutor: retrieval keeps finding nothing; answering.")
+                                needs_final_synthesis = True
+                            else:
+                                logger.info(
+                                    f"AgentExecutor: "
+                                    f"{self.ctx.consecutive_empty_results} "
+                                    "consecutive empty results. Forcing replan."
+                                )
+                                needs_replan = True
                     else:
                         self.ctx.clear_empty_results()
+                        self.ctx.empty_replans = 0
 
                     break
 
@@ -1078,7 +1089,9 @@ class AgentExecutor:
 
                 if self.ctx.is_duplicate(call.name, call.args):
                     error_message = (
-                        f"Duplicate call to '{call.name}' with same arguments"
+                        f"Duplicate call to '{call.name}' with same arguments; its "
+                        "result is already in this run. Use a different tool or "
+                        "query, or answer with submit_answer."
                     )
                     self.ctx.note_nonfatal_error(error_message)
                     results_out.append({"tool": call.name, "error": error_message})

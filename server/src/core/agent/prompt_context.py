@@ -199,7 +199,9 @@ def _empty_retrieval_guidance(tool: str) -> str:
     alternative = alternatives.get(tool, "another retrieval surface")
     return (
         f"- `{tool}`: No results found on this retrieval surface. "
-        f"Simplify or paraphrase the query, or try {alternative}.\n"
+        f"Simplify or paraphrase the query, or try {alternative}. If the "
+        "question does not depend on the user's own data, answer from general "
+        "knowledge and say it is not from their memory.\n"
     )
 
 

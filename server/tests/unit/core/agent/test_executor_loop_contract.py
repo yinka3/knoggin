@@ -1105,6 +1105,38 @@ async def test_executor_automatically_replans_after_empty_evidence(monkeypatch):
 
 
 @pytest.mark.no_network
+async def test_searching_an_empty_memory_ends_in_an_answer_not_the_attempt_limit(monkeypatch):
+    searches = [
+        [tool_call_event("search_knowledge_entities", f'{{"query": "SQLite {index}"}}', f"s-{index}"),
+         completed_event()]
+        for index in range(4)
+    ]
+    llm = ScriptedLLM([
+        *searches,
+        [tool_call_event("submit_answer", '{"content": "Nothing in memory; SQLite is an embedded database."}', "answer"),
+         completed_event()],
+    ])
+    run = make_run(limits=AgentRunLimits(
+        max_attempts=15, max_calls=15, empty_result_replan_threshold=2,
+        empty_replans_before_answer=2,
+    ))
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+
+    async def empty_result(*_args):
+        return {"data": []}
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", empty_result)
+
+    events = [event async for event in executor._execute_run()]
+
+    assert events[-1]["event"] == "response"
+    assert events[-1]["data"]["content"].startswith("Nothing in memory")
+    # Two empty steps force a replan; two more empty steps go straight to answering.
+    assert len(llm.calls) == 5
+    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[4]["user"]
+
+
+@pytest.mark.no_network
 @pytest.mark.parametrize("mode", ["research", "deep_research"])
 async def test_research_modes_reject_ungrounded_terminal_answers(mode):
     llm = ScriptedLLM(

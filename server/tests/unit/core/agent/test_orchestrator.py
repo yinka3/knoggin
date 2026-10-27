@@ -60,6 +60,7 @@ class FakeLimits:
     max_passage_chars = 12_000
     max_research_findings = 30
     max_consecutive_errors = 2
+    empty_replans_before_answer = 2
     tool_limit_overrides = {"search_knowledge_entities": 4}
 
 
