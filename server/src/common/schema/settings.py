@@ -217,6 +217,17 @@ class ResearchJobSettings(ConfigModel):
     max_links: int = Field(50, ge=1, le=1_000)
 
 
+class ChatCompactionSettings(ConfigModel):
+    # Turns that no longer fit the prompt are folded into one summary per chat
+    # by the extraction model, after a turn ends.
+    enabled: bool = True
+    summary_max_tokens: int = Field(2_000, ge=100, le=20_000)
+    # Wait until this many tokens have dropped out, so most turns cost nothing.
+    min_dropped_tokens: int = Field(4_000, ge=1, le=200_000)
+    # Most dropped text one summary pass reads; the rest waits for the next.
+    max_input_tokens: int = Field(60_000, ge=1_000, le=500_000)
+
+
 class ToolSettings(ConfigModel):
     # Groups a chat gets when neither it nor its agent picks tools. Web stays
     # opt-in (research mode adds it); maintenance belongs to the Maintenance agent.
@@ -232,6 +243,7 @@ class DeveloperSettings(ConfigModel):
     prompt_memory: PromptMemorySettings = Field(default_factory=PromptMemorySettings)
     research_jobs: ResearchJobSettings = Field(default_factory=ResearchJobSettings)
     tools: ToolSettings = Field(default_factory=ToolSettings)
+    chat_compaction: ChatCompactionSettings = Field(default_factory=ChatCompactionSettings)
     entity_resolution: EntityResolutionSettings = Field(
         default_factory=EntityResolutionSettings
     )

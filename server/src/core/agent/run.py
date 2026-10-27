@@ -408,6 +408,8 @@ class AgentRun:
         default_factory=lambda: DEFAULT_RESEARCH_PROFILES["normal"]
     )
     history: List[Dict] = field(default_factory=list)
+    # Summary of this chat's turns that no longer fit the prompt.
+    history_summary: str = ""
     document_focus: Optional[DocumentFocus] = None
     document_selection_context: Optional[Dict[str, Any]] = None
     selected_notebook: Optional[Dict[str, Any]] = None
@@ -465,6 +467,7 @@ class AgentRun:
         audit_project_id: str | None | object = _UNSET_AUDIT_PROJECT_ID,
         research_profile: ResearchProfile | None = None,
         history: Optional[List[Dict]] = None,
+        history_summary: str = "",
         document_focus: Optional[DocumentFocus] = None,
         document_selection_context: Optional[Dict[str, Any]] = None,
         selected_notebook: Optional[Dict[str, Any]] = None,
@@ -551,6 +554,7 @@ class AgentRun:
             memory_budget=memory_budget or PromptMemoryBudget(),
             research_profile=effective_research_profile,
             history=list(history or []),
+            history_summary=history_summary,
             document_focus=document_focus,
             document_selection_context=document_selection_context,
             selected_notebook=selected_notebook,

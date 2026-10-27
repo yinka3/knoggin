@@ -26,6 +26,12 @@ def build_user_message(
     if last_turn_context:
         msg += f"**Last successful turn:** {last_turn_context}\n\n"
 
+    if ctx.history_summary:
+        msg += (
+            "**Earlier in this chat** (summary of turns no longer shown; "
+            "search messages for exact wording):\n" + ctx.history_summary + "\n\n"
+        )
+
     history_text = format_conversation_history(ctx) if history_text is None else history_text
     if history_text:
         msg += "**Recent conversation:**\n" + history_text + "\n"

@@ -1109,6 +1109,8 @@ CREATE TABLE public.sessions (
     status text DEFAULT 'open'::text NOT NULL,
     semantic_participation_enabled boolean DEFAULT true NOT NULL,
     semantic_participation_after_message_id bigint DEFAULT 0 NOT NULL,
+    chat_summary text,
+    chat_summary_through_message_id bigint DEFAULT 0 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     last_active_at timestamp with time zone DEFAULT now() NOT NULL,
     deleted_at timestamp with time zone,

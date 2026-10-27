@@ -834,3 +834,17 @@ def test_groups_and_single_tools_mix():
     assert "get_ingestion_health" in run.enabled_tools
     assert "search_web" in run.enabled_tools
     assert "read_web_page" not in run.enabled_tools
+
+
+@pytest.mark.no_network
+def test_chat_summary_comes_before_recent_turns_in_the_prompt():
+    from core.agent.prompt_context import build_user_message
+
+    run = make_run(
+        history_summary="- Ada chose SQLite.",
+        history=[{"role": "user", "content": "And now?"}],
+    )
+    message = build_user_message(run)
+
+    assert message.index("- Ada chose SQLite.") < message.index("And now?")
+    assert "Earlier in this chat" not in build_user_message(make_run())

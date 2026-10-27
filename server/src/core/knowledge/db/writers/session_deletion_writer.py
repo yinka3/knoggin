@@ -25,6 +25,7 @@ class SessionDeletionWriter:
                     agent_id = NULL,
                     enabled_tools = NULL,
                     document_focus = NULL,
+                    chat_summary = NULL,
                     semantic_participation_enabled = FALSE
                 WHERE user_name = %(user_name)s
                   AND session_id = %(session_id)s

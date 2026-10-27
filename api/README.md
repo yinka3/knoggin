@@ -127,6 +127,11 @@ For an existing project, replace `{project_id}` in these routes:
   manages durable preferences. `GET /v1/sessions/{session_id}/history` reads
   recent messages. `GET/PUT/DELETE /v1/sessions/{session_id}/document-focus`
   reads, pins, and clears a document or subtree focus.
+  Turns that no longer fit a run's conversation share are summarized after a
+  turn ends, and the summary leads the next prompts
+  (`developer_settings.chat_compaction`: `min_dropped_tokens` 4,000,
+  `summary_max_tokens` 2,000, `max_input_tokens` 60,000; `enabled` turns it off).
+  Existing databases need `server/src/infrastructure/chat_summary_upgrade.sql`.
 - `POST /v1/sessions/{session_id}/runs` accepts `{"query":"..."}` plus optional
   model, agent, tool, research mode, document focus, notebook, and idempotency choices.
   Set `notebook_id` to a project notebook UUID to pass its current, bounded

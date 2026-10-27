@@ -31,6 +31,7 @@ from common.utils.events import emit
 from common.utils.time_utils import get_now
 from core.agent.run import AgentIdentity
 from core.knowledge.documents import DocumentService
+from core.session.chat_compaction import ChatCompaction
 from runtime.project_runtime import ProjectRuntime
 from runtime.resources import RuntimeResources
 
@@ -185,6 +186,10 @@ class SessionRuntime:
         self._agent_runs_closed = False
         self._closed = False
         self._shutdown_event_emitted = False
+        # Conversation share of the last admitted run's prompt; compaction
+        # summarizes what falls outside it.
+        self._conversation_tokens: int | None = None
+        self._compaction_task: asyncio.Task | None = None
 
     @property
     def current_config(self) -> RootConfig:
@@ -541,6 +546,7 @@ class SessionRuntime:
                     resolved_model=selected_model,
                     prompt_memory_budget=budget,
                 )
+                self._conversation_tokens = budget.conversation_tokens
             except BaseException:
                 await self._release_agent_run(None)
                 raise
@@ -672,6 +678,7 @@ class SessionRuntime:
             history = await self._recent_history_within(
                 history_budget_tokens, up_to_msg_id=accepted.id - 1,
             )
+            history_summary = await self._chat_summary()
             orchestrator = orchestrator or self.agent_orchestrator
             if orchestrator is None:
                 raise RuntimeError("Session has no application-owned AgentOrchestrator")
@@ -686,6 +693,7 @@ class SessionRuntime:
                 enabled_tools=enabled_tools,
                 request_document_focus=document_focus,
                 conversation_history=history,
+                history_summary=history_summary,
                 user_message_id=accepted.id,
                 pasted_text_spans=pasted_text_spans,
                 research_mode=research_mode,
@@ -1160,6 +1168,7 @@ class SessionRuntime:
             outcome=outcome,
         )
         self._signal_exchange_closed()
+        self._schedule_chat_compaction()
         return {
             "message_id": persisted_message_id,
             "source_ref_ids": source_ref_ids,
@@ -1288,6 +1297,62 @@ class SessionRuntime:
     _HISTORY_PAGE = 200
     _HISTORY_MAX_TURNS = 10_000
 
+    def _chat_compaction(self) -> ChatCompaction | None:
+        postgres = getattr(self.resources, "postgres", None)
+        if postgres is None:
+            return None
+        return ChatCompaction(
+            postgres, self.llm, user_name=self.user_name, session_id=self.session_id,
+            count_tokens=getattr(self.llm, "count_tokens", None),
+        )
+
+    async def _chat_summary(self) -> str:
+        """The summary of turns that no longer fit the prompt, if any."""
+
+        compaction = self._chat_compaction()
+        if compaction is None:
+            return ""
+        try:
+            return (await compaction.load())[0]
+        except Exception:
+            logger.exception("Chat summary unavailable for {}", self.session_id)
+            return ""
+
+    def _schedule_chat_compaction(self) -> None:
+        """Start one background summary pass; never fails the finished turn."""
+
+        try:
+            settings = self.current_config.developer_settings.chat_compaction
+        except Exception:
+            logger.exception("Chat compaction settings unavailable for {}", self.session_id)
+            return
+        if (
+            not settings.enabled or self._closed or self._conversation_tokens is None
+            or (self._compaction_task is not None and not self._compaction_task.done())
+        ):
+            return
+        self._compaction_task = asyncio.create_task(
+            self._compact_chat(self._conversation_tokens, settings)
+        )
+
+    async def _compact_chat(self, conversation_tokens: int, settings) -> None:
+        compaction = self._chat_compaction()
+        if compaction is None:
+            return
+        try:
+            history = await self._recent_history_within(
+                conversation_tokens + settings.max_input_tokens, up_to_msg_id=None,
+            )
+            await compaction.extend(
+                history, conversation_tokens=conversation_tokens, settings=settings
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # The next finished turn tries again; the prompt still has the
+            # recent turns and message search finds the rest.
+            logger.exception("Chat compaction failed for {}", self.session_id)
+
     async def _recent_history_within(
         self, budget_tokens: int, *, up_to_msg_id: int
     ) -> List[Dict]:
@@ -1368,6 +1433,16 @@ class SessionRuntime:
                     "Failed to cancel agent run for session {}", self.session_id
                 )
                 failures.append(exc)
+
+            compaction_task = self._compaction_task
+            if compaction_task is not None and not compaction_task.done():
+                compaction_task.cancel()
+                try:
+                    await compaction_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logger.exception("Chat compaction stopped with an error for {}", self.session_id)
 
             if follow_up_task is not None and not follow_up_task.done():
                 follow_up_task.cancel()
