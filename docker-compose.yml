@@ -1,8 +1,7 @@
 services:
   postgres:
-    build:
-      context: docker/postgres
-      dockerfile: Dockerfile
+    # Postgres 16 with pgvector. Trixie keeps the existing database text collation.
+    image: pgvector/pgvector:0.8.0-pg16-trixie
     container_name: knoggin-postgres
     ports:
       - "127.0.0.1:5432:5432"
