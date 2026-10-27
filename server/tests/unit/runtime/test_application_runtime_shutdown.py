@@ -45,6 +45,9 @@ class RecordingSessions(RecordingOwner):
     def active_runtime_count(self):
         return 0
 
+    async def resume_background_work(self):
+        self.calls.append("resume_background_work")
+
 
 async def test_startup_cleanup_retains_dependencies_after_failure():
     calls = []
@@ -456,6 +459,7 @@ async def test_application_start_establishes_identity_before_managers(
         "sessions",
         "aac_create",
         "aac_start",
+        "resume_background_work",
     ]
     assert isinstance(runtime.agent_manager, RecordingAgentManager)
     assert isinstance(runtime.agent_orchestrator, RecordingAgentOrchestrator)

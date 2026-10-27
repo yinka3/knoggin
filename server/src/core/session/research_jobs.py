@@ -16,12 +16,14 @@ from common.conf.manager import ConfigManager
 from common.schema.agent.tool_names import research_job_tool_names
 from common.schema.primitives import Message
 from common.utils.time_utils import get_now_iso
+from core.session.background_work_store import BackgroundWorkStore
 
 if TYPE_CHECKING:
     from core.session.session_manager import SessionManager
 
 ResearchDepth = Literal["research", "deep_research"]
 _FINISHED = frozenset({"completed", "needs_input", "failed", "cancelled"})
+_UNFINISHED = frozenset({"queued", "running", "interrupted"})
 _KEPT_FINISHED_JOBS = 100
 
 
@@ -29,13 +31,17 @@ class ResearchJobs:
     """Run each job as a research turn in its own new chat.
 
     The job's chat holds the full research and sources and becomes memory like
-    any chat. When it ends, the starting chat gets a report turn. Jobs live in
-    memory only: after a restart, a job's chat remains but the report is not
-    sent.
+    any chat. When it ends, the starting chat gets a report turn. Jobs are
+    recorded at each change: after a restart, a job that was cut off runs
+    again from the start, and a report that was not handed to its chat is.
     """
 
     def __init__(self, sessions: SessionManager, config_manager) -> None:
         self._sessions = sessions
+        postgres = getattr(sessions, "pg", None)
+        self._store = (
+            BackgroundWorkStore(postgres, sessions.user_name) if postgres is not None else None
+        )
         self._config_manager = config_manager
         self._jobs: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._tasks: dict[str, asyncio.Task] = {}
@@ -76,10 +82,53 @@ class ResearchJobs:
             "created_at": get_now_iso(), "finished_at": None,
         }
         self._remember(job)
+        await self._persist(job)
+        self._launch(job)
+        return self._public(job)
+
+    def _launch(self, job: dict[str, Any]) -> None:
         self._tasks[job["job_id"]] = asyncio.create_task(
             self._run(job), name=f"research-job:{job['job_id']}"
         )
-        return self._public(job)
+
+    async def resume(self) -> None:
+        """After a restart: run cut-off jobs again and hand undelivered
+        reports to their chats. Finished jobs are listed again."""
+
+        if self._store is None:
+            return
+        for row in await self._store.load("research_job", limit=_KEPT_FINISHED_JOBS):
+            job = dict(row["payload"])
+            report = job.pop("report", None)
+            if job["state"] in _UNFINISHED:
+                job.update(state="queued", session_id=None, error_code=None)
+                self._remember(job)
+                await self._persist(job)
+                self._launch(job)
+            else:
+                self._remember(job)
+                if not job["report_delivered"] and job["state"] != "cancelled":
+                    self._tasks[job["job_id"]] = asyncio.create_task(
+                        self._deliver(job, report), name=f"research-report:{job['job_id']}"
+                    )
+
+    async def _deliver(self, job: dict[str, Any], report: str | None) -> None:
+        await self._report(job, report)
+        self._tasks.pop(job["job_id"], None)
+
+    async def _persist(self, job: dict[str, Any], report: str | None = None) -> None:
+        """Record the job; a failed write must not stop the job itself."""
+
+        if self._store is None:
+            return
+        try:
+            await self._store.save(
+                "research_job", job["job_id"], project_id=job["project_id"],
+                session_id=job["parent_session_id"], state=job["state"],
+                payload={**job, "report": report},
+            )
+        except Exception:
+            logger.exception("Research job {} was not recorded", job["job_id"])
 
     def list(self, *, parent_session_id: str | None = None) -> list[dict[str, Any]]:
         return [
@@ -114,11 +163,14 @@ class ResearchJobs:
         try:
             async with self._slot(job["project_id"]):
                 job["state"] = "running"
+                await self._persist(job)
                 content = await self._research(job)
         except asyncio.CancelledError:
-            job["state"] = "cancelled"
-            job["finished_at"] = get_now_iso()
+            # A shutdown is not the user's choice: the job runs again on start.
+            job["state"] = "interrupted" if self._closed else "cancelled"
+            job["finished_at"] = None if self._closed else get_now_iso()
             self._tasks.pop(job["job_id"], None)
+            await asyncio.shield(self._persist(job))
             raise
         except Exception:
             logger.exception("Research job {} failed", job["job_id"])
@@ -127,6 +179,7 @@ class ResearchJobs:
             content = None
         job["finished_at"] = get_now_iso()
         self._tasks.pop(job["job_id"], None)
+        await self._persist(job, content)
         await self._report(job, content)
 
     async def _research(self, job: dict[str, Any]) -> str | None:
@@ -206,6 +259,7 @@ class ResearchJobs:
             logger.exception("Research job {} report was not queued", job["job_id"])
             return
         job["report_delivered"] = queued is not None
+        await self._persist(job, content)
 
     @asynccontextmanager
     async def _slot(self, project_id: str):

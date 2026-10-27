@@ -16,6 +16,9 @@ class FakePg:
         _user, session_id, project_id = params
         return {"ok": 1} if (session_id, project_id) in self.chats else None
 
+    async def execute(self, _query, _params):
+        pass
+
     async def fetch_all(self, _query, _params):
         return self.polls.pop(0) if len(self.polls) > 1 else self.polls[0]
 

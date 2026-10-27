@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from loguru import logger
 
 from common.conf.manager import ConfigManager
+from core.session.background_work_store import BackgroundWorkStore
 
 if TYPE_CHECKING:
     from core.session.session_manager import SessionManager
@@ -17,11 +19,12 @@ _MAX_LISTED_FAILURES = 20
 
 class DocumentBatchNotices:
     """Watch documents until each is indexed, deleted, or failed with no retry
-    left, then queue one report turn in the chat that asked. Watches live in
-    memory: after a restart the documents still index, but no notice comes."""
+    left, then queue one report turn in the chat that asked. Each watch is
+    recorded until its notice is queued, so a restart resumes it."""
 
     def __init__(self, sessions: SessionManager, config_manager=None) -> None:
         self._sessions = sessions
+        self._store = BackgroundWorkStore(sessions.pg, sessions.user_name)
         self._config_manager = config_manager
         self._tasks: set[asyncio.Task] = set()
         self._closed = False
@@ -40,8 +43,27 @@ class DocumentBatchNotices:
         if not document_ids:
             return
         await self.check_chat(project_id=project_id, session_id=session_id)
+        work_id = str(uuid4())
+        document_ids = sorted(set(document_ids))
+        await self._store.save(
+            "folder_notice", work_id, project_id=project_id, session_id=session_id,
+            state="watching", payload={"label": label, "document_ids": document_ids},
+        )
+        self._launch(work_id, project_id, session_id, label, document_ids)
+
+    async def resume(self) -> None:
+        """After a restart, keep watching every batch not yet reported."""
+
+        for row in await self._store.load("folder_notice"):
+            payload = row["payload"]
+            self._launch(
+                row["work_id"], row["project_id"], row["session_id"],
+                payload["label"], payload["document_ids"],
+            )
+
+    def _launch(self, work_id, project_id, session_id, label, document_ids) -> None:
         task = asyncio.create_task(
-            self._watch(project_id, session_id, label, sorted(set(document_ids))),
+            self._watch(work_id, project_id, session_id, label, document_ids),
             name=f"document-notice:{session_id}",
         )
         self._tasks.add(task)
@@ -68,7 +90,8 @@ class DocumentBatchNotices:
         await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _watch(
-        self, project_id: str, session_id: str, label: str, document_ids: list[str],
+        self, work_id: str, project_id: str, session_id: str, label: str,
+        document_ids: list[str],
     ) -> None:
         settings = self._settings()
         waited = 0.0
@@ -84,6 +107,7 @@ class DocumentBatchNotices:
                 await asyncio.sleep(settings.poll_seconds)
                 waited += settings.poll_seconds
             await self._report(session_id, label, _report_text(label, document_ids, rows))
+            await self._store.delete(work_id)
         except asyncio.CancelledError:
             raise
         except Exception:

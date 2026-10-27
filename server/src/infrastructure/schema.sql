@@ -233,6 +233,18 @@ CREATE TABLE public.agents (
     last_turn_at timestamp with time zone,
     CONSTRAINT agents_brain_revision_check CHECK ((brain_revision >= 1))
 );
+CREATE TABLE public.background_work (
+    work_id text NOT NULL,
+    user_name text NOT NULL,
+    kind text NOT NULL,
+    project_id text NOT NULL,
+    session_id text NOT NULL,
+    state text NOT NULL,
+    payload jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT background_work_kind_check CHECK ((kind = ANY (ARRAY['research_job'::text, 'folder_notice'::text])))
+);
 CREATE TABLE public.document_chunks (
     chunk_id uuid NOT NULL,
     document_id uuid NOT NULL,
@@ -1122,6 +1134,8 @@ ALTER TABLE ONLY public.maintenance_review_events ALTER COLUMN event_id SET DEFA
 ALTER TABLE ONLY public.relationship_observations ALTER COLUMN observation_id SET DEFAULT nextval('public.relationship_observations_observation_id_seq'::regclass);
 ALTER TABLE ONLY public.aac_discussions
     ADD CONSTRAINT aac_discussions_pkey PRIMARY KEY (discussion_id);
+ALTER TABLE ONLY public.background_work
+    ADD CONSTRAINT background_work_pkey PRIMARY KEY (work_id);
 ALTER TABLE ONLY public.aac_insight_votes
     ADD CONSTRAINT aac_insight_votes_pkey PRIMARY KEY (insight_id, voter_agent_id);
 ALTER TABLE ONLY public.aac_insights
@@ -1349,6 +1363,7 @@ CREATE UNIQUE INDEX aac_timeline_discussion_sequence_idx ON public.aac_timeline 
 CREATE INDEX agent_brain_snapshots_user_idx ON public.agent_brain_snapshots USING btree (user_name, agent_id, revision DESC);
 CREATE INDEX agent_tool_audits_run_idx ON public.agent_tool_audits USING btree (run_id, created_at);
 CREATE INDEX agent_tool_audits_scope_idx ON public.agent_tool_audits USING btree (user_name, project_id, created_at DESC);
+CREATE INDEX background_work_user_kind_idx ON public.background_work USING btree (user_name, kind, created_at);
 CREATE UNIQUE INDEX agents_one_default_per_user_idx ON public.agents USING btree (user_name) WHERE is_default;
 CREATE INDEX document_chunks_document_idx ON public.document_chunks USING btree (document_id);
 CREATE INDEX document_chunks_embedding_idx ON public.document_chunks USING hnsw (embedding public.vector_cosine_ops);

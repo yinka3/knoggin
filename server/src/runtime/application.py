@@ -171,6 +171,7 @@ class ApplicationRuntime:
             )
             startup_cleanup.owners["aac"] = aac_runtime
             await aac_runtime.start()
+            await sessions.resume_background_work()
             return cls(
                 config_manager=config_manager,
                 resources=resources,

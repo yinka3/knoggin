@@ -62,6 +62,15 @@ class SessionManager:
         self.research_jobs = ResearchJobs(self, config_manager)
         self.document_notices = DocumentBatchNotices(self, config_manager)
 
+    async def resume_background_work(self) -> None:
+        """Pick up research jobs and folder notices a restart interrupted."""
+
+        for owner in (self.research_jobs, self.document_notices):
+            try:
+                await owner.resume()
+            except Exception:
+                logger.exception("Background work was not resumed by {}", type(owner).__name__)
+
     def attach_health_service(self, health_service: Any) -> None:
         """Attach the application-owned health service before sessions are exposed."""
 

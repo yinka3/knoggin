@@ -191,8 +191,10 @@ For an existing project, replace `{project_id}` in these routes:
   .../research-jobs/{job_id}` cancels one. Up to
   `developer_settings.research_jobs.max_running_per_project` (default 3) run at
   once per project and the rest wait; `max_links` (default 50) bounds one job.
-  Jobs are in memory: after a restart a job's session remains, but its report
-  is not sent.
+  Jobs are recorded in `background_work`: after a restart, a job that was cut
+  off runs again from the start, and a finished job's report that had not
+  reached its chat is sent. Existing databases need
+  `server/src/infrastructure/background_work_upgrade.sql`.
 
 CORS currently permits `localhost:3000` and `127.0.0.1:3000`.
 
@@ -276,7 +278,7 @@ CORS currently permits `localhost:3000` and `127.0.0.1:3000`.
   intake reports once when it completes and again for files a retry accepts.
   `developer_settings.ingestion_notices` sets `poll_seconds` (default 10) and
   `max_wait_minutes` (default 1,440), after which the chat is told the import
-  is still running. Watches are in memory and do not survive a restart.
+  is still running. Watches are recorded and resume after a restart.
 - For a larger folder, `POST /v1/projects/{project_id}/folders/intakes` with
   `folder_name`, `files` containing `relative_path` and `size_bytes`, and
   optional `force_include_paths`. The response assigns each file a `file_id`.
