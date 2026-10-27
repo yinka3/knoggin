@@ -120,14 +120,15 @@ async def test_job_researches_in_its_own_chat_and_reports_to_the_starting_chat()
 
 @pytest.mark.unit
 @pytest.mark.no_network
-def test_job_tools_are_reads_without_health_maintenance_or_more_jobs():
+def test_job_tools_are_reads_plus_saving_findings():
     names = set(research_job_tool_names())
 
     assert {"search_web", "read_web_page", "submit_answer"} <= names
+    assert {"create_project_file", "append_project_file", "create_project_folder"} <= names
     assert not names & {
         "start_research_job", "list_research_jobs", "cancel_research_job",
-        "get_engine_health", "propose_entity_merge", "create_project_file",
-        "edit_agent_brain",
+        "get_engine_health", "propose_entity_merge", "update_project_file",
+        "delete_project_file", "move_project_file", "edit_agent_brain",
     }
 
 

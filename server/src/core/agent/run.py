@@ -24,7 +24,7 @@ from common.schema.agent.settings import (
     validate_tool_limit_overrides,
 )
 from common.schema.agent.stream import StreamUsage
-from common.schema.agent.tool_names import JOB_TOOL_NAMES
+from common.schema.agent.tool_names import research_run_blocked_tool_names
 from common.schema.document import DocumentFocus
 from common.schema.source.references import SourceReferenceCandidate
 from core.agent.notebook import (
@@ -452,15 +452,16 @@ class AgentRun:
             research_profile or DEFAULT_RESEARCH_PROFILES["normal"]
         )
         if effective_research_profile.mode != "normal":
-            # A research run must not hand its work to background copies of
-            # itself; measured runs did that when replanning.
+            # Research gathers and records findings; a confused measured run
+            # rewrote its own Brain, and others started jobs of themselves.
+            blocked = research_run_blocked_tool_names()
             effective_enabled_tools = tuple(
                 name for name in (
                     effective_enabled_tools
                     if effective_enabled_tools is not None
                     else sorted(get_registered_tool_names())
                 )
-                if name not in JOB_TOOL_NAMES
+                if name not in blocked
             )
         tool_runtime = build_tool_runtime(
             enabled_tools=effective_enabled_tools,

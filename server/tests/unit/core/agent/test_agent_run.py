@@ -756,9 +756,16 @@ def test_research_runs_cannot_start_background_jobs():
         enabled_tools=["read_web_page", "start_research_job"],
     )
 
-    assert "start_research_job" in tool_names(normal)
-    assert not tool_names(research) & {"start_research_job", "list_research_jobs"}
-    assert "search_web" in tool_names(research)
+    assert {"start_research_job", "edit_agent_brain", "delete_project_file"} <= tool_names(normal)
+    assert not tool_names(research) & {
+        "start_research_job", "list_research_jobs", "edit_agent_brain",
+        "restore_agent_brain_section", "propose_entity_merge",
+        "report_relationship_conflict", "update_project_file",
+        "move_project_file", "delete_project_file",
+    }
+    # Research still reads, and can save its findings.
+    assert {"search_web", "read_agent_brain", "create_project_file",
+            "append_project_file", "create_project_folder"} <= tool_names(research)
     assert "read_web_page" in tool_names(chosen)
     assert "start_research_job" not in tool_names(chosen)
 

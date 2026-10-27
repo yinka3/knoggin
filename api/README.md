@@ -158,8 +158,11 @@ For an existing project, replace `{project_id}` in these routes:
   `{"question":"...","links":["https://..."],"depth":"research"}` starts
   research in the background (`depth` may be `deep_research`). The agent can
   also start one itself with its `start_research_job` tool. Each job runs as a
-  research turn in its own new session, using only read tools, with one extra
-  page read budgeted per link. When it ends, the starting session gets an
+  research turn in its own new session with one extra page read budgeted per
+  link. Research runs, foreground or background, may read and may save findings
+  by creating or appending project files (include the path in the question);
+  they cannot edit the agent's Brain, run maintenance actions, overwrite, move,
+  or delete files, or start jobs. When it ends, the starting session gets an
   automatic turn with the report (it appears in `/follow-ups`), and the agent
   there summarizes it. That turn is not added to memory; the job's own session
   is. `GET` on the same path lists the session's jobs; `DELETE

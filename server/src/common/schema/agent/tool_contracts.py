@@ -890,7 +890,9 @@ TOOL_SCHEMAS = [
                         "maxLength": 4000,
                         "description": (
                             "The complete research request, with any context "
-                            "from this chat it needs; the job cannot see this chat."
+                            "from this chat it needs; the job cannot see this "
+                            "chat. If the user wants the findings saved, give "
+                            "the project file path to write them to."
                         ),
                     },
                     "links": {
