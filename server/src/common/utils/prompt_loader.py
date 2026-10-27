@@ -256,14 +256,17 @@ def validate_prompt_library() -> None:
             )
 
 
+_AGENT_SEEDS = frozenset({"AGENT_IDENTITY", "MAINTENANCE_AGENT"})
+
+
 def load_agent_file(agent_id: str) -> tuple[dict, str]:
     """Load the packaged default identity seed."""
-    if agent_id != "AGENT_IDENTITY":
+    if agent_id not in _AGENT_SEEDS:
         raise FileNotFoundError(
             "Packaged agent files are seeds only; runtime agents live in Postgres"
         )
 
-    file_path = _template_path("AGENT_IDENTITY.md")
+    file_path = _template_path(f"{agent_id}.md")
     content = file_path.read_text(encoding="utf-8")
     if content.startswith("---"):
         parts = content.split("---", 2)

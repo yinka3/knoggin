@@ -113,3 +113,23 @@ async def test_lifecycle_operations_preserve_one_default_and_conditional_delete(
         (stale_target.id,),
     )
     assert still_default == {"is_default": True}
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_maintenance_agent_is_created_once_with_its_tool_groups(real_postgres_client):
+    manager = _manager(real_postgres_client)
+
+    first = await manager.ensure_maintenance_agent()
+    second = await manager.ensure_maintenance_agent()
+    agent = await manager.get_agent(first)
+
+    assert first == second
+    assert agent.name == "Maintenance"
+    assert agent.enabled_tools == ["core", "maintenance"]
+    assert agent.is_default is False
+    rows = await real_postgres_client.fetch_all(
+        "SELECT agent_id FROM public.agents WHERE user_name = 'ada' AND name = 'Maintenance'"
+    )
+    assert len(rows) == 1

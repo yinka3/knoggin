@@ -110,7 +110,8 @@ _WEB_READ_RUNTIME_INSTRUCTION = (
 )
 _RECORD_FINDING_RUNTIME_INSTRUCTION = (
     "[SYSTEM NOTICE: Call record_finding whenever a page or document you read "
-    "answers part of the plan, quoting a short exact line from it. Findings stay "
+    "answers part of the plan. Quote one sentence copied exactly from it; do not "
+    "join sentences, skip words, or rewrite lists. Findings stay "
     "visible on every step, so record them instead of rereading sources.]"
 )
 _SAVE_FINDINGS_RUNTIME_INSTRUCTION = (
@@ -478,6 +479,30 @@ def get_runtime_instructions(schemas: Iterable[dict]) -> str:
     return "\n\n".join(instructions)
 
 
+_WEB_OFF_NOTICE = (
+    "[SYSTEM NOTICE: Web tools are off in this chat. If the user asks to search "
+    "the web, read a link, or research in the background, say so right away and "
+    "tell them to use research mode or turn on the web tool group; do not keep "
+    "searching memory for what only the web has.]"
+)
+_MAINTENANCE_ELSEWHERE_NOTICE = (
+    "[SYSTEM NOTICE: Health checks and memory repairs belong to the Maintenance "
+    "agent. If the user asks for them, tell them to switch to it.]"
+)
+
+
+def _missing_tools_notice(tool_names) -> str:
+    """Tell the agent which asks it cannot serve, so it says so instead of
+    searching memory for answers only a missing tool has."""
+
+    notices = []
+    if "read_web_page" not in tool_names:
+        notices.append(_WEB_OFF_NOTICE)
+    if "get_ingestion_health" not in tool_names:
+        notices.append(_MAINTENANCE_ELSEWHERE_NOTICE)
+    return "\n\n".join(notices)
+
+
 @dataclass(frozen=True)
 class ToolPermissions:
     user_name: str
@@ -541,7 +566,10 @@ def build_tool_runtime(
     return ToolRuntime(
         schemas=schemas,
         permissions=permissions,
-        runtime_instructions=get_runtime_instructions(schemas),
+        runtime_instructions="\n\n".join(
+            part for part in (get_runtime_instructions(schemas), _missing_tools_notice(schema_map))
+            if part
+        ),
         max_graph_results=max_graph_results,
     )
 

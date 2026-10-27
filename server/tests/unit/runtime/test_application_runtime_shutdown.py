@@ -307,6 +307,9 @@ async def test_application_start_cleans_aac_and_resources_when_aac_start_fails(
         async def ensure_default_agent(self):
             pass
 
+        async def ensure_maintenance_agent(self):
+            pass
+
     monkeypatch.setattr(
         application_module.RuntimeResources,
         "create",
@@ -373,6 +376,9 @@ async def test_application_start_establishes_identity_before_managers(
 
         async def ensure_default_agent(self):
             calls.append("ensure_default_agent")
+
+        async def ensure_maintenance_agent(self):
+            calls.append("ensure_maintenance_agent")
 
     class RecordingAgentOrchestrator:
         def __init__(self, manager, **kwargs):
@@ -445,6 +451,7 @@ async def test_application_start_establishes_identity_before_managers(
         "projects_start",
         "agent_manager",
         "ensure_default_agent",
+        "ensure_maintenance_agent",
         "agent_orchestrator",
         "sessions",
         "aac_create",

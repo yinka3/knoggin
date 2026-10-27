@@ -24,6 +24,37 @@ def get_configurable_tool_names() -> frozenset[str]:
 JOB_TOOL_NAMES = frozenset(
     {"start_research_job", "list_research_jobs", "cancel_research_job"}
 )
+WEB_TOOL_NAMES = frozenset({"search_web", "search_news", "read_web_page"}) | JOB_TOOL_NAMES
+MAINTENANCE_TOOL_NAMES = frozenset({
+    "get_engine_health", "get_resource_health", "get_ingestion_health",
+    "get_background_health", "inspect_duplicate_entities", "advise_entity_merge",
+    "propose_entity_merge", "report_relationship_conflict",
+})
+
+
+def tool_groups() -> dict[str, frozenset[str]]:
+    """Named tool sets that agents, chats and runs may enable by name. Core is
+    everything that is neither web access nor memory maintenance."""
+
+    every = frozenset(schema["function"]["name"] for schema in TOOL_SCHEMAS)
+    return {
+        "core": every - WEB_TOOL_NAMES - MAINTENANCE_TOOL_NAMES,
+        "web": WEB_TOOL_NAMES,
+        "maintenance": MAINTENANCE_TOOL_NAMES,
+    }
+
+
+def expand_tool_groups(names) -> tuple[str, ...]:
+    """Replace group names with their tools, keeping first-seen order."""
+
+    groups = tool_groups()
+    expanded: dict[str, None] = {}
+    for name in names:
+        for tool in sorted(groups[name]) if name in groups else (name,):
+            expanded.setdefault(tool)
+    return tuple(expanded)
+
+
 # The only writes research may make: saving its findings to project files.
 RESEARCH_WRITE_TOOL_NAMES = frozenset(
     {"create_project_file", "append_project_file", "create_project_folder", "save_findings"}

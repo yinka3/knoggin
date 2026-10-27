@@ -26,6 +26,7 @@ from common.schema.agent.settings import (
 from common.schema.agent.stream import StreamUsage
 from common.schema.agent.tool_names import (
     RESEARCH_ONLY_TOOL_NAMES,
+    expand_tool_groups,
     research_run_blocked_tool_names,
 )
 from common.schema.document import DocumentFocus
@@ -141,7 +142,15 @@ _RECORD_TEXT_FIELDS = (
 )
 
 
+_MARKDOWN_LINK = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
+_MARKDOWN_EMPHASIS = re.compile(r"\*\*|__|`")
+
+
 def _normalized_text(value: str) -> str:
+    """Text as a reader sees it: pages are stored as markdown, and models
+    quote a link's words without its URL."""
+
+    value = _MARKDOWN_EMPHASIS.sub("", _MARKDOWN_LINK.sub(r"\1", value))
     return " ".join(value.split()).casefold()
 
 
@@ -472,7 +481,7 @@ class AgentRun:
             raise ValueError("AgentRun requires user, project, and session scope")
         effective_run_id = run_id or str(uuid4())
         effective_enabled_tools = (
-            tuple(enabled_tools) if enabled_tools is not None else None
+            expand_tool_groups(enabled_tools) if enabled_tools is not None else None
         )
         effective_additional_schemas = tuple(additional_tool_schemas or ())
         effective_audit_project_id = (
@@ -496,12 +505,14 @@ class AgentRun:
         effective_research_profile = (
             research_profile or DEFAULT_RESEARCH_PROFILES["normal"]
         )
+        research = effective_research_profile.mode != "normal"
+        if research and effective_enabled_tools is not None:
+            # Choosing research mode is how a chat without web tools gets them.
+            effective_enabled_tools = expand_tool_groups((*effective_enabled_tools, "web"))
         # Research gathers and records findings; a confused measured run
         # rewrote its own Brain, and others started jobs of themselves.
         blocked = (
-            research_run_blocked_tool_names()
-            if effective_research_profile.mode != "normal"
-            else RESEARCH_ONLY_TOOL_NAMES
+            research_run_blocked_tool_names() if research else RESEARCH_ONLY_TOOL_NAMES
         )
         if blocked:
             effective_enabled_tools = tuple(

@@ -148,6 +148,7 @@ class ApplicationRuntime:
             await projects.start()
             agent_manager = AgentManager(resources, user_name)
             await agent_manager.ensure_default_agent()
+            await agent_manager.ensure_maintenance_agent()
             agent_orchestrator = AgentOrchestrator(
                 agent_manager,
                 config_manager=config_manager,

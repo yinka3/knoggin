@@ -132,6 +132,13 @@ For an existing project, replace `{project_id}` in these routes:
   Set `notebook_id` to a project notebook UUID to pass its current, bounded
   snapshot to this run. Missing or changed sources are marked; changed passages
   are withheld until verified. The saved user query remains unchanged.
+  Tool choices (`enabled_tools` on a run, session, or agent) accept tool names
+  and the groups `core`, `web` (web search, page reads, research jobs), and
+  `maintenance` (health checks, duplicate and conflict repair). The run's
+  choice wins, then the session's, then the agent's; with none,
+  `developer_settings.tools.default_groups` applies (default `["core"]`).
+  Research mode adds `web` for that run. A "Maintenance" agent with
+  `["core", "maintenance"]` is created at startup.
   It returns an SSE stream with `run_started`, `message_delta`, `tool`,
   `source_added`, `usage_updated`, `steer_applied`, `run_completed`, and `run_failed` events.
   Closing the HTTP stream closes the owned engine run.
@@ -157,7 +164,7 @@ For an existing project, replace `{project_id}` in these routes:
 - `POST /v1/sessions/{session_id}/research-jobs` with
   `{"question":"...","links":["https://..."],"depth":"research"}` starts
   research in the background (`depth` may be `deep_research`). The agent can
-  also start one itself with its `start_research_job` tool. Each job runs as a
+  also start one itself with its `start_research_job` tool (in the `web` group). Each job runs as a
   research turn in its own new session with one extra page read budgeted per
   link. Research runs, foreground or background, may read and may save findings
   by creating or appending project files (include the path in the question);

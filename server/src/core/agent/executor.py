@@ -424,6 +424,11 @@ class AgentExecutor:
                             step_failed = True
                             break
                         coverage = submit.args.get("research_coverage")
+                        raw_artifact = submit.args.get("artifact")
+                        if isinstance(raw_artifact, dict) and "research_coverage" in raw_artifact:
+                            # Measured runs nest coverage inside the artifact.
+                            raw_artifact = dict(raw_artifact)
+                            coverage = coverage or raw_artifact.pop("research_coverage")
                         if not coverage and self.ctx.findings:
                             coverage = self.ctx.coverage_from_findings()
                         coverage_error = self.ctx.validate_research_coverage(coverage)
@@ -432,7 +437,6 @@ class AgentExecutor:
                             step_failed = True
                             break
                         artifact = None
-                        raw_artifact = submit.args.get("artifact")
                         if raw_artifact is not None:
                             try:
                                 artifact = ArtifactDraft.model_validate(raw_artifact)

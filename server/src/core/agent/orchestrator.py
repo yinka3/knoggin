@@ -166,6 +166,8 @@ class AgentOrchestrator:
                     else agent_cfg.enabled_tools
                 )
             )
+            if effective_enabled_tools is None:
+                effective_enabled_tools = list(config.developer_settings.tools.default_groups)
             run = AgentRun.open(
                 user_name=context.user_name,
                 project_id=context.project_id or "",

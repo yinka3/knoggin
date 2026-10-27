@@ -11,7 +11,7 @@ from core.agent.tools.findings import findings_markdown, findings_table
 PAGE = (
     "SQLite works well as the database engine for most low to medium traffic "
     "websites.\nIf many threads and/or processes need to write the database at "
-    "the same instant, choose a client/server engine."
+    "the same instant, choose a [client/server](serverless.html) **engine**."
 )
 
 
@@ -61,6 +61,8 @@ def test_a_finding_needs_a_quote_that_is_really_in_a_read_source():
     assert "search snippets do not count" in _record(run, reference="W1", quote="SQLite is small.")
     assert "one of the research plan" in _record(run, subquestion="Is SQLite fast?")
     assert isinstance(_record(run, subquestion="when is sqlite BETTER?"), dict)
+    # Pages are markdown; a quote of a link's visible words still matches.
+    assert isinstance(_record(run, quote="choose a client/server engine"), dict)
 
 
 @pytest.mark.no_network

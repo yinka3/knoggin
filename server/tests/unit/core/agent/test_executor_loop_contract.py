@@ -1388,6 +1388,34 @@ async def test_research_accepts_validated_supplied_evidence_without_dispatch(
 
 
 @pytest.mark.no_network
+async def test_research_coverage_nested_in_the_artifact_is_accepted():
+    llm = ScriptedLLM(
+        [
+            [
+                tool_call_event(
+                    "submit_answer",
+                    '{"content": "Answer from supplied evidence.", "artifact": {"kind": "research_brief", "title": "Brief", "blocks": [{"kind": "markdown", "content": "Answer."}], "research_coverage": [{"subquestion": "What changed?", "supporting_references": [], "unresolved_gap": "Evidence was supplied outside the run notebook."}]}}',
+                    "submit-nested",
+                ),
+                completed_event(),
+            ]
+        ]
+    )
+    run = make_run(
+        limits=AgentRunLimits(max_attempts=1, max_calls=1),
+        research_profile=resolve_research_profile("research"),
+        initial_source_candidates=_validated_initial_source_candidates("pasted_text"),
+    )
+    assert run.set_research_plan(["What changed?"]) is None
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+
+    events = [event async for event in executor._execute_run()]
+
+    assert events[-1]["event"] == "response"
+    assert events[-1]["data"]["artifact"]["title"] == "Brief"
+
+
+@pytest.mark.no_network
 async def test_research_plan_is_frozen_before_completion():
     llm = ScriptedLLM(
         [

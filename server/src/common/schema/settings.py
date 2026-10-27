@@ -217,12 +217,21 @@ class ResearchJobSettings(ConfigModel):
     max_links: int = Field(50, ge=1, le=1_000)
 
 
+class ToolSettings(ConfigModel):
+    # Groups a chat gets when neither it nor its agent picks tools. Web stays
+    # opt-in (research mode adds it); maintenance belongs to the Maintenance agent.
+    default_groups: List[Literal["core", "web", "maintenance"]] = Field(
+        default_factory=lambda: ["core"], min_length=1
+    )
+
+
 class DeveloperSettings(ConfigModel):
     ingestion: IngestionSettings = Field(default_factory=IngestionSettings)
     jobs: JobSettings = Field(default_factory=JobSettings)
     limits: AgentLimitSettings = Field(default_factory=AgentLimitSettings)
     prompt_memory: PromptMemorySettings = Field(default_factory=PromptMemorySettings)
     research_jobs: ResearchJobSettings = Field(default_factory=ResearchJobSettings)
+    tools: ToolSettings = Field(default_factory=ToolSettings)
     entity_resolution: EntityResolutionSettings = Field(
         default_factory=EntityResolutionSettings
     )

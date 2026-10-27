@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 from psycopg import sql
 
-from common.schema.agent.tool_names import get_configurable_tool_names
+from common.schema.agent.tool_names import get_configurable_tool_names, tool_groups
 from common.schema.document import (
     create_document_focus,
     dump_document_focus,
@@ -504,7 +504,7 @@ class SessionManager:
         result = request.model_dump(include=set(values))
         names = result.get("enabled_tools")
         if names is not None:
-            unknown = set(names) - get_configurable_tool_names()
+            unknown = set(names) - get_configurable_tool_names() - set(tool_groups())
             if unknown:
                 raise ValueError("Unknown enabled tools: " + ", ".join(sorted(unknown)))
         return result

@@ -797,3 +797,40 @@ def test_research_coverage_accepts_the_handles_the_notebook_shows():
     # A discovery snippet is still not evidence, by handle or otherwise.
     assert "discovery-only" in cover("W1")
     assert "unknown" in cover("WR9")
+
+
+@pytest.mark.no_network
+def test_tool_groups_cover_every_tool_once():
+    from common.schema.agent.tool_contracts import TOOL_SCHEMAS
+    from common.schema.agent.tool_names import tool_groups
+
+    groups = tool_groups()
+    every = {schema["function"]["name"] for schema in TOOL_SCHEMAS}
+    assert set().union(*groups.values()) == every
+    assert sum(len(names) for names in groups.values()) == len(every)
+    assert "search_web" in groups["web"]
+    assert "get_ingestion_health" in groups["maintenance"]
+    assert "create_project_file" in groups["core"]
+
+
+@pytest.mark.no_network
+def test_core_group_has_no_web_or_maintenance_until_research_adds_web():
+    normal = make_run(enabled_tools=["core"])
+    research = make_run(
+        enabled_tools=["core"], research_profile=resolve_research_profile("research")
+    )
+
+    assert "search_knowledge_messages" in normal.enabled_tools
+    assert not {"search_web", "read_web_page", "get_engine_health"} & set(normal.enabled_tools)
+    assert {"search_web", "search_news", "read_web_page"} <= set(research.enabled_tools)
+    assert "start_research_job" not in research.enabled_tools
+    assert "get_engine_health" not in research.enabled_tools
+
+
+@pytest.mark.no_network
+def test_groups_and_single_tools_mix():
+    run = make_run(enabled_tools=["maintenance", "search_web"])
+
+    assert "get_ingestion_health" in run.enabled_tools
+    assert "search_web" in run.enabled_tools
+    assert "read_web_page" not in run.enabled_tools

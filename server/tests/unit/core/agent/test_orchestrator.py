@@ -6,6 +6,7 @@ from common.conf.domain_config import DomainConfig
 from common.exceptions import LLMBudgetExceededError, WorkspaceConflictError
 from common.schema.agent.identity import AgentConfig
 from common.schema.agent.settings import PromptMemorySettings
+from common.schema.settings import ToolSettings
 from core.agent.agent_manager import AgentManager
 from core.agent.orchestrator import AgentOrchestrator
 from tests.fixtures.fakes import FakeResources
@@ -69,6 +70,7 @@ class FakeConfig:
         {
             "limits": FakeLimits(),
             "prompt_memory": PromptMemorySettings(),
+            "tools": ToolSettings(),
             "search": type("Search", (), {"model_dump": lambda self: {}})(),
         },
     )()
@@ -228,6 +230,31 @@ async def test_orchestrator_compiles_selected_research_mode_into_same_agent_run(
     assert run.limits.max_attempts == FakeLimits.max_attempts * 2
     assert run.project_briefing.mode == "adaptive"
     assert run.project_briefing.initial_reason == "research_mode"
+    assert "search_web" in run.enabled_tools
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_agent_without_tool_choice_gets_the_default_groups(monkeypatch):
+    context = FakeSession()
+    context.resources.postgres.upsert_agent(
+        AgentConfig(id="agent-1", name="Helper", persona="Careful", is_default=True)
+    )
+    monkeypatch.setattr("core.agent.orchestrator.AgentExecutor", FakeExecutor)
+
+    async def fake_bootstrap_services(self, context_arg, agent_id, document_focus):
+        return FakeTools()
+
+    monkeypatch.setattr(AgentOrchestrator, "_bootstrap_services", fake_bootstrap_services)
+    FakeExecutor.instances.clear()
+
+    [_ async for _ in make_orchestrator(context).run_stream(
+        user_query="What did we decide?", context=context,
+    )]
+
+    tools = set(FakeExecutor.instances[0].ctx.enabled_tools)
+    assert "search_knowledge_messages" in tools
+    assert not {"search_web", "get_engine_health", "propose_entity_merge"} & tools
 
 
 @pytest.mark.runtime

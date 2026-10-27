@@ -7,6 +7,7 @@ from loguru import logger
 
 from common.schema.agent.community_tools import AAC_DEFAULT_ENABLED_TOOLS
 from common.schema.agent.identity import AgentConfig, PersonaProfile
+from common.schema.agent.tool_names import tool_groups
 from common.utils.agent_identity import (
     build_brain_snapshot_summary,
     normalize_agent_brain,
@@ -74,7 +75,9 @@ class AgentManager:
     def _validate_enabled_tools(enabled_tools: Optional[List[str]]) -> None:
         if enabled_tools is None:
             return
-        unknown = sorted(set(enabled_tools) - get_registered_tool_names())
+        unknown = sorted(
+            set(enabled_tools) - get_registered_tool_names() - set(tool_groups())
+        )
         if unknown:
             raise ValueError("Unknown agent tools: " + ", ".join(unknown))
 
@@ -173,6 +176,49 @@ class AgentManager:
             await self._seed_default_agents()
             rows = await self.pg.fetch_all(query, {"user_name": self.user_name})
             return rows[0]["agent_id"]
+
+    async def ensure_maintenance_agent(self) -> str:
+        """Create the user's Maintenance agent if it is missing. It owns the
+        health and memory-repair tools that ordinary chats no longer get."""
+
+        from common.utils.prompt_loader import load_agent_config
+
+        seed = load_agent_config("MAINTENANCE_AGENT")
+        agent_id = f"maintenance_{self.user_name}"
+        brain = normalize_agent_brain(seed.brain or "", seed.persona_markdown)
+        await self.pg.execute(
+            """
+            WITH inserted AS (
+                INSERT INTO public.agents (
+                    agent_id, user_name, name, persona, brain, model, temperature,
+                    enabled_tools, is_default
+                ) VALUES (
+                    %(agent_id)s, %(user_name)s, %(name)s, %(persona)s, %(brain)s,
+                    %(model)s, %(temperature)s, %(enabled_tools)s, false
+                )
+                ON CONFLICT (agent_id) DO NOTHING
+                RETURNING agent_id, user_name, brain_revision, brain
+            )
+            INSERT INTO public.agent_brain_snapshots (
+                agent_id, revision, user_name, content, edited_by,
+                change_type, change_summary
+            )
+            SELECT agent_id, brain_revision, user_name, COALESCE(brain, ''),
+                   'seed', 'initial_seed', 'Initial Brain'
+            FROM inserted
+            """,
+            {
+                "agent_id": agent_id,
+                "user_name": self.user_name,
+                "name": seed.name,
+                "persona": seed.persona_markdown,
+                "brain": brain,
+                "model": seed.model,
+                "temperature": seed.temperature,
+                "enabled_tools": json.dumps(seed.enabled_tools),
+            },
+        )
+        return agent_id
 
     async def get_default_agent_id(self) -> str:
         """Read the startup-initialized default agent without mutating state."""
