@@ -171,6 +171,11 @@ CORS currently permits `localhost:3000` and `127.0.0.1:3000`.
   retries one eligible failed window without replacing its captured membership
   or policy. The response contains only retry status fields, not its internal
   policy snapshot.
+- `POST /v1/projects/{project_id}/memory/save` turns finished conversation into
+  memory now. Normally Knoggin waits until a window of conversation fills
+  (128K tokens, less for small extraction models) or five minutes pass with no
+  new exchange. Returns 202, or 409 when
+  the project is not running.
 
 ## Project notebooks
 

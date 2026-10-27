@@ -222,6 +222,7 @@ class ProjectSemanticProcessor(BaseJob):
         self._capture_semantic_policy = capture_semantic_policy
         self._now_ms = now_ms or (lambda: int(time() * 1000))
         self._timeout_stage: tuple[SemanticWindowRecord, str] | None = None
+        self._flush_requested = False
         self.update_settings(settings)
 
     @property
@@ -236,6 +237,12 @@ class ProjectSemanticProcessor(BaseJob):
 
     def update_episode_settings(self, settings: EpisodeSettings) -> None:
         self.admission.update_episode_settings(settings)
+
+    def request_flush(self) -> None:
+        """Turn finished conversation into memory now instead of after the
+        idle wait. The request holds until no finished exchange is left."""
+
+        self._flush_requested = True
 
     async def should_run(self, ctx: JobContext) -> bool:
         active = await self.knowledge_store.get_active_project_semantic_window(
@@ -290,8 +297,10 @@ class ProjectSemanticProcessor(BaseJob):
                 project_id=ctx.project_id,
                 domain=policy.domain,
                 ingestion_policy=policy,
+                force_flush=self._flush_requested,
             )
             if claimed is None:
+                self._flush_requested = False
                 return JobResult(success=True, summary="No semantic window is due")
             window = claimed.window
         return await self._drain_window(window, ctx)

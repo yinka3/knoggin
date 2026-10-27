@@ -78,6 +78,20 @@ async def retry_window(request):
     })
 
 
+async def save_memory_now(request):
+    runtime = request.app.state.runtime
+    project_id = request.path_params["project_id"]
+    if error := await _project_error(runtime, project_id, write=True):
+        return error
+    if not await runtime.projects.maintenance_service.flush_semantic_memory(project_id):
+        return _error(
+            "project_not_running",
+            "Project is not running; its conversation is saved after it starts",
+            409,
+        )
+    return JSONResponse({"flush_requested": True}, status_code=202)
+
+
 async def control_overview(request):
     runtime = request.app.state.runtime
     project_id = request.path_params["project_id"]
@@ -113,4 +127,5 @@ routes = [
     Route("/v1/projects/{project_id}/semantic-participation", select_participation, methods=["PUT"]),
     Route("/v1/projects/{project_id}/maintenance/semantic-windows/blocked", blocked_windows, methods=["GET"]),
     Route("/v1/projects/{project_id}/maintenance/semantic-windows/{window_id}/retry", retry_window, methods=["POST"]),
+    Route("/v1/projects/{project_id}/memory/save", save_memory_now, methods=["POST"]),
 ]

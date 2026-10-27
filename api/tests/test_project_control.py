@@ -18,6 +18,10 @@ def test_project_control_scopes_reads_and_future_only_selection(monkeypatch, tmp
             calls.append(("inspect", project_id, limit))
             return (SimpleNamespace(model_dump=lambda **_: {"window_id": "window-1"}),)
 
+        async def flush_semantic_memory(self, project_id):
+            calls.append(("flush", project_id))
+            return project["status"] == "active"
+
         async def list_maintenance_reviews(self, project_id):
             return [SimpleNamespace(status="open")]
 
@@ -71,6 +75,7 @@ def test_project_control_scopes_reads_and_future_only_selection(monkeypatch, tmp
                 assert overview["ingestion_health"]["status"] == "healthy"
                 assert (await client.get(base + "/semantic-participation")).json()["sessions"][0]["semantic_participation_enabled"] is False
                 assert (await client.put(base + "/semantic-participation", json={"session_ids": ["session-1"]})).status_code == 409
+                assert (await client.post(base + "/memory/save")).status_code == 409
                 activated = await client.post(base + "/reactivate")
                 assert activated.status_code == 200
                 invalid = await client.put(base + "/semantic-participation", json={"session_ids": ["session-1", "session-1"]})
@@ -84,6 +89,11 @@ def test_project_control_scopes_reads_and_future_only_selection(monkeypatch, tmp
                 assert retry.json()["retry_accepted"] is True
                 assert "must-not-appear" not in retry.text
                 assert (await client.post(base + "/maintenance/semantic-windows/bad/retry")).status_code == 422
+                saved = await client.post(base + "/memory/save")
+                assert saved.status_code == 202
+                assert saved.json() == {"flush_requested": True}
 
     asyncio.run(exercise())
     assert ("inspect", "project-1", 21) in calls
+    # The archived project is refused before the service is asked.
+    assert calls.count(("flush", "project-1")) == 1

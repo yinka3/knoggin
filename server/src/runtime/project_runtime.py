@@ -85,6 +85,14 @@ class ProjectRuntime:
             return False
         return self.scheduler.wake_job(self.project_semantic_processor.name)
 
+    def flush_semantic_work(self) -> bool:
+        """Ask the semantic owner to close pending conversation now."""
+
+        if self.project_semantic_processor is None:
+            return False
+        self.project_semantic_processor.request_flush()
+        return self.signal_semantic_work()
+
     async def shutdown(self):
         """Stop admission, then release every project-owned runtime resource."""
         async with self._shutdown_lock:

@@ -182,6 +182,15 @@ class ProjectMaintenanceService:
                 runtime.signal_semantic_work()
             return window
 
+    async def flush_semantic_memory(self, project_id: str) -> bool:
+        """Save finished conversation to memory now. Returns False when the
+        project is not loaded; its pending conversation is then saved after
+        the idle wait once it runs again."""
+
+        await self._require_domain_project(project_id, allow_archived=False)
+        runtime = self._active_projects.get(project_id)
+        return runtime is not None and runtime.flush_semantic_work()
+
     async def inspect_semantic_window_blockages(
         self, project_id: str, *, limit: int = 100
     ) -> tuple[SemanticWindowBlockage, ...]:
