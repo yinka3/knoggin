@@ -569,14 +569,6 @@ class FakePostgresClient:
         self._execute_against_stores(query, params or {})
         return self.write_count
 
-    @staticmethod
-    def build_cypher(
-        cypher_query,
-        return_types="result agtype",
-        graph_name="knoggin_graph",
-    ):
-        return f"cypher<{graph_name}|{return_types}>:{cypher_query}"
-
     @asynccontextmanager
     async def transaction(self):
         yield _FakePostgresCursor(self)
@@ -1133,14 +1125,6 @@ class RecordingPostgresClient:
         exc = exceptions.pop(0)
         if exc is not None:
             raise exc
-
-    def build_cypher(
-        self,
-        cypher_query,
-        return_types="result agtype",
-        graph_name="knoggin_graph",
-    ):
-        return f"cypher<{graph_name}|{return_types}>:{cypher_query}"
 
     @asynccontextmanager
     async def transaction(self):

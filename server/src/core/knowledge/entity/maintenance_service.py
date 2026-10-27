@@ -9,7 +9,6 @@ from contextlib import asynccontextmanager
 from typing import Any, Iterable
 
 from common.schema.evidence import EvidencePointer, EvidenceSnapshot
-from core.knowledge.db.projection_rebuilder import GraphBuilder
 from core.knowledge.db.readers.semantic_window_reader import SemanticWindowReader
 from core.knowledge.db.writers.global_entity_merge_writer import (
     EntityMergeConflict,
@@ -47,7 +46,6 @@ class EntityMaintenanceService:
         self.user_name = user_name.strip()
         self.writer = GlobalEntityMergeWriter(postgres)
         self.review_writer = MaintenanceReviewWriter(postgres)
-        self.projection_rebuilder = GraphBuilder(postgres)
         self.semantic_window_reader = SemanticWindowReader(postgres)
         self.merge_advisor = (
             EntityMergeAdvisor(postgres, llm, self.user_name) if llm is not None else None
@@ -434,14 +432,6 @@ class EntityMaintenanceService:
                     reason="Confirmed global entity merge applied",
                     cur=cur,
                 )
-        result["projection_errors"] = await self._rebuild_projections(
-            result["affected_project_ids"],
-            actor,
-        )
-        await self._record_projection_repair_state(
-            merge_id,
-            result["projection_errors"],
-        )
         return result
 
     async def apply_merge_review(
@@ -531,17 +521,6 @@ class EntityMaintenanceService:
             safe_mutation_ids=requested_ids,
             force_mutation_ids=approved_ids,
         )
-        if result["applied_mutation_ids"]:
-            result["projection_errors"] = await self._rebuild_projections(
-                result["affected_project_ids"],
-                actor,
-            )
-            await self._record_projection_repair_state(
-                merge_id,
-                result["projection_errors"],
-            )
-        else:
-            result["projection_errors"] = []
         conflicts = [
             item
             for item in plan["conflicting_mutations"]
@@ -588,69 +567,6 @@ class EntityMaintenanceService:
             result["policy_result"] = "rolled_back"
         return result
 
-    async def repair_merge_projections(
-        self,
-        merge_id: str,
-        *,
-        user_name: str | None = None,
-    ) -> dict[str, Any]:
-        """Retry only derived projection work for one durable merge audit."""
-
-        actor = user_name or self.user_name
-        if not actor:
-            raise ValueError("user_name is required for global maintenance")
-        audit = await self.writer.get_audit(merge_id)
-        if audit is None or audit["user_name"] != actor:
-            raise ValueError("Unknown entity merge audit")
-        if audit["status"] == "failed":
-            raise ValueError("Cannot repair projections for an invalidated merge")
-        project_ids = sorted(
-            {str(value) for value in (audit.get("affected_project_ids") or [])}
-        )
-        errors = await self._rebuild_projections(project_ids, actor)
-        await self._record_projection_repair_state(merge_id, errors)
-        return {
-            "merge_id": merge_id,
-            "canonical_status": audit["status"],
-            "affected_project_ids": project_ids,
-            "projection_repaired": not errors,
-            "projection_errors": errors,
-            "survivor_entity_id": int(audit["survivor_entity_id"]),
-            "retired_entity_id": int(audit["retired_entity_id"]),
-        }
-
-    async def projection_repair_health(self, *, limit: int = 100) -> dict[str, Any]:
-        """Return bounded repair counts without evidence or failure contents."""
-
-        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
-            raise ValueError("projection repair health limit must be between 1 and 100")
-        row = await self.postgres.fetch_one(
-            """
-            SELECT count(*) AS pending_count
-            FROM (
-                SELECT merge_id
-                FROM public.entity_global_merge_audits
-                WHERE user_name = %s AND failure_reason = 'projection_repair_pending'
-                LIMIT %s
-            ) AS pending
-            """,
-            (self.user_name, limit),
-        )
-        return {
-            "pending_count": int((row or {}).get("pending_count") or 0),
-            "truncated": int((row or {}).get("pending_count") or 0) == limit,
-        }
-
-    async def _record_projection_repair_state(
-        self,
-        merge_id: str,
-        errors: list[dict[str, str]],
-    ) -> None:
-        await self.writer.record_projection_repair_state(
-            merge_id,
-            repair_pending=bool(errors),
-        )
-
     async def dismiss_review(
         self,
         review_id: str,
@@ -686,22 +602,6 @@ class EntityMaintenanceService:
             user_name=actor,
             scope="user-global",
         )
-
-    async def _rebuild_projections(
-        self,
-        project_ids: Iterable[str],
-        user_name: str,
-    ) -> list[dict[str, str]]:
-        errors = []
-        for project_id in sorted(set(project_ids)):
-            try:
-                await self.projection_rebuilder.rebuild_project_projection(
-                    project_id,
-                    user_name,
-                )
-            except Exception as exc:  # relational mutation remains durable/auditable
-                errors.append({"project_id": project_id, "error": str(exc)})
-        return errors
 
     async def capture_frontier(
         self,

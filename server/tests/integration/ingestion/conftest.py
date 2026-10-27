@@ -50,11 +50,7 @@ async def real_server_scope():
     try:
         with psycopg.connect(database_url, autocommit=True) as connection:
             connection.execute("CREATE EXTENSION vector")
-            connection.execute("CREATE EXTENSION age")
-            connection.execute("LOAD 'age'")
-            connection.execute('SET search_path = ag_catalog, "$user", public')
             connection.execute(schema_sql)
-            connection.execute("SELECT ag_catalog.create_graph('knoggin_graph')")
 
         postgres = PostgresClient(dsn=database_url, min_size=1, max_size=2)
         await postgres.connect()

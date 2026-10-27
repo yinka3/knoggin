@@ -4,7 +4,6 @@ import pytest
 from psycopg.errors import RaiseException
 
 from core.knowledge.db.writers.session_deletion_writer import SessionDeletionWriter
-from infrastructure.postgres_client import PostgresClient
 
 
 class RecordingCursor:
@@ -19,8 +18,6 @@ class RecordingCursor:
 
 
 class RecordingClient:
-    build_cypher = staticmethod(PostgresClient.build_cypher)
-
     def __init__(self, **cursor_kwargs) -> None:
         self.cursor = RecordingCursor(**cursor_kwargs)
         self.transaction_exits = []

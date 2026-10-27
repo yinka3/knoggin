@@ -25,7 +25,6 @@ def test_backup_verification_and_restore_into_fresh_targets(monkeypatch, tmp_pat
 
     monkeypatch.setattr(instance_backup, "_run_postgres", postgres)
     monkeypatch.setattr(instance_backup, "_empty_database", lambda _url: None)
-    monkeypatch.setattr(instance_backup, "_repair_restored_age_graph_ids", lambda _url: None)
 
     backup = instance_backup.create_backup(
         tmp_path / "backup", database_url="postgresql:///source", settings_dir=settings,
@@ -50,7 +49,6 @@ def test_restore_rejects_modified_backup_or_populated_target(monkeypatch, tmp_pa
         Path(command[-1]).write_bytes(b"dump") if command[0] == "pg_dump" else None
     ))
     monkeypatch.setattr(instance_backup, "_empty_database", lambda _url: None)
-    monkeypatch.setattr(instance_backup, "_repair_restored_age_graph_ids", lambda _url: None)
     settings = tmp_path / "settings"
     settings.mkdir()
     backup = instance_backup.create_backup(
@@ -100,7 +98,6 @@ def test_absolute_library_path_requires_explicit_restore_destination(monkeypatch
         Path(command[-1]).write_bytes(b"dump") if command[0] == "pg_dump" else None
     ))
     monkeypatch.setattr(instance_backup, "_empty_database", lambda _url: None)
-    monkeypatch.setattr(instance_backup, "_repair_restored_age_graph_ids", lambda _url: None)
     backup = instance_backup.create_backup(
         tmp_path / "backup", database_url="postgresql:///source", settings_dir=settings,
     )

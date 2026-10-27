@@ -12,9 +12,6 @@ from common.scoping import (
     require_scope_value,
 )
 from common.utils.time_utils import get_now_ms
-from core.knowledge.db.writers.age_projection_writer import (
-    AgeProjectionWriter,
-)
 from infrastructure.postgres_client import PostgresClient
 
 
@@ -37,10 +34,8 @@ def _storage_write(operation: str):
 
 
 class GraphWriter:
-    def __init__(self, client: PostgresClient, graph_name: str = "knoggin_graph"):
+    def __init__(self, client: PostgresClient):
         self.client = client
-        self.graph_name = graph_name
-        self.projection = AgeProjectionWriter(client, graph_name=graph_name)
 
     def _current_time_ms(self) -> int:
         return get_now_ms()
@@ -186,7 +181,6 @@ class GraphWriter:
                     """,
                     (IDENTITY_ENTITY_ID, name, user_name),
                 )
-            await self.projection.project_identity(cur, identity)
 
         return identity
 
@@ -242,12 +236,6 @@ class GraphWriter:
             """,
             (project_id, entity_ids, entity_ids),
         )
-        await self.projection.replace_relationships_for_entities(
-            cur,
-            project_id,
-            entity_ids,
-            [],
-        )
         await cur.execute(
             """
             DELETE FROM message_entity_refs ref
@@ -287,15 +275,8 @@ class GraphWriter:
                   SELECT 1 FROM project_entity_contexts context
                   WHERE context.entity_id = entity.entity_id
               )
-            RETURNING entity_id
             """,
             (entity_ids,),
-        )
-        orphaned_ids = sorted(int(row["entity_id"]) for row in await cur.fetchall())
-        await self.projection.delete_entities_projection(
-            cur,
-            orphaned_ids,
-            project_id,
         )
         return sorted(entity_ids)
 

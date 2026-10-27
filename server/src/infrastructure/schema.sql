@@ -1,5 +1,5 @@
 -- Canonical fresh-install schema for unreleased Knoggin.
--- Extensions and the AGE graph are created by the deployment/test bootstrap.
+-- The vector extension is created by the deployment/test bootstrap.
 -- Historical upgrades and developer data cleanup do not belong in this file.
 
 SET statement_timeout = 0;

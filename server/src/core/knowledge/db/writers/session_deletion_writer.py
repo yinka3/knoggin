@@ -32,6 +32,6 @@ class SessionDeletionWriter:
                 """,
                 params,
             )
-            # Do not delete or mutate canonical messages (or their AGE
-            # projections). The session tombstone makes them read-only
+            # Do not delete or mutate canonical messages. The session
+            # tombstone makes them read-only
             # historical evidence and mutation paths require an open session.

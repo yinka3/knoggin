@@ -107,7 +107,7 @@ class ProjectMaintenanceService:
         self._lock = asyncio.Lock()
         self._domain_store = DomainConfigStore(self.pg)
         # Semantic review workflows live above KnowledgeStore. The persistence
-        # facade remains focused on durable reads/writes and graph projections.
+        # facade remains focused on durable reads and writes.
         self._maintenance_reviews = MaintenanceReviewWriter(self.pg)
         self._conflict_writer = ConflictWriter(
             self.pg,
@@ -889,7 +889,6 @@ class ProjectMaintenanceService:
                 impact("relationship_observation", "direct_mutation", observations, observation_count),
                 impact("message_entity_ref", "direct_mutation", messages, message_count),
                 impact("episode_entity_link", "derived_rebuild", episodes, episode_count),
-                impact("age_projection", "derived_rebuild", (project_id,), 1),
                 impact("live_entity_cache", "cache_invalidation", (project_id,), 1),
             ),
         )
@@ -1527,17 +1526,7 @@ class ProjectMaintenanceService:
                 batch_size=batch_size,
                 max_entities=max_entities,
             )
-            summary = result.to_dict()
-            summary["projection_rebuilt"] = False
-            if result.updated:
-                summary[
-                    "projection"
-                ] = await knowledge_store.rebuild_project_projection(
-                    project_id,
-                    self.user_name,
-                )
-                summary["projection_rebuilt"] = True
-            return summary
+            return result.to_dict()
 
     async def preview_historical_relationship_normalization(
         self,
@@ -1586,17 +1575,7 @@ class ProjectMaintenanceService:
                 batch_size=batch_size,
                 max_relationships=max_relationships,
             )
-            summary = result.to_dict()
-            summary["projection_rebuilt"] = False
-            if result.updated:
-                summary[
-                    "projection"
-                ] = await knowledge_store.rebuild_project_projection(
-                    project_id,
-                    self.user_name,
-                )
-                summary["projection_rebuilt"] = True
-            return summary
+            return result.to_dict()
 
     def _require_no_active_runtimes(self, message: str) -> None:
         active_runtime_projects = [

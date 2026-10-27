@@ -26,7 +26,6 @@ from core.ingestion.jev_extraction import (
     accepted_extraction_type,
     prepare_extraction_request,
 )
-from core.knowledge.db.projection_rebuilder import GraphBuilder
 from core.knowledge.db.writers.maintenance_review_writer import MaintenanceReviewWriter
 from core.knowledge.db.writers.relationship_interpretation_writer import (
     RelationshipInterpretationWriter,
@@ -81,7 +80,6 @@ class SemanticCommitWriter:
 
     def __init__(self, client: PostgresClient) -> None:
         self.client = client
-        self._projection = GraphBuilder(client)
 
     async def commit(self, build: SemanticWindowBuild) -> SemanticCommitSummary:
         if not isinstance(build, SemanticWindowBuild):
@@ -213,13 +211,6 @@ class SemanticCommitWriter:
                         )
                     relationships_removed = await self._remove_orphan_relationships(
                         cur, project_id=project_id
-                    )
-                    # AGE is a rebuildable projection, but it must reflect the same
-                    # committed SQL snapshot before this window advertises Knowledge.
-                    await self._projection.rebuild_project_projection(
-                        project_id,
-                        user_name,
-                        cur=cur,
                     )
                 await cur.execute(
                     """

@@ -27,7 +27,6 @@ from common.schema.source.references import (
 from core.knowledge.context.models import ContextMaterialization
 from core.knowledge.db.embedding_rebuilder import EmbeddingRebuilder
 from core.knowledge.db.id_allocator import IdAllocator
-from core.knowledge.db.projection_rebuilder import GraphBuilder
 from core.knowledge.db.readers.artifact_reader import ArtifactReader
 from core.knowledge.db.readers.entity_reader import EntityReader
 from core.knowledge.db.readers.episode_reader import EpisodeReader
@@ -77,7 +76,7 @@ class KnowledgeStore:
 
     Composes focused readers, writers, rebuilders, and tool queries over the
     runtime-owned PostgresClient. Callers use this
-    boundary without depending on the underlying SQL, AGE, or index layout.
+    boundary without depending on the underlying SQL or index layout.
     """
 
     def __init__(
@@ -116,13 +115,12 @@ class KnowledgeStore:
         self._artifact_reader = ArtifactReader(self._postgres_client)
         self._project_context_reader = ProjectContextReader(self._postgres_client)
         self._semantic_window_reader = SemanticWindowReader(self._postgres_client)
-        self._projection_rebuilder = GraphBuilder(self._postgres_client)
         self._embedding_rebuilder = EmbeddingRebuilder(
             self._postgres_client,
             embedding_service,
         )
         self._embedding_service = embedding_service
-        logger.info("KnowledgeStore initialized with internal Postgres/AGE backend")
+        logger.info("KnowledgeStore initialized with internal Postgres backend")
 
     # Message and exchange lifecycle
 
@@ -1453,16 +1451,6 @@ class KnowledgeStore:
             entity_ids,
             user_name=user_name,
             project_id=project_id,
-        )
-
-    async def rebuild_project_projection(
-        self,
-        project_id: str,
-        user_name: str,
-    ) -> Dict[str, int]:
-        return await self._projection_rebuilder.rebuild_project_projection(
-            project_id,
-            user_name=user_name,
         )
 
     async def rebuild_project_embeddings(

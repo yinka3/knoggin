@@ -11,7 +11,6 @@ from typing import Iterable
 from common.conf.domain_config import CompiledDomain
 from common.schema.ingestion.contracts import relationship_identity
 from common.scoping import require_scope_value
-from core.knowledge.db.projection_rebuilder import GraphBuilder
 from core.knowledge.db.writers.maintenance_review_writer import MaintenanceReviewWriter
 from core.knowledge.maintenance.maintenance_reviews import (
     RelationshipInterpretationPlan,
@@ -30,10 +29,9 @@ class RelationshipInterpretationResult:
 class RelationshipInterpretationWriter:
     """Apply a typed observation plan without replacing evidence identity."""
 
-    def __init__(self, client, *, reviews=None, projection=None) -> None:
+    def __init__(self, client, *, reviews=None) -> None:
         self.client = client
         self.reviews = reviews or MaintenanceReviewWriter(client)
-        self.projection = projection or GraphBuilder(client)
 
     @asynccontextmanager
     async def _cursor_context(self, cur=None):
@@ -241,9 +239,6 @@ class RelationshipInterpretationWriter:
                         json.dumps(changed_ids),
                         json.dumps(changes_for_audit, sort_keys=True),
                     ),
-                )
-                await self.projection.rebuild_project_projection(
-                    project_id, user_name, cur=active_cur
                 )
                 if review_id is not None and conflicts == 0:
                     await self.reviews.transition(

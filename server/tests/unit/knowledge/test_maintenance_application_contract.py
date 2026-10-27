@@ -133,16 +133,11 @@ class _ReclassificationStore:
     def __init__(self, result: HistoricalReclassificationResult):
         self.result = result
         self.reclassification_calls = []
-        self.projection_calls = []
         self.embedding_calls = []
 
     async def reclassify_historical_entities(self, **kwargs):
         self.reclassification_calls.append(kwargs)
         return self.result
-
-    async def rebuild_project_projection(self, project_id, user_name):
-        self.projection_calls.append((project_id, user_name))
-        return {"entities": self.result.updated}
 
     async def rebuild_project_embeddings(self, project_id, user_name):
         self.embedding_calls.append((project_id, user_name))
@@ -150,7 +145,7 @@ class _ReclassificationStore:
 
 
 @pytest.mark.no_network
-async def test_entity_reclassification_rebuilds_projection_without_embeddings():
+async def test_entity_reclassification_returns_the_writer_summary_without_embeddings():
     service, _reviews = _project_service(_relationship_review())
     store = _ReclassificationStore(
         HistoricalReclassificationResult(
@@ -179,12 +174,9 @@ async def test_entity_reclassification_rebuilds_projection_without_embeddings():
         "conflicts": 0,
         "batches": 1,
         "truncated": False,
-        "projection_rebuilt": True,
-        "projection": {"entities": 1},
     }
     assert store.reclassification_calls[0]["user_name"] == "ada"
     assert store.reclassification_calls[0]["project_id"] == "project-1"
-    assert store.projection_calls == [("project-1", "ada")]
     assert store.embedding_calls == []
 
 
@@ -209,12 +201,9 @@ async def test_entity_reclassification_skips_derived_work_without_updates():
         expected_domain_version=1,
     )
 
-    assert summary["projection_rebuilt"] is False
-    assert "projection" not in summary
     assert "embedding_rebuild_required" not in summary
     assert "embeddings" not in summary
     assert "embeddings_rebuilt" not in summary
-    assert store.projection_calls == []
     assert store.embedding_calls == []
 
 
@@ -686,16 +675,6 @@ class _EntityService:
             "applied_mutation_ids": [1],
         }
 
-    async def repair_merge_projections(self, merge_id, **_kwargs):
-        assert merge_id == "merge-1"
-        return {
-            "merge_id": merge_id,
-            "affected_project_ids": ["project-1"],
-            "survivor_entity_id": 2,
-            "retired_entity_id": 3,
-            "projection_repaired": True,
-        }
-
 
 @pytest.mark.no_network
 async def test_project_manager_invalidates_affected_live_entity_cache():
@@ -725,21 +704,6 @@ async def test_project_manager_invalidates_cache_after_rollback():
     assert result["runtime_cache_invalidations"] == {"project-1": 2}
 
 
-@pytest.mark.no_network
-async def test_project_manager_invalidates_cache_after_projection_repair():
-    manager = ProjectManager.__new__(ProjectManager)
-    manager.entity_maintenance_service = _EntityService()
-    manager.maintenance_service = SimpleNamespace(lock=__import__("asyncio").Lock())
-    cache = _EntityCache()
-    manager.active_projects = {"project-1": SimpleNamespace(entities=cache)}
-
-    result = await manager.repair_global_entity_merge_projections("merge-1")
-
-    assert result["projection_repaired"] is True
-    assert cache.removed == [[2, 3]]
-    assert result["runtime_cache_invalidations"] == {"project-1": 2}
-
-
 class _RollbackWriter:
     async def plan_rollback(self, **_kwargs):
         return {
@@ -764,96 +728,6 @@ class _RollbackWriter:
             "concurrent_conflicts": [],
         }
 
-    async def record_projection_repair_state(self, merge_id, *, repair_pending):
-        self.projection_repair_state = (merge_id, repair_pending)
-
-
-class _ProjectionBuilder:
-    def __init__(self):
-        self.calls = []
-
-    async def rebuild_project_projection(self, project_id, user_name):
-        self.calls.append((project_id, user_name))
-        return {"entities": 1, "relationships": 0}
-
-
-@pytest.mark.no_network
-async def test_rollback_rebuilds_every_affected_projection():
-    service = EntityMaintenanceService(postgres=object(), user_name="ada")
-    service.writer = _RollbackWriter()
-    service.projection_rebuilder = _ProjectionBuilder()
-
-    result = await service.rollback("merge-1")
-
-    assert result["rolled_back"] is True
-    assert result["projection_errors"] == []
-    assert service.projection_rebuilder.calls == [
-        ("project-1", "ada"),
-        ("project-2", "ada"),
-    ]
-
-
-@pytest.mark.no_network
-async def test_noop_rollback_does_not_clear_an_existing_projection_repair_marker():
-    class NoopRollbackWriter(_RollbackWriter):
-        def __init__(self):
-            self.repair_state_updates = []
-
-        async def rollback_safe(self, **_kwargs):
-            return {
-                "merge_id": "merge-1",
-                "survivor_entity_id": 2,
-                "retired_entity_id": 3,
-                "affected_project_ids": ["project-1", "project-2"],
-                "applied_mutation_ids": [],
-                "rolled_back": True,
-                "concurrent_conflicts": [],
-            }
-
-        async def record_projection_repair_state(self, merge_id, *, repair_pending):
-            self.repair_state_updates.append((merge_id, repair_pending))
-
-    service = EntityMaintenanceService(postgres=object(), user_name="ada")
-    service.writer = NoopRollbackWriter()
-    service.projection_rebuilder = _ProjectionBuilder()
-
-    result = await service.rollback("merge-1")
-
-    assert result["projection_errors"] == []
-    assert service.projection_rebuilder.calls == []
-    assert service.writer.repair_state_updates == []
-
-
-@pytest.mark.no_network
-async def test_projection_repair_rebuilds_only_derived_state():
-    class RepairWriter:
-        def __init__(self):
-            self.states = []
-
-        async def get_audit(self, merge_id):
-            return {
-                "merge_id": merge_id,
-                "user_name": "ada",
-                "status": "executed",
-                "survivor_entity_id": 2,
-                "retired_entity_id": 3,
-                "affected_project_ids": ["project-1"],
-            }
-
-        async def record_projection_repair_state(self, merge_id, *, repair_pending):
-            self.states.append((merge_id, repair_pending))
-
-    service = EntityMaintenanceService(postgres=object(), user_name="ada")
-    service.writer = RepairWriter()
-    service.projection_rebuilder = _ProjectionBuilder()
-
-    result = await service.repair_merge_projections("merge-1")
-
-    assert result["canonical_status"] == "executed"
-    assert result["projection_repaired"] is True
-    assert service.projection_rebuilder.calls == [("project-1", "ada")]
-    assert service.writer.states == [("merge-1", False)]
-
 
 class _AtomicMergeWriter:
     def __init__(self):
@@ -867,9 +741,6 @@ class _AtomicMergeWriter:
             "survivor_entity_id": 2,
             "retired_entity_id": 3,
         }
-
-    async def record_projection_repair_state(self, merge_id, *, repair_pending):
-        self.repair_state = (merge_id, repair_pending)
 
 
 class _AtomicReviewWriter:
@@ -908,13 +779,9 @@ async def test_merge_and_review_transition_share_one_transaction(monkeypatch):
     async def versions(*_args, **_kwargs):
         return {"project-1": 1}
 
-    async def no_projection_errors(*_args, **_kwargs):
-        return []
-
     monkeypatch.setattr(service, "preview_merge", preview_merge)
     monkeypatch.setattr(service, "revalidate_frontier", true_frontier)
     monkeypatch.setattr(service, "_definition_versions", versions)
-    monkeypatch.setattr(service, "_rebuild_projections", no_projection_errors)
 
     await service.merge(
         plan,
@@ -926,179 +793,3 @@ async def test_merge_and_review_transition_share_one_transaction(monkeypatch):
     assert client.transaction_enters == 1
 
 
-@pytest.mark.no_network
-async def test_failed_merge_projection_repair_does_not_repeat_canonical_merge(
-    monkeypatch,
-):
-    class Writer(_AtomicMergeWriter):
-        def __init__(self):
-            super().__init__()
-            self.merge_calls = 0
-            self.states = []
-
-        async def merge(self, **kwargs):
-            self.merge_calls += 1
-            result = await super().merge(**kwargs)
-            self.merge_id = kwargs["merge_id"]
-            return result
-
-        async def get_audit(self, merge_id):
-            return {
-                "merge_id": merge_id,
-                "user_name": "ada",
-                "status": "executed",
-                "survivor_entity_id": 2,
-                "retired_entity_id": 3,
-                "affected_project_ids": ["project-1"],
-            }
-
-        async def record_projection_repair_state(self, merge_id, *, repair_pending):
-            self.states.append((merge_id, repair_pending))
-
-    class FailOnceProjection:
-        def __init__(self):
-            self.calls = 0
-
-        async def rebuild_project_projection(self, *_args):
-            self.calls += 1
-            if self.calls == 1:
-                raise RuntimeError("projection unavailable")
-            return {"entities": 1, "relationships": 0}
-
-    service = EntityMaintenanceService(
-        postgres=RecordingPostgresClient(), user_name="ada"
-    )
-    service.writer = Writer()
-    service.projection_rebuilder = FailOnceProjection()
-
-    async def preview_merge(**_kwargs):
-        return {
-            "context_conflicts": [],
-            "state_hash": "hash-1",
-            "affected_project_ids": ["project-1"],
-            "frontiers": {"project-1": {"token": "frontier"}},
-        }
-
-    async def valid_frontier(*_args, **_kwargs):
-        return True
-
-    async def definition_versions(*_args, **_kwargs):
-        return {"project-1": 1}
-
-    monkeypatch.setattr(service, "preview_merge", preview_merge)
-    monkeypatch.setattr(service, "revalidate_frontier", valid_frontier)
-    monkeypatch.setattr(service, "_definition_versions", definition_versions)
-    plan = EntityMergePlan(
-        survivor_entity_id=2,
-        retired_entity_id=3,
-        frontier_tokens={"project-1": "frontier"},
-        definition_versions={"project-1": 1},
-        expected_state_hash="hash-1",
-    )
-
-    merged = await service.merge(plan)
-    repaired = await service.repair_merge_projections(service.writer.merge_id)
-
-    assert merged["projection_errors"]
-    assert repaired["projection_repaired"] is True
-    assert service.writer.merge_calls == 1
-    assert [pending for _, pending in service.writer.states] == [True, False]
-
-
-@pytest.mark.no_network
-async def test_cancelled_multi_project_projection_repair_preserves_writer_marker(
-    monkeypatch,
-):
-    class Writer(_AtomicMergeWriter):
-        def __init__(self):
-            super().__init__()
-            self.merge_calls = 0
-            self.states = []
-            self.canonical_marker_set = False
-
-        async def merge(self, **kwargs):
-            self.merge_calls += 1
-            self.cursor = kwargs["cur"]
-            self.merge_id = kwargs["merge_id"]
-            self.canonical_marker_set = True
-            return {
-                "merge_id": self.merge_id,
-                "affected_project_ids": ["project-1", "project-2"],
-                "survivor_entity_id": 2,
-                "retired_entity_id": 3,
-            }
-
-        async def get_audit(self, merge_id):
-            return {
-                "merge_id": merge_id,
-                "user_name": "ada",
-                "status": "executed",
-                "survivor_entity_id": 2,
-                "retired_entity_id": 3,
-                "affected_project_ids": ["project-1", "project-2"],
-            }
-
-        async def record_projection_repair_state(self, merge_id, *, repair_pending):
-            self.states.append((merge_id, repair_pending))
-
-    class CancelSecondProjection:
-        def __init__(self):
-            self.calls = []
-
-        async def rebuild_project_projection(self, project_id, user_name):
-            self.calls.append((project_id, user_name))
-            if project_id == "project-2":
-                raise asyncio.CancelledError()
-            return {"entities": 1, "relationships": 0}
-
-    service = EntityMaintenanceService(
-        postgres=RecordingPostgresClient(), user_name="ada"
-    )
-    service.writer = Writer()
-    service.projection_rebuilder = CancelSecondProjection()
-
-    async def preview_merge(**_kwargs):
-        return {
-            "context_conflicts": [],
-            "state_hash": "hash-1",
-            "affected_project_ids": ["project-1", "project-2"],
-            "frontiers": {
-                "project-1": {"token": "frontier-1"},
-                "project-2": {"token": "frontier-2"},
-            },
-        }
-
-    async def valid_frontier(*_args, **_kwargs):
-        return True
-
-    async def definition_versions(*_args, **_kwargs):
-        return {"project-1": 1, "project-2": 1}
-
-    monkeypatch.setattr(service, "preview_merge", preview_merge)
-    monkeypatch.setattr(service, "revalidate_frontier", valid_frontier)
-    monkeypatch.setattr(service, "_definition_versions", definition_versions)
-    plan = EntityMergePlan(
-        survivor_entity_id=2,
-        retired_entity_id=3,
-        frontier_tokens={"project-1": "frontier-1", "project-2": "frontier-2"},
-        definition_versions={"project-1": 1, "project-2": 1},
-        expected_state_hash="hash-1",
-    )
-
-    with pytest.raises(asyncio.CancelledError):
-        await service.merge(plan)
-
-    assert service.projection_rebuilder.calls == [
-        ("project-1", "ada"),
-        ("project-2", "ada"),
-    ]
-    assert service.writer.canonical_marker_set is True
-    assert service.writer.merge_calls == 1
-    assert service.writer.states == []
-
-    service.projection_rebuilder = _ProjectionBuilder()
-    repaired = await service.repair_merge_projections(service.writer.merge_id)
-
-    assert repaired["projection_repaired"] is True
-    assert service.writer.merge_calls == 1
-    assert service.writer.states == [(service.writer.merge_id, False)]

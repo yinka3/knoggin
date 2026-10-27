@@ -6,7 +6,6 @@ import pytest
 from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
 from core.knowledge.documents.filesystem import ProjectFilesystemFactory
 from core.project.project_manager import ProjectManager, ProjectStatus
-from infrastructure.postgres_client import PostgresClient
 
 
 class RecordingCursor:
@@ -98,8 +97,6 @@ class RecordingClient:
         self.cursor = RecordingCursor(**cursor_kwargs)
         self.transaction_exits = []
 
-    build_cypher = staticmethod(PostgresClient.build_cypher)
-
     @asynccontextmanager
     async def transaction(self):
         try:
@@ -127,7 +124,6 @@ async def test_project_deletion_uses_one_project_cascade_root_atomically():
 
     queries = [query for query, _ in client.cursor.calls]
     assert queries[0].startswith("SELECT project_id FROM public.projects")
-    assert any("RELATED_TO" in query for query in queries)
     assert any("project_entity_contexts" in query for query in queries)
     assert any("DELETE FROM public.entities" in query for query in queries)
     assert not any("DELETE FROM public.messages" in query for query in queries)

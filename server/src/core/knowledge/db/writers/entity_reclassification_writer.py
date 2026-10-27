@@ -7,7 +7,6 @@ from typing import Any, Iterable
 
 from common.conf.domain_config import CompiledDomain
 from common.scoping import IDENTITY_ENTITY_ID, require_scope_value
-from core.knowledge.db.writers.age_projection_writer import AgeProjectionWriter
 from core.knowledge.db.writers.maintenance_review_writer import MaintenanceReviewWriter
 from core.knowledge.entity.reclassification import (
     EntityReclassification,
@@ -55,9 +54,8 @@ class HistoricalReclassificationResult:
 class EntityReclassificationWriter:
     """Read and update entity type/topic pairs without guessing semantics."""
 
-    def __init__(self, client: PostgresClient, graph_name: str = "knoggin_graph"):
+    def __init__(self, client: PostgresClient):
         self.client = client
-        self.projection = AgeProjectionWriter(client, graph_name=graph_name)
 
     @staticmethod
     def _scope(user_name: str, project_id: str, operation: str) -> tuple[str, str]:
@@ -247,8 +245,6 @@ class EntityReclassificationWriter:
                 if change.old_type != change.new_type:
                     type_changed_entity_ids.append(change.entity_id)
 
-            if updated_entities:
-                await self.projection.project_entity_domain(cur, updated_entities)
             if type_changed_entity_ids:
                 await cur.execute(
                     """

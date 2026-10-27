@@ -12,11 +12,6 @@ from core.knowledge.maintenance.maintenance_reviews import (
 )
 
 
-class _NoopProjection:
-    async def rebuild_project_projection(self, project_id, user_name, *, cur):
-        pass
-
-
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
@@ -201,9 +196,7 @@ async def test_relationship_enrichment_requires_a_complete_observation_support_s
         """,
         (relationship_id,),
     )
-    result = await RelationshipInterpretationWriter(
-        real_postgres_client, projection=_NoopProjection()
-    ).apply_plan(
+    result = await RelationshipInterpretationWriter(real_postgres_client).apply_plan(
         user_name="ada",
         project_id="project-1",
         plan=RelationshipInterpretationPlan(

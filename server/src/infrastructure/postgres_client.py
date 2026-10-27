@@ -1,50 +1,18 @@
-import json
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import Any, Optional, TypeAlias
 
 import psycopg
 from loguru import logger
-from psycopg.adapt import Loader
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 QueryParams: TypeAlias = Mapping[str, Any] | Sequence[Any]
 
 
-class _AgtypeLoader(Loader):
-    """Decode AGE scalar, list, and map values into native Python values."""
-
-    def load(self, data) -> Any:
-        raw = bytes(data).decode("utf-8")
-        value, separator, type_name = raw.rpartition("::")
-        if separator and type_name in {"vertex", "edge", "path"}:
-            raw = value
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            # Preserve unfamiliar AGE extensions without breaking the query.
-            return raw
-
-
-async def _configure_async_conn(conn: psycopg.AsyncConnection):
-    """Load Apache AGE and set search path on every async connection."""
-    await conn.execute("LOAD 'age';")
-    await conn.execute('SET search_path = ag_catalog, "$user", public;')
-    cursor = await conn.execute(
-        "SELECT 'ag_catalog.agtype'::regtype::oid AS agtype_oid;"
-    )
-    row = await cursor.fetchone()
-    if row is None:
-        raise RuntimeError("Apache AGE agtype is unavailable after loading AGE")
-    conn.adapters.register_loader(int(row["agtype_oid"]), _AgtypeLoader)
-    await conn.commit()
-
-
 class PostgresClient:
     """
-    Asynchronous Postgres connection-pool client.
-    Supports Apache AGE (graph) and pgvector/tsvector (hybrid storage).
+    Asynchronous Postgres connection-pool client (pgvector and full-text search).
     """
 
     def __init__(
@@ -82,12 +50,11 @@ class PostgresClient:
                 min_size=self.min_size,
                 max_size=self.max_size,
                 kwargs={"autocommit": False, "row_factory": dict_row},
-                configure=_configure_async_conn,
                 open=False,
             )
             self._pool = pool
             await pool.open(wait=True, timeout=self.startup_timeout)
-            logger.info("Connected to Postgres (async pool ready with AGE loaded)")
+            logger.info("Connected to Postgres (async pool ready)")
         except Exception as e:
             logger.error(f"Failed to connect to Postgres: {e}")
             if pool is not None:
@@ -178,21 +145,3 @@ class PostgresClient:
             await cur.execute(query, params)
             return cur.rowcount
 
-    # --- Cypher Helpers ---
-
-    @staticmethod
-    def build_cypher(
-        cypher_query: str,
-        return_types: str = "result agtype",
-        graph_name: str = "knoggin_graph",
-    ) -> str:
-        """
-        Wraps a Cypher query in the required Apache AGE SQL syntax.
-        Parameters should be passed to psycopg execution as `%s` (a JSON string).
-        `return_types` dictates the expected output columns, such as
-        ``id agtype, name agtype``.
-        """
-        return (
-            f"SELECT * FROM cypher('{graph_name}', $${cypher_query}$$, %s) "
-            f"AS ({return_types})"  # noqa: S608
-        )

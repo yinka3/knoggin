@@ -426,7 +426,7 @@ class SessionManager:
         """
         Tombstone a session without mutating project-owned documents.
 
-        Canonical messages and their graph projections remain as read-only
+        Canonical messages and the facts derived from them remain as read-only
         evidence for existing project memories. The durable tombstone excludes
         them from future runtime, ingestion, and episode work.
 

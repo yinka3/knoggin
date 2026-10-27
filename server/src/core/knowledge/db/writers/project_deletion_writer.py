@@ -5,8 +5,6 @@ from psycopg import Error as PsycopgError
 
 from common.exceptions import StorageWriteError
 from common.scoping import IDENTITY_ENTITY_ID, require_scope_value
-from core.knowledge.db.projection_rebuilder import GraphBuilder
-from core.knowledge.db.writers.age_projection_writer import AgeProjectionWriter
 from infrastructure.postgres_client import PostgresClient
 
 
@@ -15,8 +13,6 @@ class ProjectDeletionWriter:
 
     def __init__(self, client: PostgresClient) -> None:
         self.client = client
-        self.projection = AgeProjectionWriter(client)
-        self.projection_rebuilder = GraphBuilder(client)
 
     @staticmethod
     def _raise_storage_write(operation: str, exc: Exception) -> None:
@@ -525,7 +521,7 @@ class ProjectDeletionWriter:
                     user_name=user_name,
                     project_id=project_id,
                 )
-                projection_project_ids = await self._capture_context_project_ids(
+                context_project_ids = await self._capture_context_project_ids(
                     cur,
                     entity_ids=affected_entity_ids,
                     deleted_project_id=project_id,
@@ -540,7 +536,6 @@ class ProjectDeletionWriter:
                     user_name=user_name,
                     project_id=project_id,
                 )
-                await self.projection.clear_project_projection(cur, project_id)
 
                 # Assistant memberships restrict deletion of their exchange's
                 # user message. Remove the project-owned memberships first so
@@ -576,7 +571,6 @@ class ProjectDeletionWriter:
                 if await cur.fetchone() is None:
                     raise RuntimeError("Project disappeared during aggregate deletion")
 
-                surviving_entities: list[dict[str, Any]] = []
                 entity_ids_to_delete: list[int] = []
                 for entity_id in affected_entity_ids:
                     entity = await self._cleanup_entity_names(
@@ -586,8 +580,6 @@ class ProjectDeletionWriter:
                     )
                     if entity is None:
                         entity_ids_to_delete.append(entity_id)
-                    else:
-                        surviving_entities.append(entity)
 
                 deleted_entity_ids = await self._expanded_redirect_ids(
                     cur,
@@ -605,36 +597,6 @@ class ProjectDeletionWriter:
                     deleted_entity_ids = [
                         int(row["entity_id"]) for row in await cur.fetchall()
                     ]
-                    await self.projection.delete_entities_projection(
-                        cur,
-                        deleted_entity_ids,
-                        project_id,
-                    )
-
-                non_identity_entities = [
-                    entity
-                    for entity in surviving_entities
-                    if int(entity["id"]) != IDENTITY_ENTITY_ID
-                ]
-                if non_identity_entities:
-                    await self.projection.project_entities(cur, non_identity_entities)
-                identity = next(
-                    (
-                        entity
-                        for entity in surviving_entities
-                        if int(entity["id"]) == IDENTITY_ENTITY_ID
-                    ),
-                    None,
-                )
-                if identity is not None:
-                    await self.projection.project_identity(cur, identity)
-
-                for affected_project_id in projection_project_ids:
-                    await self.projection_rebuilder.rebuild_project_projection(
-                        affected_project_id,
-                        user_name,
-                        cur=cur,
-                    )
 
                 affected_entity_ids = sorted(
                     set(affected_entity_ids) | set(deleted_entity_ids)
@@ -643,9 +605,8 @@ class ProjectDeletionWriter:
                     "entities": len(deleted_entity_ids),
                     "projects": 1,
                     "affected_entity_ids": affected_entity_ids,
-                    "projection_project_ids": projection_project_ids,
                     "cache_project_ids": sorted(
-                        set(projection_project_ids) | set(reader_project_ids)
+                        set(context_project_ids) | set(reader_project_ids)
                     ),
                     "merge_audits_invalidated": len(invalidated_merge_ids),
                 }

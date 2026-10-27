@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from common.exceptions import MaintenanceConflictError
-from core.knowledge.db.projection_rebuilder import GraphBuilder
 from core.knowledge.db.writers.maintenance_review_writer import MaintenanceReviewWriter
 from core.knowledge.db.writers.relationship_interpretation_writer import (
     RelationshipInterpretationWriter,
@@ -158,9 +157,6 @@ class IdentityReassignmentWriter:
             await SemanticCommitWriter._remove_orphan_relationships(
                 cur, project_id=project_id,
             )
-        await GraphBuilder(self.client).rebuild_project_projection(
-            project_id, user_name, cur=cur,
-        )
         return target_id
 
     @staticmethod

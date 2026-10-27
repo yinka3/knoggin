@@ -51,11 +51,7 @@ def storage_database_url():
     try:
         with psycopg.connect(database_url, autocommit=True) as connection:
             connection.execute("CREATE EXTENSION vector")
-            connection.execute("CREATE EXTENSION age")
-            connection.execute("LOAD 'age'")
-            connection.execute('SET search_path = ag_catalog, "$user", public')
             connection.execute(schema_sql)
-            connection.execute("SELECT ag_catalog.create_graph('knoggin_graph')")
         yield database_url
     finally:
         with psycopg.connect(admin_url, autocommit=True) as admin:
@@ -83,7 +79,7 @@ async def real_postgres_client(storage_database_url):
 
 
 async def _reset_storage_db(client: PostgresClient):
-    """Truncate canonical tables, seed projects, and wipe the AGE projection."""
+    """Truncate canonical tables and seed projects."""
 
     await client.execute(
         """
@@ -121,21 +117,3 @@ async def _reset_storage_db(client: PostgresClient):
         ON CONFLICT (project_id) DO NOTHING;
         """
     )
-    # Ensure the AGE graph exists before trying to wipe it
-    graph_name = "knoggin_graph"
-    row = await client.fetch_one(
-        "SELECT count(*) FROM ag_graph WHERE name = %s;",
-        (graph_name,),
-    )
-    if row["count"] == 0:
-        await client.execute(
-            f"SELECT create_graph('{graph_name}');"
-        )
-
-    # Wipe the AGE graph nodes and relationships
-    wipe_graph_sql = (
-        f"SELECT * FROM cypher('{graph_name}', "
-        "$$ MATCH (n) DETACH DELETE n RETURN n $$"
-        ") AS (n agtype);"
-    )
-    await client.execute(wipe_graph_sql)

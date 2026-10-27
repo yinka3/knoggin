@@ -26,7 +26,7 @@ def _review(plan, *, project_id="project-1"):
 
 @pytest.mark.unit
 @pytest.mark.no_network
-def test_relationship_preview_separates_direct_rows_from_age_rebuild():
+def test_relationship_preview_lists_only_direct_row_impacts():
     preview = MaintenanceImpactPlanner.preview(
         _review(
             RelationshipInterpretationPlan(
@@ -45,7 +45,8 @@ def test_relationship_preview_separates_direct_rows_from_age_rebuild():
     by_kind = {item.kind: item for item in preview.impacts}
     assert by_kind["relationship_observation"].mode == "direct_mutation"
     assert by_kind["relationship_observation"].identifiers == ("7",)
-    assert by_kind["age_projection"].mode == "derived_rebuild"
+    # The graph is read from the relationship rows, so there is no derived rebuild.
+    assert all(item.mode == "direct_mutation" for item in preview.impacts)
     assert "search_projection" not in by_kind
 
 
@@ -69,7 +70,6 @@ def test_merge_preview_lists_context_scopes_projection_and_cache_impacts():
         "project-1",
         "project-2",
     )
-    assert by_kind["age_projection"].mode == "derived_rebuild"
     assert by_kind["live_entity_cache"].mode == "cache_invalidation"
     assert by_kind["context_block_entity"].identifiers == (
         "project-1",

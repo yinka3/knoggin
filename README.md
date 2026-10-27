@@ -62,7 +62,7 @@ Project files follow a separate path. Knoggin keeps the files in a confined proj
 
 ### Knowledge storage
 
-Postgres holds messages, Episodes, document metadata and chunks, entity records, relationship observations, and their source references. The local database image includes pgvector for embeddings and Apache AGE for graph data.
+Postgres holds messages, Episodes, document metadata and chunks, entity records, relationship observations, and their source references. The local database image adds pgvector for embeddings. The knowledge graph lives in ordinary tables: graph lookups and path searches query the relationships table directly.
 
 Entity identity is shared across a user's projects. Project context, documents, Episodes, and relationship observations stay scoped to their projects. Knoggin records observed relationships with evidence rather than silently treating every extraction as a settled fact. Potential duplicate entities and conflicting relationship evidence can be reviewed through maintenance workflows.
 

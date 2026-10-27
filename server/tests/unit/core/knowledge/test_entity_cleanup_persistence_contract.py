@@ -52,11 +52,7 @@ async def test_selected_entity_cleanup_validates_ownership_before_deleting():
         call[1] for call in client.calls
     )
     assert "DELETE FROM entities" in "\n".join(call[1] for call in client.calls)
-    assert any(
-        "MATCH (e:Entity)-[r:RELATED_TO]-(target:Entity)" in call[1]
-        and '"project_id": "project-1"' in call[2][0]
-        for call in client.calls
-    )
+    assert "DELETE FROM relationships" in "\n".join(call[1] for call in client.calls)
 
 
 @pytest.mark.unit

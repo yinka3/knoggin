@@ -19,9 +19,8 @@ _MAX_ENTITY_LIST_OFFSET = 10_000
 
 
 class EntityReader:
-    def __init__(self, client: PostgresClient, graph_name: str = "knoggin_graph"):
+    def __init__(self, client: PostgresClient):
         self.client = client
-        self.graph_name = graph_name
 
     async def get_active_identity_corrections(
         self, project_id: str, block_ids: list[str],
@@ -51,8 +50,8 @@ class EntityReader:
             (project_id, block_ids),
         )
 
-    def _parse_agtype(self, val):
-        """Unwrap agtype returned by psycopg when needed."""
+    def _parse_json_value(self, val):
+        """Decode a JSON string value; other values pass through unchanged."""
         if not val:
             return val
         if isinstance(val, str):
@@ -112,7 +111,7 @@ class EntityReader:
         return days
 
     def _parse_aliases(self, value) -> List[str]:
-        aliases = self._parse_agtype(value) or []
+        aliases = self._parse_json_value(value) or []
         if isinstance(aliases, str):
             cleaned = self._clean_string(aliases)
             return [cleaned] if cleaned else []
@@ -142,7 +141,7 @@ class EntityReader:
         return entity
 
     def _parse_contexts(self, value) -> List[Dict]:
-        contexts = self._parse_agtype(value) or []
+        contexts = self._parse_json_value(value) or []
         if isinstance(contexts, dict):
             contexts = [contexts]
         if not isinstance(contexts, (list, tuple)):
@@ -150,7 +149,7 @@ class EntityReader:
 
         parsed_contexts = []
         for context in contexts:
-            context = self._parse_agtype(context)
+            context = self._parse_json_value(context)
             if not isinstance(context, dict):
                 continue
             parsed_contexts.append(

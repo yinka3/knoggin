@@ -232,11 +232,7 @@ def _create_database(source_url: str, database: str) -> str:
     try:
         with psycopg.connect(database_url, autocommit=True) as connection:
             connection.execute("CREATE EXTENSION vector")
-            connection.execute("CREATE EXTENSION age")
-            connection.execute("LOAD 'age'")
-            connection.execute('SET search_path = ag_catalog, "$user", public')
             connection.execute(schema_text)
-            connection.execute("SELECT ag_catalog.create_graph('knoggin_graph')")
     except BaseException:
         _drop_database(source_url, database)
         raise

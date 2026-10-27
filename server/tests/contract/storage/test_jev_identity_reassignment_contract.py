@@ -234,15 +234,16 @@ async def test_identity_review_requires_complete_current_occurrence(real_postgre
            WHERE block_id = %s AND entity_id = 2""",
         (block_id,),
     )
-    async def fail_projection(*_args, **_kwargs):
-        raise RuntimeError("projection unavailable")
+    async def fail_late(*_args, **_kwargs):
+        raise RuntimeError("late write failed")
 
     with monkeypatch.context() as patcher:
         patcher.setattr(
-            "core.knowledge.entity.identity_reassignment_writer.GraphBuilder.rebuild_project_projection",
-            fail_projection,
+            "core.knowledge.entity.identity_reassignment_writer."
+            "IdentityReassignmentWriter._reconcile_episodes",
+            fail_late,
         )
-        with pytest.raises(RuntimeError, match="projection unavailable"):
+        with pytest.raises(RuntimeError, match="late write failed"):
             await service.apply_jev_identity_review(
                 "project-1", review.review_id, expected_state=review.expected_state,
             )

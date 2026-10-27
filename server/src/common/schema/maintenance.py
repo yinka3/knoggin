@@ -15,7 +15,6 @@ ImpactKind = Literal[
     "episode_entity_link",
     "merge_mutation",
     "domain_config",
-    "age_projection",
     "search_projection",
     "live_entity_cache",
 ]

@@ -43,7 +43,7 @@ def _conninfo_for_database(database: str) -> str:
 @pytest.mark.slow
 @pytest.mark.no_network
 async def test_schema_bootstraps_a_fresh_database_with_age_and_vector():
-    """A new database accepts extension setup, AGE graph setup, and schema SQL."""
+    """A new database accepts extension setup and schema SQL."""
 
     database = f"knoggin_p2_bootstrap_{uuid4().hex[:12]}"
     admin_conninfo = _conninfo_for_database("postgres")
@@ -65,19 +65,18 @@ async def test_schema_bootstraps_a_fresh_database_with_age_and_vector():
         )
         try:
             await extension_conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
-            await extension_conn.execute("CREATE EXTENSION IF NOT EXISTS age")
         finally:
             await extension_conn.close()
 
         await client.connect()
-        await client.execute("SELECT create_graph('knoggin_graph')")
         await client.execute(SCHEMA_SQL)
 
         extensions = await client.fetch_all(
             "SELECT extname FROM pg_extension WHERE extname IN ('age', 'vector') "
             "ORDER BY extname"
         )
-        assert extensions == [{"extname": "age"}, {"extname": "vector"}]
+        # The knowledge graph is relational; Apache AGE is not installed.
+        assert extensions == [{"extname": "vector"}]
         assert await client.fetch_one(
             "SELECT 1 AS present FROM information_schema.tables "
             "WHERE table_schema = 'public' AND table_name = 'messages'"
@@ -159,9 +158,6 @@ async def test_schema_bootstraps_a_fresh_database_with_age_and_vector():
             {"proname": "enforce_relationship_scope"},
             {"proname": "reject_entity_identity_mutation"},
         ]
-        assert await client.fetch_one(
-            "SELECT 1 AS present FROM ag_catalog.ag_graph WHERE name = 'knoggin_graph'"
-        ) == {"present": 1}
     finally:
         await client.close()
         drop_admin = await psycopg.AsyncConnection.connect(

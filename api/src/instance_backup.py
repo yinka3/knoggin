@@ -198,42 +198,6 @@ def _empty_database(database_url: str) -> None:
         raise ValueError("Restore requires an empty target database")
 
 
-def _repair_restored_age_graph_ids(database_url: str) -> None:
-    """Rebind AGE's raw graph OIDs to the namespaces created by pg_restore."""
-
-    with psycopg.connect(database_url) as connection:
-        if connection.execute(
-            "SELECT to_regclass('ag_catalog.ag_graph')"
-        ).fetchone()[0] is None:
-            return
-        stale = connection.execute(
-            "SELECT 1 FROM ag_catalog.ag_graph "
-            "WHERE graphid IS DISTINCT FROM namespace::oid LIMIT 1"
-        ).fetchone()
-        if stale is None:
-            return
-        # AGE stores graphid and ag_label.graph as bare OIDs. Unlike the
-        # regnamespace/regclass columns, pg_dump restores those source OIDs
-        # verbatim. The FK is not deferrable, so repair both sides together.
-        connection.execute("ALTER TABLE ag_catalog.ag_label DROP CONSTRAINT fk_graph_oid")
-        connection.execute(
-            """UPDATE ag_catalog.ag_label AS label
-               SET graph = graph.namespace::oid
-               FROM ag_catalog.ag_graph AS graph
-               WHERE label.graph = graph.graphid
-                 AND graph.graphid IS DISTINCT FROM graph.namespace::oid"""
-        )
-        connection.execute(
-            """UPDATE ag_catalog.ag_graph
-               SET graphid = namespace::oid
-               WHERE graphid IS DISTINCT FROM namespace::oid"""
-        )
-        connection.execute(
-            """ALTER TABLE ag_catalog.ag_label ADD CONSTRAINT fk_graph_oid
-               FOREIGN KEY (graph) REFERENCES ag_catalog.ag_graph (graphid)"""
-        )
-
-
 def _require_empty_target(path: Path) -> None:
     if path.is_symlink() or (path.exists() and (not path.is_dir() or any(path.iterdir()))):
         raise ValueError(f"Restore destination is not empty: {path}")
@@ -289,7 +253,6 @@ def restore_backup(
     staged_config.chmod(0o600)
     try:
         _run_postgres(["pg_restore", "--no-owner", "--no-acl", "--exit-on-error", "--dbname", _pg_environment(database_url)["PGDATABASE"], str(source / "database.dump")], database_url)
-        _repair_restored_age_graph_ids(database_url)
         for directory in manifest["directories"]:
             if directory == "projects" or directory.startswith("projects/"):
                 relative = Path(directory).relative_to("projects")

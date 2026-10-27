@@ -45,14 +45,5 @@ def test_database_url():
     url = server_database_url(TEST_DATABASE_NAME)
     with psycopg.connect(url, autocommit=True) as connection:
         connection.execute("CREATE EXTENSION vector")
-        connection.execute("CREATE EXTENSION age")
-        connection.execute("LOAD 'age'")
-        connection.execute('SET search_path = ag_catalog, "$user", public')
         connection.execute(schema_sql)
-        connection.execute("SELECT ag_catalog.create_graph('knoggin_graph')")
-        connection.execute(
-            sql.SQL('ALTER DATABASE {} SET search_path = ag_catalog, "$user", public').format(
-                sql.Identifier(TEST_DATABASE_NAME)
-            )
-        )
     return url

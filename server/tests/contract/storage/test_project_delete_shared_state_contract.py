@@ -3,7 +3,6 @@
 import pytest
 from psycopg.errors import RaiseException
 
-from core.knowledge.db.projection_rebuilder import GraphBuilder
 from core.knowledge.db.readers.entity_reader import EntityReader
 from core.knowledge.db.writers.global_entity_merge_writer import (
     GlobalEntityMergeWriter,
@@ -11,7 +10,6 @@ from core.knowledge.db.writers.global_entity_merge_writer import (
 from core.knowledge.db.writers.project_deletion_writer import (
     ProjectDeletionWriter,
 )
-from core.knowledge.entity.maintenance_service import EntityMaintenanceService
 
 
 @pytest.mark.storage
@@ -71,27 +69,6 @@ async def test_project_delete_removes_unsupported_names_and_invalidates_merge_ro
         );
         """
     )
-
-    await GraphBuilder(real_postgres_client).rebuild_project_projection(
-        "project-2",
-        "ada",
-    )
-    graph_before = await real_postgres_client.fetch_one(
-        real_postgres_client.build_cypher(
-            """
-            MATCH (entity:Entity {id: 2})
-            RETURN entity.canonical_name AS canonical_name, entity.aliases AS aliases
-            """,
-            "canonical_name agtype, aliases agtype",
-        ),
-        ("{}",),
-    )
-    assert graph_before is not None
-    assert set(graph_before["aliases"]) == {
-        "Project One Alias",
-        "Project Two Name",
-        "User Preferred Name",
-    }
 
     with pytest.raises(RaiseException, match="canonical_name is immutable"):
         await real_postgres_client.execute(
@@ -187,23 +164,6 @@ async def test_project_delete_removes_unsupported_names_and_invalidates_merge_ro
         visible_project_ids=["project-3"],
     )] == [4]
 
-    graph_after = await real_postgres_client.fetch_one(
-        real_postgres_client.build_cypher(
-            """
-            MATCH (entity:Entity {id: 2})
-            RETURN entity.canonical_name AS canonical_name, entity.aliases AS aliases
-            """,
-            "canonical_name agtype, aliases agtype",
-        ),
-        ("{}",),
-    )
-    assert graph_after is not None
-    assert graph_after["canonical_name"] == "User Preferred Name"
-    assert set(graph_after["aliases"]) == {
-        "Project Two Name",
-        "User Preferred Name",
-    }
-
     assert await real_postgres_client.fetch_one(
         """
         SELECT status, plan, affected_project_ids, failure_reason
@@ -228,131 +188,6 @@ async def test_project_delete_removes_unsupported_names_and_invalidates_merge_ro
             merge_id="merge-project-1",
             user_name="ada",
         )
-    with pytest.raises(ValueError, match="invalidated merge"):
-        await EntityMaintenanceService(
-            postgres=real_postgres_client,
-            user_name="ada",
-        ).repair_merge_projections("merge-project-1")
-
-
-@pytest.mark.storage
-@pytest.mark.requires_postgres
-@pytest.mark.requires_pgvector
-@pytest.mark.no_network
-async def test_project_delete_rolls_back_shared_cleanup_when_projection_rebuild_fails(
-    real_postgres_client,
-    monkeypatch,
-):
-    """A failed derived rebuild leaves the project and its sources retryable."""
-
-    await real_postgres_client.execute(
-        """
-        INSERT INTO public.entities (entity_id, user_name, canonical_name)
-        VALUES (2, 'ada', 'Project One Name');
-        INSERT INTO public.project_entity_contexts (
-            project_id, entity_id, user_name, entity_type, topic
-        ) VALUES
-            ('project-1', 2, 'ada', 'concept', 'General'),
-            ('project-2', 2, 'ada', 'concept', 'General');
-        INSERT INTO public.entity_aliases (entity_id, alias)
-        VALUES (2, 'Project Two Name');
-        INSERT INTO public.entity_name_supports (
-            entity_id, name, project_id, source_kind, source_key
-        ) VALUES
-            (2, 'Project One Name', 'project-1', 'project', 'project-1'),
-            (2, 'Project Two Name', 'project-2', 'project', 'project-2');
-        INSERT INTO public.entity_global_merge_audits (
-            merge_id, user_name, survivor_entity_id, retired_entity_id,
-            plan, affected_project_ids, status
-        ) VALUES (
-            'merge-retry', 'ada', 2, 99,
-            '{"project_payload":"retain until commit"}'::jsonb,
-            '["project-1", "project-2"]'::jsonb,
-            'executed'
-        );
-        INSERT INTO public.entity_global_merge_mutations (
-            merge_id, object_kind, object_key, before_value, after_value
-        ) VALUES (
-            'merge-retry', 'entity_aliases', '2',
-            '{"project_payload":"retain until commit"}'::jsonb,
-            '{"project_payload":"retain until commit"}'::jsonb
-        );
-        """
-    )
-    writer = ProjectDeletionWriter(real_postgres_client)
-    original_rebuild = writer.projection_rebuilder.rebuild_project_projection
-
-    async def fail_rebuild(*_args, **_kwargs):
-        raise RuntimeError("injected projection rebuild failure")
-
-    monkeypatch.setattr(
-        writer.projection_rebuilder,
-        "rebuild_project_projection",
-        fail_rebuild,
-    )
-    with pytest.raises(RuntimeError, match="injected projection rebuild failure"):
-        await writer.delete_project(user_name="ada", project_id="project-1")
-
-    assert await real_postgres_client.fetch_one(
-        "SELECT count(*) AS count FROM public.projects WHERE project_id = 'project-1'"
-    ) == {"count": 1}
-    assert await real_postgres_client.fetch_one(
-        """
-        SELECT count(*) AS count
-        FROM public.project_file_cleanup_tasks
-        WHERE project_id = 'project-1'
-        """
-    ) == {"count": 0}
-    assert await real_postgres_client.fetch_one(
-        "SELECT canonical_name FROM public.entities WHERE entity_id = 2"
-    ) == {"canonical_name": "Project One Name"}
-    assert await real_postgres_client.fetch_all(
-        "SELECT alias FROM public.entity_aliases WHERE entity_id = 2"
-    ) == [{"alias": "Project Two Name"}]
-    assert await real_postgres_client.fetch_all(
-        """
-        SELECT name, project_id
-        FROM public.entity_name_supports
-        WHERE entity_id = 2
-        ORDER BY project_id, name
-        """
-    ) == [
-        {"name": "Project One Name", "project_id": "project-1"},
-        {"name": "Project Two Name", "project_id": "project-2"},
-    ]
-    assert await real_postgres_client.fetch_one(
-        """
-        SELECT status, plan, failure_reason
-        FROM public.entity_global_merge_audits
-        WHERE merge_id = 'merge-retry'
-        """
-    ) == {
-        "status": "executed",
-        "plan": {"project_payload": "retain until commit"},
-        "failure_reason": None,
-    }
-    assert await real_postgres_client.fetch_one(
-        """
-        SELECT count(*) AS count
-        FROM public.entity_global_merge_mutations
-        WHERE merge_id = 'merge-retry'
-        """
-    ) == {"count": 1}
-
-    monkeypatch.setattr(
-        writer.projection_rebuilder,
-        "rebuild_project_projection",
-        original_rebuild,
-    )
-    deleted = await writer.delete_project(user_name="ada", project_id="project-1")
-
-    assert deleted is not None
-    assert await real_postgres_client.fetch_one(
-        "SELECT count(*) AS count FROM public.projects WHERE project_id = 'project-1'"
-    ) == {"count": 0}
-    assert await real_postgres_client.fetch_one(
-        "SELECT canonical_name FROM public.entities WHERE entity_id = 2"
-    ) == {"canonical_name": "Project Two Name"}
 
 
 @pytest.mark.storage

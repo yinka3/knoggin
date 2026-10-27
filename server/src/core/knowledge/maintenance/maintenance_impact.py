@@ -45,7 +45,6 @@ class MaintenanceImpactPlanner:
                     cls._item("episode_entity_link", "direct_mutation", observation_ids),
                 ]
             )
-            impacts.extend(cls._project_rebuilds([review.project_id]))
         elif isinstance(plan, EntityMergePlan):
             projects = sorted(plan.frontier_tokens)
             impacts.extend(
@@ -125,7 +124,7 @@ class MaintenanceImpactPlanner:
         include_cache: bool = False,
     ) -> list[MaintenanceImpactItem]:
         projects = [project_id for project_id in project_ids if project_id]
-        impacts = [cls._item("age_projection", "derived_rebuild", projects)]
+        impacts = []
         if include_search:
             impacts.append(cls._item("search_projection", "derived_rebuild", projects))
         if include_cache:
