@@ -39,11 +39,11 @@ def test_source_lists_continue_with_cursor_and_search_stays_scoped(monkeypatch, 
         async def search(self, query, **kwargs):
             searches.append((query, kwargs))
             return [{"document_id": documents[0]["document_id"], "project_id": "project-1",
-                     "content": "found passage", "score": 0.8, "embedding": [1, 2]}]
+                     "relative_path": "src/3.md", "content": "found passage", "score": 0.8, "embedding": [1, 2]}]
 
     class Projects:
         async def get_project(self, project_id):
-            return {"status": "active"} if project_id == "project-1" else None
+            return {"status": "active", "workspaces": []} if project_id == "project-1" else None
 
         async def acquire_project_for_session(self, project_id, lease_id):
             leases.add(lease_id)

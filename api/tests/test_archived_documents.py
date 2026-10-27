@@ -13,14 +13,15 @@ def test_archived_documents_and_links_remain_readable_without_a_runtime(monkeypa
 
     class Documents:
         async def list_documents(self, *, limit, path_prefix, before):
-            return [{"document_id": "doc-1", "project_id": "project-1", "original_name": "a.txt"}]
+            return [{"document_id": "doc-1", "project_id": "project-1", "original_name": "a.txt",
+                     "relative_path": "a.txt"}]
 
         async def search(self, query, *, n_results, document_filter, relative_path, path_prefix):
             return [{"document_id": "doc-1", "project_id": "project-1",
                      "relative_path": "a.txt", "content": query}]
 
         async def get_document_info(self, *, document_id):
-            return {"document_id": document_id, "project_id": "project-1"}
+            return {"document_id": document_id, "project_id": "project-1", "relative_path": "a.txt"}
 
         async def read_document(self, *, document_id, page_number, start_line, end_line):
             if document_id == "pending":
@@ -35,7 +36,7 @@ def test_archived_documents_and_links_remain_readable_without_a_runtime(monkeypa
 
     class Projects:
         async def get_project(self, project_id):
-            return {"status": status[project_id]} if project_id in status else None
+            return {"status": status[project_id], "workspaces": []} if project_id in status else None
 
         async def archived_document_reader(self, project_id):
             assert status[project_id] == "archived"

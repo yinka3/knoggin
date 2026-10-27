@@ -5,6 +5,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from common.exceptions import WorkspaceConflictError
+from core.project.project_files import workspace_of
 from contracts.workspace import (
     FileAppend, FileCreate, FileDelete, FileMove, FileReplace, FolderCreate,
 )
@@ -51,7 +52,13 @@ async def list_files(request):
             )
         except ValueError as exc:
             return _operation_error(exc)
-    return JSONResponse({"items": items})
+    project = await request.app.state.runtime.projects.get_project(
+        request.path_params["project_id"]
+    )
+    return JSONResponse({"items": [
+        {**item, "workspace": workspace_of(item["relative_path"], project["workspaces"])}
+        for item in items
+    ]})
 
 
 async def read_file(request):

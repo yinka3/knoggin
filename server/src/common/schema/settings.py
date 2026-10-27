@@ -80,6 +80,7 @@ class DocumentSettings(ConfigModel):
     project_library_root: str = Field("data/projects", min_length=1)
     rerank_enabled: bool = True
     rerank_candidates: int = Field(15, ge=1, le=50)
+    max_workspaces_per_project: int = Field(3, ge=1, le=20)
 
 
 class EpisodeSettings(ConfigModel):

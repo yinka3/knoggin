@@ -6,6 +6,8 @@ from starlette.routing import Route
 
 from common.conf.domain_config import DomainConfig
 from common.exceptions import WorkspaceConflictError
+from core.project.project_files import workspace_name
+from project_lease import project_documents
 
 from routes.project_settings import _error, _json
 
@@ -124,6 +126,49 @@ async def delete_project(request):
     )
 
 
+async def add_workspace(request):
+    from contracts.projects import AddWorkspace
+
+    project_id = request.path_params["project_id"]
+    if error := await _editable(request, project_id):
+        return error
+    try:
+        name = workspace_name(AddWorkspace.model_validate(await _json(request)).name)
+    except (ValidationError, ValueError):
+        return _error("invalid_workspace", "Invalid workspace name", 422)
+    projects = request.app.state.runtime.projects
+    try:
+        workspaces = await projects.add_workspace(project_id, name)
+    except ValueError:
+        return _error(
+            "workspace_unavailable",
+            "Workspace exists or the project has reached its workspace limit", 409,
+        )
+    try:
+        async with project_documents(request.app.state.runtime, project_id) as service:
+            await service.create_project_folder(name)
+    except (OSError, ValueError, WorkspaceConflictError):
+        # A file already has that name; the folder is the workspace.
+        await projects.remove_workspace(project_id, name)
+        return _error("invalid_workspace", "A project file already uses that name", 409)
+    return JSONResponse({"workspaces": workspaces}, status_code=201)
+
+
+async def remove_workspace(request):
+    project_id = request.path_params["project_id"]
+    if error := await _editable(request, project_id):
+        return error
+    try:
+        workspaces = await request.app.state.runtime.projects.remove_workspace(
+            project_id, request.path_params["name"]
+        )
+    except WorkspaceConflictError:
+        return _error("workspace_not_empty", "Workspace still has documents", 409)
+    if workspaces is None:
+        return _error("workspace_not_found", "Workspace not found", 404)
+    return JSONResponse({"workspaces": workspaces})
+
+
 routes = [
     Route("/v1/projects", list_projects, methods=["GET"]),
     Route("/v1/projects", create_project, methods=["POST"]),
@@ -132,4 +177,9 @@ routes = [
     Route("/v1/projects/{project_id}/archive", archive_project, methods=["POST"]),
     Route("/v1/projects/{project_id}/reactivate", reactivate_project, methods=["POST"]),
     Route("/v1/projects/{project_id}", delete_project, methods=["DELETE"]),
+    Route("/v1/projects/{project_id}/workspaces", add_workspace, methods=["POST"]),
+    Route(
+        "/v1/projects/{project_id}/workspaces/{name}", remove_workspace,
+        methods=["DELETE"],
+    ),
 ]

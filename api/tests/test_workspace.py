@@ -31,7 +31,7 @@ def test_workspace_writes_use_file_owner_and_release_lease(monkeypatch, tmp_path
 
     class Projects:
         async def get_project(self, project_id):
-            return {"status": "active"} if project_id == "p1" else None
+            return {"status": "active", "workspaces": []} if project_id == "p1" else None
 
         async def acquire_project_for_session(self, project_id, lease_id):
             leases.add(lease_id)
@@ -91,7 +91,7 @@ def test_archived_workspace_reads_without_starting_project(monkeypatch, tmp_path
 
     class Projects:
         async def get_project(self, project_id):
-            return {"status": "archived"} if project_id == "p1" else None
+            return {"status": "archived", "workspaces": []} if project_id == "p1" else None
 
         async def archived_document_reader(self, project_id):
             assert project_id == "p1"
@@ -115,7 +115,7 @@ def test_archived_workspace_reads_without_starting_project(monkeypatch, tmp_path
             ) as client:
                 base = "/v1/projects/p1/workspace"
                 assert (await client.get(base + "/files")).json()["items"] == [
-                    {"relative_path": "PROJECT.md"}
+                    {"relative_path": "PROJECT.md", "workspace": None}
                 ]
                 assert (await client.get(base + "/file", params={
                     "path": "PROJECT.md"

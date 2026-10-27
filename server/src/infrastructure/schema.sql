@@ -808,6 +808,7 @@ CREATE TABLE public.projects (
     archived_at timestamp with time zone,
     deleted_at timestamp with time zone,
     last_activity_at timestamp with time zone,
+    workspaces text[] DEFAULT '{}'::text[] NOT NULL,
     CONSTRAINT projects_domain_config_check CHECK ((jsonb_typeof(domain_config) = 'object'::text)),
     CONSTRAINT projects_status_check CHECK ((status = ANY (ARRAY['active'::text, 'archived'::text, 'deleted'::text])))
 );

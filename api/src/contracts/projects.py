@@ -13,6 +13,7 @@ class ProjectView(BaseModel):
     status: Literal["active", "archived", "deleted"]
     session_count: int = 0
     allowed_projects: list[str] = Field(default_factory=list)
+    workspaces: list[str] = Field(default_factory=list)
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -48,3 +49,9 @@ class UpdateProject(BaseModel):
         if not value:
             raise ValueError("blank name")
         return value
+
+
+class AddWorkspace(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=100)

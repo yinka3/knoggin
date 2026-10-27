@@ -41,7 +41,11 @@ from core.project.domain_config_store import (
 from core.project.evidence_board_service import EvidenceBoardService
 from core.project.maintenance_service import ProjectMaintenanceService
 from core.project.notebook_store import ProjectNotebookStore
-from core.project.project_files import PROJECT_FILE_PATH, build_project_markdown
+from core.project.project_files import (
+    PROJECT_FILE_PATH,
+    build_project_markdown,
+    workspace_name,
+)
 from runtime.project_factory import ProjectRuntimeFactory
 from runtime.project_runtime import ProjectRuntime
 from runtime.resources import RuntimeResources
@@ -833,6 +837,50 @@ class ProjectManager:
             self._update_project_locked, project_id,
             name=name, description=description, allowed_projects=allowed_projects,
         )
+
+    async def add_workspace(self, project_id: str, name: str) -> list[str]:
+        """Name a top-level folder as a workspace; raises ValueError for a bad
+        name, a duplicate, or a project already at the workspace limit."""
+        name = workspace_name(name)
+        limit = (
+            self._config_manager or ConfigManager.get()
+        ).config.developer_settings.documents.max_workspaces_per_project
+        row = await self.pg.fetch_one(
+            """UPDATE public.projects
+               SET workspaces = array_append(workspaces, %(name)s), updated_at = now()
+               WHERE user_name = %(user_name)s AND project_id = %(project_id)s
+                 AND NOT %(name)s = ANY(workspaces)
+                 AND cardinality(workspaces) < %(limit)s
+               RETURNING workspaces""",
+            {"user_name": self.user_name, "project_id": project_id,
+             "name": name, "limit": limit},
+        )
+        if row is None:
+            raise ValueError(f"Workspace exists or the project has {limit} already")
+        return row["workspaces"]
+
+    async def remove_workspace(self, project_id: str, name: str) -> list[str] | None:
+        """Forget a workspace whose folder holds no documents; None when the
+        project has no workspace by that name. The folder itself stays."""
+        row = await self.pg.fetch_one(
+            """SELECT EXISTS (
+                   SELECT 1 FROM public.project_documents
+                   WHERE project_id = %(project_id)s AND status <> 'deleted'
+                     AND starts_with(relative_path, %(name)s || '/')
+               ) AS has_documents""",
+            {"project_id": project_id, "name": name},
+        )
+        if row["has_documents"]:
+            raise WorkspaceConflictError(f"Workspace '{name}' still has documents")
+        row = await self.pg.fetch_one(
+            """UPDATE public.projects
+               SET workspaces = array_remove(workspaces, %(name)s), updated_at = now()
+               WHERE user_name = %(user_name)s AND project_id = %(project_id)s
+                 AND %(name)s = ANY(workspaces)
+               RETURNING workspaces""",
+            {"user_name": self.user_name, "project_id": project_id, "name": name},
+        )
+        return None if row is None else row["workspaces"]
 
     async def _mutate_project(self, operation, *args, **kwargs):
         """Keep admission excluded until an already-started mutation settles."""

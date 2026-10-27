@@ -121,6 +121,17 @@ For an existing project, replace `{project_id}` in these routes:
   `POST /v1/projects/{project_id}/archive` archives it; `POST
   /v1/projects/{project_id}/reactivate` restores an archived project. Deletion reports file
   cleanup status; an active session can block archive or deletion.
+- A workspace is a named top-level folder of a project; projects list theirs in
+  `workspaces`. `POST /v1/projects/{project_id}/workspaces` with `{"name":"backend"}`
+  adds one and creates the folder (an existing folder is kept). It returns 422
+  `invalid_workspace` for a name that is not one plain folder name, and 409
+  `workspace_unavailable` for a duplicate or a project at
+  `developer_settings.documents.max_workspaces_per_project` (default 3).
+  `DELETE /v1/projects/{project_id}/workspaces/{name}` forgets one; 409
+  `workspace_not_empty` while it still has documents. The folder stays on disk.
+  Document list, metadata, and search items, and workspace file lists, carry
+  `workspace` (null outside one); filter one workspace with `path_prefix`.
+  Existing databases need `server/src/infrastructure/project_workspaces_upgrade.sql`.
 - `GET/POST /v1/agents` lists and creates agents. `GET/PATCH/DELETE
   /v1/agents/{agent_id}` manages editable preferences. `POST
   /v1/agents/{agent_id}/default` selects the default agent. Brain state is

@@ -23,6 +23,7 @@ from contracts.documents import (
     BatchDocument, BatchSources, FolderIntake, OcrPreflight, PromoteSource, SaveWebLink, StagedFolderCreate, UpdateWebLink,
     UploadDocument,
 )
+from core.project.project_files import workspace_of
 from errors import handle_error
 from folder_staging import IntakeConflict, IntakeTooLarge
 from project_lease import project_documents, project_runtime, readable_project_documents
@@ -54,6 +55,17 @@ def _public(row, fields):
         key: value.isoformat() if isinstance(value, datetime) else str(value) if isinstance(value, UUID) else value
         for key, value in row.items() if key in fields
     }
+
+
+async def _workspaces(request):
+    project = await request.app.state.runtime.projects.get_project(
+        request.path_params["project_id"]
+    )
+    return project["workspaces"] if project else []
+
+
+def _in_workspace(item, workspaces):
+    return {**item, "workspace": workspace_of(item["relative_path"], workspaces)}
 
 
 async def _project(request, *, write=True):
@@ -113,10 +125,13 @@ async def list_documents(request):
             )
         except ValueError:
             return _error("invalid_document_list", "Invalid document list options", 422)
-    return JSONResponse(_page(
+    page = _page(
         rows, limit=limit, fields=DOCUMENT_FIELDS,
         time_field="created_at", id_field="document_id",
-    ))
+    )
+    workspaces = await _workspaces(request)
+    page["items"] = [_in_workspace(item, workspaces) for item in page["items"]]
+    return JSONResponse(page)
 
 
 async def search_documents(request):
@@ -144,7 +159,10 @@ async def search_documents(request):
             )
         except ValueError:
             return _error("invalid_document_search", "Invalid document search", 422)
-    return JSONResponse({"items": [_public(row, SEARCH_FIELDS) for row in rows]})
+    workspaces = await _workspaces(request)
+    return JSONResponse({"items": [
+        _in_workspace(_public(row, SEARCH_FIELDS), workspaces) for row in rows
+    ]})
 
 
 async def get_document(request):
@@ -155,7 +173,7 @@ async def get_document(request):
             row = await service.get_document_info(document_id=request.path_params["document_id"])
         except FileNotFoundError:
             return _error("document_not_found", "Document not found", 404)
-    return JSONResponse(_public(row, DOCUMENT_FIELDS))
+    return JSONResponse(_in_workspace(_public(row, DOCUMENT_FIELDS), await _workspaces(request)))
 
 
 async def read_document(request):
