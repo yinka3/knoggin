@@ -21,5 +21,38 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  api:
+    build:
+      context: .
+      args:
+        UID: ${UID:-1000}
+    container_name: knoggin-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8000:8000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # These override .env, whose values point at the host.
+      - DATABASE_URL=postgresql://knoggin:${POSTGRES_PASSWORD:-knoggin}@postgres:5432/knoggin_db
+      - SETTINGS_DIR=/app/config
+    volumes:
+      # The same settings folder a local run uses: knoggin.yml and project files.
+      - ${SETTINGS_DIR:-./config}:/app/config
+    extra_hosts:
+      # Reach a local model server on the host, e.g. Ollama at
+      # http://host.docker.internal:11434.
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/v1/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 120s
+    restart: unless-stopped
+
 volumes:
   knoggin_pg_data:

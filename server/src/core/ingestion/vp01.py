@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any, Mapping, Protocol
 
 from common.conf.domain_config import CompiledDomain
+from common.model_cache import cached_model_path
 
 GLINER25_ENGLISH_MODEL = "fastino/gliner2.5-base-v1"
 GLINER25_MULTILINGUAL_MODEL = "fastino/gliner2.5-multi-v1"
+_REVISION_VARIABLES = {
+    GLINER25_ENGLISH_MODEL: "GLINER_EN_MODEL_REVISION",
+    GLINER25_MULTILINGUAL_MODEL: "GLINER_MULTI_MODEL_REVISION",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,10 +97,15 @@ class GLiNER25VP01Adapter:
         from gliner2 import AutoExtractor
 
         model_id = model_id_for_language(language)
+        revision_variable = _REVISION_VARIABLES.get(model_id)
+        revision = os.getenv(revision_variable) if revision_variable else None
+        local = cached_model_path(model_id, revision)
         kwargs: dict[str, object] = {}
         if device:
             kwargs["map_location"] = device
-        model = AutoExtractor.from_pretrained(model_id, **kwargs)
+        if revision and local is None:
+            kwargs["revision"] = revision
+        model = AutoExtractor.from_pretrained(local or model_id, **kwargs)
         return cls(model, model_id=model_id)
 
     def extract_entities(

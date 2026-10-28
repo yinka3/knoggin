@@ -77,9 +77,9 @@ Document search is a separate path. It combines text and embedding matches over 
 - `server/` contains the Python engine, runtime, storage, and tests. See [server/README.md](server/README.md).
 - `api/` contains the local HTTP service. See [api/README.md](api/README.md).
 - `app/` contains the Next.js configuration; its frontend source and API integration are in progress.
-- `docker/` contains the local Postgres image and initialization scripts.
+- `docker/` contains the Postgres initialization script. `Dockerfile` builds the API image.
 
-The engine runs inside an application and does not start an HTTP service on its own. The `api/` package hosts the HTTP service; Docker Compose starts the database only.
+The engine runs inside an application and does not start an HTTP service on its own. The `api/` package hosts the HTTP service.
 
 ## Local setup
 
@@ -93,13 +93,24 @@ uv sync --package server
 
 The copied `.env` works with the local Docker defaults. For a different database password, set both `POSTGRES_PASSWORD` and the password in `DATABASE_URL` to the same value before starting Postgres.
 
-Model files download when first needed. To download them ahead of time, run:
+Model files download when first needed. After that, Knoggin loads them from the local cache without contacting Hugging Face, so it starts offline. To download them ahead of time, or to update cached models, run:
 
 ```powershell
 uv run --package server python server/scripts/prefetch_models.py
 ```
 
+To use an exact model version, set `EMBEDDING_MODEL_REVISION`, `RERANKER_MODEL_REVISION`, `GLINER_EN_MODEL_REVISION`, or `GLINER_MULTI_MODEL_REVISION` in `.env`; a version that is not cached downloads on first use.
+
 Stop Postgres with `docker compose down`. This keeps the database volume; `docker compose down -v` deletes it.
+
+### Running everything in Docker
+
+`docker compose up -d` also builds and starts the API on `http://127.0.0.1:8000`, after Postgres is healthy. The image is a CPU build with the default embedding, reranker, GLiNER (English and multilingual), and Docling models already inside, so the first start downloads nothing.
+
+- The API reads `.env` for `RUNTIME_USER_NAME` and provider keys. Compose points it at the `postgres` service and mounts the host folder named by `SETTINGS_DIR` (default `./config`), so `knoggin.yml` and project files are shared with a local run.
+- The container runs as UID 1000. If your user has a different UID, set `UID` in `.env` before building.
+- To use a model server on your machine, such as Ollama, set its URL to `http://host.docker.internal:11434`.
+- Start only the database with `docker compose up -d postgres`.
 
 ## Where your data goes
 

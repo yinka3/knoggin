@@ -11,7 +11,6 @@ from typing import List
 import numpy as np
 import onnxruntime as ort
 import torch
-from huggingface_hub import snapshot_download
 from loguru import logger
 from sentence_transformers import CrossEncoder, SentenceTransformer
 from transformers import AutoTokenizer
@@ -21,6 +20,7 @@ from common.embedding_contract import (
     DEFAULT_RERANKER_MODEL,
     EMBEDDING_DIMENSION,
 )
+from common.model_cache import cached_model_path
 from infrastructure.model_work import ModelWorkCoordinator, ModelWorkPriority
 from infrastructure.work_record import WorkRecord
 
@@ -175,6 +175,7 @@ class EmbeddingService:
         )
         self._cross_encoder_model_kwargs = self._embedding_model_kwargs
         self._embedding_revision = os.getenv("EMBEDDING_MODEL_REVISION")
+        self._reranker_revision = os.getenv("RERANKER_MODEL_REVISION")
         self._embedding_model = embedding_model
         self._reranker_model = reranker_model
         self._model_work = model_work
@@ -304,13 +305,14 @@ class EmbeddingService:
     def _load_embedder_sync(self) -> None:
         with self._lock:
             if self._embedder is None:
+                local = cached_model_path(self._embedding_model, self._embedding_revision)
                 revision_kwargs = (
                     {"revision": self._embedding_revision}
-                    if self._embedding_revision
+                    if self._embedding_revision and local is None
                     else {}
                 )
                 self._embedder = SentenceTransformer(
-                    self._embedding_model,
+                    local or self._embedding_model,
                     **revision_kwargs,
                     trust_remote_code=True,
                     device=self.device,
@@ -324,25 +326,11 @@ class EmbeddingService:
         if self._backend != "onnx":
             return None
 
-        model_path = Path(self._embedding_model)
-        if not model_path.is_dir():
-            try:
-                revision_kwargs = (
-                    {"revision": self._embedding_revision}
-                    if self._embedding_revision
-                    else {}
-                )
-                model_path = Path(
-                    snapshot_download(
-                        self._embedding_model,
-                        **revision_kwargs,
-                        local_files_only=True,
-                    )
-                )
-            except Exception:
-                # SentenceTransformer remains responsible for downloading and
-                # loading models that are not already in the local cache.
-                return None
+        local = cached_model_path(self._embedding_model, self._embedding_revision)
+        if local is None:
+            # SentenceTransformer downloads and loads models not cached yet.
+            return None
+        model_path = Path(local)
 
         onnx_path = model_path / "onnx" / "model.onnx"
         if not onnx_path.is_file():
@@ -379,8 +367,15 @@ class EmbeddingService:
     def _load_reranker_sync(self) -> None:
         with self._lock:
             if self._reranker is None:
+                local = cached_model_path(self._reranker_model, self._reranker_revision)
+                revision_kwargs = (
+                    {"revision": self._reranker_revision}
+                    if self._reranker_revision and local is None
+                    else {}
+                )
                 self._reranker = CrossEncoder(
-                    self._reranker_model,
+                    local or self._reranker_model,
+                    **revision_kwargs,
                     device=self.device,
                     model_kwargs=self._cross_encoder_model_kwargs,
                     backend=self._backend,
