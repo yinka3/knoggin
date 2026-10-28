@@ -9,6 +9,7 @@ from pathlib import Path
 from starlette.applications import Starlette
 from starlette.middleware.cors import CORSMiddleware
 
+from routes.docs import routes as docs_routes
 from routes.health import routes as health_routes
 from routes.agents import routes as agent_routes
 from routes.artifacts import routes as artifact_routes
@@ -81,7 +82,7 @@ def create_app(
                         del app.state.runtime
 
     app = Starlette(
-        routes=[*health_routes, *settings_routes, *project_routes, *project_settings_routes, *project_control_routes, *notebook_routes, *agent_routes, *session_routes, *run_routes, *research_job_routes, *community_routes, *document_routes, *artifact_routes, *maintenance_routes, *episode_routes, *knowledge_routes, *workspace_routes, *context_note_routes],
+        routes=[*docs_routes, *health_routes, *settings_routes, *project_routes, *project_settings_routes, *project_control_routes, *notebook_routes, *agent_routes, *session_routes, *run_routes, *research_job_routes, *community_routes, *document_routes, *artifact_routes, *maintenance_routes, *episode_routes, *knowledge_routes, *workspace_routes, *context_note_routes],
         lifespan=lifespan,
         exception_handlers={Exception: handle_error},
     )
