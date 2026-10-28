@@ -93,13 +93,13 @@ uv sync --package server
 
 The copied `.env` works with the local Docker defaults. For a different database password, set both `POSTGRES_PASSWORD` and the password in `DATABASE_URL` to the same value before starting Postgres.
 
-Model files download when first needed. After that, Knoggin loads them from the local cache without contacting Hugging Face, so it starts offline. To download them ahead of time, or to update cached models, run:
+Model files download when first needed. After that, Knoggin loads them from the local cache without contacting Hugging Face, so it starts offline. To download them ahead of time, run:
 
 ```powershell
 uv run --package server python server/scripts/prefetch_models.py
 ```
 
-To use an exact model version, set `EMBEDDING_MODEL_REVISION`, `RERANKER_MODEL_REVISION`, `GLINER_EN_MODEL_REVISION`, or `GLINER_MULTI_MODEL_REVISION` in `.env`; a version that is not cached downloads on first use.
+Each default model is pinned to the exact version Knoggin was tested with (`PINNED_REVISIONS` in `server/src/common/model_cache.py`), so a download never picks up an unreviewed change. To use a different version, set `EMBEDDING_MODEL_REVISION`, `RERANKER_MODEL_REVISION`, `GLINER_EN_MODEL_REVISION`, or `GLINER_MULTI_MODEL_REVISION` in `.env`; a version that is not cached downloads on first use. Models never run code from their repositories.
 
 Stop Postgres with `docker compose down`. This keeps the database volume; `docker compose down -v` deletes it.
 

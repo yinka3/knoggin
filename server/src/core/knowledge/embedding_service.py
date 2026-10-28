@@ -20,7 +20,7 @@ from common.embedding_contract import (
     DEFAULT_RERANKER_MODEL,
     EMBEDDING_DIMENSION,
 )
-from common.model_cache import cached_model_path
+from common.model_cache import cached_model_path, model_revision
 from infrastructure.model_work import ModelWorkCoordinator, ModelWorkPriority
 from infrastructure.work_record import WorkRecord
 
@@ -44,7 +44,6 @@ class _DirectOnnxSentenceEmbedder:
         self._model_path = model_path
         self._tokenizer = AutoTokenizer.from_pretrained(
             str(model_path),
-            trust_remote_code=True,
         )
         self.max_seq_length = getattr(self._tokenizer, "model_max_length", None)
         config_path = model_path / "sentence_bert_config.json"
@@ -174,8 +173,8 @@ class EmbeddingService:
             else self._torch_model_kwargs
         )
         self._cross_encoder_model_kwargs = self._embedding_model_kwargs
-        self._embedding_revision = os.getenv("EMBEDDING_MODEL_REVISION")
-        self._reranker_revision = os.getenv("RERANKER_MODEL_REVISION")
+        self._embedding_revision = model_revision(embedding_model, "EMBEDDING_MODEL_REVISION")
+        self._reranker_revision = model_revision(reranker_model, "RERANKER_MODEL_REVISION")
         self._embedding_model = embedding_model
         self._reranker_model = reranker_model
         self._model_work = model_work
@@ -314,7 +313,6 @@ class EmbeddingService:
                 self._embedder = SentenceTransformer(
                     local or self._embedding_model,
                     **revision_kwargs,
-                    trust_remote_code=True,
                     device=self.device,
                     model_kwargs=self._embedding_model_kwargs,
                     config_kwargs=self._config_kwargs,

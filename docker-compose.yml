@@ -1,7 +1,7 @@
 services:
   postgres:
     # Postgres 16 with pgvector. Trixie keeps the existing database text collation.
-    image: pgvector/pgvector:0.8.0-pg16-trixie
+    image: pgvector/pgvector:0.8.0-pg16-trixie@sha256:4f26f01433671ee540195bff27f4890acca58cb49cf6d61ea12008d842ec0699
     container_name: knoggin-postgres
     ports:
       - "127.0.0.1:5432:5432"

@@ -1,7 +1,8 @@
 """Download, export, and validate Knoggin's complete local model set.
 
 Normal starts load cached models without asking the Hub. Run this to fetch
-models that are missing or newer, or the pinned *_MODEL_REVISION versions.
+missing models: the versions pinned in common.model_cache, or the ones a
+*_MODEL_REVISION setting names.
 """
 
 import asyncio
@@ -23,7 +24,7 @@ from common.embedding_contract import (  # noqa: E402
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_RERANKER_MODEL,
 )
-from common.model_cache import cached_model_path  # noqa: E402
+from common.model_cache import cached_model_path, model_revision  # noqa: E402
 from core.ingestion.vp01 import (  # noqa: E402
     GLINER25_ENGLISH_MODEL,
     GLINER25_MULTILINGUAL_MODEL,
@@ -61,7 +62,7 @@ async def prefetch_models() -> None:
     for model, revision_variable in models:
         logger.info(f"Fetching {model}")
         await asyncio.to_thread(
-            snapshot_download, model, revision=os.getenv(revision_variable)
+            snapshot_download, model, revision=model_revision(model, revision_variable)
         )
     embedding = EmbeddingService(
         embedding_model=embedding_model,

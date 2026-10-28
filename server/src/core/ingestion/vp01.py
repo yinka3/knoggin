@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Any, Mapping, Protocol
 
 from common.conf.domain_config import CompiledDomain
-from common.model_cache import cached_model_path
+from common.model_cache import cached_model_path, model_revision
 
 GLINER25_ENGLISH_MODEL = "fastino/gliner2.5-base-v1"
 GLINER25_MULTILINGUAL_MODEL = "fastino/gliner2.5-multi-v1"
@@ -98,7 +97,7 @@ class GLiNER25VP01Adapter:
 
         model_id = model_id_for_language(language)
         revision_variable = _REVISION_VARIABLES.get(model_id)
-        revision = os.getenv(revision_variable) if revision_variable else None
+        revision = model_revision(model_id, revision_variable) if revision_variable else None
         local = cached_model_path(model_id, revision)
         kwargs: dict[str, object] = {}
         if device:

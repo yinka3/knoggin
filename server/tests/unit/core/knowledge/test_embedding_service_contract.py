@@ -118,7 +118,6 @@ async def test_embedding_service_loads_embedder_before_lazy_onnx_reranker(
     assert sentence_transformer_calls == [
         {
             "model_name": "custom/embedder",
-            "trust_remote_code": True,
             "device": "cpu",
             "model_kwargs": {"provider": "CPUExecutionProvider"},
             "config_kwargs": {
@@ -155,7 +154,7 @@ async def test_embedding_service_runs_pooled_onnx_sentence_export_directly(
         @classmethod
         def from_pretrained(cls, model_name, **kwargs):
             assert model_name == str(model_path)
-            assert kwargs == {"trust_remote_code": True}
+            assert kwargs == {}  # never run code from the model repository
             return cls()
 
         def __call__(self, texts, **kwargs):
