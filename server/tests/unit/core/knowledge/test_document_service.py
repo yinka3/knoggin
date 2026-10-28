@@ -2697,11 +2697,8 @@ async def test_add_document_rejects_invalid_content_scope_and_size(
     with pytest.raises(ValueError, match="Unsupported file type"):
         await service.add_document(content=b"data", original_name="archive.zip")
 
-    monkeypatch.setattr(
-        "core.knowledge.documents.service.MAX_DOCUMENT_SIZE",
-        3,
-    )
-    with pytest.raises(ValueError, match="50 MB"):
+    monkeypatch.setattr(service, "_document_upload_limit", 3)
+    with pytest.raises(ValueError, match="configured upload size limit"):
         await service.add_document(content=b"four", original_name="notes.md")
 
     assert postgres.rows == []

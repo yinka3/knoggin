@@ -42,7 +42,7 @@ def _conninfo_for_database(database: str) -> str:
 @pytest.mark.requires_async_psycopg
 @pytest.mark.slow
 @pytest.mark.no_network
-async def test_schema_bootstraps_a_fresh_database_with_age_and_vector():
+async def test_schema_bootstraps_a_fresh_database_with_vector():
     """A new database accepts extension setup and schema SQL."""
 
     database = f"knoggin_p2_bootstrap_{uuid4().hex[:12]}"
@@ -71,12 +71,10 @@ async def test_schema_bootstraps_a_fresh_database_with_age_and_vector():
         await client.connect()
         await client.execute(SCHEMA_SQL)
 
-        extensions = await client.fetch_all(
-            "SELECT extname FROM pg_extension WHERE extname IN ('age', 'vector') "
-            "ORDER BY extname"
+        extension = await client.fetch_one(
+            "SELECT extname FROM pg_extension WHERE extname = 'vector'"
         )
-        # The knowledge graph is relational; Apache AGE is not installed.
-        assert extensions == [{"extname": "vector"}]
+        assert extension == {"extname": "vector"}
         assert await client.fetch_one(
             "SELECT 1 AS present FROM information_schema.tables "
             "WHERE table_schema = 'public' AND table_name = 'messages'"

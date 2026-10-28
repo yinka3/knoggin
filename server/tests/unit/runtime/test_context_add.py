@@ -166,6 +166,29 @@ async def test_shutdown_cancels_running_follow_up(context):
 
 @pytest.mark.runtime
 @pytest.mark.no_network
+async def test_a_full_length_follow_up_can_quote_an_excerpt(context):
+    ctx, _ = context
+    queries = []
+    done = asyncio.Event()
+    query = "y" * 100_000
+
+    async def handler(kwargs):
+        queries.append(kwargs["user_query"])
+        if len(queries) == 2:
+            done.set()
+        yield _response_event("Done")
+
+    ctx.agent_orchestrator = _FakeTurnOrchestrator(handler)
+    first = await ctx.open_agent_run_stream(Message(content="first"))
+    excerpt = {"message_id": 7, "start": 0, "end": 3, "quote": "two"}
+    assert await ctx.queue_follow_up(first.run_id, query, annotations=[excerpt])
+    await _collect_stream(first)
+    await asyncio.wait_for(done.wait(), 2)
+    assert queries[1].startswith(query) and "selected text: two" in queries[1]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
 async def test_follow_up_cannot_be_removed_once_admission_starts(context):
     ctx, _ = context
     starting = asyncio.Event()
@@ -386,6 +409,37 @@ async def test_run_steer_applies_to_active_run_and_reports_completion(context):
     assert (await ctx.get_run_status("run-1"))["steer"]["state"] == "applied"
     assert (await ctx.get_run_status("run-1"))["state"] == "assistant_final"
     assert next(iter(resources.knowledge_store.run_steers.values()))["state"] == "applied"
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_a_full_length_steer_can_quote_a_long_excerpt(context):
+    ctx, resources = context
+    waiting = asyncio.Event()
+    resume = asyncio.Event()
+    delivered = []
+    instruction = "x" * 4000
+    excerpt = {"message_id": 7, "start": 0, "end": 3990, "quote": "q" * 3990}
+
+    async def handler(kwargs):
+        yield {"event": "token", "data": {"content": "working"}}
+        waiting.set()
+        await resume.wait()
+        delivered.append(await kwargs["take_steer"]())
+        yield _response_event("Answer")
+
+    stream = await ctx.open_agent_run_stream(
+        Message(content="Question"), orchestrator=_FakeTurnOrchestrator(handler), run_id="run-1"
+    )
+    task = asyncio.create_task(_consume(stream))
+    await waiting.wait()
+    assert (await ctx.submit_steer("run-1", instruction, annotations=[excerpt]))["state"] == "pending"
+    resume.set()
+    await task
+    # The model gets the excerpt; the record keeps the user's own words.
+    assert delivered[0]["instruction"].startswith(instruction)
+    assert "selected text: " + "q" * 3990 in delivered[0]["instruction"]
+    assert next(iter(resources.knowledge_store.run_steers.values()))["instruction"] == instruction
 
 
 @pytest.mark.runtime

@@ -1,5 +1,6 @@
 """Resolve selected response text before it becomes a user instruction."""
 
+from common.response_annotations import with_annotations  # noqa: F401  (re-exported)
 from contracts.sessions import ResponseAnnotation
 
 
@@ -21,13 +22,3 @@ async def resolve_annotations(runtime, session_id: str, project_id: str,
             raise ValueError("Selected response text does not match this session")
         resolved.append(item.model_dump())
     return resolved
-
-
-def with_annotations(text: str, annotations: list[dict]) -> str:
-    if not annotations:
-        return text
-    quoted = "\n".join(
-        f"Assistant message {item['message_id']}, selected text: {item['quote']}"
-        for item in annotations
-    )
-    return f"{text}\n\n**Response excerpts I am referring to:**\n{quoted}"

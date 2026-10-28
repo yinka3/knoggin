@@ -171,7 +171,10 @@ For an existing project, replace `{project_id}` in these routes:
   clarification ends the run with the saved question and assistant message ID
   so the user can answer it in a new turn.
   The API process owns the engine run. Closing the HTTP stream leaves it
-  running. Reconnect with `GET /v1/sessions/{session_id}/runs/{run_id}/events`
+  running for `developer_settings.run_events.unwatched_run_grace_seconds`
+  (default 120); if no client reconnects by then, the run stops and records
+  `run_cancelled` with `"reason":"unwatched"` (`"shutdown"` when the API
+  stops). Reconnect with `GET /v1/sessions/{session_id}/runs/{run_id}/events`
   and `?after={last_sequence}` to receive later events. Omitting `after`
   replays the retained buffer. An expired sequence returns 409; a connected
   client that falls behind receives `run_events_gap`. Event history is
@@ -313,7 +316,8 @@ CORS currently permits `localhost:3000` and `127.0.0.1:3000`.
   saving anything. Send the same manifest to `/folders/intake` to preview
   again and submit only included files; the response reports accepted and
   failed files separately. Both routes accept optional `force_include_paths`.
-  This single-request form is capped at 50 MiB of decoded files.
+  This single-request form is capped by
+  `developer_settings.documents.max_document_upload_bytes` (default 50 MiB).
   Both `/folders/intake` and `/folders/intakes` accept an optional
   `session_id` (an open chat in the same project, else `session_not_found`).
   When every accepted file is indexed, deleted, or failed with no retry left,
@@ -338,7 +342,8 @@ CORS currently permits `localhost:3000` and `127.0.0.1:3000`.
   two hours) when another intake request arrives, and clears all
   staging on shutdown. Staging is local
   to the running API process, so an API restart requires a new intake.
-  Individual files retain the 50 MiB upload limit. Staging defaults to 2 GiB
+  Individual files use `max_document_upload_bytes` (default 50 MiB, supported
+  up to 512 MiB). Staging defaults to 2 GiB
   per folder and two active intakes; `developer_settings.documents` exposes
   `max_staged_folder_bytes` and `max_active_folder_intakes`. The project's
   scan settings still decide which files can be admitted (by default 25 MiB

@@ -11,9 +11,11 @@ from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from typing import Iterator
 
+from common.document_limits import MAX_DOCUMENT_SIZE
+
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 _FILE_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW
-_MAX_FILE_SIZE = 50 * 1024 * 1024
+_MAX_FILE_SIZE = MAX_DOCUMENT_SIZE
 
 
 class PosixFileConflictError(Exception):

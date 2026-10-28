@@ -241,6 +241,9 @@ class ProjectRuntimeFactory:
             blocking_runner=asyncio.to_thread,
             document_rerank_enabled=document_settings.rerank_enabled,
             document_rerank_candidates=document_settings.rerank_candidates,
+            max_document_upload_bytes=lambda: (
+                config_manager.config.developer_settings.documents.max_document_upload_bytes
+            ),
             filesystem_factory=filesystem_factory,
             reconciliation_interval_seconds=(
                 runtime_config.developer_settings.jobs.document_indexing.reconciliation_interval_seconds

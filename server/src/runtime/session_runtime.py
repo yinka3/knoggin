@@ -19,6 +19,7 @@ from common.exceptions import (
     RequestInterruptedError,
     SessionBusyError,
 )
+from common.response_annotations import with_annotations
 from common.schema.agent.research import ResearchMode
 from common.schema.agent.settings import PromptMemoryBudget
 from common.schema.agent.stream import AgentExecutionEvent
@@ -255,6 +256,7 @@ class SessionRuntime:
         query = query.strip()
         if not query or len(query) > 100_000:
             raise ValueError("Follow-up query must contain 1 to 100000 characters")
+        query = with_annotations(query, annotations)
         async with self._agent_run_lock:
             if self._agent_runs_closed or self._closed:
                 return None
@@ -433,7 +435,12 @@ class SessionRuntime:
             ):
                 raise RuntimeError("Steer could not be recorded before delivery")
             steer["state"] = "applied"
-            return {"steer_id": steer["steer_id"], "instruction": steer["instruction"]}
+            return {
+                "steer_id": steer["steer_id"],
+                "instruction": with_annotations(
+                    steer["instruction"], steer.get("response_annotations")
+                ),
+            }
 
     async def open_agent_run_stream(
         self,
@@ -1408,7 +1415,10 @@ class SessionRuntime:
             if (turn["role"] == "user" and isinstance(steer, dict)
                     and steer.get("state") == "applied"
                     and isinstance(steer.get("instruction"), str)):
-                content = f"{content}\n\nUser instruction during this run: {steer['instruction']}"
+                instruction = with_annotations(
+                    steer["instruction"], steer.get("response_annotations")
+                )
+                content = f"{content}\n\nUser instruction during this run: {instruction}"
             role_label = "USER" if turn["role"] == "user" else "AGENT"
             ts = datetime.fromtimestamp(turn["timestamp"] / 1000, tz=timezone.utc)
             date_str = ts.strftime("%Y-%m-%d %H:%M")

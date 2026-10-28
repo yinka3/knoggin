@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from routes.runs import _events, _request_focus, start_run
 from routes.runs import _selected_notebook
+from common.schema.settings import RunEventSettings
 from run_events import RunEvents
 
 
@@ -12,7 +13,7 @@ def test_run_continues_after_event_subscriber_disconnects():
     async def exercise():
         release = asyncio.Event()
         finished = asyncio.Event()
-        settings = SimpleNamespace(
+        settings = RunEventSettings(
             max_buffered_events=10, max_buffered_bytes=4096, max_retained_runs=2
         )
         events = RunEvents(lambda: settings)
@@ -40,7 +41,7 @@ def test_run_continues_after_event_subscriber_disconnects():
 
 def test_cancelled_process_owned_run_reports_a_terminal_event():
     async def exercise():
-        settings = SimpleNamespace(
+        settings = RunEventSettings(
             max_buffered_events=10, max_buffered_bytes=4096, max_retained_runs=2
         )
         events = RunEvents(lambda: settings)
@@ -57,6 +58,42 @@ def test_cancelled_process_owned_run_reports_a_terminal_event():
         replay = [frame async for frame in events.stream(run, after=0)]
         assert len(replay) == 1
         assert b"run_cancelled" in replay[0]
+        await events.close()
+
+    asyncio.run(exercise())
+
+
+def test_a_run_nobody_reconnects_to_is_stopped_after_the_grace_period():
+    async def exercise():
+        settings = RunEventSettings(
+            max_buffered_events=10, max_buffered_bytes=4096, max_retained_runs=2,
+            unwatched_run_grace_seconds=0.05,
+        )
+        events = RunEvents(lambda: settings)
+
+        async def frames():
+            yield b'event: run_started\ndata: {"sequence":0}\n\n'
+            await asyncio.Event().wait()
+
+        events.start("session-1", "kept", frames())
+        events.start("session-1", "left", frames())
+        kept, left = events.get("session-1", "kept"), events.get("session-1", "left")
+        first = events.stream(kept)
+        await anext(first)
+        await first.aclose()
+        # A reconnect inside the grace period keeps the run going.
+        await asyncio.sleep(0.01)
+        watching = events.stream(kept, after=0)
+        reader = asyncio.create_task(anext(watching))
+        gone = events.stream(left)
+        await anext(gone)
+        await gone.aclose()
+        await asyncio.gather(left.task, return_exceptions=True)
+        assert left.task.cancelled()
+        replay = [frame async for frame in events.stream(left, after=0)]
+        assert b'"reason": "unwatched"' in replay[0]
+        assert not kept.task.done()
+        reader.cancel()
         await events.close()
 
     asyncio.run(exercise())
@@ -218,6 +255,7 @@ def test_start_run_passes_selected_notebook_without_changing_query():
             return {"status": "active"}
 
     class Sessions:
+        user_name = "ada"
         async def list_sessions(self):
             return {"session-1": {"project_id": "project-1"}}
 
@@ -225,15 +263,21 @@ def test_start_run_passes_selected_notebook_without_changing_query():
             return Session()
 
     class Request:
+        payload = {"query": "What changed?", "notebook_id": notebook_id}
         path_params = {"session_id": "session-1"}
         app = SimpleNamespace(state=SimpleNamespace(runtime=SimpleNamespace(
             projects=Projects(), sessions=Sessions(),
-        ), run_events=RunEvents(lambda: SimpleNamespace(
+            resources=SimpleNamespace(knowledge_store=SimpleNamespace(
+                get_messages_by_ids=lambda *_args, **_kwargs: asyncio.sleep(
+                    0, result=[{"id": 12, "role": "assistant", "content": "One two three"}]
+                ),
+            )),
+        ), run_events=RunEvents(lambda: RunEventSettings(
             max_buffered_events=10, max_buffered_bytes=4096, max_retained_runs=2,
         ))))
 
         async def json(self):
-            return {"query": "What changed?", "notebook_id": notebook_id}
+            return self.payload
 
     async def exercise():
         response = await start_run(Request())
@@ -242,6 +286,14 @@ def test_start_run_passes_selected_notebook_without_changing_query():
         assert calls[0][1]["selected_notebook"] == {
             "notebook_id": notebook_id, "revision": 2, "context": "",
         }
+        Request.payload = {
+            "query": "Explain", "annotations": [
+                {"message_id": 12, "start": 4, "end": 7, "quote": "two"}
+            ],
+        }
+        assert (await start_run(Request())).media_type == "text/event-stream"
+        assert "selected text: two" in calls[-1][0].content
+        assert calls[-1][0].metadata["response_annotations"][0]["message_id"] == 12
         await Request.app.state.run_events.close()
 
         async def disappeared(_session_id):
@@ -326,11 +378,32 @@ def test_run_stream_exposes_saved_clarification_as_a_question():
     asyncio.run(exercise())
 
 
+def test_run_stream_explains_budget_failures_without_provider_details():
+    async def exercise():
+        for code, phrase in (
+            ("prompt_budget_exceeded", "prompt budget"),
+            ("provider_context_limit", "context limit"),
+            ("llm_budget_exhausted", "spending budget"),
+        ):
+            async def raw():
+                yield {"event": "error", "data": {"code": code, "message": "private provider detail"}}
+
+            frames = [frame async for frame in _events(raw(), "run-1")]
+            failure = json.loads(frames[-1].decode().split("data: ", 1)[1])
+            assert failure["code"] == code
+            assert phrase in failure["message"]
+            assert "private provider detail" not in failure["message"]
+
+    asyncio.run(exercise())
+
+
 def test_run_steer_and_stop_routes_target_only_the_active_run(monkeypatch, tmp_path):
     import httpx
     from app import create_app
 
     class Session:
+        session_id = "session-1"
+        project_id = "project-1"
         stopped = False
         follow_up = None
 
@@ -342,7 +415,11 @@ def test_run_steer_and_stop_routes_target_only_the_active_run(monkeypatch, tmp_p
         async def get_run_status(self, run_id):
             return {"run_id": run_id, "state": "cancelled" if self.stopped else "running", "steer": None} if run_id == "run-1" else None
 
-        async def submit_steer(self, run_id, instruction):
+        async def submit_steer(self, run_id, instruction, *, annotations=None):
+            if annotations:
+                assert annotations == [{"message_id": 12, "start": 4, "end": 7, "quote": "two"}]
+                # The session adds the excerpt; the route passes the user's words.
+                assert "selected text" not in instruction
             return {"steer_id": "steer-1", "state": "pending"} if run_id == "run-1" else None
 
         async def cancel_active_agent_run(self, *, run_id):
@@ -351,14 +428,17 @@ def test_run_steer_and_stop_routes_target_only_the_active_run(monkeypatch, tmp_p
             self.stopped = True
             return True
 
-        async def queue_follow_up(self, run_id, query):
+        async def queue_follow_up(self, run_id, query, *, annotations=None):
+            if annotations:
+                assert annotations == [{"message_id": 12, "start": 4, "end": 7, "quote": "two"}]
+                assert "selected text" not in query
             if run_id != "run-1" or self.stopped:
                 return None
             self.follow_up = {
                 "queue_id": "queued-1", "after_run_id": run_id,
                 "run_id": "run-2", "state": "queued", "assistant_message_id": None,
             }
-            assert query == "Later question"
+            assert query.startswith("Later question")
             return self.follow_up
 
         async def list_follow_ups(self):
@@ -374,6 +454,7 @@ def test_run_steer_and_stop_routes_target_only_the_active_run(monkeypatch, tmp_p
             return self.follow_up
 
     class Sessions:
+        user_name = "ada"
         session = Session()
 
         async def list_sessions(self):
@@ -385,7 +466,16 @@ def test_run_steer_and_stop_routes_target_only_the_active_run(monkeypatch, tmp_p
     async def start(**_kwargs):
         async def shutdown():
             pass
-        return SimpleNamespace(sessions=Sessions(), shutdown=shutdown)
+        class Store:
+            async def get_messages_by_ids(self, ids, **scope):
+                assert ids == [12]
+                assert scope["session_ids"] == ["session-1"]
+                return [{"id": 12, "role": "assistant", "content": "One two three"}]
+
+        return SimpleNamespace(
+            sessions=Sessions(), shutdown=shutdown,
+            resources=SimpleNamespace(knowledge_store=Store()),
+        )
 
     monkeypatch.setattr("app.ApplicationRuntime.start", start)
     app = create_app(user_name="ada", config_dir=tmp_path)
@@ -409,10 +499,13 @@ def test_run_steer_and_stop_routes_target_only_the_active_run(monkeypatch, tmp_p
                 assert (await client.get(base + "/events?after=-1")).status_code == 409
                 assert (await client.get(base)).json()["state"] == "running"
                 assert (await client.post(base + "/steers", json={"instruction": "  Focus  "})).status_code == 202
+                annotation = {"message_id": 12, "start": 4, "end": 7, "quote": "two"}
+                assert (await client.post(base + "/steers", json={"instruction": "Focus", "annotations": [annotation]})).status_code == 202
                 assert (await client.post(base + "/steers", json={"instruction": " "})).status_code == 422
                 assert (await client.post(base + "/follow-ups", json={"query": " "})).status_code == 422
                 queued = await client.post(base + "/follow-ups", json={"query": " Later question "})
                 assert queued.status_code == 202
+                assert (await client.post(base + "/follow-ups", json={"query": "Later question", "annotations": [annotation]})).status_code == 202
                 queue_base = "/v1/sessions/session-1/follow-ups"
                 assert (await client.get(queue_base)).json()["follow_ups"][0]["queue_id"] == "queued-1"
                 assert (await client.get(queue_base + "/queued-1")).json()["state"] == "queued"

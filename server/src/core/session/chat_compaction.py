@@ -25,6 +25,10 @@ _SYSTEM = (
 )
 
 
+# Room for chat-template tokens the counter does not see.
+_MARGIN_TOKENS = 64
+
+
 class ChatCompaction:
     """One session's stored summary: reading it for the prompt and extending
     it once enough turns have dropped out of the prompt."""
@@ -68,17 +72,29 @@ class ChatCompaction:
                 f"Write the new summary in at most {settings.summary_max_tokens * 3 // 4} words."
             )
 
-        # Never drop the previous summary or checkpoint a partially read turn.
+        def fits(turns: str) -> bool:
+            return token_count(_SYSTEM, self._count) + token_count(
+                request_text(summary, turns), self._count
+            ) + _MARGIN_TOKENS <= settings.max_input_tokens
+
+        # Read whole turns, oldest first, without dropping the previous summary.
         batch: List[Dict] = []
         for turn in dropped:
-            candidate = batch + [turn]
-            turns = "\n\n".join(_render(item) for item in candidate)
-            if token_count(_SYSTEM, self._count) + token_count(request_text(summary, turns), self._count) + 64 > settings.max_input_tokens:
+            if not fits("\n\n".join(_render(item) for item in [*batch, turn])):
                 break
-            batch = candidate
-        if not batch:
-            return False
-        turns = "\n\n".join(_render(turn) for turn in batch)
+            batch.append(turn)
+        if batch:
+            turns = "\n\n".join(_render(turn) for turn in batch)
+        else:
+            # The oldest turn alone is over the cap. Summarize the part that
+            # fits and move past it, or it would block every later pass.
+            room = settings.max_input_tokens - _MARGIN_TOKENS - token_count(
+                _SYSTEM, self._count
+            ) - token_count(request_text(summary, ""), self._count)
+            turns = trim_to_tokens(_render(dropped[0]), room, self._count)
+            if not turns:
+                return False
+            batch = [dropped[0]]
         updated = await self._llm.generate_text(
             _SYSTEM,
             request_text(summary, turns),

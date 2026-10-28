@@ -121,9 +121,16 @@ async def _events(raw: AsyncIterator, run_id: str, *, runtime=None, session=None
                 }
                 terminal = True
             elif name == "error":
+                code = data.get("code")
+                messages = {
+                    "llm_budget_exhausted": "The model spending budget is exhausted.",
+                    "prompt_budget_exceeded": "The configured prompt budget is too small for this request.",
+                    "provider_context_limit": "The prompt and response reserve exceed this model's context limit.",
+                    "workspace_conflict": "Project files changed during this run.",
+                }
                 event, public = "run_failed", {
-                    "code": data.get("code") if data.get("code") in {"llm_budget_exhausted", "prompt_budget_exceeded", "provider_context_limit", "workspace_conflict"} else "run_failed",
-                    "message": "The response could not be completed.",
+                    "code": code if code in messages else "run_failed",
+                    "message": messages.get(code, "The response could not be completed."),
                 }
                 terminal = True
             else:
@@ -327,7 +334,7 @@ async def steer_run(request):
         return _error("run_not_found", "Run not found", 404)
     try:
         annotations = await resolve_annotations(request.app.state.runtime, session.session_id, session.project_id, body.annotations)
-        result = await session.submit_steer(request.path_params["run_id"], with_annotations(body.instruction, annotations), annotations=annotations)
+        result = await session.submit_steer(request.path_params["run_id"], body.instruction, annotations=annotations)
     except ValueError:
         return _error("invalid_annotation", "Selected response text is unavailable or changed", 422)
     except SessionBusyError:
@@ -359,7 +366,7 @@ async def queue_follow_up(request):
         return _error("run_not_found", "Run not found", 404)
     try:
         annotations = await resolve_annotations(request.app.state.runtime, session.session_id, session.project_id, body.annotations)
-        result = await session.queue_follow_up(request.path_params["run_id"], with_annotations(body.query, annotations), annotations=annotations)
+        result = await session.queue_follow_up(request.path_params["run_id"], body.query, annotations=annotations)
     except ValueError:
         return _error("invalid_annotation", "Selected response text is unavailable or changed", 422)
     except FollowUpQueueFull:

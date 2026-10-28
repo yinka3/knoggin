@@ -20,6 +20,7 @@ from typing import (
 from loguru import logger
 from pydantic import TypeAdapter
 
+from common.document_limits import DEFAULT_DOCUMENT_SIZE
 from common.schema.document import (
     DocumentExtractionMode,
     DocumentExtractionStrategy,
@@ -132,8 +133,16 @@ class DocumentService:
         document_rerank_candidates: int = DOCUMENT_RERANK_DEFAULT_CANDIDATES,
         filesystem_factory: ProjectFilesystemFactory | None = None,
         reconciliation_interval_seconds: int = 60,
+        max_document_upload_bytes: int | Callable[[], int] = DEFAULT_DOCUMENT_SIZE,
     ):
         self.project_id = project_id
+        initial_upload_limit = (
+            max_document_upload_bytes()
+            if callable(max_document_upload_bytes) else max_document_upload_bytes
+        )
+        if not 1 <= initial_upload_limit <= MAX_DOCUMENT_SIZE:
+            raise ValueError("max_document_upload_bytes is outside the supported range")
+        self._document_upload_limit = max_document_upload_bytes
         self._embedding = embedding_service
         self._reader = reader or DocumentReader(
             postgres_client,
@@ -184,6 +193,10 @@ class DocumentService:
                 self.reconcile_project_files,
                 interval_seconds=reconciliation_interval_seconds,
             )
+
+    def _max_document_upload_bytes(self) -> int:
+        value = self._document_upload_limit
+        return value() if callable(value) else value
 
     @property
     def _filesystem(self) -> ProjectFilesystem | None:
@@ -983,8 +996,8 @@ class DocumentService:
     def _validate_project_file_bytes(self, path: str, content: bytes) -> None:
         self._require_unreserved_context_path(normalize_relative_path(path, path))
         self._validate_project_file_extension(path)
-        if len(content) > MAX_DOCUMENT_SIZE:
-            raise ValueError("document exceeds the 50 MB size limit")
+        if len(content) > self._max_document_upload_bytes():
+            raise ValueError("document exceeds the configured upload size limit")
 
     async def preview_folder(
         self,
@@ -1443,8 +1456,8 @@ class DocumentService:
             raise TypeError("content must be bytes")
         if not content:
             raise ValueError("document content must not be empty")
-        if len(content) > MAX_DOCUMENT_SIZE:
-            raise ValueError("document exceeds the 50 MB size limit")
+        if len(content) > self._max_document_upload_bytes():
+            raise ValueError("document exceeds the configured upload size limit")
         original_name = original_name.strip() if original_name else original_name
         if not original_name:
             raise ValueError("original_name must not be empty")

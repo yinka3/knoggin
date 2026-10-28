@@ -16,6 +16,8 @@ from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from typing import Iterator
 
+from common.document_limits import MAX_DOCUMENT_SIZE
+
 
 class _UnicodeString(ctypes.Structure):
     _fields_ = [
@@ -342,7 +344,7 @@ def write_project_file(root: Path, relative_path: str, content: bytes, *, overwr
                 try:
                     if not overwrite:
                         raise FileExistsError(f"project file already exists: {relative_path}")
-                    if expected_hash is not None and hashlib.sha256(_read(existing, 50 * 1024 * 1024)).hexdigest() != expected_hash:
+                    if expected_hash is not None and hashlib.sha256(_read(existing, MAX_DOCUMENT_SIZE)).hexdigest() != expected_hash:
                         raise WindowsFileConflictError("project file changed")
                 finally:
                     _close(existing)
@@ -379,7 +381,7 @@ def delete_project_file(root: Path, relative_path: str, *, expected_hash: str | 
                 _assert_handle_at_path(
                     parent, root.joinpath(*PurePosixPath(relative_path).parts[:-1])
                 )
-                content = _read(target, 50 * 1024 * 1024)
+                content = _read(target, MAX_DOCUMENT_SIZE)
                 if expected_hash is not None and hashlib.sha256(content).hexdigest() != expected_hash:
                     raise WindowsFileConflictError("project file changed")
                 _assert_handle_at_path(
@@ -406,7 +408,7 @@ def move_project_file(
                 _assert_handle_at_path(
                     source_parent, root.joinpath(*PurePosixPath(source_path).parts[:-1])
                 )
-                content = _read(source, 50 * 1024 * 1024)
+                content = _read(source, MAX_DOCUMENT_SIZE)
                 if expected_hash is not None and hashlib.sha256(content).hexdigest() != expected_hash:
                     raise WindowsFileConflictError("project file changed")
                 with open_relative_parent(project, destination_path, create=True) as (target_parent, target_name):

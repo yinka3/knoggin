@@ -104,7 +104,7 @@ class NotebookCapacity:
             ),
             max_passage_chars=_positive_limit(limits, "max_passage_chars", 12_000),
             max_render_tokens=_positive_limit(
-                limits, "max_notebook_render_tokens", 10000
+                limits, "max_notebook_render_tokens", 48_000
             ),
         )
 

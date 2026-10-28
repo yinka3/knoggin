@@ -15,6 +15,7 @@ from pydantic import (
     model_validator,
 )
 
+from common.document_limits import MAX_DOCUMENT_SIZE
 from common.schema.source.locators import DocumentLocator
 
 DocumentExtractionMode = Literal["standard", "ocr"]
@@ -153,6 +154,7 @@ class FolderScanSettings(BaseModel):
     max_document_size_bytes: int = Field(
         25 * 1024 * 1024,
         ge=1,
+        le=MAX_DOCUMENT_SIZE,
     )
     max_total_size_bytes: int = Field(
         500 * 1024 * 1024,

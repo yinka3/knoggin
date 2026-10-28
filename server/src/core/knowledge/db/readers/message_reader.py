@@ -98,7 +98,7 @@ class MessageReader:
             "user_name": self._clean_string(row["user_name"]),
             "session_id": self._clean_string(row["session_id"]),
             "role": self._clean_string(row["role"]),
-            "content": self._clean_string(row["content"]),
+            "content": row["content"],
             "timestamp": row["timestamp"],
         }
 
@@ -481,7 +481,7 @@ class MessageReader:
             self._raise_storage_read("get_message_text", exc)
         if not row:
             return ""
-        return self._clean_string(row["content"])
+        return row["content"]
 
     async def get_messages_by_ids(
         self,

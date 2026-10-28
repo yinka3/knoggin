@@ -42,7 +42,9 @@ def _compaction(postgres, llm):
     )
 
 
-SETTINGS = ChatCompactionSettings(min_dropped_tokens=300, max_input_tokens=1_000)
+SETTINGS = ChatCompactionSettings(
+    min_dropped_tokens=300, max_input_tokens=1_000, summary_max_tokens=500
+)
 
 
 @pytest.mark.unit
@@ -109,3 +111,29 @@ async def test_compaction_keeps_previous_summary_when_it_cannot_fit():
     assert changed is False
     assert llm.prompts == []
     assert postgres.row["chat_summary_through_message_id"] == 0
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_an_oldest_turn_over_the_cap_is_summarized_in_part_and_passed():
+    postgres, llm = FakePostgres(), FakeLLM()
+    history = _turns(30)
+    history[0]["content"] = "turn1 " + "word " * 1_500
+
+    changed = await _compaction(postgres, llm).extend(
+        history, conversation_tokens=400, settings=SETTINGS
+    )
+
+    assert changed is True
+    assert postgres.row["chat_summary_through_message_id"] == 1
+    assert "content omitted" in llm.prompts[0]
+    assert len((_SYSTEM + llm.prompts[0]).split()) + 64 <= 1_000
+    # The next pass continues with the turns after it.
+    await _compaction(postgres, llm).extend(history, conversation_tokens=400, settings=SETTINGS)
+    assert postgres.row["chat_summary_through_message_id"] > 1
+
+
+@pytest.mark.unit
+def test_the_summary_must_leave_room_for_turns():
+    with pytest.raises(ValueError):
+        ChatCompactionSettings(max_input_tokens=1_000, summary_max_tokens=600)

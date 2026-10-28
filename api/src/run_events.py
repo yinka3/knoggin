@@ -7,6 +7,7 @@ import json
 from collections import deque
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from itertools import islice
 
 
 @dataclass
@@ -20,6 +21,9 @@ class _Run:
     done: bool = False
     condition: asyncio.Condition = field(default_factory=asyncio.Condition)
     task: asyncio.Task | None = None
+    watchers: int = 0
+    unwatched_stop: asyncio.Task | None = None
+    cancel_reason: str = "shutdown"
 
     @property
     def first_sequence(self) -> int:
@@ -27,7 +31,9 @@ class _Run:
 
 
 class RunEvents:
-    """Run tasks outlive HTTP subscribers but end with the API process."""
+    """Run tasks outlive a dropped connection long enough to reconnect, stop
+    once nobody has watched them for the grace period, and end with the API
+    process."""
 
     def __init__(self, settings):
         self._settings = settings
@@ -58,7 +64,9 @@ class RunEvents:
                 await self._append(run, sequence, frame)
                 sequence += 1
         except asyncio.CancelledError:
-            payload = json.dumps({"run_id": run.run_id, "sequence": sequence})
+            payload = json.dumps({
+                "run_id": run.run_id, "sequence": sequence, "reason": run.cancel_reason,
+            })
             await self._append(
                 run, sequence, f"event: run_cancelled\ndata: {payload}\n\n".encode()
             )
@@ -70,6 +78,8 @@ class RunEvents:
                 async with run.condition:
                     run.done = True
                     run.condition.notify_all()
+                if run.unwatched_stop is not None:
+                    run.unwatched_stop.cancel()
 
     @staticmethod
     async def _append(run: _Run, sequence: int, frame: bytes) -> None:
@@ -90,6 +100,28 @@ class RunEvents:
         self, run: _Run, *, after: int | None = None
     ) -> AsyncIterator[bytes]:
         cursor = run.first_sequence - 1 if after is None else after
+        run.watchers += 1
+        if run.unwatched_stop is not None:
+            run.unwatched_stop.cancel()
+            run.unwatched_stop = None
+        try:
+            async for frame in self._frames_after(run, cursor):
+                yield frame
+        finally:
+            run.watchers -= 1
+            if run.watchers == 0 and not run.done:
+                run.unwatched_stop = asyncio.create_task(self._stop_when_unwatched(run))
+
+    async def _stop_when_unwatched(self, run: _Run) -> None:
+        """Stop a run nobody reconnected to, so it does not keep spending."""
+
+        await asyncio.sleep(self._settings().unwatched_run_grace_seconds)
+        if run.watchers == 0 and run.task is not None and not run.task.done():
+            run.cancel_reason = "unwatched"
+            run.task.cancel()
+
+    @staticmethod
+    async def _frames_after(run: _Run, cursor: int) -> AsyncIterator[bytes]:
         while True:
             async with run.condition:
                 gap = None
@@ -100,10 +132,13 @@ class RunEvents:
                         "first_available_sequence": run.first_sequence,
                     }
                     cursor = run.first_sequence - 1
-                available = [frame for sequence, frame in run.frames if sequence > cursor]
+                # Sequences are consecutive, so the new frames are the last few.
+                newest = run.frames[-1][0] if run.frames else cursor
+                available = [
+                    frame for _, frame in islice(reversed(run.frames), max(0, newest - cursor))
+                ][::-1]
                 if available:
-                    # Event numbers are monotonic even when old frames expire.
-                    cursor = run.frames[-1][0]
+                    cursor = newest
                 elif run.done:
                     return
                 else:
@@ -115,6 +150,9 @@ class RunEvents:
                 yield frame
 
     async def close(self) -> None:
+        for run in self._runs.values():
+            if run.unwatched_stop is not None:
+                run.unwatched_stop.cancel()
         tasks = [run.task for run in self._runs.values() if run.task and not run.task.done()]
         for task in tasks:
             task.cancel()

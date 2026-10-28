@@ -81,6 +81,7 @@ class DocumentSettings(ConfigModel):
     rerank_enabled: bool = True
     rerank_candidates: int = Field(15, ge=1, le=50)
     max_workspaces_per_project: int = Field(3, ge=1, le=20)
+    max_document_upload_bytes: int = Field(50 * 1024 * 1024, ge=1, le=512 * 1024 * 1024)
     max_staged_folder_bytes: int = Field(2 * 1024 * 1024 * 1024, ge=1)
     max_active_folder_intakes: int = Field(2, ge=1)
     folder_intake_idle_seconds: int = Field(2 * 60 * 60, ge=1)
@@ -247,6 +248,13 @@ class ChatCompactionSettings(ConfigModel):
     # Most dropped text one summary pass reads; the rest waits for the next.
     max_input_tokens: int = Field(60_000, ge=1_000, le=500_000)
 
+    @model_validator(mode="after")
+    def leave_room_for_turns(self):
+        # The previous summary is resent each pass; turns need the rest.
+        if self.summary_max_tokens > self.max_input_tokens // 2:
+            raise ValueError("summary_max_tokens must be at most half of max_input_tokens")
+        return self
+
 
 class IngestionNoticeSettings(ConfigModel):
     # How often a folder import's documents are checked, and how long a chat
@@ -269,6 +277,8 @@ class RunEventSettings(ConfigModel):
     max_buffered_events: int = Field(10_000, ge=1)
     max_buffered_bytes: int = Field(8 * 1024 * 1024, ge=1_024)
     max_retained_runs: int = Field(20, ge=1)
+    # A run whose last viewer left is stopped unless one reconnects in time.
+    unwatched_run_grace_seconds: float = Field(120.0, ge=0, le=86_400, allow_inf_nan=False)
 
 
 class DeveloperSettings(ConfigModel):

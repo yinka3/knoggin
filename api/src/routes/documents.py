@@ -12,9 +12,7 @@ from pydantic import ValidationError
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from common.document_limits import (
-    MAX_DOCUMENT_BASE64_LENGTH, MAX_DOCUMENT_SIZE, MAX_DOCUMENT_UPLOAD_BODY_BYTES,
-)
+from common.document_limits import MAX_DOCUMENT_UPLOAD_BODY_BYTES
 from common.exceptions import SavedWebLinkAlreadyExistsError
 from common.schema.document import FolderUploadEntry
 from core.knowledge.documents.scanning import normalize_relative_path
@@ -55,6 +53,28 @@ def _public(row, fields):
         key: value.isoformat() if isinstance(value, datetime) else str(value) if isinstance(value, UUID) else value
         for key, value in row.items() if key in fields
     }
+
+
+def _document_limit(request) -> int:
+    return request.app.state.runtime.config_manager.config.developer_settings.documents.max_document_upload_bytes
+
+
+def _base64_limit(size: int) -> int:
+    return 4 * ((size + 2) // 3)
+
+
+async def _bounded_upload_json(request):
+    """Bound encoded bytes before JSON decoding or base64 allocation."""
+    ceiling = _base64_limit(_document_limit(request)) + 4 * 1024 * 1024
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > ceiling:
+            return None, _error("payload_too_large", "Upload is too large", 413)
+    try:
+        return json.loads(body), None
+    except (ValueError, UnicodeDecodeError):
+        return None, None
 
 
 async def _workspaces(request):
@@ -209,16 +229,19 @@ async def read_document(request):
 async def upload_document(request):
     if error := await _project(request):
         return error
-    body = await _json(request)
+    body, body_error = await _bounded_upload_json(request)
+    if body_error is not None:
+        return body_error
+    limit = _document_limit(request)
     if isinstance(body, dict) and isinstance(body.get("content_base64"), str):
-        if len(body["content_base64"]) > MAX_DOCUMENT_BASE64_LENGTH:
+        if len(body["content_base64"]) > _base64_limit(limit):
             return _error("payload_too_large", "Document is too large", 413)
     try:
         upload = UploadDocument.model_validate(body)
         content = base64.b64decode(upload.content_base64, validate=True)
     except (ValidationError, ValueError):
         return _error("invalid_document", "Invalid document upload", 422)
-    if len(content) > MAX_DOCUMENT_SIZE:
+    if len(content) > limit:
         return _error("payload_too_large", "Document is too large", 413)
     async with project_documents(request.app.state.runtime, request.path_params["project_id"]) as service:
         try:
@@ -234,7 +257,8 @@ async def upload_document(request):
 
 async def _folder_manifest(request):
     # A bounded JSON upload keeps folder intake comparable to existing document uploads.
-    ceiling = MAX_DOCUMENT_UPLOAD_BODY_BYTES + 2 * 1024 * 1024
+    ceiling = min(_base64_limit(_document_limit(request)) + 64 * 1024,
+                  MAX_DOCUMENT_UPLOAD_BODY_BYTES) + 2 * 1024 * 1024
     body = bytearray()
     async for chunk in request.stream():
         body.extend(chunk)
@@ -247,7 +271,7 @@ async def _folder_manifest(request):
         for item in payload.files:
             content = base64.b64decode(item.content_base64, validate=True)
             total_bytes += len(content)
-            if total_bytes > MAX_DOCUMENT_SIZE:
+            if total_bytes > _document_limit(request):
                 return _error("payload_too_large", "Folder upload is too large", 413)
             files.append(FolderUploadEntry(relative_path=item.relative_path, content=content))
     except (ValidationError, ValueError, TypeError):
@@ -456,9 +480,12 @@ async def commit_staged_folder(request):
 
 
 async def inspect_ocr(request):
-    body = await _json(request)
+    body, body_error = await _bounded_upload_json(request)
+    if body_error is not None:
+        return body_error
+    limit = _document_limit(request)
     if isinstance(body, dict) and isinstance(body.get("content_base64"), str):
-        if len(body["content_base64"]) > MAX_DOCUMENT_BASE64_LENGTH:
+        if len(body["content_base64"]) > _base64_limit(limit):
             return _error("payload_too_large", "Document is too large", 413)
     try:
         preflight = OcrPreflight.model_validate(body)
@@ -467,7 +494,7 @@ async def inspect_ocr(request):
         content = base64.b64decode(preflight.content_base64, validate=True)
     except (ValidationError, ValueError):
         return _error("invalid_document", "Invalid PDF preflight request", 422)
-    if len(content) > MAX_DOCUMENT_SIZE:
+    if len(content) > limit:
         return _error("payload_too_large", "Document is too large", 413)
     from core.knowledge.documents.extraction import inspect_pdf_ocr_need
 
@@ -478,7 +505,9 @@ async def inspect_ocr(request):
 async def admit_batch(request):
     if error := await _project(request):
         return error
-    payload = await _json(request)
+    payload, body_error = await _bounded_upload_json(request)
+    if body_error is not None:
+        return body_error
     if isinstance(payload, dict) and isinstance(payload.get("items"), list):
         maximum = request.app.state.runtime.config_manager.config.developer_settings.documents.max_source_batch_items
         if len(payload["items"]) > maximum:
@@ -488,7 +517,7 @@ async def admit_batch(request):
             for item in payload["items"]
             if isinstance(item, dict) and isinstance(item.get("content_base64"), str)
         )
-        if encoded_bytes > MAX_DOCUMENT_BASE64_LENGTH:
+        if encoded_bytes > _base64_limit(_document_limit(request)):
             return _error("payload_too_large", "Batch is too large", 413)
     try:
         batch = BatchSources.model_validate(payload)
@@ -505,7 +534,7 @@ async def admit_batch(request):
                 failures.add(index)
                 continue
             total_bytes += len(content)
-            if total_bytes > MAX_DOCUMENT_SIZE:
+            if total_bytes > _document_limit(request):
                 return _error("payload_too_large", "Batch is too large", 413)
             decoded[index] = content
     results = []

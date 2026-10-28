@@ -13,7 +13,6 @@ from uuid import uuid4
 
 import anyio
 
-from common.document_limits import MAX_DOCUMENT_SIZE
 from core.knowledge.documents.scanning import FolderScanPathEntry, normalize_relative_path
 
 class IntakeConflict(Exception):
@@ -55,6 +54,7 @@ class _Intake:
     force_include_paths: list[str]
     files: dict[str, _File]
     directory: Path
+    max_file_bytes: int
     status: str = "uploading"
     preview: object | None = None
     scan_settings: object | None = None
@@ -114,11 +114,12 @@ class FolderStaging:
             paths = []
             seen_paths = set()
             total = 0
+            max_file_bytes = self._settings().max_document_upload_bytes
             for item in payload.files:
                 path = normalize_relative_path(item.relative_path, item.relative_path)
                 if path in seen_paths:
                     raise ValueError("Duplicate normalized folder path")
-                if item.size_bytes > MAX_DOCUMENT_SIZE:
+                if item.size_bytes > max_file_bytes:
                     raise IntakeTooLarge("An individual file exceeds the upload limit")
                 total += item.size_bytes
                 if total > self._settings().max_staged_folder_bytes:
@@ -145,7 +146,8 @@ class FolderStaging:
                 intake_id=intake_id, project_id=project_id,
                 folder_name=payload.folder_name.strip(),
                 force_include_paths=force_include_paths,
-                files=files, directory=directory, session_id=payload.session_id,
+                files=files, directory=directory, max_file_bytes=max_file_bytes,
+                session_id=payload.session_id,
             )
             self._intakes[intake_id] = intake
             return intake.public()
@@ -212,8 +214,8 @@ class FolderStaging:
             def load(path: str, size: int) -> bytes:
                 item = by_path[path]
                 with item.disk_path.open("rb") as handle:
-                    content = handle.read(MAX_DOCUMENT_SIZE + 1)
-                if len(content) != size or len(content) > MAX_DOCUMENT_SIZE:
+                    content = handle.read(intake.max_file_bytes + 1)
+                if len(content) != size or len(content) > intake.max_file_bytes:
                     raise ValueError("Staged file changed during preview")
                 return content
 

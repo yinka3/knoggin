@@ -293,7 +293,7 @@ class AgentRunLimits:
     max_accumulated_summary_chars: int = 4000
     max_passage_chars: int = 12_000
     max_research_findings: int = 30
-    max_notebook_render_tokens: int = 10000
+    max_notebook_render_tokens: int = 48_000
     max_consecutive_errors: int = 3
     project_briefing_mode: ProjectBriefingMode = "adaptive"
     empty_result_replan_threshold: int = 3

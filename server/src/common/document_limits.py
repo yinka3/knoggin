@@ -1,6 +1,9 @@
 """Shared upload ceilings for transport and document ingestion."""
 
-MAX_DOCUMENT_SIZE = 50 * 1024 * 1024
+DEFAULT_DOCUMENT_SIZE = 50 * 1024 * 1024
+# A structural bound for in-memory extraction and JSON upload. The configured
+# admission limit can be lower and defaults to 50 MiB.
+MAX_DOCUMENT_SIZE = 512 * 1024 * 1024
 MAX_DOCUMENT_BASE64_LENGTH = 4 * ((MAX_DOCUMENT_SIZE + 2) // 3)
 # Canonical base64 plus bounded JSON metadata. Escaped/noncanonical JSON can
 # exceed this envelope and is rejected even if its decoded document would fit.
