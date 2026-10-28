@@ -31,6 +31,7 @@ from infrastructure.llm_client import LLMService
 from infrastructure.model_work import ModelWorkCoordinator, ModelWorkPriority
 from infrastructure.postgres_client import PostgresClient
 from infrastructure.resource_profile import ResourceProfile
+from infrastructure.schema_migrations import migrate
 from log.llm_trace import get_trace_logger
 
 
@@ -230,6 +231,9 @@ class RuntimeResources:
         if not dsn:
             raise ConfigurationError("DATABASE_URL environment variable is not set")
 
+        ran = await asyncio.to_thread(migrate, dsn)
+        if ran:
+            logger.info("Applied database migrations: {}", ", ".join(ran))
         self.postgres = PostgresClient(dsn=dsn)
         await self.postgres.connect()
 

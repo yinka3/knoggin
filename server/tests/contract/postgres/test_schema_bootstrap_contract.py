@@ -1,7 +1,7 @@
 """Fresh-database schema and extension bootstrap contracts."""
 
+import asyncio
 import os
-from pathlib import Path
 from uuid import uuid4
 
 import psycopg
@@ -10,14 +10,13 @@ from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from infrastructure.postgres_client import PostgresClient
+from infrastructure.schema_migrations import MIGRATIONS_DIR, migrate
 
 DB_URL = os.environ.get(
     "TEST_DATABASE_URL",
     "postgresql://knoggin:knoggin@127.0.0.1:5432/postgres",
 )
-SCHEMA_SQL = (
-    Path(__file__).resolve().parents[3] / "src" / "infrastructure" / "schema.sql"
-).read_text(encoding="utf-8")
+SCHEMA_SQL = (MIGRATIONS_DIR / "0000_baseline.sql").read_text(encoding="utf-8")
 
 
 def test_schema_is_fresh_install_ddl_without_historical_upgrade_steps():
@@ -43,7 +42,7 @@ def _conninfo_for_database(database: str) -> str:
 @pytest.mark.slow
 @pytest.mark.no_network
 async def test_schema_bootstraps_a_fresh_database_with_vector():
-    """A new database accepts extension setup and schema SQL."""
+    """The migrations build a new database, extension included."""
 
     database = f"knoggin_p2_bootstrap_{uuid4().hex[:12]}"
     admin_conninfo = _conninfo_for_database("postgres")
@@ -59,17 +58,8 @@ async def test_schema_bootstraps_a_fresh_database_with_vector():
 
     client = PostgresClient(database_conninfo, min_size=1, max_size=1)
     try:
-        extension_conn = await psycopg.AsyncConnection.connect(
-            database_conninfo,
-            autocommit=True,
-        )
-        try:
-            await extension_conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
-        finally:
-            await extension_conn.close()
-
+        assert await asyncio.to_thread(migrate, database_conninfo) == ["0000_baseline"]
         await client.connect()
-        await client.execute(SCHEMA_SQL)
 
         extension = await client.fetch_one(
             "SELECT extname FROM pg_extension WHERE extname = 'vector'"
@@ -138,8 +128,8 @@ async def test_schema_bootstraps_a_fresh_database_with_vector():
             "WHERE conname IN ('aac_insights_discussion_id_fkey', "
             "'aac_timeline_discussion_id_fkey') ORDER BY conname"
         ) == [
-            {"table_name": "public.aac_insights", "confdeltype": "n"},
-            {"table_name": "public.aac_timeline", "confdeltype": "c"},
+            {"table_name": "aac_insights", "confdeltype": "n"},
+            {"table_name": "aac_timeline", "confdeltype": "c"},
         ]
         assert await client.fetch_one(
             "SELECT count(*) AS invalid_constraints FROM pg_constraint "

@@ -165,6 +165,7 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
     monkeypatch.setattr(resources_module, "load_dotenv", load_dotenv)
     monkeypatch.setattr(resources_module, "KnowledgeStore", FakeKnowledgeStore)
     monkeypatch.setattr(resources_module, "PostgresClient", FakePostgresClient)
+    monkeypatch.setattr(resources_module, "migrate", lambda _dsn: [])
     monkeypatch.setattr(
         resources_module,
         "configure_coordination_log",
@@ -327,6 +328,7 @@ async def test_resource_manager_cleans_up_when_postgres_startup_fails(monkeypatc
         "PostgresClient",
         FailingPostgresClient,
     )
+    monkeypatch.setattr(resources_module, "migrate", lambda _dsn: [])
     monkeypatch.setattr(resources_module, "LLMService", FakeLLMService)
     monkeypatch.setattr(resources_module, "EmbeddingService", FakeEmbeddingService)
     monkeypatch.setattr(resources_module, "spacy", FakeSpacy)
@@ -402,6 +404,7 @@ async def test_resource_manager_resolves_gpu_cuda(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(resources_module, "KnowledgeStore", FakeKnowledgeStore)
     monkeypatch.setattr(resources_module, "PostgresClient", FakePostgresClient)
+    monkeypatch.setattr(resources_module, "migrate", lambda _dsn: [])
     monkeypatch.setattr(resources_module, "LLMService", FakeLLMService)
     monkeypatch.setattr(resources_module, "EmbeddingService", FakeEmbeddingService)
     monkeypatch.setattr(resources_module, "spacy", FakeSpacy)
@@ -491,6 +494,7 @@ async def test_resource_manager_resolves_gpu_mps(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(resources_module, "KnowledgeStore", FakeKnowledgeStore)
     monkeypatch.setattr(resources_module, "PostgresClient", FakePostgresClient)
+    monkeypatch.setattr(resources_module, "migrate", lambda _dsn: [])
     monkeypatch.setattr(resources_module, "LLMService", FakeLLMService)
     monkeypatch.setattr(resources_module, "EmbeddingService", FakeEmbeddingService)
     monkeypatch.setattr(resources_module, "spacy", FakeSpacy)
@@ -561,6 +565,7 @@ async def test_resource_manager_resolves_cpu_when_gpu_false(monkeypatch, tmp_pat
     )
     monkeypatch.setattr(resources_module, "KnowledgeStore", FakeKnowledgeStore)
     monkeypatch.setattr(resources_module, "PostgresClient", FakePostgresClient)
+    monkeypatch.setattr(resources_module, "migrate", lambda _dsn: [])
     monkeypatch.setattr(resources_module, "LLMService", FakeLLMService)
     monkeypatch.setattr(resources_module, "EmbeddingService", FakeEmbeddingService)
     monkeypatch.setattr(resources_module, "spacy", FakeSpacy)

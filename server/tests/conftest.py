@@ -32,9 +32,10 @@ def server_database_url(database: str) -> str:
 
 @pytest.fixture(scope="session")
 def test_database_url():
-    """Recreate knoggin_testdb from schema.sql once per test session."""
+    """Recreate knoggin_testdb through the migrations once per test session."""
 
-    schema_sql = (SRC_ROOT / "infrastructure" / "schema.sql").read_text(encoding="utf-8")
+    from infrastructure.schema_migrations import migrate
+
     with psycopg.connect(server_database_url("postgres"), autocommit=True) as admin:
         admin.execute(
             sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
@@ -43,7 +44,5 @@ def test_database_url():
         )
         admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(TEST_DATABASE_NAME)))
     url = server_database_url(TEST_DATABASE_NAME)
-    with psycopg.connect(url, autocommit=True) as connection:
-        connection.execute("CREATE EXTENSION vector")
-        connection.execute(schema_sql)
+    migrate(url)
     return url

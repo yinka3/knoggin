@@ -1,6 +1,7 @@
--- Canonical fresh-install schema for unreleased Knoggin.
--- The vector extension is created by the deployment/test bootstrap.
--- Historical upgrades and developer data cleanup do not belong in this file.
+-- The schema as of the first tracked migration. Never edit this file: put
+-- each later change in the next numbered file in this folder.
+
+CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;

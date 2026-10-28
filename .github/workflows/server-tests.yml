@@ -10,7 +10,7 @@ on:
     paths:
       - "server/**"
       - "api/**"
-      - "docker/**"
+      - "Dockerfile"
       - "docker-compose.yml"
       - "pyproject.toml"
       - "uv.lock"

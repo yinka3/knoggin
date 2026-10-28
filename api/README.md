@@ -52,6 +52,10 @@ This README covers the rules the route list cannot show.
 - **Tools:** `enabled_tools` takes tool names or the groups `core`, `web`, and
   `maintenance`. A run's choice wins over the session's, then the agent's, then
   `tools.default_groups`.
+- **Prompt cache:** editing project context, the project brief, or other text
+  sent early in a model prompt can reduce provider cache reuse on later calls.
+  Those calls may take longer or cost more until the new prefix is cached.
+  A revision number alone does not imply a cache miss; provider behavior varies.
 
 ## Background work
 
@@ -80,9 +84,11 @@ asked for it (shown in `/follow-ups`):
 
 ## Database upgrades
 
-Fresh databases get everything from `server/src/infrastructure/schema.sql`. An
-existing database needs each upgrade script in that folder that it has not run
-yet, such as `project_workspaces_upgrade.sql`.
+The API brings the database up to date when it starts: it runs each file in
+`server/src/infrastructure/migrations/` that the `schema_migrations` table has
+not recorded, in order, each in its own transaction. A schema change goes in
+the next numbered file; never edit one that has shipped. The API refuses a
+database that has tables but no `schema_migrations` table.
 
 ## Backup and restore
 

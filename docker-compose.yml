@@ -10,9 +10,8 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-knoggin}
       - POSTGRES_DB=knoggin_db
     volumes:
+      # The API creates and upgrades the schema when it starts.
       - knoggin_pg_data:/var/lib/postgresql/data
-      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
-      - ./server/src/infrastructure/schema.sql:/docker-entrypoint-initdb.d/02-schema.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U knoggin -d knoggin_db"]
       interval: 10s

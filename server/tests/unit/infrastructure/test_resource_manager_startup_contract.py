@@ -168,6 +168,7 @@ async def test_resource_manager_cleans_every_partial_startup_stage(
     monkeypatch.setattr(resources_module, "EmbeddingService", FakeEmbedding)
     monkeypatch.setattr(resources_module, "KnowledgeStore", FakeKnowledgeStore)
     monkeypatch.setattr(resources_module, "PostgresClient", FakePostgres)
+    monkeypatch.setattr(resources_module, "migrate", lambda _dsn: [])
     monkeypatch.setattr(resources_module, "spacy", FakeSpacy)
     monkeypatch.setattr(
         resources_module,

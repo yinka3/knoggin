@@ -45,7 +45,7 @@ def budget_database_url():
     params["dbname"] = database
     target = make_conninfo(**params)
     schema = (
-        Path(__file__).resolve().parents[3] / "src/infrastructure/schema.sql"
+        Path(__file__).resolve().parents[3] / "src/infrastructure/migrations/0000_baseline.sql"
     ).read_text(encoding="utf-8")
     try:
         with psycopg.connect(target, autocommit=True) as connection:

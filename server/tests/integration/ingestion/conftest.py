@@ -5,7 +5,6 @@ import json
 import os
 import sys
 import uuid
-from pathlib import Path
 
 import psycopg
 import pytest
@@ -13,6 +12,7 @@ from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from infrastructure.postgres_client import PostgresClient
+from infrastructure.schema_migrations import migrate
 from tests.fixtures.factories import make_domain_config
 
 DB_URL = os.environ.get(
@@ -41,16 +41,11 @@ async def real_server_scope():
     database = f"knoggin_ingestion_{uuid.uuid4().hex[:12]}"
     admin_url = _database_url("postgres")
     database_url = _database_url(database)
-    schema_sql = (
-        Path(__file__).resolve().parents[3] / "src" / "infrastructure" / "schema.sql"
-    ).read_text(encoding="utf-8")
     with psycopg.connect(admin_url, autocommit=True) as admin:
         admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database)))
     postgres = None
     try:
-        with psycopg.connect(database_url, autocommit=True) as connection:
-            connection.execute("CREATE EXTENSION vector")
-            connection.execute(schema_sql)
+        migrate(database_url)
 
         postgres = PostgresClient(dsn=database_url, min_size=1, max_size=2)
         await postgres.connect()

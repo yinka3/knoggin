@@ -43,6 +43,7 @@ from common.embedding_contract import (  # noqa: E402
     DEFAULT_RERANKER_MODEL,
     EMBEDDING_DIMENSION,
 )
+from infrastructure.schema_migrations import migrate  # noqa: E402
 
 DEFAULT_DATABASE_URL = "postgresql://knoggin:knoggin@127.0.0.1:5432/knoggin_db"
 DEFAULT_QUERIES = (
@@ -224,15 +225,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def _create_database(source_url: str, database: str) -> str:
     admin_url = _database_url(source_url, "postgres")
     database_url = _database_url(source_url, database)
-    schema_text = (SERVER_ROOT / "src" / "infrastructure" / "schema.sql").read_text(
-        encoding="utf-8"
-    )
     with psycopg.connect(admin_url, autocommit=True) as admin:
         admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database)))
     try:
-        with psycopg.connect(database_url, autocommit=True) as connection:
-            connection.execute("CREATE EXTENSION vector")
-            connection.execute(schema_text)
+        migrate(database_url)
     except BaseException:
         _drop_database(source_url, database)
         raise
