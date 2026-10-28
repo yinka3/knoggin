@@ -58,6 +58,7 @@ class FakeLimits:
     max_accumulated_next_steps = 6
     max_accumulated_summary_chars = 2000
     max_passage_chars = 12_000
+    max_notebook_render_tokens = 48_000
     max_research_findings = 30
     max_consecutive_errors = 2
     empty_replans_before_answer = 2
