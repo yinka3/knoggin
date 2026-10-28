@@ -95,7 +95,7 @@ matching your Postgres version. The backup can contain API keys stored in
 Restore only into a new, empty database and empty folders:
 
 ```bash
-uv run --package api python -m instance_backup restore <backup-dir> \
+uv run --package server python server/scripts/instance_backup.py restore <backup-dir> \
   --settings-dir ~/.config/knoggin-restored
 ```
 

@@ -24,7 +24,7 @@ The [completion audit](remediation-completion-audit.md) records current status a
 
 ## Admission performance measurement
 
-`server/scripts/benchmark_semantic_admission.py` uses the production selector and `cl100k_base` tokenizer with in-memory ready exchanges, a 128,000-token target, and forced flush. On this Windows machine:
+The one-off benchmark (`server/scripts/benchmark_semantic_admission.py`, since removed; see git history) used the production selector and `cl100k_base` tokenizer with in-memory ready exchanges, a 128,000-token target, and forced flush. On this Windows machine:
 
 | Exchanges | Exact token calls | Characters tokenized | Elapsed |
 | ---: | ---: | ---: | ---: |

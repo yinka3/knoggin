@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-import instance_backup
+from scripts import instance_backup
 
 
 def test_backup_verification_and_restore_into_fresh_targets(monkeypatch, tmp_path):

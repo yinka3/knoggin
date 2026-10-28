@@ -16,7 +16,6 @@ import psycopg
 import yaml
 from psycopg.conninfo import conninfo_to_dict
 
-
 FORMAT_VERSION = 1
 DEFAULT_LIBRARY_ROOT = "data/projects"
 

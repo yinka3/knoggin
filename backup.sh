@@ -18,7 +18,7 @@ case "${1:-}" in
             exit 1
         fi
         cd -- "$repo_root"
-        exec uv run --package api python -m instance_backup verify "$2"
+        exec uv run --package server python server/scripts/instance_backup.py verify "$2"
         ;;
 esac
 
@@ -37,4 +37,4 @@ fi
 
 destination="${1:-$HOME/knoggin-backups/backup-$(date -u +%Y%m%dT%H%M%SZ)}"
 cd -- "$repo_root"
-exec env -u DATABASE_URL -u SETTINGS_DIR uv run --package api --env-file "$repo_root/.env" python -m instance_backup backup "$destination"
+exec env -u DATABASE_URL -u SETTINGS_DIR uv run --package server --env-file "$repo_root/.env" python server/scripts/instance_backup.py backup "$destination"
