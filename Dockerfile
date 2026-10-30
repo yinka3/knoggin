@@ -43,7 +43,11 @@ for repo, revision in PINNED_REVISIONS.items():
         repo, revision=revision, ignore_patterns=["*.bin", "*.h5", "*.msgpack", "*.ot"]
     )
 PY
-RUN docling-tools models download layout tableformer rapidocr --quiet
+# Docling's PDF models, checked file by file against the committed manifest.
+COPY --chown=knoggin server/src/common/docling_models.py server/src/common/docling_models.json /tmp/
+RUN docling-tools models download --output-dir /home/knoggin/.cache/knoggin/docling \
+        layout tableformer rapidocr --quiet \
+    && python -c "import sys; sys.path.insert(0, '/tmp'); import docling_models as d; d.verify(d.artifacts_path())"
 
 COPY --chown=knoggin . .
 RUN --mount=type=cache,target=/home/knoggin/.cache/uv,uid=${UID} \

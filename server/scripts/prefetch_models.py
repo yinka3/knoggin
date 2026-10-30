@@ -5,6 +5,7 @@ missing models: the versions pinned in common.model_cache, or the ones a
 *_MODEL_REVISION setting names.
 """
 
+import argparse
 import asyncio
 import os
 import subprocess
@@ -20,6 +21,7 @@ SERVER_ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = SERVER_ROOT.parent
 sys.path.insert(0, str(SERVER_ROOT / "src"))
 
+from common import docling_models  # noqa: E402
 from common.embedding_contract import (  # noqa: E402
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_RERANKER_MODEL,
@@ -44,7 +46,7 @@ def _device() -> torch.device:
     return torch.device("cpu")
 
 
-async def prefetch_models() -> None:
+async def prefetch_models(*, update_docling_manifest: bool = False) -> None:
     """Prepare every local model without starting the server or data services."""
     load_dotenv(REPOSITORY_ROOT / ".env")
     profile = ResourceProfile.from_environment()
@@ -83,24 +85,32 @@ async def prefetch_models() -> None:
             language="en",
             device=str(device),
         )
-        logger.info("Prefetching Docling PDF layout, table, and OCR artifacts")
+        folder = docling_models.artifacts_path()
+        logger.info(f"Prefetching Docling PDF layout, table, and OCR artifacts into {folder}")
         await asyncio.to_thread(
             subprocess.run,
             [
-                "docling-tools",
-                "models",
-                "download",
-                "layout",
-                "tableformer",
-                "rapidocr",
-                "--quiet",
+                "docling-tools", "models", "download", "--output-dir", str(folder),
+                "layout", "tableformer", "rapidocr", "--quiet",
             ],
             check=True,
         )
+        if update_docling_manifest:
+            docling_models.write_manifest(folder)
+            logger.info(f"Wrote {docling_models.MANIFEST}; test, then commit it")
+        else:
+            docling_models.verify(folder)
         logger.info("All local models are ready in the local cache")
     finally:
         embedding.cleanup()
 
 
 if __name__ == "__main__":
-    asyncio.run(prefetch_models())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--update-docling-manifest", action="store_true",
+        help="Record the downloaded Docling files as trusted (after upgrading Docling).",
+    )
+    asyncio.run(prefetch_models(
+        update_docling_manifest=parser.parse_args().update_docling_manifest
+    ))

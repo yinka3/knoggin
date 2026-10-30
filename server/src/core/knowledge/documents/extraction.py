@@ -46,6 +46,7 @@ from PIL import Image as PILImage
 from pypdf import PdfReader, PdfWriter
 from tree_sitter import Language, Parser
 
+from common import docling_models
 from common.exceptions import DependencyError
 from common.schema.document import DocumentExtractionMode, DocumentExtractionStrategy
 from core.knowledge.documents.constants import (
@@ -533,6 +534,8 @@ def _docling_converter(extraction_mode: DocumentExtractionMode = "standard"):
     from docling.document_converter import DocumentConverter, PdfFormatOption
 
     pdf_options = PdfPipelineOptions(
+        # Only the checked models folder; never the Hub or Docling's own cache.
+        artifacts_path=docling_models.artifacts_path(),
         accelerator_options=AcceleratorOptions(
             device=AcceleratorDevice.CPU,
             num_threads=_DOCLING_CPU_THREADS,
@@ -576,7 +579,8 @@ def _parse_with_docling(
             ).document
     except Exception as exc:
         detail = str(exc).strip() or type(exc).__name__
-        if "LocalEntryNotFoundError" in detail or "huggingface.co" in detail:
+        models_missing = extension == ".pdf" and not docling_models.artifacts_path().is_dir()
+        if models_missing or "LocalEntryNotFoundError" in detail or "huggingface.co" in detail:
             raise DependencyError(
                 "Docling PDF models are not installed; run "
                 "uv run --package server python server/scripts/prefetch_models.py before indexing PDFs"

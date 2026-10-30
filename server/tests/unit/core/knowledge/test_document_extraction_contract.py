@@ -177,8 +177,10 @@ def test_layout_region_locator_preserves_optional_coordinates_and_text_offsets()
     ],
 )
 def test_docling_parse_failures_distinguish_missing_models_from_bad_content(
-    monkeypatch, detail, expected, error_type, classification
+    monkeypatch, tmp_path, detail, expected, error_type, classification
 ):
+    monkeypatch.setenv("DOCLING_ARTIFACTS_PATH", str(tmp_path))  # models present
+
     class FailingConverter:
         def convert(self, _stream):
             raise RuntimeError(detail)
@@ -192,6 +194,24 @@ def test_docling_parse_failures_distinguish_missing_models_from_bad_content(
     with pytest.raises(error_type, match=expected) as error:
         extraction_module._parse_with_docling(b"document", ".pdf")
     assert DocumentIndexer._classify_index_failure(error.value) == classification
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_a_failed_pdf_parse_without_the_models_folder_says_to_install_them(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("DOCLING_ARTIFACTS_PATH", str(tmp_path / "missing"))
+
+    class FailingConverter:
+        def convert(self, _stream):
+            raise FileNotFoundError("model.safetensors")
+
+    monkeypatch.setattr(
+        extraction_module, "_docling_converter", lambda _mode="standard": FailingConverter()
+    )
+    with pytest.raises(DependencyError, match="prefetch_models.py"):
+        extraction_module._parse_with_docling(b"document", ".pdf")
 
 
 @pytest.mark.unit

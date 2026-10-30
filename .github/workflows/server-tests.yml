@@ -238,6 +238,18 @@ jobs:
       - name: Install workspace dependencies
         run: uv sync --frozen --dev
 
+      - name: Restore Docling models
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/knoggin/docling
+          key: docling-models-${{ hashFiles('server/src/common/docling_models.json') }}
+
+      - name: Download and verify Docling models
+        run: |
+          uv run docling-tools models download --output-dir ~/.cache/knoggin/docling \
+            layout tableformer rapidocr --quiet
+          uv run python -c "import sys; sys.path.insert(0, 'server/src'); from common import docling_models as d; d.verify(d.artifacts_path())"
+
       - name: Start PostgreSQL
         run: docker compose up -d --build --wait postgres
 
@@ -380,7 +392,10 @@ jobs:
 
       - name: Provision Docling PDF artifacts
         working-directory: server
-        run: uv run docling-tools models download layout tableformer rapidocr --quiet
+        run: |
+          uv run docling-tools models download --output-dir ~/.cache/knoggin/docling \
+            layout tableformer rapidocr --quiet
+          uv run python -c "import sys; sys.path.insert(0, 'src'); from common import docling_models as d; d.verify(d.artifacts_path())"
 
       - name: Start PostgreSQL for runtime composition
         run: docker compose up -d --build --wait postgres

@@ -75,7 +75,7 @@ where = ["src"]
 include = ["common*", "core*", "infrastructure*", "log*", "runtime*"]
 
 [tool.setuptools.package-data]
-common = ["templates/*.md", "templates/*.yaml", "templates/prompts/*.md"]
+common = ["templates/*.md", "templates/*.yaml", "templates/prompts/*.md", "docling_models.json"]
 infrastructure = ["migrations/*.sql"]
 
 [tool.pytest.ini_options]
