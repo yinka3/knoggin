@@ -491,3 +491,30 @@ def test_a_user_claim_needs_the_users_own_words():
         ("Claim: unquoted.", AssertionKind.AGENT_DERIVED),
     ]
     assert result.rejected_operations == ()
+
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_a_quote_may_join_pieces_of_the_users_words():
+    build, _ = _build()
+
+    result = build.apply(LLMContextUpdate(operations=[
+        ContextAdd(section_key="preferences", markdown="Claim: joined pieces.",
+                   assertion_kind=AssertionKind.USER_ASSERTED,
+                   user_quote="I prefer\n... a local-only project", evidence=[{"handle": "M1"}]),
+        ContextAdd(section_key="preferences", markdown="Claim: sentences from two messages.",
+                   assertion_kind=AssertionKind.USER_ASSERTED,
+                   user_quote="I prefer a local-only project. The document says the project is local-only.",
+                   evidence=[{"handle": "M1"}, {"handle": "M2"}]),
+        ContextAdd(section_key="preferences", markdown="Claim: one piece is not theirs.",
+                   assertion_kind=AssertionKind.USER_ASSERTED,
+                   user_quote="I prefer ... the document says so", evidence=[{"handle": "M1"}]),
+    ]))
+
+    assert _kinds(result) == [
+        ("Claim: joined pieces.", AssertionKind.USER_ASSERTED),
+        # The second sentence is the agent's (M2), so the claim is not the user's.
+        ("Claim: sentences from two messages.", AssertionKind.AGENT_DERIVED),
+        ("Claim: one piece is not theirs.", AssertionKind.AGENT_DERIVED),
+    ]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol, TypeVar
 from uuid import UUID
@@ -81,11 +82,17 @@ def _require_user_quote(operation, evidence: "_ResolvedEvidence"):
 
     if getattr(operation, "assertion_kind", None) is not AssertionKind.USER_ASSERTED:
         return operation
-    quote = _normalized((operation.user_quote or "").strip().strip("\"'“”‘’"))
-    if quote and any(
-        message.role == "user" and quote in _normalized(message.content)
-        for message in evidence.messages
-    ):
+    # Models join sentences from several messages, with or without a line
+    # break or "...", so each sentence of the quote must be the user's words.
+    pieces = [
+        _normalized(piece.strip().strip("\"'“”‘’"))
+        for piece in re.split(r"\n|\.\.\.|…|(?<=[.!?])\s+", operation.user_quote or "")
+    ]
+    pieces = [piece for piece in pieces if piece]
+    user_texts = [
+        _normalized(message.content) for message in evidence.messages if message.role == "user"
+    ]
+    if pieces and all(any(piece in text for text in user_texts) for piece in pieces):
         return operation
     logger.info("Context claim without a matching user quote kept as agent_derived")
     return operation.model_copy(update={"assertion_kind": AssertionKind.AGENT_DERIVED})

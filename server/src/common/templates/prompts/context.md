@@ -28,8 +28,9 @@ transcript.
   extraction input. Never emit `human_asserted`.
 - An assistant restatement of a user statement must cite the user message and
   remain `user_asserted`; an unsupported assistant assertion is not evidence.
-- Every `user_asserted` ADD or REPLACE sets `user_quote` to the exact words,
-  copied from a cited user message, that state the claim. A reply such as
+- Every `user_asserted` ADD or REPLACE sets `user_quote` to a short phrase
+  copied exactly from a cited user message, a few words up to one sentence,
+  that states the claim. Do not reword it or join several messages. A reply such as
   "Yes" to an assistant question may be quoted alone when the question is also
   cited. A claim whose quote is missing or not in a cited user message is kept
   as `agent_derived`.
