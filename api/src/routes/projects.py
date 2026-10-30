@@ -6,6 +6,7 @@ from starlette.routing import Route
 
 from common.conf.domain_config import DomainConfig
 from common.exceptions import WorkspaceConflictError
+from contracts.projects import workspace_views
 from core.project.project_files import workspace_name
 from project_lease import project_documents
 
@@ -133,12 +134,13 @@ async def add_workspace(request):
     if error := await _editable(request, project_id):
         return error
     try:
-        name = workspace_name(AddWorkspace.model_validate(await _json(request)).name)
+        body = AddWorkspace.model_validate(await _json(request))
+        name = workspace_name(body.name)
     except (ValidationError, ValueError):
         return _error("invalid_workspace", "Invalid workspace name", 422)
     projects = request.app.state.runtime.projects
     try:
-        workspaces = await projects.add_workspace(project_id, name)
+        workspaces = await projects.add_workspace(project_id, name, read_only=body.read_only)
     except ValueError:
         return _error(
             "workspace_unavailable",
@@ -151,7 +153,27 @@ async def add_workspace(request):
         # A file already has that name; the folder is the workspace.
         await projects.remove_workspace(project_id, name)
         return _error("invalid_workspace", "A project file already uses that name", 409)
-    return JSONResponse({"workspaces": workspaces}, status_code=201)
+    return JSONResponse({"workspaces": workspace_views(workspaces)}, status_code=201)
+
+
+async def update_workspace(request):
+    from contracts.projects import UpdateWorkspace
+
+    project_id = request.path_params["project_id"]
+    if error := await _editable(request, project_id):
+        return error
+    try:
+        changes = UpdateWorkspace.model_validate(await _json(request)).model_dump(
+            exclude_none=True
+        )
+    except ValidationError:
+        return _error("invalid_workspace", "Invalid workspace settings", 422)
+    workspaces = await request.app.state.runtime.projects.update_workspace(
+        project_id, request.path_params["name"], changes
+    )
+    if workspaces is None:
+        return _error("workspace_not_found", "Workspace not found", 404)
+    return JSONResponse({"workspaces": workspace_views(workspaces)})
 
 
 async def remove_workspace(request):
@@ -166,7 +188,7 @@ async def remove_workspace(request):
         return _error("workspace_not_empty", "Workspace still has documents", 409)
     if workspaces is None:
         return _error("workspace_not_found", "Workspace not found", 404)
-    return JSONResponse({"workspaces": workspaces})
+    return JSONResponse({"workspaces": workspace_views(workspaces)})
 
 
 routes = [
@@ -181,5 +203,9 @@ routes = [
     Route(
         "/v1/projects/{project_id}/workspaces/{name}", remove_workspace,
         methods=["DELETE"],
+    ),
+    Route(
+        "/v1/projects/{project_id}/workspaces/{name}", update_workspace,
+        methods=["PATCH"],
     ),
 ]

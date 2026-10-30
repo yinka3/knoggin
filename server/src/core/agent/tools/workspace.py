@@ -11,6 +11,7 @@ from core.project.project_files import (
     CONTEXT_FILE_PATH,
     PROJECT_FILE_PATH,
     is_controlled_context_file,
+    parse_workspaces,
 )
 
 PROJECT_FILE_TOOL_MAX_PATH_LENGTH = 512
@@ -171,6 +172,24 @@ class ProjectFileTools:
             }
         return result
 
+    async def _writable_path(self, path: str) -> str:
+        """An editable path outside every read-only workspace."""
+        normalized = _editable_path(path)
+        workspace = normalized.partition("/")[0] if "/" in normalized else None
+        postgres = getattr(self, "postgres", None)
+        if workspace is not None and postgres is not None:
+            row = await postgres.fetch_one(
+                "SELECT workspaces FROM public.projects WHERE user_name = %s AND project_id = %s",
+                (self.user_name, self.project_id),
+            )
+            settings = parse_workspaces(row["workspaces"] if row else {}).get(workspace)
+            if settings is not None and settings.read_only:
+                raise PermissionError(
+                    f"The {workspace} workspace is read-only for agents. The user can "
+                    "change that in the workspace settings."
+                )
+        return normalized
+
     def _run_read_web(self) -> bool:
         """Whether this run has read web content, which a write may quote."""
         run = getattr(self, "agent_run", None)
@@ -180,7 +199,7 @@ class ProjectFileTools:
         if self.document_service is None:
             self._files_unavailable("create_project_file")
         return await self.document_service.create_project_file(
-            _editable_path(path),
+            await self._writable_path(path),
             _validate_content(content),
             derived_from_web=self._run_read_web(),
         )
@@ -194,7 +213,7 @@ class ProjectFileTools:
         if self.document_service is None:
             self._files_unavailable("update_project_file")
         return await self.document_service.update_project_file(
-            _editable_path(path),
+            await self._writable_path(path),
             _validate_content(content),
             expected_content_hash=_validate_content_hash(expected_content_hash),
             derived_from_web=self._run_read_web(),
@@ -209,7 +228,7 @@ class ProjectFileTools:
         if self.document_service is None:
             self._files_unavailable("append_project_file")
         return await self.document_service.append_project_file(
-            _editable_path(path),
+            await self._writable_path(path),
             _validate_content(content),
             expected_content_hash=_validate_content_hash(expected_content_hash),
             derived_from_web=self._run_read_web(),
@@ -224,8 +243,8 @@ class ProjectFileTools:
         if self.document_service is None:
             self._files_unavailable("move_project_file")
         return await self.document_service.move_project_file(
-            _editable_path(source_path),
-            _editable_path(destination_path),
+            await self._writable_path(source_path),
+            await self._writable_path(destination_path),
             expected_content_hash=_validate_content_hash(expected_content_hash),
         )
 
@@ -233,14 +252,14 @@ class ProjectFileTools:
         if self.document_service is None:
             self._files_unavailable("delete_project_file")
         return await self.document_service.delete_project_file(
-            _editable_path(path),
+            await self._writable_path(path),
             expected_content_hash=_validate_content_hash(expected_content_hash),
         )
 
     async def create_project_folder(self, path: str) -> Dict:
         if self.document_service is None:
             self._files_unavailable("create_project_folder")
-        return await self.document_service.create_project_folder(_editable_path(path))
+        return await self.document_service.create_project_folder(await self._writable_path(path))
 
 
 def _validate_content(content: str) -> str:
