@@ -8,6 +8,9 @@ from pathlib import Path
 
 from starlette.applications import Starlette
 from starlette.middleware.cors import CORSMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+
+from local_access import ALLOWED_ORIGINS, SameOriginWrites
 
 from routes.docs import routes as docs_routes
 from routes.health import routes as health_routes
@@ -86,10 +89,21 @@ def create_app(
         lifespan=lifespan,
         exception_handlers={Exception: handle_error},
     )
+    app.add_middleware(SameOriginWrites)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://127.0.0.1:3000", "http://localhost:3000"],
+        allow_origins=list(ALLOWED_ORIGINS),
         allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
         allow_headers=["Content-Type"],
     )
+    # A rebound domain (attacker.com resolving to 127.0.0.1) arrives with its
+    # own name in Host; only local names are served.
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts())
     return app
+
+
+def allowed_hosts() -> list[str]:
+    configured = os.environ.get("KNOGGIN_ALLOWED_HOSTS")
+    if configured:
+        return [host.strip() for host in configured.split(",") if host.strip()]
+    return ["127.0.0.1", "localhost", "[::1]"]
