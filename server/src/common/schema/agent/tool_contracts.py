@@ -429,6 +429,32 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "grep_project_files",
+            "description": (
+                "Find lines containing some exact text in the project's files, read "
+                "straight from disk. Use for code, config and data in workspaces, which "
+                "are not in document search, or to find every use of a name. Returns "
+                "paths with line numbers; read more with read_project_file."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Exact text to find (not a regex)."},
+                    "path_prefix": {
+                        "type": "string",
+                        "description": "Optional folder to search in, such as a workspace name.",
+                    },
+                    "case_sensitive": {"type": "boolean", "default": False},
+                    "max_results": {"type": "integer", "minimum": 1, "maximum": 100, "default": 30},
+                },
+                "required": ["text"],
+            },
+            "tags": ["core"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "list_answer_sources",
             "description": (
                 "List the sources saved with an earlier answer in this chat: documents, "

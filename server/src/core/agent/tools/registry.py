@@ -264,6 +264,7 @@ TOOL_DEFINITIONS = {
         runtime_instruction=_RECENT_EPISODES_RUNTIME_INSTRUCTION,
     ),
     "list_answer_sources": _definition("list_answer_sources", default_limit=3),
+    "grep_project_files": _definition("grep_project_files", default_limit=6),
     "read_agent_brain": _definition(
         "read_agent_brain",
         default_limit=4,

@@ -244,6 +244,9 @@ class ProjectRuntimeFactory:
             max_document_upload_bytes=lambda: (
                 config_manager.config.developer_settings.documents.max_document_upload_bytes
             ),
+            max_reconciled_files=lambda: (
+                config_manager.config.developer_settings.documents.max_reconciled_files
+            ),
             filesystem_factory=filesystem_factory,
             reconciliation_interval_seconds=(
                 runtime_config.developer_settings.jobs.document_indexing.reconciliation_interval_seconds

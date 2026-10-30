@@ -40,5 +40,8 @@ class DocumentReadService:
     async def list_project_files(self, **kwargs: Any) -> List[Dict]:
         return await self._service.list_project_files(**kwargs)
 
+    async def grep_project_files(self, text: str, **kwargs: Any) -> Dict:
+        return await self._service.grep_project_files(text, **kwargs)
+
     async def read_project_file(self, path: str, **kwargs: Any) -> Dict:
         return await self._service.read_project_file(path, **kwargs)

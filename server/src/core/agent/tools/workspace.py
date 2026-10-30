@@ -127,7 +127,9 @@ class ProjectFileTools:
             )
             # A document waiting to be reindexed has no passage to cite yet,
             # and read_project_document refuses it; the file itself is current.
-            unindexed = registered and document.get("status") in {"queued", "indexing", "failed"}
+            unindexed = registered and document.get("status") in {
+                "queued", "indexing", "failed", "skipped",
+            }
             if registered and not unindexed:
                 raise ToolExecutionError(
                     "read_project_file",
@@ -166,6 +168,8 @@ class ProjectFileTools:
                 **result,
                 "indexed": False,
                 "note": (
+                    "Read from disk: code in a workspace is not indexed."
+                    if document.get("status") == "skipped" else
                     "Read from disk: this document changed and is waiting to be "
                     "reindexed, so it cannot be cited as a source yet."
                 ),
@@ -194,6 +198,20 @@ class ProjectFileTools:
         """Whether this run has read web content, which a write may quote."""
         run = getattr(self, "agent_run", None)
         return bool(run is not None and run.read_web)
+
+    async def grep_project_files(
+        self,
+        text: str,
+        path_prefix: Optional[str] = None,
+        case_sensitive: bool = False,
+        max_results: int = 30,
+    ) -> Dict:
+        if self.document_service is None:
+            self._files_unavailable("grep_project_files")
+        return await self.document_service.grep_project_files(
+            text, path_prefix=path_prefix, case_sensitive=case_sensitive,
+            max_matches=max_results,
+        )
 
     async def create_project_file(self, path: str, content: str) -> Dict:
         if self.document_service is None:

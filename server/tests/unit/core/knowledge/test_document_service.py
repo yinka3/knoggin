@@ -4604,3 +4604,25 @@ async def test_only_writes_flagged_as_web_derived_mark_their_document(document_h
         if kind == "execute" and "derived_from_web = true" in query
     ]
     assert marks == [("project-1", ["research/findings.md"])]
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_the_scan_file_limit_is_a_live_setting(tmp_path):
+    limit = {"files": 5}
+    service = DocumentService(
+        project_id="project-1",
+        postgres_client=MemoryPostgres(),
+        embedding_service=FakeEmbeddingService(),
+        blocking_runner=run_inline,
+        document_rerank_enabled=False,
+        filesystem_factory=ProjectFilesystemFactory(tmp_path / "projects"),
+        max_reconciled_files=lambda: limit["files"],
+    )
+    for index in range(8):
+        service._filesystem.write_bytes(f"notes/{index}.md", b"note")
+
+    with pytest.raises(RuntimeError, match="max_reconciled_files"):
+        await service.reconcile_project_files()
+    limit["files"] = 100
+    assert (await service.reconcile_project_files())["created"] == 8

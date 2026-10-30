@@ -84,6 +84,8 @@ class DocumentSettings(ConfigModel):
     rerank_candidates: int = Field(15, ge=1, le=50)
     max_workspaces_per_project: int = Field(3, ge=1, le=20)
     max_document_upload_bytes: int = Field(50 * 1024 * 1024, ge=1, le=512 * 1024 * 1024)
+    # Most files one project's scan will track; a scan past it fails.
+    max_reconciled_files: int = Field(10_000, ge=100, le=1_000_000)
     max_staged_folder_bytes: int = Field(2 * 1024 * 1024 * 1024, ge=1)
     max_active_folder_intakes: int = Field(2, ge=1)
     folder_intake_idle_seconds: int = Field(2 * 60 * 60, ge=1)
