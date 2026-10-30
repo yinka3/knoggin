@@ -62,10 +62,33 @@ class _MessageEvidence:
     role: str
     timestamp_ms: int | None
     exchange_outcome: str | None
+    content: str = ""
 
     @property
     def is_clarification(self) -> bool:
         return self.role == "assistant" and self.exchange_outcome == "clarification"
+
+
+def _normalized(text: str) -> str:
+    return " ".join(text.split()).casefold()
+
+
+def _require_user_quote(operation, evidence: "_ResolvedEvidence"):
+    """Keep a claim marked as the user's only when it quotes words found in a
+    cited user message. Citing a user message is not enough: an agent claim
+    could otherwise pass as the user's by citing one beside it. A claim that
+    fails is kept as agent_derived, which stays out of Knowledge extraction."""
+
+    if getattr(operation, "assertion_kind", None) is not AssertionKind.USER_ASSERTED:
+        return operation
+    quote = _normalized((operation.user_quote or "").strip().strip("\"'“”‘’"))
+    if quote and any(
+        message.role == "user" and quote in _normalized(message.content)
+        for message in evidence.messages
+    ):
+        return operation
+    logger.info("Context claim without a matching user quote kept as agent_derived")
+    return operation.model_copy(update={"assertion_kind": AssertionKind.AGENT_DERIVED})
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,6 +166,7 @@ class ContextUpdateBuild:
                         if raw.get("exchange_outcome") is None
                         else str(raw["exchange_outcome"])
                     ),
+                    content=str(raw.get("content") or ""),
                 )
             except (KeyError, TypeError, ValueError) as exc:
                 raise ValueError("Context window contains malformed message evidence") from exc
@@ -261,6 +285,7 @@ class ContextUpdateBuild:
             # the edit rules stay owned by apply_context_edits.
             try:
                 evidence = self._resolve_evidence(operation)
+                operation = _require_user_quote(operation, evidence)
                 self._reject_stale_target(operation, evidence)
                 resolved = self._with_derived_source_time(operation, evidence)
                 apply_context_edits(

@@ -378,6 +378,7 @@ class _Stage2ContextModel:
                         section_key="current_state",
                         markdown="Avery Stone owns Delta Corp.",
                         assertion_kind=AssertionKind.USER_ASSERTED,
+                        user_quote="Avery Stone owns Delta Corp.",
                         evidence=[{"handle": "M1"}],
                     )
                 ],
@@ -391,6 +392,7 @@ class _Stage2ContextModel:
                         target={"handle": "C1"},
                         markdown="Avery Stone continues to own Delta Corp.",
                         assertion_kind=AssertionKind.USER_ASSERTED,
+                        user_quote="Avery Stone continues to own Delta Corp.",
                         evidence=[{"handle": "M1"}],
                     )
                 ],
@@ -557,6 +559,7 @@ class _CorrectionContextModel:
                         section_key="current_state",
                         markdown="Sarah owns Delta.",
                         assertion_kind=AssertionKind.USER_ASSERTED,
+                        user_quote="Sarah owns Delta.",
                         evidence=[{"handle": "M1"}],
                     )
                 ],
@@ -570,6 +573,7 @@ class _CorrectionContextModel:
                         target={"handle": "C1"},
                         markdown="John owns Delta.",
                         assertion_kind=AssertionKind.USER_ASSERTED,
+                        user_quote="John owns Delta.",
                         evidence=[{"handle": "M1"}],
                     )
                 ],

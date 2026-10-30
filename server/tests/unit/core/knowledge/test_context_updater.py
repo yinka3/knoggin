@@ -117,6 +117,7 @@ def test_context_updater_derives_user_block_time_and_persists_only_user_support(
                     section_key="preferences",
                     markdown="Keep the project local-only.",
                     assertion_kind=AssertionKind.USER_ASSERTED,
+                    user_quote="I prefer a local-only project",
                     evidence=[{"handle": "M1"}],
                 )
             ],
@@ -131,6 +132,7 @@ def test_context_updater_derives_user_block_time_and_persists_only_user_support(
         if block.section_key == "preferences"
     )
     assert added.source_time_ms == 100
+    assert added.assertion_kind is AssertionKind.USER_ASSERTED
     assert [(support.message_id, support.support_kind.value) for support in result.materialization.supports] == [
         (11, "user_message")
     ]
@@ -419,6 +421,7 @@ def test_one_invalid_operation_does_not_discard_valid_operations():
                     section_key="current_state",
                     markdown="The user prefers a local-only project.",
                     assertion_kind=AssertionKind.USER_ASSERTED,
+                    user_quote="I prefer a local-only project.",
                     evidence=[{"handle": "M1"}],
                 ),
             ]
@@ -452,3 +455,39 @@ def test_brief_names_the_section_keys_the_model_must_return():
 
     for section in _domain().context_sections:
         assert f"- {section.key}: {section.title}" in brief
+
+
+
+def _kinds(result):
+    return [
+        (block.markdown, block.assertion_kind) for block in result.materialization.blocks
+        if block.markdown.startswith("Claim:")
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_a_user_claim_needs_the_users_own_words():
+    build, _ = _build()
+
+    result = build.apply(LLMContextUpdate(operations=[
+        # The user's words, quoted with different spacing and case.
+        ContextAdd(section_key="preferences", markdown="Claim: local only.",
+                   assertion_kind=AssertionKind.USER_ASSERTED,
+                   user_quote="i prefer a  LOCAL-ONLY project", evidence=[{"handle": "M1"}]),
+        # The agent's words, cited beside the user's message.
+        ContextAdd(section_key="preferences", markdown="Claim: the document agrees.",
+                   assertion_kind=AssertionKind.USER_ASSERTED,
+                   user_quote="The document says the project is local-only",
+                   evidence=[{"handle": "M1"}, {"handle": "M2"}]),
+        # No quote at all.
+        ContextAdd(section_key="preferences", markdown="Claim: unquoted.",
+                   assertion_kind=AssertionKind.USER_ASSERTED, evidence=[{"handle": "M1"}]),
+    ]))
+
+    assert _kinds(result) == [
+        ("Claim: local only.", AssertionKind.USER_ASSERTED),
+        ("Claim: the document agrees.", AssertionKind.AGENT_DERIVED),
+        ("Claim: unquoted.", AssertionKind.AGENT_DERIVED),
+    ]
+    assert result.rejected_operations == ()

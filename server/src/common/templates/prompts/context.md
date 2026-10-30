@@ -28,6 +28,11 @@ transcript.
   extraction input. Never emit `human_asserted`.
 - An assistant restatement of a user statement must cite the user message and
   remain `user_asserted`; an unsupported assistant assertion is not evidence.
+- Every `user_asserted` ADD or REPLACE sets `user_quote` to the exact words,
+  copied from a cited user message, that state the claim. A reply such as
+  "Yes" to an assistant question may be quoted alone when the question is also
+  cited. A claim whose quote is missing or not in a cited user message is kept
+  as `agent_derived`.
 - A message marked `kind=clarification_question` is an unanswered assistant
   question. Do not use it alone for a Context change or infer that its premise
   is true. A source handle remains usable only for what its excerpt establishes.
@@ -40,7 +45,7 @@ transcript.
 <output_contract>
 Return exactly the structured response requested by the schema. Each operation
 must include one or more `evidence` handles. ADD and REPLACE provide bounded
-natural Markdown, an assertion kind, a configured section key, and any needed
-dependencies. REPLACE and DELETE target one current `C` handle. Do not provide
+natural Markdown, an assertion kind, a configured section key, any needed
+dependencies, and `user_quote` when the kind is `user_asserted`. REPLACE and DELETE target one current `C` handle. Do not provide
 durable IDs, source timestamps, or any prose outside the structured response.
 </output_contract>

@@ -205,6 +205,8 @@ class ContextAdd(ContextEditBase):
     operation: Literal[ContextEditOperationKind.ADD] = ContextEditOperationKind.ADD
     markdown: str = Field(min_length=1, max_length=50_000)
     assertion_kind: AssertionKind = AssertionKind.AGENT_DERIVED
+    # Exact words from a cited user message; required for user_asserted.
+    user_quote: str | None = Field(default=None, max_length=1_000)
     source_time_ms: int | None = Field(default=None, ge=0)
 
 
@@ -215,6 +217,7 @@ class ContextReplace(ContextEditBase):
     target: LocalContextBlockReference
     markdown: str = Field(min_length=1, max_length=50_000)
     assertion_kind: AssertionKind = AssertionKind.AGENT_DERIVED
+    user_quote: str | None = Field(default=None, max_length=1_000)
     source_time_ms: int | None = Field(default=None, ge=0)
 
 
