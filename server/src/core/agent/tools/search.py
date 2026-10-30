@@ -37,6 +37,34 @@ except ImportError:
 _URL_IN_TEXT = re.compile(r"https?://[^\s<>\"'`]+")
 
 
+# Credential shapes a search query must never carry to a provider.
+_SECRET_LIKE = re.compile(
+    r"-----BEGIN [A-Z ]*(?:PRIVATE )?KEY-----"
+    r"|\b(?:sk|pk|rk)[-_](?:live_|test_|proj-)?[A-Za-z0-9_-]{16,}"
+    r"|\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}|\bgithub_pat_[A-Za-z0-9_]{20,}"
+    r"|\bxox[abprs]-[A-Za-z0-9-]{10,}|\bAKIA[0-9A-Z]{16}\b|\bAIza[0-9A-Za-z_-]{30,}"
+    r"|\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}"
+)
+# Dashes and slashes split words and URL paths; keys with them match above.
+_LONG_TOKEN = re.compile(r"[A-Za-z0-9_+=]{32,}")
+
+
+def _refuse_secret_like_query(tool: str, query: str) -> None:
+    """A search query goes to the provider as written, so one that looks
+    like it holds a key or token is not sent."""
+
+    text = query if isinstance(query, str) else ""
+    if _SECRET_LIKE.search(text) or any(
+        re.search(r"[A-Za-z]", token) and re.search(r"\d", token)
+        for token in _LONG_TOKEN.findall(text)
+    ):
+        raise ToolExecutionError(
+            tool,
+            "This query looks like it contains a key or token, so it was not sent. "
+            "Search without it.",
+        )
+
+
 def _comparable_url(url: str) -> str:
     """One form per page: no fragment, no trailing slash or punctuation."""
     try:
@@ -1005,6 +1033,7 @@ class WebTools:
         Search the web using the best available provider.
         Tier: configured provider > Brave > Tavily > DuckDuckGo (free default).
         """
+        _refuse_secret_like_query("search_web", query)
         provider = self.search_cfg.get("provider", "auto")
         brave_key = brave_api_key()
         tavily_key = tavily_api_key()
@@ -1040,6 +1069,7 @@ class WebTools:
         """
         Search for news articles. Requires Brave Search API key.
         """
+        _refuse_secret_like_query("search_news", query)
         brave_key = brave_api_key()
         if not brave_key:
             return [

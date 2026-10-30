@@ -5,7 +5,8 @@ from __future__ import annotations
 from typing import Dict, List, Optional
 
 from common.exceptions import ToolExecutionError
-from core.knowledge.documents.scanning import normalize_relative_path
+from core.knowledge.documents.constants import SENSITIVE_FILE_PATTERNS
+from core.knowledge.documents.scanning import matches_pattern, normalize_relative_path
 from core.project.project_files import (
     CONTEXT_FILE_PATH,
     PROJECT_FILE_PATH,
@@ -25,7 +26,15 @@ def _normalize_tool_path(path: str) -> str:
             "path must be a string no longer than "
             f"{PROJECT_FILE_TOOL_MAX_PATH_LENGTH} characters"
         )
-    return normalize_relative_path(path, path)
+    normalized = normalize_relative_path(path, path)
+    if matches_pattern(normalized.lower(), SENSITIVE_FILE_PATTERNS):
+        # Keys and credentials stay out of the index for the same reason: once
+        # read, an injected instruction could carry them out in a search query.
+        raise PermissionError(
+            "This file may hold keys or credentials, so agents cannot open it. "
+            "The user can open it themselves."
+        )
+    return normalized
 
 
 def _editable_path(path: str) -> str:

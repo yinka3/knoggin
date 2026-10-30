@@ -260,3 +260,13 @@ async def test_files_written_after_a_web_read_are_marked():
     tools.agent_run = SimpleNamespace(read_web=True)
     await tools.create_project_file("research/findings.md", "quoted from a page")
     assert service.derived_from_web is True
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize("path", [".env", "api/.env.local", "certs/server.pem", "id_rsa"])
+async def test_agents_cannot_open_files_that_may_hold_credentials(path):
+    tools = ProjectFileHarness(FakeDocumentService())
+    with pytest.raises(PermissionError, match="keys or credentials"):
+        await tools.read_project_file(path)
+    with pytest.raises(PermissionError, match="keys or credentials"):
+        await tools.create_project_file(path, "SECRET=1")
