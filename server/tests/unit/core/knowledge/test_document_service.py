@@ -4561,3 +4561,29 @@ async def test_oversized_project_brief_tells_the_agent_it_was_truncated(document
     assert brief.startswith("x" * 1_000)
     assert "PROJECT.md was truncated" in brief
     assert len(brief) < 21_000
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_a_package_install_does_not_push_reconciliation_past_its_file_limit(
+    document_harness,
+):
+    service, postgres = document_harness
+    filesystem = service._filesystem
+    assert filesystem is not None
+    # A document uploaded into a normally excluded folder must stay visible.
+    kept = await service.add_document(
+        content=b"release notes", original_name="notes.md", relative_path="build/notes.md"
+    )
+    filesystem.write_bytes("app/main.md", b"the app")
+    packages = filesystem._root / "app" / "node_modules" / "pkg"
+    packages.mkdir(parents=True)
+    for index in range(10_001):
+        (packages / f"f{index}.js").write_text("x")
+
+    result = await service.reconcile_project_files()
+
+    assert result["created"] == 1  # app/main.md; node_modules was never walked
+    live = {row["relative_path"]: row for row in postgres.rows if row["status"] != "deleted"}
+    assert "build/notes.md" in live and live["build/notes.md"]["document_id"] == kept["document_id"]
+    assert not any("node_modules" in path for path in live)

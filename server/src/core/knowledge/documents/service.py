@@ -54,6 +54,7 @@ from infrastructure.postgres_client import PostgresClient
 
 from .constants import (
     ACCEPTED_EXTENSIONS,
+    DEFAULT_IGNORED_DIRECTORIES,
     DOCUMENT_RERANK_DEFAULT_CANDIDATES,
     EXPECTED_EMBEDDING_DIMENSION,
     HYBRID_SEARCH_CANDIDATE_MULTIPLIER,
@@ -78,6 +79,31 @@ from .scanning import FolderScanPathEntry, build_folder_preview, normalize_relat
 BlockingRunner = Callable[..., Awaitable[Any]]
 _RECONCILIATION_MAX_FILES = 10_000
 _RECONCILIATION_FULL_HASH_INTERVAL = 10
+
+
+def _excluded_directory_check(settings, documents) -> Callable[[str], bool]:
+    """Keep the walk out of folders whose files the scan would exclude by
+    name anyway (``node_modules``, ``.venv``, hidden folders), so an install
+    cannot push a project past the file limit. A folder holding a registered
+    document is still walked, or that document would look deleted."""
+
+    occupied = {
+        PurePosixPath(*PurePosixPath(path).parts[:index]).as_posix()
+        for path in documents
+        for index in range(1, len(PurePosixPath(path).parts))
+    }
+
+    def skip(directory: str) -> bool:
+        if directory in occupied:
+            return False
+        name = PurePosixPath(directory).name.lower()
+        return (
+            name in DEFAULT_IGNORED_DIRECTORIES
+            or name in settings.blocked_directory_names
+            or (not settings.include_hidden and name.startswith("."))
+        )
+
+    return skip
 
 
 class _UnsetSavedWebLinkField:
@@ -255,16 +281,6 @@ class DocumentService:
             filesystem.get_mutation_generation, _lease=lease
         )
 
-        paths = await self._run_blocking(
-            lambda: list(filesystem.iter_paths(limit=_RECONCILIATION_MAX_FILES + 1))
-        )
-        if len(paths) > _RECONCILIATION_MAX_FILES:
-            raise RuntimeError(
-                "project filesystem reconciliation exceeds the "
-                f"{_RECONCILIATION_MAX_FILES}-file safety limit"
-            )
-        reserved_paths = [path for path in paths if is_controlled_context_file(path.relative_path)]
-        paths = [path for path in paths if not is_controlled_context_file(path.relative_path)]
         settings = await self.get_scan_settings()
         if settings != self._reconciliation_settings:
             self._reconciliation_fingerprints.clear()
@@ -277,6 +293,19 @@ class DocumentService:
                 "document catalog reconciliation exceeds the "
                 f"{_RECONCILIATION_MAX_FILES}-file safety limit"
             )
+        skip_directory = _excluded_directory_check(settings, current)
+        paths = await self._run_blocking(
+            lambda: list(filesystem.iter_paths(
+                limit=_RECONCILIATION_MAX_FILES + 1, skip_directory=skip_directory,
+            ))
+        )
+        if len(paths) > _RECONCILIATION_MAX_FILES:
+            raise RuntimeError(
+                "project filesystem reconciliation exceeds the "
+                f"{_RECONCILIATION_MAX_FILES}-file safety limit"
+            )
+        reserved_paths = [path for path in paths if is_controlled_context_file(path.relative_path)]
+        paths = [path for path in paths if not is_controlled_context_file(path.relative_path)]
 
         self._reconciliation_run_count += 1
         full_hash_sweep = (
@@ -2007,6 +2036,13 @@ class DocumentService:
     def _public_saved_web_link(row: Dict) -> Dict:
         """Normalize one database bookmark into the public service shape."""
         return SavedWebLink.model_validate(row).model_dump(mode="json")
+
+    async def list_documents_awaiting_index(
+        self, *, path_prefix: Optional[str] = None, limit: int = 5
+    ) -> List[str]:
+        return await self._reader.list_documents_awaiting_index(
+            path_prefix=path_prefix, limit=limit
+        )
 
     async def list_documents(
         self,

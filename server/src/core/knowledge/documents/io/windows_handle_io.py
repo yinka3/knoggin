@@ -14,7 +14,7 @@ import stat
 import time
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
-from typing import Iterator
+from typing import Callable, Iterator
 
 from common.document_limits import MAX_DOCUMENT_SIZE
 
@@ -635,7 +635,9 @@ def delete_pending_markers_for_project(library_root: Path, prefix: str) -> None:
         return
 
 
-def iter_project_paths(root: Path) -> Iterator[tuple[str, int, int]]:
+def iter_project_paths(
+    root: Path, skip_directory: Callable[[str], bool] | None = None
+) -> Iterator[tuple[str, int, int]]:
     """List regular files by opened directory identity, skipping links."""
 
     def walk(directory: int, prefix: str) -> Iterator[tuple[str, int, int]]:
@@ -663,6 +665,8 @@ def iter_project_paths(root: Path) -> Iterator[tuple[str, int, int]]:
                     continue
                 relative_path = f"{prefix}{name}"
                 if attributes[0] & _DIRECTORY_ATTRIBUTE:
+                    if skip_directory is not None and skip_directory(relative_path):
+                        continue
                     yield from walk(child, relative_path + "/")
                 else:
                     size, mtime_ns = _handle_size_and_mtime_ns(child)

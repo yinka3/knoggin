@@ -9,7 +9,7 @@ import secrets
 import stat
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
-from typing import Iterator
+from typing import Callable, Iterator
 
 from common.document_limits import MAX_DOCUMENT_SIZE
 
@@ -283,7 +283,9 @@ def remove_project_tree(
         return True
 
 
-def iter_project_paths(root: Path) -> Iterator[tuple[str, int, int]]:
+def iter_project_paths(
+    root: Path, skip_directory: Callable[[str], bool] | None = None
+) -> Iterator[tuple[str, int, int]]:
     def walk(directory: int, prefix: str) -> Iterator[tuple[str, int, int]]:
         entries = []
         for name in os.listdir(directory):
@@ -303,6 +305,8 @@ def iter_project_paths(root: Path) -> Iterator[tuple[str, int, int]]:
                 if (metadata.st_dev, metadata.st_ino) != (current.st_dev, current.st_ino):
                     raise RuntimeError("project directory changed during file scan")
                 if stat.S_ISDIR(current.st_mode):
+                    if skip_directory is not None and skip_directory(prefix + name):
+                        continue
                     yield from walk(child, prefix + name + "/")
                 elif stat.S_ISREG(current.st_mode):
                     yield prefix + name, current.st_size, current.st_mtime_ns
