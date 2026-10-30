@@ -1865,7 +1865,9 @@ async def test_semantic_timeout_retry_survives_processor_restart(
     now = [1_000]
     blocking = _BlockingEpisodeGenerator()
     scheduler = Scheduler(user_name, project_id)
-    scheduler.JOB_EXECUTION_TIMEOUT = 0.01
+    # Window claim and CONTEXT.md sync take ~10 ms before the episode stage;
+    # the blocking generator never returns, so the timeout still always fires.
+    scheduler.JOB_EXECUTION_TIMEOUT = 0.5
     context = JobContext(user_name=user_name, project_id=project_id)
 
     await scheduler._execute_job(new_job(blocking, lambda: now[0]), context)
