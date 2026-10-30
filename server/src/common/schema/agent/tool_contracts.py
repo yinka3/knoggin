@@ -429,6 +429,30 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "list_answer_sources",
+            "description": (
+                "List the sources saved with an earlier answer in this chat: documents, "
+                "web pages, and search results it cited, with short excerpts. Use when the "
+                "user asks where an answer came from or what it was based on."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "answers_back": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "default": 1,
+                        "description": "1 for the latest answer, 2 for the one before it, and so on.",
+                    }
+                },
+                "required": [],
+            },
+            "tags": ["core"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "read_recent_episodes",
             "description": (
                 "Return the most recent episode summaries by source chronology from "

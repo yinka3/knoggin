@@ -15,6 +15,7 @@ from core.agent.tools.jobs import ResearchJobTools
 from core.agent.tools.maintenance import MaintenanceTools
 from core.agent.tools.memory import MemoryTools
 from core.agent.tools.search import SearchTools
+from core.agent.tools.sources import AnswerSourceTools
 from core.agent.tools.workspace import ProjectFileTools
 from core.knowledge.documents import DocumentService
 from core.knowledge.entity.maintenance_service import EntityMaintenanceService
@@ -262,6 +263,7 @@ TOOL_DEFINITIONS = {
         default_limit=4,
         runtime_instruction=_RECENT_EPISODES_RUNTIME_INSTRUCTION,
     ),
+    "list_answer_sources": _definition("list_answer_sources", default_limit=3),
     "read_agent_brain": _definition(
         "read_agent_brain",
         default_limit=4,
@@ -651,6 +653,7 @@ class Tools(
     ProjectFileTools,
     ResearchJobTools,
     ResearchFindingTools,
+    AnswerSourceTools,
 ):
     def __init__(
         self,
