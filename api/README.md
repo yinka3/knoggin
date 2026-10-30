@@ -84,7 +84,8 @@ asked for it (shown in `/follow-ups`):
 
 - **Large folder upload:** `POST .../folders/intakes` with each file's path and
   size, `PUT` each file's bytes, `POST .../preview`, then `POST .../commit`
-  until `complete`. Staging lives in the API process only.
+  until `complete`. Staging lives in the API process only. Pass `workspace`
+  on either import route to place the files under that workspace.
 - **Duplicate pairs that need a choice:** `GET /v1/maintenance/duplicates`, then
   `/v1/maintenance/merges/preview` with `context_choices`, then
   `POST /v1/maintenance/merges`. Or dismiss the pair for good.

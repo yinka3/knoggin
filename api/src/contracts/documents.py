@@ -87,6 +87,8 @@ class FolderIntake(BaseModel):
     force_include_paths: list[str] = Field(default_factory=list, max_length=1000)
     # A chat in this project to tell when the imported files finish indexing.
     session_id: str | None = Field(None, min_length=1, max_length=200)
+    # A workspace of the project to import into; paths are placed under it.
+    workspace: str | None = Field(None, min_length=1, max_length=100)
 
 
 class StagedFolderFile(BaseModel):
@@ -104,3 +106,5 @@ class StagedFolderCreate(BaseModel):
     force_include_paths: list[str] = Field(default_factory=list, max_length=1000)
     # A chat in this project to tell when the imported files finish indexing.
     session_id: str | None = Field(None, min_length=1, max_length=200)
+    # A workspace of the project to import into; paths are placed under it.
+    workspace: str | None = Field(None, min_length=1, max_length=100)

@@ -255,6 +255,20 @@ async def upload_document(request):
     return JSONResponse(_public(row, DOCUMENT_FIELDS), status_code=201)
 
 
+async def _into_workspace(request, payload):
+    """Place an import's paths under its chosen workspace, or explain why not."""
+    if payload.workspace is None:
+        return payload
+    if payload.workspace not in await _workspaces(request):
+        return _error("workspace_not_found", "Workspace not found", 404)
+    prefix = payload.workspace + "/"
+    return payload.model_copy(update={
+        "files": [item.model_copy(update={"relative_path": prefix + item.relative_path})
+                  for item in payload.files],
+        "force_include_paths": [prefix + path for path in payload.force_include_paths],
+    })
+
+
 async def _folder_manifest(request):
     # A bounded JSON upload keeps folder intake comparable to existing document uploads.
     ceiling = min(_base64_limit(_document_limit(request)) + 64 * 1024,
@@ -266,6 +280,12 @@ async def _folder_manifest(request):
             return _error("payload_too_large", "Folder upload is too large", 413)
     try:
         payload = FolderIntake.model_validate(json.loads(body))
+    except (ValidationError, ValueError, TypeError):
+        return _error("invalid_folder", "Invalid folder manifest", 422)
+    payload = await _into_workspace(request, payload)
+    if isinstance(payload, JSONResponse):
+        return payload
+    try:
         files = []
         total_bytes = 0
         for item in payload.files:
@@ -399,6 +419,9 @@ async def create_staged_folder(request):
         payload = StagedFolderCreate.model_validate(json.loads(body))
     except (ValidationError, ValueError, TypeError):
         return _error("invalid_folder", "Invalid folder manifest", 422)
+    payload = await _into_workspace(request, payload)
+    if isinstance(payload, JSONResponse):
+        return payload
     if error := await _check_notice_chat(request, payload.session_id):
         return error
     result = await _staged_error(
