@@ -161,7 +161,8 @@ class EntityResolutionSettings(ConfigModel):
 
 
 class LLMModelPricing(ConfigModel):
-    """User-supplied provider pricing for one model, in USD per million tokens."""
+    """Provider pricing for one model, in USD per million tokens. Overrides
+    the price OpenRouter lists for the model."""
 
     input_usd_per_million_tokens: float = Field(ge=0.0, allow_inf_nan=False)
     output_usd_per_million_tokens: float = Field(ge=0.0, allow_inf_nan=False)
@@ -175,20 +176,6 @@ class LLMSpendingBudgetSettings(ConfigModel):
     fallback_pricing: Optional[LLMModelPricing] = None
     reservation_output_tokens: int = Field(1_024, ge=0, le=32_768)
     reset_key: str = Field("")
-
-    @model_validator(mode="after")
-    def require_pricing_for_a_positive_limit(self):
-        if (
-            self.limit_usd is not None
-            and self.limit_usd > 0
-            and not self.model_pricing
-            and self.fallback_pricing is None
-        ):
-            raise ValueError(
-                "llm.spending_budget requires model_pricing or fallback_pricing "
-                "when limit_usd is positive"
-            )
-        return self
 
 
 class LLMSettings(ConfigModel):

@@ -39,7 +39,11 @@ from common.schema.agent.stream import (
     StreamToolCall,
     StreamUsage,
 )
-from common.schema.settings import LLMSettings, LLMSpendingBudgetSettings
+from common.schema.settings import (
+    LLMModelPricing,
+    LLMSettings,
+    LLMSpendingBudgetSettings,
+)
 from infrastructure.external_model_budget import (
     ExternalModelSpendingLedger,
     _BudgetReservation,
@@ -74,6 +78,24 @@ def _reported_window(row: Any) -> int | None:
         if isinstance(value, int) and value > 0:
             return value
     return None
+
+
+def _listed_price(row: Any) -> LLMModelPricing | None:
+    # OpenRouter lists USD per token as strings; -1 means priced per request.
+    pricing = getattr(row, "pricing", None)
+    if not isinstance(pricing, dict):
+        return None
+    try:
+        prompt = float(pricing["prompt"])
+        completion = float(pricing["completion"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not (math.isfinite(prompt) and math.isfinite(completion)) or prompt < 0 or completion < 0:
+        return None
+    return LLMModelPricing(
+        input_usd_per_million_tokens=prompt * 1_000_000,
+        output_usd_per_million_tokens=completion * 1_000_000,
+    )
 
 
 def system_text(system: SystemPrompt) -> str:
@@ -346,6 +368,7 @@ class LLMService:
             self._raw_client = replacement_raw
             self._client = replacement_instructor
             self._listed_windows = None
+            self._spending_ledger.set_listed_prices({})
             self._serves_ollama_ps = None
             self._retire_client(previous_raw)
             logger.info(f"LLMService: API configuration updated ({self._base_url})")
@@ -454,16 +477,25 @@ class LLMService:
             loaded = await self._ollama_loaded_window(model)
             if loaded is not None:
                 return loaded
-        if self._listed_windows is None:
-            try:
-                page = await client.models.list()
-            except Exception as exc:
-                logger.debug("LLMService: model list unavailable ({})", exc)
-                return None
-            self._listed_windows = {
-                str(row.id): _reported_window(row) for row in page.data
-            }
-        return self._listed_windows.get(model)
+        await self._load_model_list()
+        return (self._listed_windows or {}).get(model)
+
+    async def _load_model_list(self) -> None:
+        """Fetch the provider's model list once: context sizes and prices."""
+
+        client = self._raw_client
+        if client is None or self._listed_windows is not None:
+            return
+        try:
+            page = await client.models.list()
+        except Exception as exc:
+            logger.debug("LLMService: model list unavailable ({})", exc)
+            return
+        self._listed_windows = {
+            str(row.id): _reported_window(row) for row in page.data
+        }
+        prices = {str(row.id): price for row in page.data if (price := _listed_price(row))}
+        self._spending_ledger.set_listed_prices(prices)
 
     async def _ollama_loaded_window(self, model: str) -> int | None:
         root = self._base_url.rstrip("/").removesuffix("/v1")
@@ -510,6 +542,8 @@ class LLMService:
         user: str,
         additional_prompt_tokens: int = 0,
     ) -> _BudgetReservation:
+        if self._is_openrouter:
+            await self._load_model_list()
         return await self._spending_ledger.reserve(
             model=model,
             estimated_prompt_tokens=(

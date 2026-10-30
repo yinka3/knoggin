@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any
 
 from common.exceptions import ConfigurationError, LLMBudgetExceededError
-from common.schema.settings import LLMSpendingBudgetSettings
+from common.schema.settings import LLMModelPricing, LLMSpendingBudgetSettings
 from common.utils.time_utils import get_now
 
 
@@ -55,6 +55,12 @@ class ExternalModelSpendingLedger:
         # Keep uncapped calls durable too so later caps see the same balance.
         self._storage = "postgres" if postgres_client is not None else "memory"
         self._pending_reservations: dict[Any, _BudgetReservation] = {}
+        self._listed_prices: dict[str, LLMModelPricing] = {}
+
+    def set_listed_prices(self, prices: dict[str, LLMModelPricing]) -> None:
+        """Prices the provider lists. Prices in settings still win."""
+
+        self._listed_prices = prices
 
     async def update_settings(self, settings: LLMSpendingBudgetSettings) -> None:
         async with self._lock:
@@ -335,9 +341,10 @@ class ExternalModelSpendingLedger:
         }
 
     def _price_for(self, model: str):
-        return self._settings.model_pricing.get(
-            model,
-            self._settings.fallback_pricing,
+        return (
+            self._settings.model_pricing.get(model)
+            or self._listed_prices.get(model)
+            or self._settings.fallback_pricing
         )
 
     @staticmethod

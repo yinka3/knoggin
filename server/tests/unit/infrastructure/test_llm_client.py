@@ -283,13 +283,6 @@ async def test_budgeted_call_rejects_an_unpriced_model_before_provider_request(
 
 @pytest.mark.unit
 @pytest.mark.no_network
-def test_positive_spending_limit_requires_user_supplied_pricing():
-    with pytest.raises(ValueError, match="requires model_pricing"):
-        LLMSpendingBudgetSettings(limit_usd=10.0)
-
-
-@pytest.mark.unit
-@pytest.mark.no_network
 async def test_generate_text_retries_transport_failures_once_per_service_policy(
     llm_service,
     monkeypatch,
@@ -876,4 +869,43 @@ async def test_listed_context_window_is_fetched_once_and_ollama_probe_stops(monk
     assert await service.context_window("big") == 262_144
     assert await service.context_window("unknown") is None
     assert paths == ["/api/ps", "/v1/models"]
+    await service.close()
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_openrouter_listed_prices_price_calls_without_user_pricing(monkeypatch):
+    paths = []
+
+    def respond(request):
+        paths.append(request.url.path)
+        if request.url.path == "/api/v1/models":
+            return httpx.Response(200, json={"object": "list", "data": [
+                {"id": "google/gemini-2.5-flash", "object": "model", "created": 0,
+                 "owned_by": "google", "context_length": 1_048_576,
+                 "pricing": {"prompt": "0.000002", "completion": "0.00001"}},
+                {"id": "openrouter/auto", "object": "model", "created": 0,
+                 "owned_by": "openrouter", "pricing": {"prompt": "-1", "completion": "-1"}},
+            ]})
+        return httpx.Response(200, json={
+            "id": "c", "object": "chat.completion", "created": 0, "model": "m",
+            "choices": [{"index": 0, "finish_reason": "stop",
+                         "message": {"role": "assistant", "content": "ok"}}],
+            "usage": {"prompt_tokens": 1_000, "completion_tokens": 100, "total_tokens": 1_100},
+        })
+
+    service = _service_over(monkeypatch, "https://openrouter.ai/api/v1", respond)
+    await service.spending_ledger.update_settings(LLMSpendingBudgetSettings(limit_usd=1.0))
+
+    assert await service.generate_text(system="s", user="u", model="google/gemini-2.5-flash") == "ok"
+    assert await service.generate_text(system="s", user="u", model="google/gemini-2.5-flash") == "ok"
+    snapshot = await service.spending_snapshot()
+    # 1,000 prompt tokens at $2/M plus 100 completion tokens at $10/M, twice.
+    assert snapshot["spent_usd"] == pytest.approx(2 * 0.003)
+    assert paths.count("/api/v1/models") == 1
+    assert await service.context_window("google/gemini-2.5-flash") == 1_048_576
+
+    # A model OpenRouter prices per request (-1) is not given a made-up price.
+    with pytest.raises(ConfigurationError, match="no price for model 'openrouter/auto'"):
+        await service.generate_text(system="s", user="u", model="openrouter/auto")
     await service.close()
