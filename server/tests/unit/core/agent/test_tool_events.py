@@ -58,3 +58,50 @@ async def test_closing_the_stream_cancels_running_calls():
 @pytest.mark.no_network
 def test_emitting_outside_a_run_does_nothing():
     emit_tool_event("command_output", {"text": "ignored"})
+
+
+@pytest.mark.no_network
+async def test_a_tool_can_ask_the_user_and_wait_for_the_answer():
+    from core.agent.tool_events import DecisionBroker, ask_user, bind_decision_broker
+
+    broker = DecisionBroker()
+    bind_decision_broker(broker)
+
+    async def tool():
+        return await ask_user("Run with network?", ("approve", "deny"),
+                              timeout_seconds=5, default="deny")
+
+    stream = stream_tool_calls([("c1", "run_command", tool)])
+    asked = await anext(stream)
+    assert asked["event"] == "decision_required"
+    assert asked["data"]["options"] == ["approve", "deny"] and asked["data"]["default"] == "deny"
+    decision_id = asked["data"]["decision_id"]
+
+    with pytest.raises(ValueError):
+        broker.answer(decision_id, "maybe")  # not an offered choice
+    assert broker.answer("unknown", "approve") is False
+    assert broker.answer(decision_id, "approve") is True
+
+    rest = [item async for item in stream]
+    assert rest[0] == {"event": "decision_resolved", "data": {
+        "decision_id": decision_id, "choice": "approve", "call_id": "c1", "tool": "run_command",
+    }}
+    assert rest[-1]["data"] == ["approve"]
+    assert broker.answer(decision_id, "deny") is False  # already answered
+
+
+@pytest.mark.no_network
+async def test_an_unanswered_or_abandoned_question_gets_the_default():
+    from core.agent.tool_events import DecisionBroker, ask_user, bind_decision_broker
+
+    assert await ask_user("No run here", ("a", "b"), timeout_seconds=1, default="b") == "b"
+
+    bind_decision_broker(DecisionBroker())
+    assert await ask_user("Too slow", ("a", "b"), timeout_seconds=0.01, default="a") == "a"
+
+    broker = DecisionBroker()
+    bind_decision_broker(broker)
+    waiting = asyncio.create_task(ask_user("Run ends", ("a", "b"), timeout_seconds=5, default="b"))
+    await asyncio.sleep(0)
+    broker.close()  # the run finished first
+    assert await waiting == "b"

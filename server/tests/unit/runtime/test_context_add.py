@@ -1894,3 +1894,35 @@ async def test_research_report_runs_on_an_idle_chat_and_is_marked(context):
         for row in batch if row.get("role") == "user"
     ]
     assert user_rows[-1]["metadata"] == {"origin": "research_job_report", "job_id": "job-1"}
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_a_tool_in_a_live_run_waits_for_the_users_answer(context):
+    from core.agent.tool_events import RESULTS, ask_user, stream_tool_calls
+
+    ctx, _ = context
+    answers = []
+
+    async def tool():
+        return await ask_user("Allow network?", ("approve", "deny"), timeout_seconds=5, default="deny")
+
+    async def handler(_kwargs):
+        async for item in stream_tool_calls([("c1", "run_command", tool)]):
+            if item["event"] == RESULTS:
+                answers.append(item["data"][0])
+            else:
+                yield item
+        yield _response_event("Done")
+
+    stream = await ctx.open_agent_run_stream(
+        Message(content="Install it"), orchestrator=_FakeTurnOrchestrator(handler), run_id="run-1"
+    )
+    async for event in stream:
+        if event["event"] == "decision_required":
+            decision_id = event["data"]["decision_id"]
+            assert ctx.answer_decision("other-run", decision_id, "approve") is False
+            assert ctx.answer_decision("run-1", decision_id, "approve") is True
+    assert answers == ["approve"]
+    # Once the run is over nothing is waiting.
+    assert ctx.answer_decision("run-1", decision_id, "approve") is False
