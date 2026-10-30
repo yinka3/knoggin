@@ -66,13 +66,40 @@ def _pg_environment(database_url: str) -> dict[str, str]:
     return environment
 
 
-def _run_postgres(command: list[str], database_url: str) -> None:
-    result = subprocess.run(
-        command, env=_pg_environment(database_url), capture_output=True, text=True,
-        check=False,
-    )
+def _run_postgres(
+    command: list[str], database_url: str, *,
+    stdin_path: Path | None = None, stdout_path: Path | None = None,
+) -> None:
+    """Run a Postgres client program, streaming the dump through stdin or
+    stdout. With KNOGGIN_PG_CONTAINER set it runs inside that container, so
+    its version always matches the server's."""
+    environment = _pg_environment(database_url)
+    container = os.environ.get("KNOGGIN_PG_CONTAINER")
+    if container:
+        pg_keys = sorted(key for key in environment if key.startswith("PG"))
+        inner = {key: environment[key] for key in pg_keys}
+        # Inside the database container the server is local.
+        inner.update({"PGHOST": "127.0.0.1", "PGPORT": "5432"})
+        inner.pop("PGHOSTADDR", None)
+        command = [
+            os.environ.get("KNOGGIN_CONTAINER_CLI", "docker"), "exec", "-i",
+            *(f"--env={key}={value}" for key, value in inner.items()),
+            container, *command,
+        ]
+    stdin = stdin_path.open("rb") if stdin_path else subprocess.DEVNULL
+    stdout = stdout_path.open("wb") if stdout_path else subprocess.DEVNULL
+    try:
+        result = subprocess.run(
+            command, env=environment, stdin=stdin, stdout=stdout,
+            stderr=subprocess.PIPE, check=False,
+        )
+    finally:
+        for stream in (stdin, stdout):
+            if hasattr(stream, "close"):
+                stream.close()
     if result.returncode:
-        raise RuntimeError(f"{command[0]} failed: {result.stderr.strip()}")
+        program = command[-1] if container else command[0]
+        raise RuntimeError(f"{program} failed: {result.stderr.decode(errors='replace').strip()}")
 
 
 def _sha256(path: Path) -> str:
@@ -133,7 +160,7 @@ def verify_backup(source: Path) -> dict:
         raise ValueError("Backup files or checksums do not match the manifest")
     if _directory_manifest(source) != manifest.get("directories"):
         raise ValueError("Backup directories do not match the manifest")
-    _run_postgres(["pg_restore", "--list", str(source / "database.dump")], "dbname=postgres")
+    _run_postgres(["pg_restore", "--list"], "dbname=postgres", stdin_path=source / "database.dump")
     return manifest
 
 
@@ -152,7 +179,7 @@ def create_backup(output: Path, *, database_url: str, settings_dir: Path) -> Pat
     try:
         staging.chmod(0o700)
         dump = staging / "database.dump"
-        _run_postgres(["pg_dump", "--format=custom", "--no-owner", "--no-acl", "--file", str(dump)], database_url)
+        _run_postgres(["pg_dump", "--format=custom", "--no-owner", "--no-acl"], database_url, stdout_path=dump)
         dump.chmod(0o600)
         if config_file.exists():
             shutil.copy2(config_file, staging / "knoggin.yml")
@@ -251,7 +278,7 @@ def restore_backup(
     staged_config.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
     staged_config.chmod(0o600)
     try:
-        _run_postgres(["pg_restore", "--no-owner", "--no-acl", "--exit-on-error", "--dbname", _pg_environment(database_url)["PGDATABASE"], str(source / "database.dump")], database_url)
+        _run_postgres(["pg_restore", "--no-owner", "--no-acl", "--exit-on-error", "--dbname", _pg_environment(database_url)["PGDATABASE"]], database_url, stdin_path=source / "database.dump")
         for directory in manifest["directories"]:
             if directory == "projects" or directory.startswith("projects/"):
                 relative = Path(directory).relative_to("projects")

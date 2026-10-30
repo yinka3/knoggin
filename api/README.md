@@ -103,8 +103,10 @@ database that has tables but no `schema_migrations` table.
 
 Stop the API, then run `./backup.sh` from the repository root. It saves a
 PostgreSQL dump, `knoggin.yml`, and the project files under `~/knoggin-backups`,
-and `./backup.sh verify <dir>` checks one. It needs `pg_dump` and `pg_restore`
-matching your Postgres version. The backup can contain API keys stored in
+and `./backup.sh verify <dir>` checks one. When the `knoggin-postgres`
+container is running it uses that container's `pg_dump` and `pg_restore`, so
+no local tools are needed; otherwise they must match your Postgres version
+(set `KNOGGIN_PG_CONTAINER` to use another container). The backup can contain API keys stored in
 `knoggin.yml`, so keep it private.
 
 Restore only into a new, empty database and empty folders:
