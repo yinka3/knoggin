@@ -59,6 +59,7 @@ from core.agent.system_prompt import (
     get_agent_prompt_parts,
     get_fallback_summary_prompt,
 )
+from core.agent.tool_events import RESULTS, stream_tool_calls
 from core.agent.tool_references import localize_agent_tool_result
 from core.agent.tool_runtime import execute_tool, summarize_result
 from core.agent.tools.findings import findings_table
@@ -1107,12 +1108,17 @@ class AgentExecutor:
 
                 self.ctx.record_tool_call(call.name, call.args)
 
-                async with asyncio.timeout(self.ctx.limits.tool_timeout):
-                    result = await execute_tool(
-                        self.tools,
-                        call.name,
-                        call.args,
-                    )
+                async def invoke(call=call):
+                    async with asyncio.timeout(self.ctx.limits.tool_timeout):
+                        return await execute_tool(self.tools, call.name, call.args)
+
+                async for item in stream_tool_calls([(call.call_id, call.name, invoke)]):
+                    if item["event"] != RESULTS:
+                        yield item
+                        continue
+                    result = item["data"][0]
+                if isinstance(result, Exception):
+                    raise result
 
                 # Keep the untouched backend result in the canonical notebook.
                 # Localization is a model-facing projection and must happen only
@@ -1200,23 +1206,20 @@ class AgentExecutor:
                 },
             }
 
-        async def invoke(call: _ToolCall):
-            try:
+        def invoker(call: _ToolCall):
+            async def invoke():
                 async with asyncio.timeout(self.ctx.limits.tool_timeout):
                     return await execute_tool(self.tools, call.name, call.args)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                return exc
+            return invoke
 
-        tasks = [asyncio.create_task(invoke(call)) for call in tool_calls]
-        try:
-            outcomes = await asyncio.gather(*tasks)
-        except BaseException:
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            raise
+        outcomes: list = []
+        async for item in stream_tool_calls(
+            [(call.call_id, call.name, invoker(call)) for call in tool_calls]
+        ):
+            if item["event"] == RESULTS:
+                outcomes = item["data"]
+            else:
+                yield item
 
         for call, outcome in zip(tool_calls, outcomes, strict=True):
             if isinstance(outcome, Exception):
