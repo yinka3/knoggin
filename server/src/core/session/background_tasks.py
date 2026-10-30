@@ -1,5 +1,5 @@
-"""Background research: research runs that report back to the chat that
-started them, so the user can keep talking while they work."""
+"""Background tasks: agent runs that report back to the chat that started
+them, so the user can keep talking while they work."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from uuid import uuid4
 from loguru import logger
 
 from common.conf.manager import ConfigManager
-from common.schema.agent.tool_names import research_job_tool_names
+from common.schema.agent.tool_names import research_task_tool_names
 from common.schema.primitives import Message
 from common.utils.time_utils import get_now_iso
 from core.session.background_work_store import BackgroundWorkStore
@@ -21,14 +21,18 @@ from core.session.background_work_store import BackgroundWorkStore
 if TYPE_CHECKING:
     from core.session.session_manager import SessionManager
 
-ResearchDepth = Literal["research", "deep_research"]
+TaskMode = Literal["normal", "research", "deep_research"]
 _FINISHED = frozenset({"completed", "needs_input", "failed", "cancelled"})
 _UNFINISHED = frozenset({"queued", "running", "interrupted"})
 _KEPT_FINISHED_JOBS = 100
 
 
-class ResearchJobs:
-    """Run each job as a research turn in its own new chat.
+class BackgroundTasks:
+    """Run each task as a turn in its own new chat.
+
+    A normal task gets the starting chat's tools, except starting other tasks
+    (one task could otherwise start several, each starting more, with nobody
+    watching the cost). Research modes keep the research tool set.
 
     The job's chat holds the full research and sources and becomes memory like
     any chat. When it ends, the starting chat gets a report turn. Jobs are
@@ -53,25 +57,27 @@ class ResearchJobs:
 
     def _settings(self):
         config = (self._config_manager or ConfigManager.get()).config
-        return config.developer_settings.research_jobs
+        return config.developer_settings.background_tasks
 
     async def start(
         self, *, project_id: str, parent_session_id: str, question: str,
-        links: list[str] | None = None, depth: ResearchDepth = "research",
+        links: list[str] | None = None, mode: TaskMode = "normal",
     ) -> dict[str, Any]:
         if self._closed:
-            raise RuntimeError("Research jobs are shutting down")
+            raise RuntimeError("Background tasks are shutting down")
         question = question.strip()
         if not question or len(question) > 4_000:
-            raise ValueError("Research question must contain 1 to 4000 characters")
-        if depth not in ("research", "deep_research"):
-            raise ValueError("depth must be research or deep_research")
+            raise ValueError("A task must contain 1 to 4000 characters")
+        if mode not in ("normal", "research", "deep_research"):
+            raise ValueError("mode must be normal, research or deep_research")
+        if any(job["session_id"] == parent_session_id for job in self._jobs.values()):
+            raise ValueError("A background task cannot start another background task")
         links = list(dict.fromkeys(link.strip() for link in links or () if link.strip()))
         max_links = self._settings().max_links
         if len(links) > max_links:
             raise ValueError(
-                f"A research job can read at most {max_links} links "
-                "(developer_settings.research_jobs.max_links)"
+                f"A background task can read at most {max_links} links "
+                "(developer_settings.background_tasks.max_links)"
             )
         for link in links:
             if urlsplit(link).scheme not in ("http", "https"):
@@ -79,7 +85,7 @@ class ResearchJobs:
         job = {
             "job_id": str(uuid4()), "project_id": project_id,
             "parent_session_id": parent_session_id, "session_id": None,
-            "question": question, "links": links, "depth": depth,
+            "question": question, "links": links, "mode": mode,
             "state": "queued", "error_code": None, "report_delivered": False,
             "created_at": get_now_iso(), "finished_at": None,
         }
@@ -100,7 +106,7 @@ class ResearchJobs:
         if self._store is None:
             return
         rerun = self._settings().resume_after_restart
-        for row in await self._store.load("research_job", limit=_KEPT_FINISHED_JOBS):
+        for row in await self._store.load("background_task", limit=_KEPT_FINISHED_JOBS):
             job = dict(row["payload"])
             report = job.pop("report", None)
             if job["state"] == "queued" or (job["state"] in _UNFINISHED and rerun):
@@ -123,12 +129,12 @@ class ResearchJobs:
         ValueError if it is not interrupted."""
 
         if self._closed:
-            raise RuntimeError("Research jobs are shutting down")
+            raise RuntimeError("Background tasks are shutting down")
         job = self._jobs.get(job_id)
         if job is None:
             return None
         if job["state"] != "interrupted":
-            raise ValueError(f"Only an interrupted job can be resumed; this one is {job['state']}")
+            raise ValueError(f"Only an interrupted task can be resumed; this one is {job['state']}")
         await self._requeue(job)
         return self._public(job)
 
@@ -149,12 +155,12 @@ class ResearchJobs:
             return
         try:
             await self._store.save(
-                "research_job", job["job_id"], project_id=job["project_id"],
+                "background_task", job["job_id"], project_id=job["project_id"],
                 session_id=job["parent_session_id"], state=job["state"],
                 payload={**job, "report": report},
             )
         except Exception:
-            logger.exception("Research job {} was not recorded", job["job_id"])
+            logger.exception("Background task {} was not recorded", job["job_id"])
 
     def list(self, *, parent_session_id: str | None = None) -> list[dict[str, Any]]:
         return [
@@ -193,7 +199,7 @@ class ResearchJobs:
             async with self._slot(job["project_id"]):
                 job["state"] = "running"
                 await self._persist(job)
-                content = await self._research(job)
+                content = await self._run_task(job)
         except asyncio.CancelledError:
             # A shutdown is not the user's choice. A job still waiting for a
             # slot has cost nothing and stays queued; one cut off mid-research
@@ -207,7 +213,7 @@ class ResearchJobs:
             await asyncio.shield(self._persist(job))
             raise
         except Exception:
-            logger.exception("Research job {} failed", job["job_id"])
+            logger.exception("Background task {} failed", job["job_id"])
             job["state"] = "failed"
             job["error_code"] = job["error_code"] or "run_failed"
             content = None
@@ -216,7 +222,7 @@ class ResearchJobs:
         await self._persist(job, content)
         await self._report(job, content)
 
-    async def _research(self, job: dict[str, Any]) -> str | None:
+    async def _run_task(self, job: dict[str, Any]) -> str | None:
         parent = self._sessions.get_runtime_session(job["parent_session_id"])
         session = await self._sessions.create_session(
             job["project_id"],
@@ -226,10 +232,14 @@ class ResearchJobs:
         job["session_id"] = session.session_id
         content = None
         try:
+            if job["mode"] == "normal":
+                tools = getattr(parent, "enabled_tools", None)
+            else:
+                tools = list(research_task_tool_names())
             stream = await session.open_agent_run_stream(
                 Message(content=self._prompt(job)),
-                research_mode=job["depth"],
-                enabled_tools=list(research_job_tool_names()),
+                research_mode=job["mode"],
+                enabled_tools=tools,
                 extra_web_reads=len(job["links"]),
             )
             try:
@@ -264,16 +274,16 @@ class ResearchJobs:
         try:
             parent = await self._sessions.get_or_resume_session(job["parent_session_id"])
         except Exception:
-            logger.exception("Research job {} could not reopen its chat", job["job_id"])
+            logger.exception("Background task {} could not reopen its chat", job["job_id"])
             return
         if parent is None:
             return  # The chat was deleted; the job's own chat has the result.
-        header = f"Background research {job['job_id']} finished.\nQuestion: {job['question']}"
+        header = f"Background task {job['job_id']} finished.\nTask: {job['question']}"
         if job["state"] == "completed":
             text = (
                 f"{header}\n\nReport:\n{content or ''}\n\n"
-                "Tell the user the main findings briefly, and say the full "
-                "report with its sources is in the research chat."
+                "Tell the user the main results briefly, and say the full "
+                "work with its sources is in the task's chat."
             )
         elif job["state"] == "needs_input":
             text = (
@@ -287,10 +297,10 @@ class ResearchJobs:
             )
         try:
             queued = await parent.queue_report(
-                text, origin="research_job_report", metadata={"job_id": job["job_id"]}
+                text, origin="background_task_report", metadata={"job_id": job["job_id"]}
             )
         except Exception:
-            logger.exception("Research job {} report was not queued", job["job_id"])
+            logger.exception("Background task {} report was not queued", job["job_id"])
             return
         job["report_delivered"] = queued is not None
         await self._persist(job, content)

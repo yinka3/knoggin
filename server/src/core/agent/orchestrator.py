@@ -325,7 +325,7 @@ class AgentOrchestrator:
             health_service=getattr(context, "health_service", None),
             entity_maintenance_service=self._entity_maintenance_service,
             project_maintenance_service=self._project_maintenance_service,
-            research_jobs=getattr(context, "research_jobs", None),
+            background_tasks=getattr(context, "background_tasks", None),
         )
 
         return tools

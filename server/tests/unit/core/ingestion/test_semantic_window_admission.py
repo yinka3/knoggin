@@ -1108,7 +1108,7 @@ async def test_window_share_and_idle_wait_are_settings():
 @pytest.mark.no_network
 async def test_research_report_turns_are_not_memory():
     report = _row(2, user_content="x" * 5, assistant_content="x" * 5)
-    report["user_origin"] = "research_job_report"
+    report["user_origin"] = "background_task_report"
     rows = [_row(1, user_content="x" * 5, assistant_content="x" * 5), report]
     admission = _admission(rows, target=1_000)
 

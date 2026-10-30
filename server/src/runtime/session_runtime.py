@@ -154,10 +154,10 @@ class SessionRuntime:
         health_service: Any | None = None,
         agent_orchestrator: Any | None = None,
         config_manager: ConfigManager | None = None,
-        research_jobs: Any | None = None,
+        background_tasks: Any | None = None,
     ):
         self.resources = resources
-        self.research_jobs = research_jobs
+        self.background_tasks = background_tasks
         self.health_service = health_service
         self.agent_orchestrator = agent_orchestrator
         self._config_manager = config_manager

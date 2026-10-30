@@ -22,11 +22,12 @@ def get_configurable_tool_names() -> frozenset[str]:
 
 
 JOB_TOOL_NAMES = frozenset(
-    {"start_research_job", "list_research_jobs", "cancel_research_job"}
+    {"start_background_task", "list_background_tasks", "cancel_background_task"}
 )
 # Tools whose results are text from the web.
 WEB_CONTENT_TOOL_NAMES = frozenset({"search_web", "search_news", "read_web_page"})
-WEB_TOOL_NAMES = WEB_CONTENT_TOOL_NAMES | JOB_TOOL_NAMES
+# Background tasks are core: a normal-mode task needs no web access.
+WEB_TOOL_NAMES = WEB_CONTENT_TOOL_NAMES
 MAINTENANCE_TOOL_NAMES = frozenset({
     "get_engine_health", "get_resource_health", "get_ingestion_health",
     "get_background_health", "inspect_duplicate_entities", "advise_entity_merge",
@@ -79,7 +80,7 @@ def research_run_blocked_tool_names() -> frozenset[str]:
     )
 
 
-def research_job_tool_names() -> tuple[str, ...]:
+def research_task_tool_names() -> tuple[str, ...]:
     """Tools a background research run may use: reads (without health or
     maintenance tools) plus saving findings to project files."""
 

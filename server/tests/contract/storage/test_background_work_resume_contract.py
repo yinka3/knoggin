@@ -5,7 +5,7 @@ import pytest
 
 from common.schema.settings import IngestionNoticeSettings
 from core.session.document_batch_notices import DocumentBatchNotices
-from tests.unit.core.session.test_research_jobs import (
+from tests.unit.core.session.test_background_tasks import (
     _answer,
     _finish,
     _jobs,

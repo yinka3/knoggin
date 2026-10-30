@@ -218,7 +218,7 @@ class CoordinationLogSettings(ConfigModel):
     rotation_mb: int = Field(10, ge=1)
 
 
-class ResearchJobSettings(ConfigModel):
+class BackgroundTaskSettings(ConfigModel):
     # Each job makes many model calls; more at once costs more and loads the
     # machine more. Extra jobs wait their turn.
     max_running_per_project: int = Field(3, ge=1, le=100)
@@ -277,7 +277,7 @@ class DeveloperSettings(ConfigModel):
     jobs: JobSettings = Field(default_factory=JobSettings)
     limits: AgentLimitSettings = Field(default_factory=AgentLimitSettings)
     prompt_memory: PromptMemorySettings = Field(default_factory=PromptMemorySettings)
-    research_jobs: ResearchJobSettings = Field(default_factory=ResearchJobSettings)
+    background_tasks: BackgroundTaskSettings = Field(default_factory=BackgroundTaskSettings)
     tools: ToolSettings = Field(default_factory=ToolSettings)
     chat_compaction: ChatCompactionSettings = Field(default_factory=ChatCompactionSettings)
     ingestion_notices: IngestionNoticeSettings = Field(default_factory=IngestionNoticeSettings)

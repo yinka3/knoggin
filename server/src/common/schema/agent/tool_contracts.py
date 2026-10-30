@@ -926,12 +926,13 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "start_research_job",
+            "name": "start_background_task",
             "description": (
-                "Start research that runs in the background in its own chat, "
-                "so the user can keep talking. Its report arrives in this chat "
-                "when it finishes. Use it for research needing many searches or "
-                "page reads, or for a long list of links to read."
+                "Start a task that runs in the background in its own chat, so the "
+                "user can keep talking. Its report arrives in this chat when it "
+                "finishes. Use mode normal for ordinary work (it has this chat's "
+                "tools), research or deep_research for research needing many "
+                "searches or page reads, or a long list of links."
             ),
             "parameters": {
                 "type": "object",
@@ -941,22 +942,25 @@ TOOL_SCHEMAS = [
                         "minLength": 1,
                         "maxLength": 4000,
                         "description": (
-                            "The complete research request, with any context "
-                            "from this chat it needs; the job cannot see this "
-                            "chat. If the user wants the findings saved, give "
-                            "the project file path to write them to."
+                            "The complete request, with any context from this "
+                            "chat it needs; the task cannot see this chat. If "
+                            "the user wants results saved, give the project "
+                            "file path to write them to."
                         ),
                     },
                     "links": {
                         "type": "array",
                         "items": {"type": "string", "minLength": 1},
-                        "description": "Links the job must read, if the user gave any.",
+                        "description": "Links the task must read, if the user gave any.",
                     },
-                    "depth": {
+                    "mode": {
                         "type": "string",
-                        "enum": ["research", "deep_research"],
-                        "default": "research",
-                        "description": "deep_research reads more sources and takes longer.",
+                        "enum": ["normal", "research", "deep_research"],
+                        "default": "normal",
+                        "description": (
+                            "normal for ordinary work; research and deep_research "
+                            "plan the work and read more sources, deep_research most."
+                        ),
                     },
                 },
                 "required": ["question"],
@@ -968,12 +972,12 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "list_research_jobs",
+            "name": "list_background_tasks",
             "description": (
-                "List the background research jobs started from this chat and "
-                "their states. An interrupted job was cut off by a restart; "
-                "running it again starts over and costs a full job, so ask the "
-                "user before starting it again."
+                "List the background tasks started from this chat and their "
+                "states. An interrupted task was cut off by a restart; running it "
+                "again starts over and costs a full task, so ask the user before "
+                "starting it again."
             ),
             "parameters": {
                 "type": "object",
@@ -986,8 +990,8 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "cancel_research_job",
-            "description": "Stop one background research job started from this chat.",
+            "name": "cancel_background_task",
+            "description": "Stop one background task started from this chat.",
             "parameters": {
                 "type": "object",
                 "properties": {

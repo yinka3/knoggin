@@ -1877,7 +1877,7 @@ async def test_research_report_runs_on_an_idle_chat_and_is_marked(context):
     # No run is active: a follow-up would be refused, a report is not.
     queued = await ctx.queue_report(
         "Background research job-1 finished.",
-        origin="research_job_report", metadata={"job_id": "job-1"},
+        origin="background_task_report", metadata={"job_id": "job-1"},
     )
     assert queued is not None
 
@@ -1893,7 +1893,7 @@ async def test_research_report_runs_on_an_idle_chat_and_is_marked(context):
         row for batch in resources.knowledge_store.saved_message_logs
         for row in batch if row.get("role") == "user"
     ]
-    assert user_rows[-1]["metadata"] == {"origin": "research_job_report", "job_id": "job-1"}
+    assert user_rows[-1]["metadata"] == {"origin": "background_task_report", "job_id": "job-1"}
 
 
 @pytest.mark.runtime

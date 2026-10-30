@@ -71,9 +71,11 @@ time is stored once, so a stopped import can be sent again. Up to
 The engine reports finished background work by adding a turn to the chat that
 asked for it (shown in `/follow-ups`):
 
-- **Research jobs** (`POST .../research-jobs`). After a restart, a job that was
-  cut off is `interrupted` and waits for `POST .../research-jobs/{job_id}/resume`
-  (or `research_jobs.resume_after_restart`), because rerunning it costs again.
+- **Background tasks** (`POST .../background-tasks` with `question` and
+  `mode`: `normal`, `research` or `deep_research`). A normal task has the chat's
+  tools except starting more tasks. After a restart, a task that was cut off is
+  `interrupted` and waits for `POST .../background-tasks/{job_id}/resume` (or
+  `background_tasks.resume_after_restart`), because rerunning it costs again.
 - **Folder imports** given a `session_id` report once every file is indexed or
   has failed for good.
 - **Duplicate entities** are checked every `jobs.duplicate_review.interval_hours`
