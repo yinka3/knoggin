@@ -4,8 +4,14 @@ from pydantic import ValidationError
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from common.exceptions import SessionBusyError
 from common.schema.source.references import SourceConsulted
-from contracts.sessions import CreateSession, SessionPreferences, focus_input
+from contracts.sessions import (
+    CreateSession,
+    ImportExchanges,
+    SessionPreferences,
+    focus_input,
+)
 from routes.project_settings import _error, _json
 
 
@@ -40,6 +46,8 @@ def _public_history_message(row):
         public_metadata["research_mode"] = metadata["research_mode"]
     if metadata.get("fallback") is True:
         public_metadata["fallback"] = True
+    if metadata.get("origin") == "import":
+        public_metadata["origin"] = "import"
 
     annotations = metadata.get("response_annotations")
     if isinstance(annotations, list):
@@ -155,6 +163,35 @@ async def history(request):
     return JSONResponse([_public_history_message(row) for row in rows])
 
 
+async def import_exchanges(request):
+    """Add recorded chat turns at their original times; they become memory."""
+    runtime = request.app.state.runtime
+    session_id = request.path_params["session_id"]
+    payload = await _json(request)
+    if isinstance(payload, dict) and isinstance(payload.get("exchanges"), list):
+        maximum = runtime.config_manager.config.developer_settings.ingestion.max_import_exchanges
+        if len(payload["exchanges"]) > maximum:
+            return _error("batch_too_large", "Import has too many exchanges", 413)
+    try:
+        body = ImportExchanges.model_validate(payload)
+    except ValidationError:
+        return _error("invalid_import", "Invalid import", 422)
+    metadata = await _metadata(runtime, session_id)
+    if metadata is None:
+        return _error("session_not_found", "Session not found", 404)
+    project = await runtime.projects.get_project(metadata["project_id"])
+    if project is None or project["status"] != "active":
+        return _error("project_unavailable", "Project is unavailable", 409)
+    session = await runtime.sessions.get_or_resume_session(session_id)
+    if session is None:
+        return _error("session_not_found", "Session not found", 404)
+    try:
+        results = await session.import_exchanges(body.exchanges)
+    except SessionBusyError:
+        return _error("session_busy", "This session has an active run", 409)
+    return JSONResponse({"exchanges": results})
+
+
 async def message_sources(request):
     """Reload the public source cards for one completed assistant message."""
     runtime = request.app.state.runtime
@@ -232,6 +269,7 @@ routes = [
     Route("/v1/sessions/{session_id}", update_session, methods=["PATCH"]),
     Route("/v1/sessions/{session_id}", delete_session, methods=["DELETE"]),
     Route("/v1/sessions/{session_id}/history", history, methods=["GET"]),
+    Route("/v1/sessions/{session_id}/imports", import_exchanges, methods=["POST"]),
     Route("/v1/sessions/{session_id}/messages/{message_id}/sources", message_sources, methods=["GET"]),
     Route("/v1/sessions/{session_id}/document-focus", get_focus, methods=["GET"]),
     Route("/v1/sessions/{session_id}/document-focus", set_focus, methods=["PUT"]),

@@ -244,6 +244,12 @@ class ProjectSemanticProcessor(BaseJob):
 
         self._flush_requested = True
 
+    @property
+    def flush_pending(self) -> bool:
+        """True until a run finds nothing left to claim after a flush request."""
+
+        return self._flush_requested
+
     async def should_run(self, ctx: JobContext) -> bool:
         active = await self.knowledge_store.get_active_project_semantic_window(
             user_name=ctx.user_name,
@@ -292,15 +298,19 @@ class ProjectSemanticProcessor(BaseJob):
             await self.synchronize_context_file(ctx, allow_user_edit=False)
         if window is None:
             policy = policy or await self._capture_semantic_policy()
+            force_flush = self._flush_requested
             claimed = await self.admission.claim_next(
                 user_name=ctx.user_name,
                 project_id=ctx.project_id,
                 domain=policy.domain,
                 ingestion_policy=policy,
-                force_flush=self._flush_requested,
+                force_flush=force_flush,
             )
             if claimed is None:
-                self._flush_requested = False
+                if force_flush:
+                    # Only a flushed run may consume the request; one that
+                    # started before it may have missed what it asked for.
+                    self._flush_requested = False
                 return JobResult(success=True, summary="No semantic window is due")
             window = claimed.window
         return await self._drain_window(window, ctx)

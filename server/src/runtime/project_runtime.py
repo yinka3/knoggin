@@ -5,6 +5,7 @@ from loguru import logger
 
 from common.conf.domain_config import CompiledDomain, DomainConfig
 from common.conf.manager import ConfigManager
+from common.schema.context import ContextRevisionRecord
 from common.schema.settings import TextProcessorSettings
 from common.scoping import require_scope_value, require_visible_project_ids
 from core.ingestion.policy import IngestionPolicy
@@ -92,6 +93,46 @@ class ProjectRuntime:
             return False
         self.project_semantic_processor.request_flush()
         return self.signal_semantic_work()
+
+    async def wait_for_semantic_idle(
+        self, *, timeout_s: float, poll_interval_s: float = 0.5
+    ) -> ContextRevisionRecord | None:
+        """Flush finished conversation, wait until memory is built, and return
+        the Context revision it produced.
+
+        Settled means the flush request was used up (a run found nothing left
+        to claim) and no window is in progress. Raises on any failed window or
+        on timeout. For evals and tools that need memory built before going on.
+        """
+
+        processor = self.project_semantic_processor
+        if processor is None or not self.flush_semantic_work():
+            raise RuntimeError("Project semantic work is not running")
+        store = processor.knowledge_store
+        scope = {"user_name": self.user_name, "project_id": self.project_id}
+        deadline = asyncio.get_running_loop().time() + timeout_s
+        while True:
+            failed = await store.list_failed_project_semantic_windows(**scope)
+            if failed:
+                details = ", ".join(
+                    f"{window.window_id} ({window.stage.value}: "
+                    f"{window.last_failure_stage}/{window.last_failure_code})"
+                    for window in failed
+                )
+                raise RuntimeError(f"Semantic windows failed: {details}")
+            if (
+                not processor.flush_pending
+                and await store.get_active_project_semantic_window(**scope) is None
+            ):
+                return await store.get_current_project_context_revision(**scope)
+            if asyncio.get_running_loop().time() >= deadline:
+                raise TimeoutError(
+                    f"Semantic work for {self.project_id} did not settle "
+                    f"within {timeout_s}s"
+                )
+            # Each run claims at most one window; wake the next one.
+            self.signal_semantic_work()
+            await asyncio.sleep(poll_interval_s)
 
     async def shutdown(self):
         """Stop admission, then release every project-owned runtime resource."""

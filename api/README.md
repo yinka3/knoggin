@@ -57,6 +57,15 @@ This README covers the rules the route list cannot show.
   Those calls may take longer or cost more until the new prefix is cached.
   A revision number alone does not imply a cache miss; provider behavior varies.
 
+## Importing chats
+
+`POST /v1/sessions/{session_id}/imports` adds recorded turns without running
+the agent: `{"exchanges": [{"user_content", "user_timestamp",
+"assistant_content"?, "assistant_timestamp"?}]}`. Times without a zone are UTC.
+Imported turns become memory like any chat. A turn with the same content and
+time is stored once, so a stopped import can be sent again. Up to
+`ingestion.max_import_exchanges` (default 1000) exchanges per request.
+
 ## Background work
 
 The engine reports finished background work by adding a turn to the chat that

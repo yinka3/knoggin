@@ -933,3 +933,45 @@ async def test_save_now_flushes_admission_until_nothing_is_left():
     await job.execute(context)
 
     assert admission.flushes == [False, True, False]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_flush_requested_during_an_unflushed_claim_is_kept():
+    class MidClaimFlushAdmission(_IdleAdmission):
+        def __init__(self):
+            self.flushes = []
+            self.job = None
+
+        async def claim_next(self, **kwargs):
+            self.flushes.append(kwargs["force_flush"])
+            if len(self.flushes) == 1:
+                self.job.request_flush()
+            return None
+
+    admission = MidClaimFlushAdmission()
+
+    async def capture_policy():
+        return _policy()
+
+    job = ProjectSemanticProcessor(
+        admission,
+        _IdleStore(),
+        object(),
+        settings=IngestionSettings(semantic_window_tokens=1),
+        capture_semantic_policy=capture_policy,
+        context_updater=_NoopUpdater(),
+        context_projection=_RecordingProjection(),
+        context_entity_builder=_UnexpectedBuilder(),
+        context_relationship_extractor=_UnexpectedRelationships(),
+        publish_committed_entity_ids=_publish_nothing,
+    )
+    admission.job = job
+    context = JobContext(user_name="ada", project_id="project-1")
+
+    await job.execute(context)
+    assert job.flush_pending
+    await job.execute(context)
+
+    assert admission.flushes == [False, True]
+    assert not job.flush_pending

@@ -26,7 +26,7 @@ from common.schema.agent.stream import AgentExecutionEvent
 from common.schema.artifacts import ArtifactDraft
 from common.schema.document import DocumentFocus
 from common.schema.message_origins import BACKGROUND_REPORT_ORIGINS
-from common.schema.primitives import Message
+from common.schema.primitives import ImportedExchange, Message
 from common.schema.settings import RootConfig
 from common.schema.source.references import SourceReferenceCandidate
 from common.utils.events import emit
@@ -1271,18 +1271,88 @@ class SessionRuntime:
 
         await self._close_user_exchange(user_message_id, outcome="user_only")
 
+    async def import_exchanges(
+        self, exchanges: List[ImportedExchange]
+    ) -> list[dict[str, Any]]:
+        """Store recorded exchanges at their original times without running the agent.
+
+        Each exchange closes like a normal turn, at its last message's time,
+        so it becomes memory (Episodes, Context, knowledge) like any chat.
+        Importing the same exchange again (same content and time) returns
+        the stored IDs and writes nothing, so a stopped import can be rerun.
+        New agent runs on this session wait until the import finishes.
+        """
+
+        async with self._agent_run_lock:
+            if self._closed or self._agent_runs_closed:
+                raise RuntimeError("Session is shutting down")
+            self._require_message_ingestion_ready()
+            if self._agent_run_reserved:
+                raise SessionBusyError()
+            return [await self._import_exchange(exchange) for exchange in exchanges]
+
+    async def _import_exchange(self, exchange: ImportedExchange) -> dict[str, Any]:
+        accepted, created = await self._accept_user_message(
+            Message(
+                content=exchange.user_content,
+                timestamp=exchange.user_timestamp,
+                metadata={"origin": "import"},
+            )
+        )
+        if not created:
+            stored = await self.knowledge_store.get_user_agent_exchange(
+                accepted.id,
+                user_name=self.user_name,
+                project_id=self.project_id,
+                session_id=self.session_id,
+            )
+            if stored is None:
+                raise RuntimeError("Accepted user message could not be reloaded")
+            if stored.exchange_state != "open":
+                return {
+                    "user_message_id": accepted.id,
+                    "assistant_message_id": stored.assistant_message_id,
+                    "created": False,
+                }
+            # An earlier import stopped before closing this exchange; imports
+            # have no side effects to repeat, so finish it.
+
+        assistant_message_id = None
+        if exchange.assistant_content is None:
+            await self._close_user_exchange(
+                accepted.id,
+                outcome="user_only",
+                closed_at_ms=int(exchange.user_timestamp.timestamp() * 1000),
+            )
+        else:
+            assistant_message_id, _ = await self._persist_assistant_message_log(
+                await self.knowledge_store.allocate_message_id(),
+                exchange.assistant_content,
+                exchange.assistant_timestamp,
+                metadata={"origin": "import"},
+                user_msg_id=accepted.id,
+            )
+            self._signal_exchange_closed()
+        return {
+            "user_message_id": accepted.id,
+            "assistant_message_id": assistant_message_id,
+            "created": True,
+        }
+
     async def _close_user_exchange(
         self,
         user_message_id: int,
         *,
         outcome: str,
         terminal_error: dict[str, object] | None = None,
+        closed_at_ms: int | None = None,
     ) -> None:
         """Close one terminal non-assistant path before waking its project owner."""
 
         if not isinstance(user_message_id, int) or user_message_id <= 0:
             raise ValueError("user_message_id must be positive")
-        closed_at_ms = int(get_now().timestamp() * 1000)
+        if closed_at_ms is None:
+            closed_at_ms = int(get_now().timestamp() * 1000)
         max_retries = 3
         for attempt in range(max_retries):
             try:

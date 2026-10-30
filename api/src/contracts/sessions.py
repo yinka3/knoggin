@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
 from common.schema.session_input import normalise_enabled_tools
 from common.schema.document import DocumentSelection
+from common.schema.primitives import ImportedExchange
 
 
 class SessionPreferences(BaseModel):
@@ -88,6 +89,21 @@ class QueueFollowUp(BaseModel):
         if not value:
             raise ValueError("blank query")
         return value
+
+
+class ImportExchange(ImportedExchange):
+    model_config = ConfigDict(extra="forbid")
+
+    user_content: str = Field(max_length=100_000)
+    assistant_content: str | None = Field(default=None, max_length=100_000)
+
+
+class ImportExchanges(BaseModel):
+    """Recorded chat turns to add to a session at their original times."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    exchanges: list[ImportExchange] = Field(min_length=1)
 
 
 class DocumentFocus(BaseModel):

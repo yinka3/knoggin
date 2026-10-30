@@ -67,6 +67,8 @@ class IngestionSettings(ConfigModel):
     # A window smaller than the ceiling closes after this long with no new
     # finished exchange.
     idle_flush_seconds: int = Field(300, ge=1, le=86_400)
+    # Recorded exchanges one import request may carry.
+    max_import_exchanges: int = Field(1_000, ge=1, le=100_000)
     semantic_window_retry: SemanticWindowRetrySettings = Field(
         default_factory=SemanticWindowRetrySettings
     )
