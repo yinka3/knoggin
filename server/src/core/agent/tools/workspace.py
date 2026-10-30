@@ -162,12 +162,18 @@ class ProjectFileTools:
             }
         return result
 
+    def _run_read_web(self) -> bool:
+        """Whether this run has read web content, which a write may quote."""
+        run = getattr(self, "agent_run", None)
+        return bool(run is not None and run.read_web)
+
     async def create_project_file(self, path: str, content: str) -> Dict:
         if self.document_service is None:
             self._files_unavailable("create_project_file")
         return await self.document_service.create_project_file(
             _editable_path(path),
             _validate_content(content),
+            derived_from_web=self._run_read_web(),
         )
 
     async def update_project_file(
@@ -182,6 +188,7 @@ class ProjectFileTools:
             _editable_path(path),
             _validate_content(content),
             expected_content_hash=_validate_content_hash(expected_content_hash),
+            derived_from_web=self._run_read_web(),
         )
 
     async def append_project_file(
@@ -196,6 +203,7 @@ class ProjectFileTools:
             _editable_path(path),
             _validate_content(content),
             expected_content_hash=_validate_content_hash(expected_content_hash),
+            derived_from_web=self._run_read_web(),
         )
 
     async def move_project_file(

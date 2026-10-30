@@ -38,3 +38,12 @@ def test_document_result_localization_keeps_absent_folder_reference_null():
     item = localized["data"][0]
     assert item["document_id"].startswith("doc_")
     assert "project_id" not in item
+
+
+@pytest.mark.no_network
+def test_a_run_knows_when_it_has_read_web_content():
+    run = _run()
+    run.record_tool_call("search_project_documents", {"query": "plan"})
+    assert run.read_web is False
+    run.record_tool_call("read_web_page", {"url": "https://example.com"})
+    assert run.read_web is True

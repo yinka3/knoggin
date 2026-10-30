@@ -24,7 +24,9 @@ def get_configurable_tool_names() -> frozenset[str]:
 JOB_TOOL_NAMES = frozenset(
     {"start_research_job", "list_research_jobs", "cancel_research_job"}
 )
-WEB_TOOL_NAMES = frozenset({"search_web", "search_news", "read_web_page"}) | JOB_TOOL_NAMES
+# Tools whose results are text from the web.
+WEB_CONTENT_TOOL_NAMES = frozenset({"search_web", "search_news", "read_web_page"})
+WEB_TOOL_NAMES = WEB_CONTENT_TOOL_NAMES | JOB_TOOL_NAMES
 MAINTENANCE_TOOL_NAMES = frozenset({
     "get_engine_health", "get_resource_health", "get_ingestion_health",
     "get_background_health", "inspect_duplicate_entities", "advise_entity_merge",

@@ -814,7 +814,9 @@ class DocumentService:
         )
 
     @_settle_file_operation
-    async def create_project_file(self, path: str, content: str) -> Dict:
+    async def create_project_file(
+        self, path: str, content: str, *, derived_from_web: bool = False
+    ) -> Dict:
         """Create a text project file and update its document catalog row."""
         payload = self._validate_project_file_content(path, content)
         filesystem = self._require_filesystem()
@@ -825,8 +827,8 @@ class DocumentService:
                 filesystem.write_bytes, normalized_path, payload, _lease=lease
             )
             await self._rollback_file_on_catalog_failure(
-                self._reconcile_owned_file_changes(
-                    upserts={normalized_path: payload}, lease=lease
+                self._catalog_written_file(
+                    normalized_path, payload, lease=lease, derived_from_web=derived_from_web
                 ),
                 lambda: self._run_blocking(
                     filesystem.delete_file,
@@ -837,6 +839,13 @@ class DocumentService:
             )
             return await self.read_project_file(normalized_path)
 
+    async def _catalog_written_file(
+        self, path: str, payload: bytes, *, lease, derived_from_web: bool
+    ) -> None:
+        await self._reconcile_owned_file_changes(upserts={path: payload}, lease=lease)
+        if derived_from_web:
+            await self._writer.mark_derived_from_web([path])
+
     @_settle_file_operation
     async def update_project_file(
         self,
@@ -844,6 +853,7 @@ class DocumentService:
         content: str,
         *,
         expected_content_hash: str,
+        derived_from_web: bool = False,
     ) -> Dict:
         """Replace a text project file only when its caller has the current hash."""
         payload = self._validate_project_file_content(path, content)
@@ -861,8 +871,8 @@ class DocumentService:
                 _lease=lease,
             )
             await self._rollback_file_on_catalog_failure(
-                self._reconcile_owned_file_changes(
-                    upserts={normalized_path: payload}, lease=lease
+                self._catalog_written_file(
+                    normalized_path, payload, lease=lease, derived_from_web=derived_from_web
                 ),
                 lambda: self._run_blocking(
                     filesystem.write_bytes,
@@ -883,6 +893,7 @@ class DocumentService:
         content: str,
         *,
         expected_content_hash: str,
+        derived_from_web: bool = False,
     ) -> Dict:
         """Append text to a project file under the same stale-write guard."""
         if not isinstance(content, str) or not content:
@@ -903,8 +914,8 @@ class DocumentService:
                 _lease=lease,
             )
             await self._rollback_file_on_catalog_failure(
-                self._reconcile_owned_file_changes(
-                    upserts={normalized_path: payload}, lease=lease
+                self._catalog_written_file(
+                    normalized_path, payload, lease=lease, derived_from_web=derived_from_web
                 ),
                 lambda: self._run_blocking(
                     filesystem.write_bytes,

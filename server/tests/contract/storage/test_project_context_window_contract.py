@@ -395,6 +395,73 @@ async def test_context_source_catalog_reads_only_frozen_assistant_owned_refs(
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
+async def test_context_never_receives_web_sources_or_files_written_after_web_reads(
+    real_postgres_client,
+):
+    await _seed_messages(real_postgres_client)
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.messages (
+            user_name, session_id, message_id, project_id, role, content,
+            user_msg_id, lifecycle_state
+        ) VALUES ('ada', 'session-1', 102, 'project-1', 'assistant', 'Sources say so.', 101, 'sealed')
+        """
+    )
+    clean_document, web_document = uuid4(), uuid4()
+    for document_id, path, derived in (
+        (clean_document, "notes/plan.md", False),
+        (web_document, "research/findings.md", True),
+    ):
+        await real_postgres_client.execute(
+            """INSERT INTO public.project_documents (
+                   document_id, project_id, original_name, relative_path, extension,
+                   size_bytes, content_hash, status, derived_from_web
+               ) VALUES (%s, 'project-1', 'x.md', %s, '.md', 1, %s, 'indexed', %s)""",
+            (document_id, path, _HASH, derived),
+        )
+    insert_ref = """
+        INSERT INTO public.message_source_refs (
+            source_ref_id, project_id, session_id, message_id, source_kind,
+            document_id, parse_snapshot_id, source_project_id, canonical_url,
+            content_hash, locator, excerpt, metadata, encounter_kind,
+            agent_run_id, tool_call_id, result_position, idempotency_key
+        ) VALUES (%s, 'project-1', 'session-1', 102, %s, %s, %s, %s, %s, %s,
+                  %s::jsonb, %s, %s::jsonb, %s, 'run-1', 'call-1', %s, %s)
+    """
+    lines = '{"kind":"text_lines","start_line":1,"end_line":1}'
+    for position, (kind, document_id, url, excerpt, encounter, metadata) in enumerate((
+        ("text_document", clean_document, None, "the user's plan", "document_read",
+         '{"document_name":"plan.md"}'),
+        ("text_document", web_document, None, "quoted from a page", "document_read",
+         '{"document_name":"findings.md"}'),
+        ("web_page", None, "https://example.com/page", "page text", "web_read", "{}"),
+    )):
+        await real_postgres_client.execute(insert_ref, (
+            uuid4(), kind, document_id, uuid4() if document_id else None,
+            "project-1" if document_id else None, url, _HASH, lines, excerpt,
+            metadata, encounter, position, f"web-filter-{position}",
+        ))
+    await real_postgres_client.execute(
+        "UPDATE public.messages SET exchange_outcome = 'assistant_final' "
+        "WHERE message_id = 101 AND project_id = 'project-1'"
+    )
+    window = _window()
+    members = _membership() + [SemanticWindowMessage(
+        message_id=102, session_id="session-1", exchange_user_message_id=101,
+        role="assistant", ordinal=1,
+    )]
+    assert (await SemanticWindowWriter(real_postgres_client).claim_window(window, members)).claimed
+
+    refs = await SemanticWindowReader(real_postgres_client).get_window_assistant_source_refs(
+        window.window_id, user_name="ada", project_id="project-1",
+    )
+
+    assert [ref["excerpt"] for ref in refs] == ["the user's plan"]
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
 async def test_semantic_episode_result_is_idempotent_and_has_no_legacy_side_effects(
     real_postgres_client,
 ):

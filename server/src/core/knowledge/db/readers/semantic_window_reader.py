@@ -634,6 +634,10 @@ class SemanticWindowReader:
         This is intentionally a narrow Context-stage catalog rather than a
         second source store. The updater receives only canonical refs whose
         owning assistant message is itself frozen window evidence.
+
+        Web sources never reach Context: a page can carry injected text, and
+        Context feeds every future prompt and the entity graph. Project files
+        the agent wrote after reading the web are kept out for the same reason.
         """
 
         user_name, project_id = self._scope(
@@ -666,6 +670,14 @@ class SemanticWindowReader:
               AND membership.project_id = %s
               AND semantic_window.user_name = %s
               AND message.role = 'assistant'
+              AND ref.source_kind NOT IN (
+                  'web_search_result', 'news_search_result', 'web_page', 'web_pdf'
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM public.project_documents AS document
+                  WHERE document.document_id = ref.document_id
+                    AND document.derived_from_web
+              )
             ORDER BY membership.ordinal ASC, ref.created_at ASC,
                      ref.result_position ASC, ref.source_ref_id ASC
             """,

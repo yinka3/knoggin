@@ -26,6 +26,7 @@ from common.schema.agent.settings import (
 from common.schema.agent.stream import StreamUsage
 from common.schema.agent.tool_names import (
     RESEARCH_ONLY_TOOL_NAMES,
+    WEB_CONTENT_TOOL_NAMES,
     expand_tool_groups,
     research_run_blocked_tool_names,
 )
@@ -905,6 +906,11 @@ class AgentRun:
             and not self.tool_limit_reached(tool_name)
             and not self.is_duplicate(tool_name, args)
         )
+
+    @property
+    def read_web(self) -> bool:
+        """Whether this run has called a tool that returns web content."""
+        return any(self.tool_call_counts.get(name) for name in WEB_CONTENT_TOOL_NAMES)
 
     def record_tool_call(self, tool_name: str, args: Dict) -> None:
         self._require_active()

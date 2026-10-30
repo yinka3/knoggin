@@ -58,7 +58,9 @@ async def test_schema_bootstraps_a_fresh_database_with_vector():
 
     client = PostgresClient(database_conninfo, min_size=1, max_size=1)
     try:
-        assert await asyncio.to_thread(migrate, database_conninfo) == ["0000_baseline"]
+        ran = await asyncio.to_thread(migrate, database_conninfo)
+        assert ran == sorted(path.stem for path in MIGRATIONS_DIR.glob("*.sql"))
+        assert ran[0] == "0000_baseline"
         await client.connect()
 
         extension = await client.fetch_one(

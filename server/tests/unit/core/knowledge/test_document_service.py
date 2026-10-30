@@ -4587,3 +4587,20 @@ async def test_a_package_install_does_not_push_reconciliation_past_its_file_limi
     live = {row["relative_path"]: row for row in postgres.rows if row["status"] != "deleted"}
     assert "build/notes.md" in live and live["build/notes.md"]["document_id"] == kept["document_id"]
     assert not any("node_modules" in path for path in live)
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_only_writes_flagged_as_web_derived_mark_their_document(document_harness):
+    service, postgres = document_harness
+
+    await service.create_project_file("notes/plan.md", "my plan")
+    await service.create_project_file(
+        "research/findings.md", "quoted from a page", derived_from_web=True
+    )
+
+    marks = [
+        params for kind, query, params in postgres.calls
+        if kind == "execute" and "derived_from_web = true" in query
+    ]
+    assert marks == [("project-1", ["research/findings.md"])]

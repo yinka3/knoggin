@@ -275,3 +275,31 @@ async def test_documents_awaiting_index_are_listed_by_scope(real_postgres_client
     }
     assert len(await reader.list_documents_awaiting_index()) == 3
     assert await reader.list_documents_awaiting_index(path_prefix="docs/done.md") == []
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_marking_a_document_as_derived_from_the_web_stays_in_its_project(
+    real_postgres_client,
+):
+    from core.knowledge.db.writers.document_writer import DocumentWriter
+
+    for project_id in ("project-1", "project-2"):
+        await real_postgres_client.execute(
+            """INSERT INTO public.project_documents (
+                   document_id, project_id, original_name, relative_path,
+                   extension, size_bytes, content_hash, status
+               ) VALUES (%s, %s, 'f.md', 'research/f.md', '.md', 1, 'hash', 'indexed')""",
+            (str(uuid4()), project_id),
+        )
+    writer = DocumentWriter(real_postgres_client, "project-1")
+    await writer.mark_derived_from_web(["research/f.md"])
+    await writer.mark_derived_from_web([])  # nothing to mark
+
+    rows = await real_postgres_client.fetch_all(
+        "SELECT project_id, derived_from_web FROM public.project_documents ORDER BY project_id"
+    )
+    assert [(row["project_id"], row["derived_from_web"]) for row in rows] == [
+        ("project-1", True), ("project-2", False),
+    ]

@@ -1,4 +1,5 @@
 import hashlib
+from types import SimpleNamespace
 
 import pytest
 
@@ -34,21 +35,28 @@ class FakeDocumentService:
             return self.registered_documents[relative_path]
         raise FileNotFoundError("Document not found")
 
-    async def create_project_file(self, path, content):
+    async def create_project_file(self, path, content, *, derived_from_web=False):
+        self.derived_from_web = derived_from_web
         self.calls.append(("create", path, content))
         return {
             "relative_path": path,
             "content_hash": hashlib.sha256(content.encode()).hexdigest(),
         }
 
-    async def update_project_file(self, path, content, *, expected_content_hash):
+    async def update_project_file(
+        self, path, content, *, expected_content_hash, derived_from_web=False
+    ):
+        self.derived_from_web = derived_from_web
         self.calls.append(("update", path, content, expected_content_hash))
         return {
             "relative_path": path,
             "content_hash": hashlib.sha256(content.encode()).hexdigest(),
         }
 
-    async def append_project_file(self, path, content, *, expected_content_hash):
+    async def append_project_file(
+        self, path, content, *, expected_content_hash, derived_from_web=False
+    ):
+        self.derived_from_web = derived_from_web
         self.calls.append(("append", path, content, expected_content_hash))
         return {"relative_path": path, "content_hash": expected_content_hash}
 
@@ -238,3 +246,17 @@ async def test_project_file_schema_registry_limits_and_bounds():
         schema,
         {"path": "notes.md", "content": ""},
     )
+
+
+@pytest.mark.no_network
+async def test_files_written_after_a_web_read_are_marked():
+    service = FakeDocumentService()
+    tools = ProjectFileHarness(service)
+
+    tools.agent_run = SimpleNamespace(read_web=False)
+    await tools.create_project_file("notes/plan.md", "my plan")
+    assert service.derived_from_web is False
+
+    tools.agent_run = SimpleNamespace(read_web=True)
+    await tools.create_project_file("research/findings.md", "quoted from a page")
+    assert service.derived_from_web is True

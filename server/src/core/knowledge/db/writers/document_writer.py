@@ -309,6 +309,15 @@ class DocumentWriter:
                     (affected_document_ids,),
                 )
 
+    async def mark_derived_from_web(self, relative_paths: List[str]) -> None:
+        """Flag live documents at these paths as written after web reads.
+        The flag never clears: later edits do not remove the quoted text."""
+        await self._client.execute(
+            """UPDATE public.project_documents SET derived_from_web = true
+               WHERE project_id = %s AND relative_path = ANY(%s) AND status <> 'deleted'""",
+            (self._project_id, list(relative_paths)),
+        )
+
     async def delete_document(
         self,
         *,
