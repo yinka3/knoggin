@@ -25,6 +25,18 @@ class ResearchJobTools:
     async def start_research_job(
         self, question: str, links: list[str] | None = None, depth: str = "research",
     ) -> Dict:
+        # The job's question becomes the user message of its own run, where
+        # links count as the user's. Only pass on links this run already trusts.
+        from core.agent.tools.search import _URL_IN_TEXT
+
+        for link in [*(links or []), *_URL_IN_TEXT.findall(question or "")]:
+            if not await self.web_url_is_known(link):
+                raise ToolExecutionError(
+                    "start_research_job",
+                    f"{link} did not come from a search result, a page read in this run, "
+                    "the user's messages, or the project's saved links. Ask the user to "
+                    "send it in a message first.",
+                )
         try:
             job = await self._jobs("start_research_job").start(
                 project_id=self.project_id, parent_session_id=self.session_id,

@@ -840,7 +840,9 @@ TOOL_SCHEMAS = [
             "description": (
                 "Read a bounded range of canonical text from one public web page "
                 "or one page of an external PDF. "
-                "Use a URL supplied by the user or returned by a web search. "
+                "Only URLs from the user's messages, a web search or a page read in "
+                "this run, or the project's saved links can be read, exactly as given; "
+                "for any other link, ask the user to send it. "
                 "For a large page, provide query to locate one relevant bounded "
                 "section instead of choosing start_line; for a PDF, provide "
                 "page_number instead. "

@@ -21,6 +21,15 @@ from core.agent.tools.search import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _every_url_is_known(monkeypatch):
+    # These tests cover fetching; which URLs may be read is tested separately.
+    async def known(self, url):
+        return True
+
+    monkeypatch.setattr(SearchTools, "web_url_is_known", known)
+
+
 def _web_tool(handler) -> SearchTools:
     tool = SearchTools()
     tool._web_page_client = httpx.AsyncClient(
