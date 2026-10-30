@@ -948,13 +948,24 @@ class DocumentSearchTools:
             relative_path=relative_path,
             path_prefix=path_prefix,
         )
+        notes = []
+        if document_filter is None:
+            pending = await self.document_service.list_documents_awaiting_index(
+                path_prefix=relative_path or path_prefix
+            )
+            if pending:
+                notes.append({"info": (
+                    f"{len(pending)} file(s) changed and are still indexing, so they "
+                    f"are not in these results: {', '.join(pending)}. Read one with "
+                    "read_project_file to see its current text."
+                )})
 
         if not results:
             return [
-                {"info": "No relevant content found in indexed documents"}
+                {"info": "No relevant content found in indexed documents"}, *notes
             ]
 
-        return [self._with_document_source_context(result) for result in results]
+        return [*(self._with_document_source_context(result) for result in results), *notes]
 
 class WebTools:
     """External web discovery, safe fetching, and run-local snapshots."""

@@ -34,6 +34,9 @@ class DocumentReadService:
     async def search(self, query: str, **kwargs: Any) -> List[Dict]:
         return await self._service.search(query, **kwargs)
 
+    async def list_documents_awaiting_index(self, **kwargs: Any) -> List[str]:
+        return await self._service.list_documents_awaiting_index(**kwargs)
+
     async def list_project_files(self, **kwargs: Any) -> List[Dict]:
         return await self._service.list_project_files(**kwargs)
 

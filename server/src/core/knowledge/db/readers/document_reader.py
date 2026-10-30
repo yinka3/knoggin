@@ -463,6 +463,28 @@ class DocumentReader:
         params.append(limit)
         return await self._client.fetch_all(query, tuple(params))
 
+    async def list_documents_awaiting_index(
+        self, *, path_prefix: Optional[str] = None, limit: int = 5
+    ) -> List[str]:
+        """Paths of visible documents queued or indexing, so search can say
+        they are missing from its results for now."""
+        query = """
+            SELECT pd.relative_path FROM public.project_documents AS pd
+            WHERE pd.status IN ('queued', 'indexing')
+        """
+        params: list = list(self._document_visibility_params())
+        query += self._document_visibility_sql()
+        if path_prefix is not None:
+            escaped = self._escape_like(path_prefix)
+            query += (
+                " AND (pd.relative_path = %s "
+                "OR pd.relative_path LIKE %s ESCAPE '\\')"
+            )
+            params.extend([path_prefix, f"{escaped}/%"])
+        query += " ORDER BY pd.updated_at DESC LIMIT %s"
+        params.append(limit)
+        return [row["relative_path"] for row in await self._client.fetch_all(query, tuple(params))]
+
     async def find_indexed_documents_by_name(
         self,
         *,

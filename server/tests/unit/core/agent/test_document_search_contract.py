@@ -22,6 +22,13 @@ class SearchableDocumentService:
         self.search_results = search_results
         self.search_calls = []
         self.name_lookup_calls = []
+        self.awaiting_index = []
+
+    async def list_documents_awaiting_index(self, *, path_prefix=None, limit=5):
+        return [
+            path for path in self.awaiting_index
+            if path_prefix is None or path == path_prefix or path.startswith(path_prefix + "/")
+        ][:limit]
 
     async def list_documents(
         self,
@@ -1146,3 +1153,21 @@ async def test_subtree_focus_defaults_filters_and_explicit_values_override():
         ("list_project_documents", "docs", 50),
         ("list_project_documents", None, 50),
     ]
+
+
+@pytest.mark.no_network
+async def test_search_names_files_in_scope_that_are_still_indexing():
+    document_service = SearchableDocumentService(
+        [{"document_id": "file-1", "original_name": "notes.md",
+          "relative_path": "docs/notes.md", "status": "indexed"}]
+    )
+    document_service.awaiting_index = ["docs/changed.md", "other/elsewhere.md"]
+    tools = SearchTools()
+    tools.document_service = document_service
+    tools.session_id = "session-1"
+
+    results = await tools.search_project_documents("alpha", path_prefix="docs")
+
+    notes = [item["info"] for item in results if "info" in item]
+    assert any("docs/changed.md" in note for note in notes)
+    assert not any("other/elsewhere.md" in note for note in notes)

@@ -96,6 +96,7 @@ class ProjectFileTools:
             raise PermissionError(
                 f"{CONTEXT_FILE_PATH} is managed through the controlled Context importer"
             )
+        unindexed = False
         if normalized_path.casefold() != PROJECT_FILE_PATH.casefold():
             try:
                 document = await self.document_service.get_document_info(
@@ -110,10 +111,14 @@ class ProjectFileTools:
                     "read_project_document with a document_id instead.",
                 ) from exc
             active_project_id = getattr(self.document_service, "project_id", None)
-            if document is not None and (
+            registered = document is not None and (
                 active_project_id is None
                 or document.get("project_id") == active_project_id
-            ):
+            )
+            # A document waiting to be reindexed has no passage to cite yet,
+            # and read_project_document refuses it; the file itself is current.
+            unindexed = registered and document.get("status") in {"queued", "indexing", "failed"}
+            if registered and not unindexed:
                 raise ToolExecutionError(
                     "read_project_file",
                     "This path is a registered evidence document. Use "
@@ -140,12 +145,22 @@ class ProjectFileTools:
                 "max_characters must be between 1 and "
                 f"{PROJECT_FILE_TOOL_MAX_READ_CHARACTERS}"
             )
-        return await self.document_service.read_project_file(
+        result = await self.document_service.read_project_file(
             normalized_path,
             start_line=start_line,
             end_line=end_line,
             max_characters=max_characters,
         )
+        if unindexed:
+            result = {
+                **result,
+                "indexed": False,
+                "note": (
+                    "Read from disk: this document changed and is waiting to be "
+                    "reindexed, so it cannot be cited as a source yet."
+                ),
+            }
+        return result
 
     async def create_project_file(self, path: str, content: str) -> Dict:
         if self.document_service is None:

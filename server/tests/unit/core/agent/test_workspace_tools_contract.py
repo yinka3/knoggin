@@ -109,6 +109,20 @@ async def test_registered_evidence_document_cannot_bypass_provenance_aware_read(
 
 
 @pytest.mark.no_network
+async def test_a_document_waiting_to_be_reindexed_is_read_from_disk():
+    service = FakeDocumentService()
+    service.registered_documents["docs/evidence.md"] = {
+        "document_id": "document-1", "project_id": "project-1", "status": "queued",
+    }
+    tools = ProjectFileHarness(service)
+
+    result = await tools.read_project_file("docs/evidence.md")
+
+    assert result["indexed"] is False and "cannot be cited" in result["note"]
+    assert service.calls[-1][0] == "read"
+
+
+@pytest.mark.no_network
 async def test_project_markdown_is_readable_but_protected_from_ordinary_writes():
     service = FakeDocumentService()
     tools = ProjectFileHarness(service)

@@ -250,3 +250,28 @@ async def test_retained_parse_snapshot_remains_readable_after_a_document_tombsto
     assert historical is not None
     assert historical["document_status"] == "deleted"
     assert historical["snapshot"]["text"] == "retained evidence"
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_documents_awaiting_index_are_listed_by_scope(real_postgres_client):
+    for path, status in (
+        ("docs/queued.md", "queued"), ("docs/running.md", "indexing"),
+        ("docs/done.md", "indexed"), ("docs/broken.md", "failed"),
+        ("other/queued.md", "queued"),
+    ):
+        await real_postgres_client.execute(
+            """INSERT INTO public.project_documents (
+                   document_id, project_id, original_name, relative_path,
+                   extension, size_bytes, content_hash, status
+               ) VALUES (%s, 'project-1', 'x.md', %s, '.md', 1, 'hash', %s)""",
+            (str(uuid4()), path, status),
+        )
+    reader = DocumentReader(real_postgres_client, "project-1")
+
+    assert set(await reader.list_documents_awaiting_index(path_prefix="docs")) == {
+        "docs/queued.md", "docs/running.md",
+    }
+    assert len(await reader.list_documents_awaiting_index()) == 3
+    assert await reader.list_documents_awaiting_index(path_prefix="docs/done.md") == []
