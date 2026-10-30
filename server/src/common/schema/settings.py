@@ -227,6 +227,8 @@ class BackgroundTaskSettings(ConfigModel):
     # A job cut off by a restart reruns from the start and pays for its model
     # calls again, so by default it waits as `interrupted` for the user.
     resume_after_restart: bool = False
+    # Tool work that keeps running after its run (a long command); per chat.
+    max_handoffs_per_chat: int = Field(1, ge=1, le=20)
 
 
 class ChatCompactionSettings(ConfigModel):

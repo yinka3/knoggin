@@ -141,3 +141,60 @@ async def ask_user(
         if asyncio.current_task().cancelling():
             raise
         return default  # the run ended; the broker was closed
+
+
+# The chat a running tool belongs to, for handing its work to the background.
+# (registry, project_id, session_id, may_hand_off) where may_hand_off says
+# whether a stopped run should keep the work: not when the user pressed stop.
+_handoff: ContextVar[tuple | None] = ContextVar("tool_handoff", default=None)
+
+
+def bind_handoffs(registry, *, project_id: str, session_id: str, may_hand_off) -> Token:
+    return _handoff.set((registry, project_id, session_id, may_hand_off))
+
+
+def unbind_handoffs(token: Token) -> None:
+    try:
+        _handoff.reset(token)
+    except ValueError:
+        pass
+
+
+def hand_off(work: asyncio.Task, *, tool: str, label: str, describe=str) -> dict:
+    """Move running work to the background now, for example when the user
+    chose to. Raises RuntimeError when there is no chat to hand it to, or the
+    chat is at its limit; the caller decides what happens to the work."""
+
+    context = _handoff.get()
+    if context is None:
+        raise RuntimeError("No chat to continue this in the background")
+    registry, project_id, session_id, _ = context
+    try:
+        return registry.adopt(
+            work, project_id=project_id, session_id=session_id, tool=tool,
+            label=label, describe=describe,
+        )
+    except Exception as exc:
+        raise RuntimeError(str(exc)) from exc
+
+
+async def finish_or_hand_off(work, *, tool: str, label: str, describe=str):
+    """Await long tool work. If the run stops before it finishes because
+    nobody was watching, the work keeps going in the background and reports
+    to the chat when done. A stop the user asked for, a shutdown, or a chat
+    already at its limit stops the work too."""
+
+    task = asyncio.ensure_future(work)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        context = _handoff.get()
+        if not task.done() and context is not None and context[3]():
+            try:
+                hand_off(task, tool=tool, label=label, describe=describe)
+                raise
+            except RuntimeError:
+                pass
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        raise

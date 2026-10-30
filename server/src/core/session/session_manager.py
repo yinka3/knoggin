@@ -20,6 +20,7 @@ from core.knowledge.db.writers.session_deletion_writer import SessionDeletionWri
 from core.project.project_manager import ProjectManager
 from core.session.background_tasks import BackgroundTasks
 from core.session.document_batch_notices import DocumentBatchNotices
+from core.session.tool_handoffs import ToolHandoffs
 from runtime.session_runtime import SessionRuntime
 
 
@@ -61,11 +62,12 @@ class SessionManager:
         self._bootstrap_cleanup: dict[str, _BootstrapCleanup] = {}
         self.background_tasks = BackgroundTasks(self, config_manager)
         self.document_notices = DocumentBatchNotices(self, config_manager)
+        self.tool_handoffs = ToolHandoffs(self, config_manager)
 
     async def resume_background_work(self) -> None:
         """Pick up research jobs and folder notices a restart interrupted."""
 
-        for owner in (self.background_tasks, self.document_notices):
+        for owner in (self.background_tasks, self.document_notices, self.tool_handoffs):
             try:
                 await owner.resume()
             except Exception:
@@ -120,7 +122,7 @@ class SessionManager:
             raise RuntimeError("project semantic job is not registered")
         if project_state.document_service is None:
             raise RuntimeError("project document service is unavailable")
-        return SessionRuntime(
+        runtime = SessionRuntime(
             self.user_name,
             self.resources,
             project=project_state,
@@ -131,6 +133,8 @@ class SessionManager:
             background_tasks=self.background_tasks,
             **settings,
         )
+        runtime._tool_handoffs = self.tool_handoffs
+        return runtime
 
     async def _hard_delete_failed_session(self, session_id: str) -> None:
         """Remove a partially created session instead of preserving a tombstone."""
@@ -410,6 +414,7 @@ class SessionManager:
         # Jobs unload their own chats, which needs the lifecycle lock.
         await self.background_tasks.shutdown()
         await self.document_notices.shutdown()
+        await self.tool_handoffs.shutdown()
         async with self._lifecycle_lock:
             if self._closed:
                 return

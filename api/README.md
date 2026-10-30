@@ -76,6 +76,12 @@ asked for it (shown in `/follow-ups`):
   tools except starting more tasks. After a restart, a task that was cut off is
   `interrupted` and waits for `POST .../background-tasks/{job_id}/resume` (or
   `background_tasks.resume_after_restart`), because rerunning it costs again.
+- **Tool work handed to the background** (a long command): when its run stops
+  because nobody was watching, it keeps going and reports when done; a stop
+  the user asked for stops it too. `GET .../handoffs` lists a chat's items,
+  `DELETE .../handoffs/{item_id}` stops one. One per chat
+  (`background_tasks.max_handoffs_per_chat`); after a restart a running item is
+  `interrupted`.
 - **Folder imports** given a `session_id` report once every file is indexed or
   has failed for good.
 - **Duplicate entities** are checked every `jobs.duplicate_review.interval_hours`

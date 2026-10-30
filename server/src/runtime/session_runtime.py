@@ -35,7 +35,9 @@ from core.agent.run import AgentIdentity
 from core.agent.tool_events import (
     DecisionBroker,
     bind_decision_broker,
+    bind_handoffs,
     unbind_decision_broker,
+    unbind_handoffs,
 )
 from core.knowledge.documents import DocumentService
 from core.session.chat_compaction import ChatCompaction
@@ -179,6 +181,9 @@ class SessionRuntime:
         self._active_agent_stream: _AdmittedAgentStream | None = None
         self._active_idempotency_key: str | None = None
         self._active_decisions: DecisionBroker | None = None
+        self._run_stop_requested = False
+        # Set by the session manager; work handed off outlives this runtime.
+        self._tool_handoffs = None
         self._active_request_fingerprint: str | None = None
         self._active_run_id: str | None = None
         self._active_user_message_id: int | None = None
@@ -219,6 +224,9 @@ class SessionRuntime:
                 return False
             task = self._active_agent_task
             stream = self._active_agent_stream
+            # The user asked to stop, so tool work stops too instead of
+            # moving to the background.
+            self._run_stop_requested = True
         if stream is not None and not stream.closed:
             await stream.aclose()
             return True
@@ -723,6 +731,11 @@ class SessionRuntime:
             # Tools in this run can ask the user something and wait for it.
             decisions = self._active_decisions = DecisionBroker()
             decision_binding = bind_decision_broker(decisions)
+            self._run_stop_requested = False
+            handoff_binding = bind_handoffs(
+                self._tool_handoffs, project_id=self.project_id, session_id=self.session_id,
+                may_hand_off=lambda: not self._run_stop_requested and not self._closed,
+            ) if self._tool_handoffs is not None else None
             try:
                 async for event in orchestrator.run_stream(
                     user_query=accepted.content.strip(),
@@ -800,6 +813,8 @@ class SessionRuntime:
                         return
 
             finally:
+                if handoff_binding is not None:
+                    unbind_handoffs(handoff_binding)
                 unbind_decision_broker(decision_binding)
                 decisions.close()
                 self._active_decisions = None

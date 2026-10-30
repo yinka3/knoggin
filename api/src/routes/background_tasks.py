@@ -70,7 +70,27 @@ async def resume_job(request):
     return JSONResponse(resumed, status_code=202)
 
 
+async def list_handoffs(request):
+    """Tool work still running (or finished) in the background for a chat."""
+    runtime = request.app.state.runtime
+    if await _session_project(request) is None:
+        return _error("session_not_found", "Session not found", 404)
+    items = runtime.sessions.tool_handoffs.list(session_id=request.path_params["session_id"])
+    return JSONResponse({"items": items})
+
+
+async def stop_handoff(request):
+    item = await request.app.state.runtime.sessions.tool_handoffs.stop(
+        request.path_params["item_id"], session_id=request.path_params["session_id"]
+    )
+    if item is None:
+        return _error("handoff_not_found", "Background item not found", 404)
+    return JSONResponse(item)
+
+
 routes = [
+    Route("/v1/sessions/{session_id}/handoffs", list_handoffs, methods=["GET"]),
+    Route("/v1/sessions/{session_id}/handoffs/{item_id}", stop_handoff, methods=["DELETE"]),
     Route("/v1/sessions/{session_id}/background-tasks", start_job, methods=["POST"]),
     Route("/v1/sessions/{session_id}/background-tasks", list_jobs, methods=["GET"]),
     Route("/v1/sessions/{session_id}/background-tasks/{job_id}", cancel_job, methods=["DELETE"]),
