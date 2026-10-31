@@ -1,0 +1,64 @@
+{
+  "version": 0,
+  "extraction_guidance": "Conversations between one person and their assistant about their everyday life. Track the people they know, where they live and go, what they own and buy, their work and studies, their plans and events, and what they like.",
+  "topics": {
+    "Identity": {"description": "The user and the people in their life"},
+    "Personal": {"description": "Home, belongings, health, travel and plans"},
+    "Work": {"description": "Jobs, studies and organizations"},
+    "Interests": {"description": "Hobbies, media and tastes"},
+    "General": {"description": "Anything else"}
+  },
+  "entity_types": {
+    "Identity": {"topic": "Identity", "labels": ["person"]},
+    "Pet": {"topic": "Personal", "labels": ["pet"]},
+    "Place": {
+      "topic": "Personal",
+      "allowed_topics": ["Personal", "Work"],
+      "labels": ["city", "country", "location", "venue"]
+    },
+    "Organization": {
+      "topic": "Work",
+      "allowed_topics": ["Work", "Personal"],
+      "labels": ["company", "organization", "store", "school"]
+    },
+    "Product": {"topic": "Personal", "labels": ["product", "device", "vehicle"]},
+    "Event": {"topic": "Personal", "labels": ["event", "trip"]},
+    "Activity": {"topic": "Interests", "labels": ["hobby", "sport", "activity"]},
+    "Media": {"topic": "Interests", "labels": ["book", "movie", "show", "song", "game"]},
+    "Concept": {"topic": "General", "labels": ["concept"]}
+  },
+  "relationships": {
+    "FAMILY_OF": {
+      "source_types": ["Identity"], "target_types": ["Identity"], "symmetric": true,
+      "labels": ["family of", "sibling of", "parent of", "child of", "married to"]
+    },
+    "FRIEND_OF": {
+      "source_types": ["Identity"], "target_types": ["Identity"], "symmetric": true,
+      "labels": ["friend of", "knows"]
+    },
+    "WORKS_AT": {
+      "source_types": ["Identity"], "target_types": ["Organization"],
+      "labels": ["works at", "works for", "employed by"]
+    },
+    "MEMBER_OF": {
+      "source_types": ["Identity"], "target_types": ["Organization"],
+      "labels": ["member of", "studies at", "belongs to"]
+    },
+    "LIVES_IN": {
+      "source_types": ["Identity"], "target_types": ["Place"],
+      "labels": ["lives in", "moved to", "resides in"]
+    },
+    "VISITED": {
+      "source_types": ["Identity"], "target_types": ["Place", "Event"],
+      "labels": ["visited", "traveled to", "attended"]
+    },
+    "OWNS": {
+      "source_types": ["Identity"], "target_types": ["Product", "Pet"],
+      "labels": ["owns", "bought", "has"]
+    },
+    "LIKES": {
+      "source_types": ["Identity"], "target_types": ["Activity", "Media", "Product", "Place"],
+      "labels": ["likes", "enjoys", "prefers", "loves"]
+    }
+  }
+}
