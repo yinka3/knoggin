@@ -48,6 +48,7 @@ from core.project.project_files import (
     parse_workspaces,
     workspace_name,
 )
+from core.sandbox.manager import SandboxManager
 from runtime.project_factory import ProjectRuntimeFactory
 from runtime.project_runtime import ProjectRuntime
 from runtime.resources import RuntimeResources
@@ -112,6 +113,7 @@ class ProjectManager:
         self.pg = resources.postgres
         self._filesystem_factory = filesystem_factory
         self._config_manager = config_manager
+        self._sandbox_manager: SandboxManager | None = None
         self._project_deletion_writer = ProjectDeletionWriter(self.pg)
         self.notebooks = ProjectNotebookStore(self.pg, user_name)
         self.evidence_boards = EvidenceBoardService(
@@ -156,6 +158,17 @@ class ProjectManager:
             config_manager=config_manager,
         )
         self._closed = False
+
+    def attach_sandbox_manager(self, manager: SandboxManager) -> None:
+        self._sandbox_manager = manager
+
+    async def _remove_project_sandbox(self, project_id: str) -> None:
+        if self._sandbox_manager is None:
+            return
+        try:
+            await self._sandbox_manager.remove_project(project_id)
+        except Exception:
+            logger.exception("Sandbox cleanup failed for deleted project {}", project_id)
 
     def _invalidate_entity_caches(self, result: dict) -> dict[str, int]:
         explicit_entity_ids = result.get("affected_entity_ids")
@@ -1076,12 +1089,12 @@ class ProjectManager:
                     project_id=project_id,
                 ):
                     return None
+                file_cleanup_status = await self._finish_project_file_cleanup(project_id)
+                await self._remove_project_sandbox(project_id)
                 return {
                     "id": project_id,
                     "status": ProjectStatus.DELETED.value,
-                    "file_cleanup_status": await self._finish_project_file_cleanup(
-                        project_id
-                    ),
+                    "file_cleanup_status": file_cleanup_status,
                 }
 
             active_state = self.active_projects.get(project_id)
@@ -1108,6 +1121,8 @@ class ProjectManager:
                 file_cleanup_status = await self._finish_project_file_cleanup(
                     project_id, lease=lease
                 )
+
+            await self._remove_project_sandbox(project_id)
 
             logger.info(
                 "Hard deleted project {} database state: {}; file cleanup: {}; "

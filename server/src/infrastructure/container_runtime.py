@@ -122,6 +122,15 @@ class ContainerRuntime:
         )
         return response.json()
 
+    async def inspect_volume(self, name: str) -> dict[str, Any] | None:
+        try:
+            response = await self._request("GET", f"/volumes/{quote(name, safe='')}")
+        except ContainerRuntimeError as exc:
+            if exc.status_code == 404:
+                return None
+            raise
+        return response.json()
+
     async def remove_volume(self, name: str) -> None:
         await self._request("DELETE", f"/volumes/{quote(name, safe='')}")
 

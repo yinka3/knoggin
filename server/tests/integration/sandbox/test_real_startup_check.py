@@ -9,7 +9,7 @@ from infrastructure.container_runtime import discover
 pytestmark = pytest.mark.requires_container
 
 
-async def test_real_startup_check_cleans_up_its_container():
+async def test_real_startup_check_cleans_up_its_container(tmp_path):
     runtime = await discover()
     if runtime is None:
         pytest.skip("No reachable Podman or Docker socket")
@@ -20,6 +20,8 @@ async def test_real_startup_check_cleans_up_its_container():
         user_name=owner,
         runtime_settings=ContainerRuntimeSettings(),
         command_settings=WorkspaceCommandSettings(),
+        project_manager=None,
+        library_root=tmp_path,
     )
     try:
         result = await manager.check()

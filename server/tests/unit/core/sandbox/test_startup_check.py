@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 
@@ -14,6 +15,8 @@ def make_manager(*, enabled=True):
         user_name="alice",
         runtime_settings=ContainerRuntimeSettings(),
         command_settings=WorkspaceCommandSettings(enabled=enabled),
+        project_manager=None,
+        library_root=Path("/tmp"),
     )
 
 
@@ -36,6 +39,8 @@ async def test_check_failure_stages_and_cleanup(monkeypatch, failure, stage):
         nonlocal check_dir
         calls.append((request.method, request.url.path))
         path = request.url.path
+        if path == "/containers/json":
+            return httpx.Response(200, json=[])
         if path.startswith("/images/"):
             if failure == "image":
                 return httpx.Response(404, json={"message": "missing"})
@@ -85,6 +90,8 @@ async def test_success_writes_mount_and_cleans_up(monkeypatch):
         nonlocal source, marker
         calls.append((request.method, request.url.path))
         path = request.url.path
+        if path == "/containers/json":
+            return httpx.Response(200, json=[])
         if path.startswith("/images/"):
             return httpx.Response(200, json={})
         if path == "/containers/create":
@@ -138,6 +145,8 @@ async def test_missing_or_unreachable_runtime(monkeypatch, tmp_path, socket_exis
         user_name="alice",
         runtime_settings=ContainerRuntimeSettings(socket=str(socket)),
         command_settings=WorkspaceCommandSettings(),
+        project_manager=None,
+        library_root=tmp_path,
     )
     await manager.start()
     assert manager.status()["stage"] == (
@@ -162,4 +171,52 @@ async def test_rootless_runtime_has_no_warning(monkeypatch):
     assert manager.status()["runtime"] == "podman"
     assert manager.status()["rootless"] is True
     assert manager.status()["warnings"] == []
+    await manager.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("slow_operation", "stage"),
+    [("pull", "image_unavailable"), ("wait", "container_failed")],
+)
+async def test_check_timeout_cleans_up_container(monkeypatch, tmp_path, slow_operation, stage):
+    requests = []
+    check_dir = None
+
+    async def respond(request):
+        nonlocal check_dir
+        requests.append((request.method, request.url.path))
+        path = request.url.path
+        if path.startswith("/images/"):
+            return httpx.Response(
+                404 if slow_operation == "pull" else 200,
+                json={"message": "missing"} if slow_operation == "pull" else {},
+            )
+        if path == "/images/create":
+            await asyncio.sleep(1)
+            return httpx.Response(200, text='{"status":"done"}\n')
+        if path == "/containers/create":
+            config = json.loads(request.content)
+            check_dir = Path(config["HostConfig"]["Binds"][0].split(":")[0])
+            return httpx.Response(201, json={"Id": "check-1"})
+        if path.endswith("/wait"):
+            await asyncio.sleep(1)
+            return httpx.Response(200, json={"StatusCode": 0})
+        if path == "/containers/json":
+            return httpx.Response(200, json=[])
+        return httpx.Response(204)
+
+    runtime = ContainerRuntime("/fake.sock", httpx.MockTransport(respond))
+    monkeypatch.setattr("core.sandbox.manager.discover", _discover(runtime))
+    manager = SandboxManager(
+        user_name="alice",
+        runtime_settings=ContainerRuntimeSettings(),
+        command_settings=WorkspaceCommandSettings(check_timeout_seconds=0.01),
+        project_manager=None,
+        library_root=tmp_path,
+    )
+    await manager.start()
+    assert manager.status()["stage"] == stage
+    assert check_dir is None or not check_dir.exists()
+    if slow_operation == "wait":
+        assert ("DELETE", "/containers/check-1") in requests
     await manager.shutdown()

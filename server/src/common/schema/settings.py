@@ -286,6 +286,7 @@ class WorkspaceCommandSettings(ConfigModel):
     cpus: float = Field(2.0, gt=0, le=64)
     pids: int = Field(512, ge=32, le=65_536)
     idle_minutes: int = Field(30, ge=1, le=1_440)
+    check_timeout_seconds: float = Field(120.0, gt=0, le=3_600, allow_inf_nan=False)
 
 
 class DeveloperSettings(ConfigModel):
