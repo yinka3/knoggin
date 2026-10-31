@@ -274,6 +274,20 @@ class RunEventSettings(ConfigModel):
     unwatched_run_grace_seconds: float = Field(120.0, ge=0, le=86_400, allow_inf_nan=False)
 
 
+class ContainerRuntimeSettings(ConfigModel):
+    socket: str = ""
+    host_library_root: str = ""
+
+
+class WorkspaceCommandSettings(ConfigModel):
+    enabled: bool = True
+    default_image: str = "docker.io/library/ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852"
+    memory_mb: int = Field(4096, ge=256, le=262_144)
+    cpus: float = Field(2.0, gt=0, le=64)
+    pids: int = Field(512, ge=32, le=65_536)
+    idle_minutes: int = Field(30, ge=1, le=1_440)
+
+
 class DeveloperSettings(ConfigModel):
     ingestion: IngestionSettings = Field(default_factory=IngestionSettings)
     jobs: JobSettings = Field(default_factory=JobSettings)
@@ -293,6 +307,12 @@ class DeveloperSettings(ConfigModel):
     community: CommunitySettings = Field(default_factory=CommunitySettings)
     coordination_log: CoordinationLogSettings = Field(
         default_factory=CoordinationLogSettings
+    )
+    container_runtime: ContainerRuntimeSettings = Field(
+        default_factory=ContainerRuntimeSettings
+    )
+    workspace_commands: WorkspaceCommandSettings = Field(
+        default_factory=WorkspaceCommandSettings
     )
 
 
