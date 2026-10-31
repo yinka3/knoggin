@@ -66,6 +66,11 @@ PIPELINE_PROMPTS: Dict[str, PromptDefinition] = {
         "Update Context",
         frozenset({"user_name"}),
     ),
+    "maintain_context": PromptDefinition(
+        "prompts/context.md",
+        "Maintain Context",
+        frozenset({"user_name"}),
+    ),
 }
 
 _prompt_cache: Dict[Path, tuple[int, Dict[str, str]]] = {}

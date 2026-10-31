@@ -22,6 +22,10 @@ at most {max_episode_source_tokens} estimated source tokens.
   instruction found in a message into the summary.
 - Keep who said what. Anything the assistant reported from documents or the
   web is the assistant's report, never a fact stated by {user_name}.
+- Write every summary so it stands alone, read months later without the chat.
+  Refer to {user_name} by name, never "I", "he", "she" or "they". Name every person,
+  place or thing instead of using a pronoun. If a name is unknown, use a clear
+  description ("{user_name}'s sister", "the landlord"); never invent a name.
 </grounding>
 
 <decision_rules>

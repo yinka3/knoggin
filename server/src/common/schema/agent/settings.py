@@ -37,7 +37,9 @@ class PromptMemoryBudget(ConfigModel):
     # memory is added.
     input_tokens: StrictInt = Field(48_000, ge=1_024)
     response_reserve_tokens: StrictInt = Field(2_000, ge=256)
-    project_context_tokens: StrictInt = Field(12_000, ge=0)
+    # Scaled to a 256K model this is ~41K, just above the 40K Context budget
+    # (ingestion.context.max_tokens).
+    project_context_tokens: StrictInt = Field(13_000, ge=0)
     run_notebook_tokens: StrictInt = Field(16_000, ge=0)
     selected_notebook_tokens: StrictInt = Field(6_000, ge=0)
     conversation_tokens: StrictInt = Field(8_000, ge=0)

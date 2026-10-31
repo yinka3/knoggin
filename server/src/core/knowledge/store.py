@@ -24,7 +24,10 @@ from common.schema.source.references import (
     SourceReference,
     SourceReferenceCandidate,
 )
-from core.knowledge.context.models import ContextMaterialization
+from core.knowledge.context.models import (
+    ContextMaintenanceState,
+    ContextMaterialization,
+)
 from core.knowledge.db.embedding_rebuilder import EmbeddingRebuilder
 from core.knowledge.db.id_allocator import IdAllocator
 from core.knowledge.db.readers.artifact_reader import ArtifactReader
@@ -518,6 +521,7 @@ class KnowledgeStore:
         domain_version: int,
         edit_summary: str,
         materialization: ContextMaterialization,
+        maintained: bool = False,
     ) -> ContextSnapshot:
         return await self._project_context_writer.commit_revision(
             user_name=user_name,
@@ -528,6 +532,14 @@ class KnowledgeStore:
             domain_version=domain_version,
             edit_summary=edit_summary,
             materialization=materialization,
+            maintained=maintained,
+        )
+
+    async def get_project_context_maintenance_state(
+        self, revision_id: str, *, user_name: str, project_id: str
+    ) -> ContextMaintenanceState:
+        return await self._project_context_reader.get_maintenance_state(
+            revision_id, user_name=user_name, project_id=project_id
         )
 
     async def claim_project_semantic_window(

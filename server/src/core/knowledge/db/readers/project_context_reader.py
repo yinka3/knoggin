@@ -15,6 +15,7 @@ from common.schema.context import (
     ContextSnapshot,
 )
 from common.scoping import require_scope_value
+from core.knowledge.context.models import ContextMaintenanceState
 from infrastructure.postgres_client import PostgresClient
 
 
@@ -47,7 +48,7 @@ class ProjectContextReader:
         self,
         operation: str,
         query: str,
-        params: tuple[object, ...],
+        params: tuple[object, ...] | dict[str, object],
     ) -> list[dict]:
         try:
             return await self.client.fetch_all(query, params)
@@ -214,6 +215,65 @@ class ProjectContextReader:
                 user_name=user_name,
                 project_id=project_id,
             ),
+        )
+
+    async def get_maintenance_state(
+        self,
+        revision_id: UUID | str,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> ContextMaintenanceState:
+        """Episodes since the last maintained revision, and each block's age."""
+
+        user_name, project_id = self._scope(user_name, project_id, "get_maintenance_state")
+        revision_id = self._uuid(revision_id, "revision_id")
+        rows = await self._fetch_all(
+            "get_maintenance_state",
+            """
+            WITH revision_episodes AS (
+                SELECT revision.revision_number, revision.maintained,
+                       count(link.episode_id) AS episodes
+                FROM public.project_context_revisions AS revision
+                JOIN public.projects AS project
+                  ON project.project_id = revision.project_id
+                LEFT JOIN public.project_semantic_window_episodes AS link
+                  ON link.window_id = revision.window_id
+                 AND link.project_id = revision.project_id
+                WHERE revision.project_id = %(project_id)s
+                  AND project.user_name = %(user_name)s
+                GROUP BY revision.revision_number, revision.maintained
+            ),
+            born AS (
+                SELECT member.block_id, min(revision.revision_number) AS revision_number
+                FROM public.project_context_revision_blocks AS member
+                JOIN public.project_context_revisions AS revision
+                  ON revision.revision_id = member.revision_id
+                 AND revision.project_id = member.project_id
+                WHERE member.project_id = %(project_id)s
+                  AND member.block_id IN (
+                      SELECT block_id FROM public.project_context_revision_blocks
+                      WHERE revision_id = %(revision_id)s AND project_id = %(project_id)s
+                  )
+                GROUP BY member.block_id
+            )
+            SELECT born.block_id,
+                   coalesce(sum(later.episodes), 0) AS age,
+                   (SELECT coalesce(sum(episodes), 0) FROM revision_episodes
+                    WHERE revision_number > (
+                        SELECT coalesce(max(revision_number), 0)
+                        FROM revision_episodes WHERE maintained
+                    )) AS since
+            FROM born
+            LEFT JOIN revision_episodes AS later
+              ON later.revision_number > born.revision_number
+            GROUP BY born.block_id
+            """,
+            {"project_id": project_id, "user_name": user_name, "revision_id": revision_id},
+        )
+        return ContextMaintenanceState(
+            episodes_since_maintenance=int(rows[0]["since"]) if rows else 0,
+            block_ages={UUID(str(row["block_id"])): int(row["age"]) for row in rows},
         )
 
     async def get_revision_impact_block_ids(

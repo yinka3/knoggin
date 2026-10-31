@@ -1,6 +1,7 @@
 import asyncio
 import json
 import math
+import re
 from contextlib import asynccontextmanager
 from typing import (
     Any,
@@ -32,6 +33,7 @@ from common.exceptions import (
     LLMBudgetExceededError,
     LLMContextTruncatedError,
     LLMProviderError,
+    LLMRefusalError,
     LLMResponseError,
 )
 from common.schema.agent.stream import (
@@ -54,6 +56,11 @@ TRANSPORT_RETRIES = 3
 VALIDATION_RETRIES = 3
 TRACE_MAX_CHARS = 20_000
 CLIENT_SHUTDOWN_TIMEOUT = 5.0
+# Providers reject a thinking budget under 1024; keep room for the answer.
+# An apology where JSON was asked for: the standard refusal of OpenAI models.
+_REFUSAL_TEXT = re.compile(r"\s*(I'm sorry|I’m sorry|I am sorry|I can't|I can’t|I cannot)\b")
+_MIN_THINKING_TOKENS = 1024
+_MIN_ANSWER_TOKENS = 512
 ResponseT = TypeVar("ResponseT")
 
 
@@ -78,6 +85,14 @@ def _reported_window(row: Any) -> int | None:
         if isinstance(value, int) and value > 0:
             return value
     return None
+
+
+def _listed_parameters(row: Any) -> frozenset[str] | None:
+    # OpenRouter lists the request parameters each model accepts.
+    values = getattr(row, "supported_parameters", None)
+    if not isinstance(values, list):
+        return None
+    return frozenset(str(value) for value in values)
 
 
 def _listed_price(row: Any) -> LLMModelPricing | None:
@@ -180,6 +195,7 @@ class LLMService:
         self._client_usage: dict[AsyncOpenAI, int] = {}
         # Context sizes from the provider's model list, fetched once.
         self._listed_windows: dict[str, int | None] | None = None
+        self._listed_parameters: dict[str, frozenset[str]] | None = None
         self._serves_ollama_ps: bool | None = None
         self._active_requests: set[asyncio.Task] = set()
         self._closed = False
@@ -368,6 +384,7 @@ class LLMService:
             self._raw_client = replacement_raw
             self._client = replacement_instructor
             self._listed_windows = None
+            self._listed_parameters = None
             self._spending_ledger.set_listed_prices({})
             self._serves_ollama_ps = None
             self._retire_client(previous_raw)
@@ -437,11 +454,40 @@ class LLMService:
 
         return local_thinking_warning(self._base_url, self._thinking)
 
-    def _provider_extra_body(self, reasoning: Optional[str]) -> Dict[str, Any] | None:
+    def _request_options(
+        self,
+        model: str,
+        *,
+        temperature: float,
+        reasoning: Optional[str],
+        max_completion_tokens: int | None = None,
+    ) -> Dict[str, Any]:
+        """Sampling and provider fields this model accepts.
+
+        OpenRouter is asked to require every sent parameter, so one the model
+        rejects (newer Anthropic models take no temperature) leaves no
+        provider at all. A model the list does not describe gets them all.
+        """
+
+        supported = (self._listed_parameters or {}).get(model)
+        options: Dict[str, Any] = {}
+        if supported is None or "temperature" in supported:
+            options["temperature"] = temperature
+        if max_completion_tokens is not None:
+            options["max_completion_tokens"] = max_completion_tokens
+        if supported is not None and "reasoning" not in supported:
+            reasoning = None
+        if extra_body := self._provider_extra_body(reasoning, max_completion_tokens):
+            options["extra_body"] = extra_body
+        return options
+
+    def _provider_extra_body(
+        self, reasoning: Optional[str], max_completion_tokens: int | None = None
+    ) -> Dict[str, Any] | None:
         """Provider-specific request fields, including thinking control."""
 
         if self._is_openrouter:
-            return self._openrouter_extra_body(reasoning)
+            return self._openrouter_extra_body(reasoning, max_completion_tokens)
         # Local servers expose thinking only as on/off via reasoning_effort.
         if self._thinking == "off" or (
             self._thinking == "planning_only" and reasoning != "high"
@@ -452,17 +498,26 @@ class LLMService:
     @staticmethod
     def _openrouter_extra_body(
         reasoning: Optional[str] = "low",
+        max_completion_tokens: int | None = None,
     ) -> Dict[str, Any]:
         """Extra body parameters for OpenRouter."""
         body: Dict[str, Any] = {
             "provider": {"require_parameters": True},
         }
         if reasoning == "high":
-            body["reasoning"] = {"max_tokens": 4096}
+            budget = 4096
         elif reasoning == "medium":
-            body["reasoning"] = {"max_tokens": 1024}
-        elif reasoning not in (None, "low"):
+            budget = 1024
+        elif reasoning in (None, "low"):
+            return body
+        else:
             raise ValueError(f"Unsupported reasoning level: {reasoning}")
+        # Thinking counts against the reply cap; a budget over it is rejected.
+        # Leave room for the answer, and skip thinking below the 1024 minimum.
+        if max_completion_tokens is not None:
+            budget = min(budget, max_completion_tokens - _MIN_ANSWER_TOKENS)
+        if budget >= _MIN_THINKING_TOKENS:
+            body["reasoning"] = {"max_tokens": budget}
         return body
 
     async def context_window(self, model: str) -> int | None:
@@ -493,6 +548,11 @@ class LLMService:
             return
         self._listed_windows = {
             str(row.id): _reported_window(row) for row in page.data
+        }
+        self._listed_parameters = {
+            str(row.id): params
+            for row in page.data
+            if (params := _listed_parameters(row)) is not None
         }
         prices = {str(row.id): price for row in page.data if (price := _listed_price(row))}
         self._spending_ledger.set_listed_prices(prices)
@@ -700,11 +760,10 @@ class LLMService:
                             system_message,
                             {"role": "user", "content": user},
                         ],
-                        "temperature": temperature,
+                        **self._request_options(
+                            model, temperature=temperature, reasoning=reasoning
+                        ),
                     }
-
-                    if extra_body := self._provider_extra_body(reasoning):
-                        create_kwargs["extra_body"] = extra_body
 
                     response = await raw_client.chat.completions.create(**create_kwargs)
                     if not response.choices:
@@ -808,20 +867,23 @@ class LLMService:
         model = model or self._extraction_model
         system_message = self._system_message(system)
         system = system_text(system)
+        if self._is_openrouter:
+            # The options below depend on what the listing says the model takes.
+            await self._load_model_list()
         create_kwargs: Dict[str, Any] = {
             "model": model,
             "messages": [
                 system_message,
                 {"role": "user", "content": user},
             ],
-            "temperature": temperature,
             "response_model": response_model,
             # Validation retries are controlled below so each provider request
             # receives its own budget reservation and usage record.
             "max_retries": 0,
+            **self._request_options(
+                model, temperature=temperature, reasoning=reasoning
+            ),
         }
-        if extra_body := self._provider_extra_body(reasoning):
-            create_kwargs["extra_body"] = extra_body
 
         async with self._client_snapshot() as (_, instructor_client):
             response = None
@@ -891,6 +953,11 @@ class LLMService:
                             details={"model": model, "error": str(provider_exc)},
                             transient=self._is_transient_provider_error(provider_exc),
                         ) from exc
+                    if self._is_refusal(completion):
+                        raise LLMRefusalError(
+                            "LLM declined the structured request",
+                            details=self._structured_validation_error_details(model, exc),
+                        ) from exc
                     if validation_failures < VALIDATION_RETRIES:
                         validation_failures += 1
                         logger.warning(
@@ -952,7 +1019,12 @@ class LLMService:
                             aac_budget=aac_budget,
                         )
                         recorded = True
-                    raise LLMResponseError(
+                    error = (
+                        LLMRefusalError
+                        if self._is_refusal(getattr(exc, "raw_response", None))
+                        else LLMResponseError
+                    )
+                    raise error(
                         "LLM structured generation failed",
                         details={"model": model, "error": str(exc)},
                     ) from exc
@@ -987,6 +1059,24 @@ class LLMService:
             if isinstance(candidate, (APIConnectionError, APIStatusError)):
                 return candidate
         return None
+
+    @staticmethod
+    def _is_refusal(completion: Any) -> bool:
+        """A provider content block, or a model that declined instead of answering."""
+
+        error = getattr(completion, "error", None)
+        if isinstance(error, dict):
+            metadata = error.get("metadata") or {}
+            return metadata.get("error_type") == "content_policy_violation"
+        choices = getattr(completion, "choices", None) or ()
+        if not choices:
+            return False
+        if getattr(choices[0], "finish_reason", None) == "content_filter":
+            return True
+        message = getattr(choices[0], "message", None)
+        if getattr(message, "refusal", None):
+            return True
+        return bool(_REFUSAL_TEXT.match(getattr(message, "content", None) or ""))
 
     @staticmethod
     def _is_transient_provider_error(exc: Exception) -> bool:
@@ -1095,16 +1185,17 @@ class LLMService:
                     ],
                     tools=tools,
                     tool_choice="auto",
-                    temperature=temperature,
                     stream=True,
+                    **self._request_options(
+                        model,
+                        temperature=temperature,
+                        reasoning=reasoning,
+                        max_completion_tokens=max_completion_tokens,
+                    ),
                 )
-                if max_completion_tokens is not None:
-                    create_kwargs["max_completion_tokens"] = max_completion_tokens
                 # Standard OpenAI option, also honored by Ollama, vLLM, and
                 # LM Studio; usage is needed for accounting and truncation checks.
                 create_kwargs["stream_options"] = {"include_usage": True}
-                if extra_body := self._provider_extra_body(reasoning):
-                    create_kwargs["extra_body"] = extra_body
 
                 response = await raw_client.chat.completions.create(**create_kwargs)
 

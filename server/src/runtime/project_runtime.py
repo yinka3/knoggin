@@ -101,8 +101,9 @@ class ProjectRuntime:
         the Context revision it produced.
 
         Settled means the flush request was used up (a run found nothing left
-        to claim) and no window is in progress. Raises on any failed window or
-        on timeout. For evals and tools that need memory built before going on.
+        to claim) and no window is in progress. A window waiting to retry (a
+        rate limit, say) is still in progress; raises on a window with no retry
+        left, or on timeout. For evals and tools that need memory built first.
         """
 
         processor = self.project_semantic_processor
@@ -112,7 +113,11 @@ class ProjectRuntime:
         scope = {"user_name": self.user_name, "project_id": self.project_id}
         deadline = asyncio.get_running_loop().time() + timeout_s
         while True:
-            failed = await store.list_failed_project_semantic_windows(**scope)
+            failed = [
+                window
+                for window in await store.list_failed_project_semantic_windows(**scope)
+                if window.next_retry_at_ms is None
+            ]
             if failed:
                 details = ", ".join(
                     f"{window.window_id} ({window.stage.value}: "

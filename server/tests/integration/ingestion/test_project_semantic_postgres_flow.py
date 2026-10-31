@@ -176,10 +176,11 @@ class _AgentDerivedUpdater:
 
 
 class _EpisodeAwareAgentDerivedUpdater(_AgentDerivedUpdater):
-    async def update(self, *, episodes, **kwargs):
-        assert len(episodes) == 1
-        assert [message.message_id for message in episodes[0].messages] == [101, 102]
-        return await super().update(episodes=episodes, **kwargs)
+    async def update(self, *, earlier_episodes, **kwargs):
+        # The window's own Episode is already in its messages; only Episodes
+        # from earlier windows are background.
+        assert earlier_episodes == []
+        return await super().update(earlier_episodes=earlier_episodes, **kwargs)
 
 
 class _EmptyEntityBuilder:

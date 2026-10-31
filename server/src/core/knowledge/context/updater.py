@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol, TypeVar
 from uuid import UUID
@@ -14,14 +15,14 @@ from common.schema.context import (
     AssertionKind,
     ContextAdd,
     ContextBlockRecord,
-    ContextDelete,
     ContextEditBase,
     ContextReplace,
     ContextSnapshot,
     ContextSupportKind,
     LLMContextUpdate,
 )
-from common.schema.episode.models import Episode
+from common.schema.episode.models import EpisodeCard
+from core.agent.prompt_budget import token_count
 from core.knowledge.context.models import ContextBlockSupport, ContextMaterialization
 from core.knowledge.context.prompts import get_context_update_prompt
 from core.knowledge.context.render import (
@@ -119,14 +120,15 @@ class ContextUpdateBuild:
     snapshot: ContextSnapshot | None
     messages: list[dict[str, Any]]
     assistant_source_refs: list[dict[str, Any]]
-    episodes: list[Episode]
+    budget_tokens: int
+    # Episodes from earlier windows, oldest first: background for judging
+    # what is recent or repeated. They cannot be cited.
+    earlier_episodes: list[EpisodeCard] = field(default_factory=list)
+    count_tokens: Callable[[str], int] | None = None
     _message_by_handle: dict[str, _MessageEvidence] = field(
         init=False, default_factory=dict
     )
     _source_by_handle: dict[str, _SourceEvidence] = field(
-        init=False, default_factory=dict
-    )
-    _episode_messages_by_handle: dict[str, tuple[_MessageEvidence, ...]] = field(
         init=False, default_factory=dict
     )
     _context_block_by_handle: dict[str, ContextBlockRecord] = field(
@@ -202,22 +204,6 @@ class ContextUpdateBuild:
             seen_sources.add(source_id)
             self._source_by_handle[f"S{index}"] = _SourceEvidence(source_id, parent)
 
-        by_pair = {
-            (message.message_id, message.session_id): message
-            for message in self._message_by_handle.values()
-        }
-        seen_episodes: set[str] = set()
-        for index, episode in enumerate(self.episodes, start=1):
-            if episode.project_id != self.project_id or episode.episode_id in seen_episodes:
-                raise ValueError("Context Episode aid is outside its project or repeated")
-            seen_episodes.add(episode.episode_id)
-            current_messages = tuple(
-                by_pair[(item.message_id, item.session_id)]
-                for item in episode.messages
-                if (item.message_id, item.session_id) in by_pair
-            )
-            self._episode_messages_by_handle[f"E{index}"] = current_messages
-
     def evidence_brief(self) -> str:
         """Render complete source catalogs without exposing durable identifiers."""
 
@@ -225,8 +211,17 @@ class ContextUpdateBuild:
             "CONTEXT SECTIONS (return one of these section_key values):",
             *(f"- {section.key}: {section.title}" for section in self.domain.context_sections),
             "",
+            f"CONTEXT SIZE: about {self._context_tokens()} of {self.budget_tokens} tokens",
+            "",
             "CURRENT CONTEXT:",
             self._current_context_text(),
+            "",
+            "EARLIER EPISODES (background, oldest first; cannot be cited):",
+            *(
+                f"- {_episode_date(episode)}{' '.join(episode.summary.split())}"
+                for episode in self.earlier_episodes
+            ),
+            *(() if self.earlier_episodes else ("(none)",)),
             "",
             "FROZEN MESSAGES:",
         ]
@@ -262,20 +257,6 @@ class ContextUpdateBuild:
                     "</source_excerpt>",
                 )
             )
-        lines.extend(("", "EPISODE INTERPRETATION AIDS:"))
-        if not self._episode_messages_by_handle:
-            lines.append("(none)")
-        for handle, messages in self._episode_messages_by_handle.items():
-            episode = self.episodes[int(handle[1:]) - 1]
-            current_handles = [
-                local
-                for local, message in self._message_by_handle.items()
-                if message in messages
-            ]
-            lines.append(
-                f"[{handle}] current_window_messages={','.join(current_handles) or '(none)'}"
-            )
-            lines.append(episode.summary)
         return "\n".join(lines)
 
     def apply(self, output: LLMContextUpdate) -> ContextUpdateResult:
@@ -340,6 +321,13 @@ class ContextUpdateBuild:
             rejected_operations=tuple(rejected),
         )
 
+    def _context_tokens(self) -> int:
+        if self.snapshot is None:
+            return 0
+        return sum(
+            token_count(block.markdown, self.count_tokens) for block in self.snapshot.blocks
+        )
+
     def _current_context_text(self) -> str:
         if self.snapshot is None:
             return "(no prior Context revision)"
@@ -354,11 +342,6 @@ class ContextUpdateBuild:
                 messages.append(self._message_by_handle[handle])
             elif handle in self._source_by_handle:
                 sources.append(self._source_by_handle[handle])
-            elif handle in self._episode_messages_by_handle:
-                expanded = self._episode_messages_by_handle[handle]
-                if not expanded:
-                    raise ValueError("Context Episode aid has no current-window evidence")
-                messages.extend(expanded)
             else:
                 raise ValueError(f"Context operation references unknown evidence {handle}")
         resolved = _ResolvedEvidence(
@@ -373,8 +356,6 @@ class ContextUpdateBuild:
             and all(message.is_clarification for message in resolved.messages)
         ):
             raise ValueError("Clarification questions alone cannot establish Context")
-        if isinstance(operation, ContextDelete):
-            return resolved
         if operation.assertion_kind is AssertionKind.HUMAN_ASSERTED:
             raise ValueError("the Context model cannot create human_asserted blocks")
         if operation.assertion_kind is AssertionKind.USER_ASSERTED:
@@ -404,7 +385,7 @@ class ContextUpdateBuild:
         operation: ContextEditBase,
         evidence: _ResolvedEvidence,
     ) -> None:
-        if not isinstance(operation, (ContextReplace, ContextDelete)):
+        if not isinstance(operation, ContextReplace):
             return
         target = self._context_block_by_handle.get(operation.target.handle)
         if target is None or target.source_time_ms is None:
@@ -418,8 +399,6 @@ class ContextUpdateBuild:
         operation: ContextEditBase,
         evidence: _ResolvedEvidence,
     ) -> ContextEditBase:
-        if isinstance(operation, ContextDelete):
-            return operation
         payload = operation.model_dump()
         payload["source_time_ms"] = ContextUpdateBuild._evidence_source_time(evidence)
         if isinstance(operation, ContextAdd):
@@ -434,8 +413,6 @@ class ContextUpdateBuild:
         operation: ContextEditBase,
         evidence: _ResolvedEvidence,
     ) -> list[ContextBlockSupport]:
-        if isinstance(operation, ContextDelete):
-            return []
         selected: list[ContextBlockSupport] = []
         if operation.assertion_kind is AssertionKind.USER_ASSERTED:
             messages = [message for message in evidence.messages if message.role == "user"]
@@ -475,6 +452,11 @@ class ContextUpdateBuild:
         return list(dict.fromkeys(selected))
 
 
+def _episode_date(episode: EpisodeCard) -> str:
+    when = episode.last_message_at or episode.first_message_at
+    return f"{when.date().isoformat()}: " if when else ""
+
+
 class ContextUpdater:
     """Call the Context LLM once, then validate before any durable write."""
 
@@ -490,7 +472,8 @@ class ContextUpdater:
         snapshot: ContextSnapshot | None,
         messages: list[dict[str, Any]],
         assistant_source_refs: list[dict[str, Any]],
-        episodes: list[Episode],
+        earlier_episodes: list[EpisodeCard],
+        budget_tokens: int,
     ) -> ContextUpdateResult:
         if self._llm is None:
             raise RuntimeError("ContextUpdater requires an LLM")
@@ -500,7 +483,9 @@ class ContextUpdater:
             snapshot=snapshot,
             messages=messages,
             assistant_source_refs=assistant_source_refs,
-            episodes=episodes,
+            budget_tokens=budget_tokens,
+            earlier_episodes=earlier_episodes,
+            count_tokens=getattr(self._llm, "count_tokens", None),
         )
         output = await self._llm.generate_structured(
             response_model=LLMContextUpdate,

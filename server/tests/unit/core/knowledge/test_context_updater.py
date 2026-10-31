@@ -13,7 +13,7 @@ from common.schema.context import (
     ContextSnapshot,
     LLMContextUpdate,
 )
-from common.schema.episode.models import Episode, MessageEpisode
+from common.schema.episode.models import EpisodeCard
 from core.knowledge.context.updater import ContextUpdateBuild, ContextUpdater
 
 
@@ -73,19 +73,7 @@ def _source_refs(source_id):
     ]
 
 
-def _episode():
-    return Episode(
-        episode_id="episode-1",
-        project_id="project-1",
-        summary="The user confirmed the local-only constraint.",
-        messages=[
-            MessageEpisode(message_id=11, session_id="session-1", message_position=0),
-            MessageEpisode(message_id=12, session_id="session-1", message_position=1),
-        ],
-    )
-
-
-def _build(*, episodes=None):
+def _build(*, earlier_episodes=(), budget_tokens=40_000):
     source_id = uuid4()
     return ContextUpdateBuild(
         project_id="project-1",
@@ -93,7 +81,8 @@ def _build(*, episodes=None):
         snapshot=_snapshot(),
         messages=_messages(),
         assistant_source_refs=_source_refs(source_id),
-        episodes=[] if episodes is None else episodes,
+        earlier_episodes=list(earlier_episodes),
+        budget_tokens=budget_tokens,
     ), source_id
 
 
@@ -192,7 +181,7 @@ def test_clarification_questions_cannot_establish_context_without_other_evidence
         snapshot=_snapshot(),
         messages=messages,
         assistant_source_refs=_source_refs(source_id),
-        episodes=[],
+        budget_tokens=40_000,
     )
 
     result = build.apply(
@@ -222,7 +211,7 @@ def test_clarification_questions_cannot_establish_context_without_other_evidence
         snapshot=_snapshot(),
         messages=[messages[1]],
         assistant_source_refs=[],
-        episodes=[],
+        budget_tokens=40_000,
     )
     rejected = clarification_only.apply(
         LLMContextUpdate(
@@ -241,57 +230,28 @@ def test_clarification_questions_cannot_establish_context_without_other_evidence
 
 @pytest.mark.unit
 @pytest.mark.no_network
-def test_episode_aid_expands_to_current_messages_and_cannot_be_terminal_evidence():
-    build, _ = _build(episodes=[_episode()])
+def test_model_contract_drops_only_the_edits_that_break_its_rules():
+    valid = {"operation": "add", "section_key": "current_state",
+             "markdown": "Kept.", "evidence": [{"handle": "M1"}]}
+    update = LLMContextUpdate.model_validate({"operations": [
+        valid,
+        {**valid, "markdown": "Missing evidence.", "evidence": []},
+        {**valid, "markdown": "Not a model capability.",
+         "assertion_kind": "human_asserted"},
+        {**valid, "markdown": "Kept without its model-set source time.",
+         "source_time_ms": 1},
+        {**valid, "markdown": "Malformed handle.", "evidence": [{"handle": "msg1"}]},
+        {**valid, "markdown": "Repeated handle.",
+         "evidence": [{"handle": "M1"}, {"handle": "M1"}]},
+        {**valid, "operation": "rename"},
+    ]})
 
-    result = build.apply(
-        LLMContextUpdate(
-            operations=[
-                ContextAdd(
-                    section_key="active_work",
-                    markdown="Work remains local-first.",
-                    assertion_kind=AssertionKind.AGENT_DERIVED,
-                    evidence=[{"handle": "E1"}],
-                )
-            ]
-        )
-    )
-
-    assert result.materialization is not None
-    assert {(support.message_id, support.support_kind.value) for support in result.materialization.supports} == {
-        (11, "user_message"),
-        (12, "assistant_message"),
-    }
-
-    stale_episode = _episode().model_copy(
-        update={
-            "messages": [
-                MessageEpisode(message_id=99, session_id="other", message_position=0)
-            ]
-        }
-    )
-    stale_build, _ = _build(episodes=[stale_episode])
-    rejected = stale_build.apply(
-        LLMContextUpdate(
-            operations=[
-                ContextAdd(
-                    section_key="active_work",
-                    markdown="Cannot use a stale episode alone.",
-                    evidence=[{"handle": "E1"}],
-                )
-            ]
-        )
-    )
-    _assert_rejected(rejected, "no current-window evidence")
-
-
-@pytest.mark.unit
-@pytest.mark.no_network
-def test_model_contract_fails_closed_for_missing_evidence_human_assertions_and_model_time():
-    with pytest.raises(ValidationError, match="evidence"):
-        LLMContextUpdate(
-            operations=[ContextAdd(section_key="current_state", markdown="Missing evidence.")]
-        )
+    assert [operation.markdown for operation in update.operations] == [
+        "Kept.",
+        "Kept without its model-set source time.",
+    ]
+    # The server computes source time; a model-set value is discarded.
+    assert update.operations[1].source_time_ms is None
 
 
 @pytest.mark.unit
@@ -306,7 +266,7 @@ def test_late_evidence_cannot_replace_newer_context_and_oversized_output_fails_c
         snapshot=snapshot,
         messages=_messages(),
         assistant_source_refs=_source_refs(source_id),
-        episodes=[],
+        budget_tokens=40_000,
     )
     rejected = build.apply(
         LLMContextUpdate(
@@ -341,28 +301,6 @@ def test_late_evidence_cannot_replace_newer_context_and_oversized_output_fails_c
                 ),
             ]
         )
-    with pytest.raises(ValidationError, match="human_asserted"):
-        LLMContextUpdate(
-            operations=[
-                ContextAdd(
-                    section_key="current_state",
-                    markdown="Not a model capability.",
-                    assertion_kind=AssertionKind.HUMAN_ASSERTED,
-                    evidence=[{"handle": "M1"}],
-                )
-            ]
-        )
-    with pytest.raises(ValidationError, match="source_time"):
-        LLMContextUpdate(
-            operations=[
-                ContextAdd(
-                    section_key="current_state",
-                    markdown="The server owns source time.",
-                    evidence=[{"handle": "M1"}],
-                    source_time_ms=1,
-                )
-            ]
-        )
 
 
 class _CapturingLLM:
@@ -389,12 +327,13 @@ async def test_context_updater_uses_the_structured_contract_and_server_prompt():
         snapshot=_snapshot(),
         messages=_messages(),
         assistant_source_refs=[],
-        episodes=[],
+        earlier_episodes=[],
+        budget_tokens=40_000,
     )
 
     assert result.materialization is None
     assert llm.calls[0]["response_model"] is LLMContextUpdate
-    assert "EPISODES are interpretation aids" in llm.calls[0]["system"]
+    assert "EARLIER EPISODES are background" in llm.calls[0]["system"]
     assert llm.calls[0]["temperature"] == 0.0
 
 
@@ -448,7 +387,7 @@ def test_brief_names_the_section_keys_the_model_must_return():
         snapshot=None,
         messages=_messages(),
         assistant_source_refs=[],
-        episodes=[],
+        budget_tokens=40_000,
     )
 
     brief = build.evidence_brief()
@@ -518,3 +457,47 @@ def test_a_quote_may_join_pieces_of_the_users_words():
         ("Claim: sentences from two messages.", AssertionKind.AGENT_DERIVED),
         ("Claim: one piece is not theirs.", AssertionKind.AGENT_DERIVED),
     ]
+
+
+def _earlier_episode(summary="Ada chose Postgres for the project last week."):
+    return EpisodeCard(
+        episode_id="episode-0", project_id="project-1", summary=summary
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_per_window_update_cannot_delete_so_one_window_cannot_empty_context():
+    update = LLMContextUpdate.model_validate({"operations": [
+        {"operation": "delete", "section_key": "current_state",
+         "target": {"handle": "C1"}, "evidence": [{"handle": "M1"}]},
+        {"operation": "replace", "section_key": "current_state",
+         "target": {"handle": "C1"}, "markdown": "The plan is finished.",
+         "evidence": [{"handle": "M1"}]},
+    ]})
+
+    assert [operation.operation.value for operation in update.operations] == ["replace"]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_earlier_episodes_are_background_that_cannot_be_cited():
+    build, _ = _build(earlier_episodes=[_earlier_episode()])
+    brief = build.evidence_brief()
+
+    background = brief.split("EARLIER EPISODES")[1]
+    assert "Ada chose Postgres for the project last week." in background
+    assert "[E1]" not in brief
+    update = LLMContextUpdate.model_validate({"operations": [
+        {"operation": "add", "section_key": "current_state",
+         "markdown": "Uses Postgres.", "evidence": [{"handle": "E1"}]},
+    ]})
+    assert update.operations == []
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_brief_says_how_full_context_is():
+    build, _ = _build(budget_tokens=40_000)
+
+    assert "CONTEXT SIZE: about 4 of 40000 tokens" in build.evidence_brief()

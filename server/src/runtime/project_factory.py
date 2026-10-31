@@ -20,6 +20,7 @@ from core.ingestion.project_semantic_processor import ProjectSemanticProcessor
 from core.ingestion.relationship_extractor import ContextRelationshipExtractor
 from core.ingestion.semantic_window_admission import SemanticWindowAdmission
 from core.ingestion.text_processor import TextProcessor
+from core.knowledge.context.maintainer import ContextMaintainer
 from core.knowledge.context.projection import ContextProjection
 from core.knowledge.context.updater import ContextUpdater
 from core.knowledge.db.readers.document_reader import DocumentReader
@@ -306,6 +307,7 @@ class ProjectRuntimeFactory:
             settings=developer_settings.ingestion,
             capture_semantic_policy=runtime.capture_semantic_policy,
             context_updater=ContextUpdater(llm=resources.llm_service),
+            context_maintainer=ContextMaintainer(llm=resources.llm_service),
             context_projection=context_projection,
             context_entity_builder=ContextEntityBuildService(
                 processor=runtime.text_processor,

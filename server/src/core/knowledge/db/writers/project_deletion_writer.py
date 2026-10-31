@@ -538,11 +538,19 @@ class ProjectDeletionWriter:
                 )
 
                 # Assistant memberships restrict deletion of their exchange's
-                # user message. Remove the project-owned memberships first so
+                # user message, and an unfinished window's Episode links
+                # restrict deletion of its Episodes. Remove both first so
                 # aggregate deletion can then rely on the project cascades.
                 await cur.execute(
                     """
                     DELETE FROM public.project_semantic_window_messages
+                    WHERE project_id = %s
+                    """,
+                    (project_id,),
+                )
+                await cur.execute(
+                    """
+                    DELETE FROM public.project_semantic_window_episodes
                     WHERE project_id = %s
                     """,
                     (project_id,),

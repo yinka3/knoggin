@@ -262,6 +262,55 @@ async def test_project_deletion_executes_complete_aggregate_against_postgres(
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
 @pytest.mark.no_network
+async def test_project_deletion_removes_a_window_stuck_after_its_episodes(
+    real_postgres_client,
+):
+    # A window that failed after writing Episodes still links to them, and
+    # that link refuses to let an Episode go first.
+    window_id = "33333333-3333-4333-8333-333333333333"
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.episodes (episode_id, project_id, summary)
+        VALUES ('stuck-episode', 'project-1', 'Written before the window failed.')
+        """
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.project_semantic_windows (
+            window_id, user_name, project_id, origin, stage, domain_version,
+            policy_snapshot, source_token_count, token_estimator,
+            token_estimator_version
+        ) VALUES (
+            %s, 'ada', 'project-1', 'conversation', 'claimed', 1,
+            '{}'::jsonb, 0, 'test', 'v1'
+        )
+        """,
+        (window_id,),
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.project_semantic_window_episodes (
+            window_id, project_id, episode_id, ordinal
+        ) VALUES (%s, 'project-1', 'stuck-episode', 0)
+        """,
+        (window_id,),
+    )
+
+    deleted = await ProjectDeletionWriter(real_postgres_client).delete_project(
+        user_name="ada", project_id="project-1"
+    )
+
+    assert deleted is not None
+    for table in ("projects", "episodes", "project_semantic_windows"):
+        assert await real_postgres_client.fetch_one(
+            f"SELECT count(*) AS count FROM public.{table} WHERE project_id = 'project-1'"
+        ) == {"count": 0}
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.requires_pgvector
+@pytest.mark.no_network
 async def test_project_manager_retries_file_cleanup_after_committed_deletion(
     real_postgres_client,
     tmp_path,

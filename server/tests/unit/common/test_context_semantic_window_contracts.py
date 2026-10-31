@@ -5,6 +5,7 @@ from common.schema.context import (
     ContextAdd,
     ContextDelete,
     ContextEditOperationKind,
+    LLMContextUpdate,
     LocalContextBlockReference,
 )
 from common.schema.semantic_window import (
@@ -92,6 +93,66 @@ def test_context_edit_and_reference_contracts_are_strict():
         )
     with pytest.raises(ValidationError):
         ContextDelete(
-            section_key="not-a-section",
+            section_key="Not a section!",
             target={"handle": "C1"},
         )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_context_edit_reads_a_section_title_as_its_key():
+    # Models sometimes return the heading they see instead of its key.
+    for title in ("Current State", "current-state", " current_state "):
+        assert ContextAdd(
+            section_key=title, markdown="The project is active."
+        ).section_key == "current_state"
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_context_edit_keeps_the_start_of_a_long_user_quote():
+    quote = "I moved to Lisbon. " * 100
+
+    edit = ContextAdd(
+        section_key="current_state",
+        markdown="The user lives in Lisbon.",
+        evidence=[{"handle": "M1"}],
+        user_quote=quote,
+    )
+
+    assert edit.user_quote == quote[:1_000]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_context_update_drops_only_the_edits_without_citations():
+    update = LLMContextUpdate.model_validate({
+        "operations": [
+            {"operation": "add", "section_key": "current_state",
+             "markdown": "Cited.", "evidence": [{"handle": "M1"}]},
+            {"operation": "add", "section_key": "current_state",
+             "markdown": "Uncited.", "evidence": []},
+            {"operation": "add", "section_key": "current_state",
+             "markdown": "No evidence field."},
+        ]
+    })
+
+    assert [op.markdown for op in update.operations] == ["Cited."]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_context_edit_keeps_its_first_eight_citations():
+    # A block drawn from a long chat can cite more messages than an edit keeps.
+    update = LLMContextUpdate.model_validate({
+        "operations": [{
+            "operation": "add",
+            "section_key": "current_state",
+            "markdown": "The user is planning a trip.",
+            "evidence": [{"handle": f"M{i}"} for i in range(1, 15)],
+        }]
+    })
+
+    assert [item.handle for item in update.operations[0].evidence] == [
+        f"M{i}" for i in range(1, 9)
+    ]

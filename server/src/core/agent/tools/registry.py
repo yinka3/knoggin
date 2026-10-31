@@ -804,7 +804,7 @@ class Tools(
         """Get indexed documents for prompt context."""
         if not self.document_service:
             return []
-        documents = await self.document_service.list_project_documents()
+        documents = await self.document_service.list_documents()
         return [
             document
             for document in documents

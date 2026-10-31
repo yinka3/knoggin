@@ -719,17 +719,38 @@ class AgentExecutor:
                     saw_tool_calls = True
                     yield event
                 elif event["event"] == "step_completed" and not saw_tool_calls:
-                    yield {
-                        "event": "step_error",
-                        "data": {
-                            "kind": "formatting",
-                            "message": (
-                                "You must either call an investigative tool or call "
-                                "submit_answer. Do not output raw text."
-                            ),
-                            "usage": event["data"]["usage"],
-                        },
-                    }
+                    text = (event["data"].get("content") or "").strip()
+                    if text and any(
+                        schema["function"]["name"] == "submit_answer"
+                        for schema in tool_schemas
+                    ):
+                        # A plain reply with no tool call is the final answer.
+                        yield {
+                            "event": "tool_calls",
+                            "data": {
+                                "content": "",
+                                "calls": [
+                                    {
+                                        "id": str(uuid.uuid4()),
+                                        "name": "submit_answer",
+                                        "arguments": json.dumps({"content": text}),
+                                    }
+                                ],
+                            },
+                        }
+                        yield event
+                    else:
+                        yield {
+                            "event": "step_error",
+                            "data": {
+                                "kind": "formatting",
+                                "message": (
+                                    "You must either call an investigative tool or "
+                                    "reply with your answer."
+                                ),
+                                "usage": event["data"]["usage"],
+                            },
+                        }
                 else:
                     yield event
         except LLMBudgetExceededError:

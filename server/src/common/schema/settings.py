@@ -56,6 +56,21 @@ class SemanticWindowRetrySettings(ConfigModel):
         return self
 
 
+class ContextSettings(ConfigModel):
+    """Project Context size and what each update reads."""
+
+    # The size Context is kept under. The update is told how full it is.
+    max_tokens: int = Field(40_000, ge=1_000, le=1_000_000)
+    # Episodes from earlier windows the update reads as background.
+    earlier_episodes: int = Field(12, ge=0, le=100)
+    # The maintainer merges, compresses, and (over budget) drops blocks after
+    # this many Episodes from Context-changing windows, or when Context is
+    # over max_tokens.
+    maintain_every_episodes: int = Field(12, ge=1, le=1_000)
+    # The most blocks one maintainer run may remove, as a share of Context.
+    maintain_max_removed_share: float = Field(0.3, gt=0, le=1)
+
+
 class IngestionSettings(ConfigModel):
     message_edit_window_seconds: int = Field(600, ge=1, le=86_400)
     # The admission-size ceiling for project-level semantic windows. A smaller
@@ -72,6 +87,7 @@ class IngestionSettings(ConfigModel):
     semantic_window_retry: SemanticWindowRetrySettings = Field(
         default_factory=SemanticWindowRetrySettings
     )
+    context: ContextSettings = Field(default_factory=ContextSettings)
 
 
 class DocumentIndexingSettings(ConfigModel):

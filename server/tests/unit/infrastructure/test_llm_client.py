@@ -12,6 +12,7 @@ from common.exceptions import (
     ConfigurationError,
     LLMBudgetExceededError,
     LLMProviderError,
+    LLMRefusalError,
     LLMResponseError,
 )
 from common.schema.settings import (
@@ -795,6 +796,46 @@ def test_local_thinking_switch_maps_to_reasoning_effort():
 
 @pytest.mark.unit
 @pytest.mark.no_network
+def test_openrouter_thinking_budget_fits_under_the_reply_cap():
+    # A budget over max_completion_tokens is rejected by providers.
+    assert LLMService._openrouter_extra_body("high", 2_000)["reasoning"] == {
+        "max_tokens": 1_488
+    }
+    assert LLMService._openrouter_extra_body("high", None)["reasoning"] == {
+        "max_tokens": 4_096
+    }
+    # Below the 1024 minimum, skip thinking rather than send a bad request.
+    assert "reasoning" not in LLMService._openrouter_extra_body("medium", 1_200)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_request_omits_parameters_the_listed_model_does_not_take():
+    with (
+        patch("infrastructure.llm_client.instructor.from_openai"),
+        patch("infrastructure.llm_client.AsyncOpenAI"),
+    ):
+        service = LLMService(api_key="key")
+    service._listed_parameters = {
+        "anthropic/claude-haiku-5.5": frozenset({"tools", "reasoning", "max_tokens"}),
+        "plain/model": frozenset({"temperature", "tools"}),
+    }
+
+    haiku = service._request_options(
+        "anthropic/claude-haiku-5.5", temperature=0.2, reasoning="high",
+        max_completion_tokens=2_000,
+    )
+    plain = service._request_options("plain/model", temperature=0.2, reasoning="high")
+    unknown = service._request_options("unlisted/model", temperature=0.2, reasoning=None)
+
+    assert "temperature" not in haiku
+    assert haiku["extra_body"]["reasoning"] == {"max_tokens": 1_488}
+    assert plain["temperature"] == 0.2 and "reasoning" not in plain["extra_body"]
+    assert unknown["temperature"] == 0.2
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 def test_local_models_are_fast_by_default_and_full_thinking_is_warned():
     from common.schema.settings import LLMSettings
     from infrastructure.llm_client import local_thinking_warning
@@ -908,4 +949,80 @@ async def test_openrouter_listed_prices_price_calls_without_user_pricing(monkeyp
     # A model OpenRouter prices per request (-1) is not given a made-up price.
     with pytest.raises(ConfigurationError, match="no price for model 'openrouter/auto'"):
         await service.generate_text(system="s", user="u", model="openrouter/auto")
+    await service.close()
+
+
+def _service_over_fake_http(monkeypatch, body):
+    from openai import AsyncOpenAI as RealAsyncOpenAI
+
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, json={
+            "id": "chatcmpl-1", "object": "chat.completion", "created": 0,
+            "model": "local-model",
+            "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+            **body,
+        })
+
+    monkeypatch.setattr(
+        "infrastructure.llm_client.AsyncOpenAI",
+        lambda **kwargs: RealAsyncOpenAI(
+            **kwargs, http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        ),
+    )
+    service = LLMService(
+        api_key="local", base_url="http://localhost:11434/v1",
+        agent_model="local-model", extraction_model="local-model", merge_model="local-model",
+    )
+    return service, requests
+
+
+def _reply(content):
+    return {"choices": [{"index": 0, "finish_reason": "stop", "message": {
+        "role": "assistant", "content": content}}]}
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_provider_content_block_is_a_refusal(monkeypatch):
+    # OpenRouter's shape for a Gemini PROHIBITED_CONTENT block.
+    service, requests = _service_over_fake_http(monkeypatch, {"choices": [], "error": {
+        "message": "Gemini blocked the request: PROHIBITED_CONTENT", "code": 403,
+        "metadata": {"error_type": "content_policy_violation"},
+    }})
+
+    with pytest.raises(LLMRefusalError):
+        await service.generate_structured(
+            response_model=DummyModel, system="Extract.", user="text"
+        )
+    assert len(requests) == 1
+    await service.close()
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_model_apology_instead_of_json_is_a_refusal(monkeypatch):
+    service, _ = _service_over_fake_http(
+        monkeypatch, _reply("I'm sorry, but I cannot assist with that request.")
+    )
+
+    with pytest.raises(LLMRefusalError):
+        await service.generate_structured(
+            response_model=DummyModel, system="Extract.", user="text"
+        )
+    await service.close()
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_malformed_output_is_not_a_refusal(monkeypatch):
+    service, _ = _service_over_fake_http(monkeypatch, _reply('{"title": "wrong field"}'))
+
+    with pytest.raises(LLMResponseError) as raised:
+        await service.generate_structured(
+            response_model=DummyModel, system="Extract.", user="text"
+        )
+    assert not isinstance(raised.value, LLMRefusalError)
     await service.close()

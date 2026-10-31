@@ -13,7 +13,7 @@ from common.utils.agent_identity import (
     normalize_agent_brain,
     should_snapshot_brain_revision,
 )
-from common.utils.time_utils import parse_iso_time
+from common.utils.time_utils import get_now, parse_iso_time
 from core.agent.tools.registry import get_registered_tool_names
 
 _UNSET = object()
@@ -580,10 +580,11 @@ class AgentManager:
         updated = await self.pg.execute(
             """
             UPDATE public.agents
-            SET last_turn_at = NOW(), updated_at = NOW()
+            SET last_turn_at = %(last_turn_at)s, updated_at = NOW()
             WHERE user_name = %(user_name)s AND agent_id = %(agent_id)s
             """,
-            {"user_name": self.user_name, "agent_id": agent_id},
+            # The engine's clock, which the prompt compares this against.
+            {"user_name": self.user_name, "agent_id": agent_id, "last_turn_at": get_now()},
         )
         return bool(updated)
 
