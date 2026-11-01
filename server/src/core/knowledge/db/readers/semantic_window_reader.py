@@ -33,9 +33,11 @@ _WINDOW_COLUMNS = """
 
 
 _ELIGIBLE_CONVERSATION_EXCHANGES_CTE = """
+    conversation_scope AS (SELECT %s::text AS user_name, %s::text AS project_id),
     eligible_conversation_exchanges AS (
         SELECT
             user_message.message_id AS user_message_id,
+            'user'::text AS anchor_role,
             user_message.session_id,
             user_message.project_id,
             user_message.content AS user_content,
@@ -45,6 +47,7 @@ _ELIGIBLE_CONVERSATION_EXCHANGES_CTE = """
             user_message.exchange_outcome AS user_exchange_outcome,
             user_message.exchange_closed_at_ms,
             user_message.metadata ->> 'origin' AS user_origin,
+            user_message.metadata -> 'run_steer' ->> 'state' AS user_steer_state,
             assistant_message.message_id AS assistant_message_id,
             assistant_message.content AS assistant_content,
             assistant_message.timestamp_ms AS assistant_timestamp_ms,
@@ -60,13 +63,47 @@ _ELIGIBLE_CONVERSATION_EXCHANGES_CTE = """
          AND assistant_message.session_id = user_message.session_id
          AND assistant_message.user_msg_id = user_message.message_id
          AND assistant_message.role = 'assistant'
-        WHERE user_message.user_name = %s
-          AND user_message.project_id = %s
+        WHERE user_message.user_name = (SELECT user_name FROM conversation_scope)
+          AND user_message.project_id = (SELECT project_id FROM conversation_scope)
           AND user_message.role = 'user'
           AND user_message.lifecycle_state <> 'superseded'
           AND session.status = 'open'
           AND session.semantic_participation_enabled
           AND user_message.message_id > session.semantic_participation_after_message_id
+          AND (user_message.metadata ->> 'origin' IS DISTINCT FROM 'steer'
+               OR user_message.metadata -> 'run_steer' ->> 'state'
+                  IS DISTINCT FROM 'undelivered')
+        UNION ALL
+        SELECT
+            assistant_turn.message_id AS user_message_id,
+            'assistant'::text AS anchor_role,
+            assistant_turn.session_id,
+            assistant_turn.project_id,
+            assistant_turn.content AS user_content,
+            assistant_turn.timestamp_ms AS user_timestamp_ms,
+            assistant_turn.lifecycle_state AS user_lifecycle_state,
+            assistant_turn.exchange_state AS user_exchange_state,
+            assistant_turn.exchange_outcome AS user_exchange_outcome,
+            assistant_turn.exchange_closed_at_ms,
+            assistant_turn.metadata ->> 'origin' AS user_origin,
+            NULL::text AS user_steer_state,
+            NULL::bigint AS assistant_message_id,
+            NULL::text AS assistant_content,
+            NULL::bigint AS assistant_timestamp_ms,
+            NULL::text AS assistant_lifecycle_state
+        FROM public.messages AS assistant_turn
+        JOIN public.sessions AS session
+          ON session.session_id = assistant_turn.session_id
+         AND session.project_id = assistant_turn.project_id
+         AND session.user_name = assistant_turn.user_name
+        WHERE assistant_turn.user_name = (SELECT user_name FROM conversation_scope)
+          AND assistant_turn.project_id = (SELECT project_id FROM conversation_scope)
+          AND assistant_turn.role = 'assistant'
+          AND assistant_turn.exchange_outcome = 'assistant_only'
+          AND assistant_turn.lifecycle_state <> 'superseded'
+          AND session.status = 'open'
+          AND session.semantic_participation_enabled
+          AND assistant_turn.message_id > session.semantic_participation_after_message_id
     )
 """
 
@@ -475,6 +512,7 @@ class SemanticWindowReader:
                          AND eligible.user_lifecycle_state = 'sealed'
                          AND eligible.user_exchange_outcome IS NOT NULL
                          AND eligible.exchange_closed_at_ms IS NOT NULL
+                         AND eligible.user_steer_state IS DISTINCT FROM 'pending'
                          AND (
                             (eligible.user_exchange_outcome IN
                                 ('assistant_final', 'clarification')
@@ -613,7 +651,7 @@ class SemanticWindowReader:
              AND exchange_user.project_id = membership.project_id
              AND exchange_user.session_id = membership.session_id
              AND exchange_user.user_name = semantic_window.user_name
-             AND exchange_user.role = 'user'
+             AND (exchange_user.role = 'user' OR (exchange_user.role = 'assistant' AND exchange_user.exchange_outcome = 'assistant_only'))
             WHERE membership.window_id = %s
               AND membership.project_id = %s
               AND semantic_window.user_name = %s
@@ -740,10 +778,12 @@ class SemanticWindowReader:
             WITH {_ELIGIBLE_CONVERSATION_EXCHANGES_CTE}
             SELECT
                 eligible.user_message_id,
+                eligible.anchor_role,
                 eligible.session_id,
                 eligible.user_content,
                 eligible.user_timestamp_ms,
                 eligible.user_lifecycle_state,
+                eligible.user_steer_state,
                 eligible.user_exchange_state,
                 eligible.user_exchange_outcome,
                 eligible.exchange_closed_at_ms,

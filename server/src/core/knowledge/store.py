@@ -142,6 +142,12 @@ class KnowledgeStore:
             message, edit_window_seconds=edit_window_seconds
         )
 
+    async def mark_orphaned_run_steers_undelivered(self, **kwargs):
+        return await self._message_lifecycle_writer.mark_orphaned_run_steers_undelivered(**kwargs)
+
+    async def create_closed_standalone_message(self, **kwargs):
+        return await self._message_lifecycle_writer.create_closed_standalone_message(**kwargs)
+
     async def record_run_steer(self, **kwargs) -> bool:
         return await self._message_lifecycle_writer.record_run_steer(**kwargs)
 

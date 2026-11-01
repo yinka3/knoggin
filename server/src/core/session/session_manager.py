@@ -63,8 +63,11 @@ class SessionManager:
         self.document_notices = DocumentBatchNotices(self, config_manager)
 
     async def resume_background_work(self) -> None:
-        """Pick up research jobs and folder notices a restart interrupted."""
+        """Recover interrupted work before exposing resumed sessions."""
 
+        await self.resources.knowledge_store.mark_orphaned_run_steers_undelivered(
+            user_name=self.user_name,
+        )
         for owner in (self.research_jobs, self.document_notices):
             try:
                 await owner.resume()
@@ -350,6 +353,11 @@ class SessionManager:
                 enabled_tools=enabled_tools,
                 document_focus=document_focus,
             )
+            recovered_steers = await self.resources.knowledge_store.mark_orphaned_run_steers_undelivered(
+                user_name=self.user_name, project_id=project_id, session_id=session_id,
+            )
+            if recovered_steers:
+                project_state.signal_semantic_work()
             update_query = """
                 UPDATE public.sessions
                 SET last_active_at = now()

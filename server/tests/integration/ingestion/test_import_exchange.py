@@ -7,9 +7,10 @@ import pytest
 from pydantic import ValidationError
 
 from common.conf.domain_config import DomainConfig
-from common.schema.primitives import ImportedExchange, Message
+from common.schema.primitives import ImportedAssistantTurn, ImportedExchange, Message
 from common.schema.settings import DeveloperSettings, IngestionSettings, RootConfig
 from core.ingestion.semantic_window_admission import SemanticWindowAdmission
+from core.knowledge.db.readers.semantic_window_reader import SemanticWindowReader
 from core.knowledge.store import KnowledgeStore
 from runtime.session_runtime import SessionRuntime
 
@@ -98,6 +99,104 @@ _USER_ONLY = ImportedExchange(
     user_content="Note: my sister is called Ana.",
     user_timestamp=_USER_AT + timedelta(minutes=2),
 )
+
+
+@pytest.mark.integration
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_only_applied_standalone_steers_enter_semantic_memory(real_server_scope):
+    scope = real_server_scope
+    store = KnowledgeStore(scope["postgres"], object())
+    first = {"steer_id": "steer-1", "instruction": "Use the first source",
+             "state": "pending", "response_annotations": []}
+    first_id = await store.allocate_message_id()
+    await store.create_closed_standalone_message(
+        user_name=scope["user_name"], project_id=scope["project_id"],
+        session_id=scope["session_id"], message_id=first_id, role="user",
+        content=first["instruction"], timestamp_ms=_ms(_USER_AT),
+        acceptance_key="steer:one",
+        metadata={"origin": "steer", "run_steer": first},
+    )
+    assert await _proposed_message_ids(scope) == []
+    assert await store.record_run_steer(
+        user_name=scope["user_name"], project_id=scope["project_id"],
+        session_id=scope["session_id"], message_id=first_id,
+        steer={**first, "state": "applied"}, expected_state="pending",
+    )
+    assert await _proposed_message_ids(scope) == [first_id]
+
+    second = {"steer_id": "steer-2", "instruction": "Ignore that",
+              "state": "pending", "response_annotations": []}
+    second_id = await store.allocate_message_id()
+    await store.create_closed_standalone_message(
+        user_name=scope["user_name"], project_id=scope["project_id"],
+        session_id=scope["session_id"], message_id=second_id, role="user",
+        content=second["instruction"], timestamp_ms=_ms(_USER_AT + timedelta(minutes=2)),
+        acceptance_key="steer:two",
+        metadata={"origin": "steer", "run_steer": second},
+    )
+    assert await store.mark_orphaned_run_steers_undelivered(
+        user_name=scope["user_name"],
+    ) == 1
+    assert await _proposed_message_ids(scope) == [first_id]
+
+
+@pytest.mark.integration
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_assistant_only_import_is_durable_idempotent_and_admissible(
+    real_server_scope, monkeypatch
+):
+    scope = real_server_scope
+    session, wakes = _session(scope, monkeypatch)
+    first = ImportedAssistantTurn(
+        assistant_content="Earlier guidance: use a pilsner.",
+        assistant_timestamp=_USER_AT,
+    )
+    later = ImportedExchange(
+        user_content="I will use that recipe.",
+        user_timestamp=_USER_AT + timedelta(minutes=2),
+    )
+    created = await session.import_exchanges([first, later])
+    repeated = await session.import_exchanges([first, later])
+
+    assert created[0]["user_message_id"] is None
+    assert created[0]["created"] is True
+    assert repeated == [{**item, "created": False} for item in created]
+    rows = await _rows(scope)
+    assert [row["role"] for row in rows] == ["assistant", "user"]
+    assert rows[0]["exchange_outcome"] == "assistant_only"
+    assert rows[0]["timestamp_ms"] == _ms(_USER_AT)
+    assert rows[1]["exchange_outcome"] == "user_only"
+    assert await _proposed_message_ids(scope) == [
+        created[0]["assistant_message_id"], created[1]["user_message_id"]
+    ]
+    assert wakes == [True, True]
+
+    store = KnowledgeStore(scope["postgres"], object())
+    admission = SemanticWindowAdmission(
+        store, IngestionSettings(semantic_window_tokens=10_000),
+        token_counter=lambda text: max(1, len(text.split())),
+        now_ms=lambda: _ms(_USER_AT),
+    )
+    domain = DomainConfig.from_mapping({
+        "version": 1, "topics": {"Work": {"active": True}},
+        "entity_types": {"Concept": {"topic": "Work", "labels": ["concept"]}},
+    }).compile()
+    proposal = await admission.select(
+        user_name=scope["user_name"], project_id=scope["project_id"],
+        domain=domain, force_flush=True,
+    )
+    assert proposal is not None
+    await store.claim_project_semantic_window(proposal.window, list(proposal.messages))
+    evidence = await SemanticWindowReader(scope["postgres"]).get_window_evidence_messages(
+        proposal.window.window_id, user_name=scope["user_name"],
+        project_id=scope["project_id"],
+    )
+    assert [(row["role"], row["content"]) for row in evidence] == [
+        ("assistant", "Earlier guidance: use a pilsner."),
+        ("user", "I will use that recipe."),
+    ]
 
 
 @pytest.mark.integration

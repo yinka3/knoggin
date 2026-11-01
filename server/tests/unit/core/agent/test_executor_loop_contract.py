@@ -89,7 +89,10 @@ async def test_steer_enters_the_next_model_prompt_after_an_active_step():
     async def take_steer():
         nonlocal calls
         calls += 1
-        return None if calls == 1 else {"steer_id": "steer-1", "instruction": "Focus on recovery"}
+        return {
+            2: {"steer_id": "steer-1", "instruction": "Focus on recovery"},
+            3: {"steer_id": "steer-2", "instruction": "Check the timeline"},
+        }.get(calls)
 
     executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None), take_steer=take_steer)
     events = [event async for event in executor._execute_run()]
@@ -97,7 +100,10 @@ async def test_steer_enters_the_next_model_prompt_after_an_active_step():
     assert len(llm.calls) == 2
     assert "Focus on recovery" not in llm.calls[0]["user"]
     assert "Focus on recovery" in llm.calls[1]["user"]
-    assert [event["event"] for event in events][-2:] == ["steer_applied", "response"]
+    assert "Check the timeline" in llm.calls[1]["user"]
+    assert [event["event"] for event in events][-3:] == [
+        "steer_applied", "steer_applied", "response"
+    ]
 
 
 def tool_call_event(name, arguments, call_id):

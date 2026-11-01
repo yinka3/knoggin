@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from routes.runs import _events, _request_focus, start_run
+from runtime.session_runtime import SteerQueueFull
 from routes.runs import _selected_notebook
 from common.schema.settings import RunEventSettings
 from run_events import RunEvents
@@ -416,6 +417,8 @@ def test_run_steer_and_stop_routes_target_only_the_active_run(monkeypatch, tmp_p
             return {"run_id": run_id, "state": "cancelled" if self.stopped else "running", "steer": None} if run_id == "run-1" else None
 
         async def submit_steer(self, run_id, instruction, *, annotations=None):
+            if instruction == "full":
+                raise SteerQueueFull("Steer queue is full")
             if annotations:
                 assert annotations == [{"message_id": 12, "start": 4, "end": 7, "quote": "two"}]
                 # The session adds the excerpt; the route passes the user's words.
@@ -502,6 +505,9 @@ def test_run_steer_and_stop_routes_target_only_the_active_run(monkeypatch, tmp_p
                 annotation = {"message_id": 12, "start": 4, "end": 7, "quote": "two"}
                 assert (await client.post(base + "/steers", json={"instruction": "Focus", "annotations": [annotation]})).status_code == 202
                 assert (await client.post(base + "/steers", json={"instruction": " "})).status_code == 422
+                full = await client.post(base + "/steers", json={"instruction": "full"})
+                assert full.status_code == 409
+                assert full.json()["error"]["code"] == "steer_queue_full"
                 assert (await client.post(base + "/follow-ups", json={"query": " "})).status_code == 422
                 queued = await client.post(base + "/follow-ups", json={"query": " Later question "})
                 assert queued.status_code == 202

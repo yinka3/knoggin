@@ -291,8 +291,11 @@ class AgentExecutor:
             await self._emit_llm_call(current_model, current_reasoning)
 
             if self._take_steer is not None:
-                steer = await self._take_steer()
-                if steer is not None:
+                # A bounded queue can accumulate while the preceding model call runs.
+                for _ in range(5):
+                    steer = await self._take_steer()
+                    if steer is None:
+                        break
                     self.ctx.user_query += "\n\n**User instruction during this run:** " + steer["instruction"]
                     yield {"event": "steer_applied", "data": {"steer_id": steer["steer_id"]}}
 

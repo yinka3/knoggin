@@ -48,3 +48,24 @@ class ImportedExchange(BaseModel):
         ):
             raise ValueError("assistant_timestamp must not precede user_timestamp")
         return self
+
+
+class ImportedAssistantTurn(BaseModel):
+    """A recorded assistant message without a preceding user turn."""
+
+    assistant_content: str
+    assistant_timestamp: datetime
+
+    @field_validator("assistant_content")
+    @classmethod
+    def _nonblank_content(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("assistant_content must not be blank")
+        return value
+
+    @field_validator("assistant_timestamp")
+    @classmethod
+    def _as_utc(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)

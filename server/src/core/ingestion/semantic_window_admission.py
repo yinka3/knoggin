@@ -336,6 +336,8 @@ class SemanticWindowAdmission:
             or row.get("exchange_closed_at_ms") is None
         ):
             return None
+        if row.get("user_steer_state") == "pending":
+            return None
         outcome = str(row["user_exchange_outcome"])
         assistant_id = row.get("assistant_message_id")
         if outcome in {"failed", "cancelled"}:
@@ -354,10 +356,13 @@ class SemanticWindowAdmission:
             # evidence row.  Treat corruption as a FIFO barrier until repaired.
             return None
 
+        anchor_role = str(row.get("anchor_role") or "user")
+        if anchor_role == "assistant" and outcome != "assistant_only":
+            return None
         messages = [
             {
                 "message_id": int(row["user_message_id"]),
-                "role": "user",
+                "role": anchor_role,
                 "content": str(row.get("user_content") or ""),
             }
         ]

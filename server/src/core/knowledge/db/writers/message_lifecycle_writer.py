@@ -59,7 +59,12 @@ class MessageLifecycleWriter:
             assignment = "jsonb_set(metadata, '{run_steer,state}', to_jsonb(%s::text), true)"
             condition = "metadata -> 'run_steer' ->> 'steer_id' = %s AND metadata -> 'run_steer' ->> 'state' = %s"
             values = (steer["state"], *scope, steer["steer_id"], expected_state)
-        exchange_condition = "" if steer["state"] == "undelivered" else "AND exchange_state = 'open'"
+        exchange_condition = (
+            "" if steer["state"] == "undelivered" else
+            "AND (exchange_state = 'open' OR "
+            "(exchange_state = 'closed' AND exchange_outcome = 'user_only' "
+            "AND metadata ->> 'origin' = 'steer'))"
+        )
         async with self.client.transaction() as cur:
             await cur.execute(
                 f"""
@@ -73,6 +78,87 @@ class MessageLifecycleWriter:
                 values,
             )
             return await cur.fetchone() is not None
+
+    async def mark_orphaned_run_steers_undelivered(
+        self, *, user_name: str, project_id: str | None = None,
+        session_id: str | None = None,
+    ) -> int:
+        """Close stale pending steers at startup or on session resume."""
+
+        if (project_id is None) != (session_id is None):
+            raise ValueError("Project and session scope must be supplied together")
+        scope_sql = (
+            "AND project_id = %s AND session_id = %s"
+            if project_id is not None else ""
+        )
+        values = (user_name, project_id, session_id) if project_id is not None else (user_name,)
+        async with self.client.transaction() as cur:
+            await cur.execute(
+                f"""UPDATE public.messages
+                   SET metadata = jsonb_set(
+                       metadata, '{{run_steer,state}}', '"undelivered"'::jsonb, true
+                   )
+                   WHERE user_name = %s {scope_sql}
+                     AND role = 'user' AND exchange_state = 'closed'
+                     AND exchange_outcome = 'user_only'
+                     AND metadata ->> 'origin' = 'steer'
+                     AND metadata -> 'run_steer' ->> 'state' = 'pending'
+                   RETURNING message_id""",
+                values,
+            )
+            return len(await cur.fetchall())
+
+    async def create_closed_standalone_message(
+        self, *, user_name: str, project_id: str, session_id: str,
+        message_id: int, role: str, content: str, timestamp_ms: int,
+        acceptance_key: str, metadata: dict[str, Any],
+    ) -> MessageAcceptance:
+        """Atomically accept one user-only or assistant-only recorded turn."""
+
+        if role not in {"user", "assistant"} or not content.strip():
+            raise ValueError("Standalone message needs a role and nonblank content")
+        if not isinstance(timestamp_ms, int) or timestamp_ms < 0 or not acceptance_key:
+            raise ValueError("Standalone message needs a timestamp and acceptance key")
+        outcome = "user_only" if role == "user" else "assistant_only"
+        async with self.client.transaction() as cur:
+            await cur.execute(
+                """SELECT 1 FROM public.sessions
+                   WHERE user_name = %s AND project_id = %s AND session_id = %s
+                     AND status = 'open' FOR KEY SHARE""",
+                (user_name, project_id, session_id),
+            )
+            if await cur.fetchone() is None:
+                raise ValueError("Cannot import a message into a deleted session")
+            await cur.execute(
+                """INSERT INTO public.messages (
+                       user_name, session_id, message_id, project_id, role, content,
+                       user_msg_id, metadata, acceptance_key, timestamp_ms,
+                       lifecycle_state, sealed_at_ms, exchange_state,
+                       exchange_outcome, exchange_closed_at_ms
+                   ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s,
+                             'sealed', %s, 'closed', %s, %s)
+                   ON CONFLICT (user_name, session_id, acceptance_key)
+                   WHERE acceptance_key IS NOT NULL DO NOTHING
+                   RETURNING message_id""",
+                (user_name, session_id, message_id, project_id, role, content,
+                 message_id if role == "user" else None, json.dumps(metadata),
+                 acceptance_key, timestamp_ms, timestamp_ms, outcome, timestamp_ms),
+            )
+            inserted = await cur.fetchone()
+            if inserted is not None:
+                return MessageAcceptance(message_id=int(inserted["message_id"]), created=True)
+            await cur.execute(
+                """SELECT message_id, project_id, role, content, timestamp_ms
+                   FROM public.messages
+                   WHERE user_name = %s AND session_id = %s AND acceptance_key = %s""",
+                (user_name, session_id, acceptance_key),
+            )
+            existing = await cur.fetchone()
+            if existing is None or (existing["project_id"], existing["role"],
+                                    existing["content"], existing["timestamp_ms"]) != (
+                                        project_id, role, content, timestamp_ms):
+                raise IdempotencyConflictError()
+            return MessageAcceptance(message_id=int(existing["message_id"]), created=False)
 
     async def create_editable_user_message(
         self, message: Dict[str, Any], *, edit_window_seconds: int

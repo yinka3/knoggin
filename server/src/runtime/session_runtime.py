@@ -26,7 +26,7 @@ from common.schema.agent.stream import AgentExecutionEvent
 from common.schema.artifacts import ArtifactDraft
 from common.schema.document import DocumentFocus
 from common.schema.message_origins import BACKGROUND_REPORT_ORIGINS
-from common.schema.primitives import ImportedExchange, Message
+from common.schema.primitives import ImportedAssistantTurn, ImportedExchange, Message
 from common.schema.settings import RootConfig
 from common.schema.source.references import SourceReferenceCandidate
 from common.utils.events import emit
@@ -41,6 +41,10 @@ _REQUEST_FINGERPRINT_METADATA_KEY = "request_fingerprint"
 
 
 class FollowUpQueueFull(ValueError):
+    pass
+
+
+class SteerQueueFull(ValueError):
     pass
 
 
@@ -178,7 +182,7 @@ class SessionRuntime:
         self._active_user_message_id: int | None = None
         self._last_run_status: dict[str, Any] | None = None
         self._active_run_state: str | None = None
-        self._active_steer: dict[str, str] | None = None
+        self._active_steers: list[dict[str, Any]] = []
         self._follow_up_queue: deque[str] = deque()
         self._follow_ups: dict[str, dict[str, Any]] = {}
         self._follow_up_task: asyncio.Task | None = None
@@ -247,7 +251,8 @@ class SessionRuntime:
         return {
             "run_id": self._active_run_id,
             "state": self._active_run_state,
-            "steer": deepcopy(self._active_steer),
+            "steer": deepcopy(self._active_steers[-1]) if self._active_steers else None,
+            "steers": deepcopy(self._active_steers),
         }
 
     async def queue_follow_up(self, run_id: str, query: str, *, annotations: list[dict] | None = None) -> dict[str, Any] | None:
@@ -400,37 +405,48 @@ class SessionRuntime:
                     if not self._agent_run_reserved:
                         self._run_idle.set()
 
-    async def submit_steer(self, run_id: str, instruction: str, *, annotations: list[dict] | None = None) -> dict[str, str] | None:
+    async def submit_steer(
+        self, run_id: str, instruction: str, *, annotations: list[dict] | None = None
+    ) -> dict[str, str] | None:
         if not instruction or not instruction.strip() or len(instruction) > 4000:
             raise ValueError("Steer instruction must contain 1 to 4000 characters")
         async with self._agent_run_lock:
             if run_id != self._active_run_id or self._active_run_state != "running":
                 return None
-            if self._active_steer is not None:
-                raise SessionBusyError()
+            if (sum(item["state"] == "pending" for item in self._active_steers) >= 5
+                    or len(self._active_steers) >= 100):
+                raise SteerQueueFull("Steer queue is full")
+            steer_id = str(uuid4())
             steer = {
-                "steer_id": str(uuid4()),
-                "instruction": instruction.strip(),
-                "response_annotations": annotations or [],
-                "state": "pending",
+                "steer_id": steer_id, "instruction": instruction.strip(),
+                "response_annotations": annotations or [], "state": "pending",
             }
-            if self._active_user_message_id is None or not await self.knowledge_store.record_run_steer(
+            at = get_now()
+            accepted = await self.knowledge_store.create_closed_standalone_message(
                 user_name=self.user_name, project_id=self.project_id,
-                session_id=self.session_id, message_id=self._active_user_message_id,
-                steer=steer,
-            ):
-                return None
-            self._active_steer = steer
-            return {"steer_id": steer["steer_id"], "state": "pending"}
+                session_id=self.session_id,
+                message_id=await self.knowledge_store.allocate_message_id(),
+                role="user", content=steer["instruction"],
+                timestamp_ms=int(at.timestamp() * 1000),
+                acceptance_key=f"steer:{steer_id}",
+                metadata={"origin": "steer", "run_id": run_id, "run_steer": steer},
+            )
+            steer["message_id"] = accepted.message_id
+            self._active_steers.append(steer)
+            self._signal_exchange_closed()
+            return {"steer_id": steer_id, "state": "pending"}
 
     async def _take_steer(self) -> dict[str, str] | None:
         async with self._agent_run_lock:
-            steer = self._active_steer
-            if steer is None or steer["state"] != "pending":
+            steer = next(
+                (item for item in self._active_steers if item["state"] == "pending"),
+                None,
+            )
+            if steer is None:
                 return None
             if not await self.knowledge_store.record_run_steer(
                 user_name=self.user_name, project_id=self.project_id,
-                session_id=self.session_id, message_id=self._active_user_message_id,
+                session_id=self.session_id, message_id=steer["message_id"],
                 steer={**steer, "state": "applied"}, expected_state="pending",
             ):
                 raise RuntimeError("Steer could not be recorded before delivery")
@@ -544,7 +560,7 @@ class SessionRuntime:
             self._run_idle.clear()
             self._active_run_id = run_id or str(uuid4())
             self._active_run_state = "admitting"
-            self._active_steer = None
+            self._active_steers = []
             self._active_user_message_id = None
             self._active_idempotency_key = normalized_idempotency_key
             self._active_request_fingerprint = request_fingerprint
@@ -837,14 +853,17 @@ class SessionRuntime:
             if task is None or self._active_agent_task is task:
                 self._active_agent_task = None
             if self._active_run_id is not None:
-                if self._active_steer is not None and self._active_steer["state"] == "pending":
-                    self._active_steer["state"] = "undelivered"
+                for steer in self._active_steers:
+                    if steer["state"] != "pending":
+                        continue
                     try:
-                        await self.knowledge_store.record_run_steer(
+                        if await self.knowledge_store.record_run_steer(
                             user_name=self.user_name, project_id=self.project_id,
-                            session_id=self.session_id, message_id=self._active_user_message_id,
-                            steer=self._active_steer, expected_state="pending",
-                        )
+                            session_id=self.session_id, message_id=steer["message_id"],
+                            steer={**steer, "state": "undelivered"},
+                            expected_state="pending",
+                        ):
+                            steer["state"] = "undelivered"
                     except Exception:
                         logger.exception("Failed to record undelivered steer for {}", self.session_id)
                 if self._active_run_state in {"admitting", "accepted", "running"}:
@@ -855,7 +874,7 @@ class SessionRuntime:
             self._active_run_id = None
             self._active_user_message_id = None
             self._active_run_state = None
-            self._active_steer = None
+            self._active_steers = []
             self._active_idempotency_key = None
             self._active_request_fingerprint = None
             self._active_agent_stream = None
@@ -1272,7 +1291,7 @@ class SessionRuntime:
         await self._close_user_exchange(user_message_id, outcome="user_only")
 
     async def import_exchanges(
-        self, exchanges: List[ImportedExchange]
+        self, exchanges: List[ImportedExchange | ImportedAssistantTurn]
     ) -> list[dict[str, Any]]:
         """Store recorded exchanges at their original times without running the agent.
 
@@ -1289,7 +1308,36 @@ class SessionRuntime:
             self._require_message_ingestion_ready()
             if self._agent_run_reserved:
                 raise SessionBusyError()
-            return [await self._import_exchange(exchange) for exchange in exchanges]
+            results = []
+            for exchange in exchanges:
+                if isinstance(exchange, ImportedAssistantTurn):
+                    results.append(await self._import_assistant_turn(exchange))
+                else:
+                    results.append(await self._import_exchange(exchange))
+            return results
+
+    async def _import_assistant_turn(
+        self, turn: ImportedAssistantTurn
+    ) -> dict[str, Any]:
+        timestamp_ms = int(turn.assistant_timestamp.timestamp() * 1000)
+        key = hashlib.sha256(
+            f"assistant:{self.session_id}:{turn.assistant_content}:{turn.assistant_timestamp.isoformat()}".encode()
+        ).hexdigest()
+        accepted = await self.knowledge_store.create_closed_standalone_message(
+            user_name=self.user_name, project_id=self.project_id,
+            session_id=self.session_id,
+            message_id=await self.knowledge_store.allocate_message_id(),
+            role="assistant", content=turn.assistant_content,
+            timestamp_ms=timestamp_ms, acceptance_key=f"import:{key}",
+            metadata={"origin": "import"},
+        )
+        if accepted.created:
+            self._signal_exchange_closed()
+        return {
+            "user_message_id": None,
+            "assistant_message_id": accepted.message_id,
+            "created": accepted.created,
+        }
 
     async def _import_exchange(self, exchange: ImportedExchange) -> dict[str, Any]:
         accepted, created = await self._accept_user_message(
@@ -1480,9 +1528,15 @@ class SessionRuntime:
 
         results = []
         for turn in turns:
+            metadata = turn.get("metadata") or {}
+            if metadata.get("origin") == "steer" and (
+                metadata.get("run_steer") or {}
+            ).get("state") != "applied":
+                continue
             content = turn["content"]
             steer = (turn.get("metadata") or {}).get("run_steer")
-            if (turn["role"] == "user" and isinstance(steer, dict)
+            if (turn["role"] == "user" and (turn.get("metadata") or {}).get("origin") != "steer"
+                    and isinstance(steer, dict)
                     and steer.get("state") == "applied"
                     and isinstance(steer.get("instruction"), str)):
                 instruction = with_annotations(

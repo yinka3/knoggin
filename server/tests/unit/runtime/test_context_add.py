@@ -461,10 +461,16 @@ async def test_run_steer_is_undelivered_if_run_finishes_first(context):
     task = asyncio.create_task(_consume(stream))
     await waiting.wait()
     await ctx.submit_steer("run-1", "Too late")
+    await ctx.submit_steer("run-1", "Also too late")
     resume.set()
     await task
     assert (await ctx.get_run_status("run-1"))["steer"]["state"] == "undelivered"
-    assert next(iter(resources.knowledge_store.run_steers.values()))["state"] == "undelivered"
+    assert [item["state"] for item in (await ctx.get_run_status("run-1"))["steers"]] == [
+        "undelivered", "undelivered"
+    ]
+    assert [item["state"] for item in resources.knowledge_store.run_steers.values()] == [
+        "undelivered", "undelivered"
+    ]
     assert await ctx.submit_steer("run-1", "Another") is None
 
 
@@ -496,7 +502,46 @@ async def test_pending_steer_becomes_undelivered_on_disconnect(context):
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_only_one_concurrent_steer_is_accepted(context):
+async def test_multiple_steers_reach_one_run_in_order(context):
+    ctx, resources = context
+    waiting = asyncio.Event()
+    resume = asyncio.Event()
+    delivered = []
+
+    async def handler(kwargs):
+        waiting.set()
+        await resume.wait()
+        for _ in range(2):
+            steer = await kwargs["take_steer"]()
+            delivered.append(steer["instruction"])
+            yield {"event": "steer_applied", "data": {"steer_id": steer["steer_id"]}}
+        yield _response_event("Answer")
+
+    stream = await ctx.open_agent_run_stream(
+        Message(content="Question"), orchestrator=_FakeTurnOrchestrator(handler),
+        run_id="run-1",
+    )
+    task = asyncio.create_task(_consume(stream))
+    await waiting.wait()
+    first = await ctx.submit_steer("run-1", "Use the first source")
+    second = await ctx.submit_steer("run-1", "Also check the date")
+    resume.set()
+    events = await task
+
+    assert delivered == ["Use the first source", "Also check the date"]
+    assert [event["data"]["steer_id"] for event in events
+            if event["event"] == "steer_applied"] == [
+        first["steer_id"], second["steer_id"]
+    ]
+    assert [item["state"] for item in
+            (await ctx.get_run_status("run-1"))["steers"]] == ["applied", "applied"]
+    assert [row["content"] for row in resources.knowledge_store.saved_message_logs
+            if isinstance(row, dict) and row["metadata"].get("origin") == "steer"] == delivered
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_multiple_concurrent_steers_are_accepted_in_order(context):
     ctx, _ = context
     waiting = asyncio.Event()
 
@@ -515,8 +560,14 @@ async def test_only_one_concurrent_steer_is_accepted(context):
         ctx.submit_steer("run-1", "Second"),
         return_exceptions=True,
     )
-    assert sum(isinstance(item, SessionBusyError) for item in outcomes) == 1
-    assert sum(isinstance(item, dict) for item in outcomes) == 1
+    assert all(isinstance(item, dict) for item in outcomes)
+    assert len({item["steer_id"] for item in outcomes}) == 2
+    assert (await ctx.get_run_status("run-1"))["steers"] == [
+        {**item, "instruction": text, "response_annotations": [], "message_id": index}
+        for index, (item, text) in enumerate(
+            zip(outcomes, ("First", "Second")), start=2
+        )
+    ]
     await stream.aclose()
     with pytest.raises(asyncio.CancelledError):
         await task

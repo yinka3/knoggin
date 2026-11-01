@@ -2,6 +2,7 @@ import json
 from datetime import datetime, timedelta, timezone
 
 from dataset import load_questions, pair_turns, parse_date
+from common.schema.primitives import ImportedAssistantTurn, ImportedExchange
 
 START = datetime(2023, 5, 20, 2, 21, tzinfo=timezone.utc)
 
@@ -10,31 +11,34 @@ def test_parse_date_reads_the_dataset_format_as_utc():
     assert parse_date("2023/05/20 (Sat) 02:21") == START
 
 
-def test_pairs_turns_and_spaces_them_in_order():
-    exchanges = pair_turns(
+def test_pairs_turns_and_preserves_assistant_only_history():
+    turns = pair_turns(
         [
-            {"role": "assistant", "content": "leading, dropped"},
+            {"role": "assistant", "content": "leading"},
             {"role": "user", "content": "first"},
             {"role": "assistant", "content": "reply"},
-            {"role": "assistant", "content": "more reply"},
+            {"role": "assistant", "content": "extra"},
             {"role": "user", "content": "unanswered"},
             {"role": "user", "content": "last"},
             {"role": "assistant", "content": "  "},
         ],
-        START,
-        label="q",
+        START, label="q",
     )
 
-    assert [(e.user_content, e.assistant_content) for e in exchanges] == [
-        ("first", "reply\n\nmore reply"),
-        ("unanswered", None),
-        ("last", None),
+    assert [type(turn) for turn in turns] == [
+        ImportedAssistantTurn, ImportedExchange, ImportedAssistantTurn,
+        ImportedExchange, ImportedExchange,
     ]
-    assert [e.user_timestamp for e in exchanges] == [
-        START, START + timedelta(minutes=2), START + timedelta(minutes=4)
-    ]
-    assert exchanges[0].assistant_timestamp == START + timedelta(seconds=30)
-    assert exchanges[1].assistant_timestamp is None
+    assert turns[0].assistant_content == "leading"
+    assert turns[0].assistant_timestamp == START
+    assert turns[1].user_content == "first"
+    assert turns[1].assistant_content == "reply"
+    assert turns[1].user_timestamp == START + timedelta(minutes=2)
+    assert turns[1].assistant_timestamp == START + timedelta(minutes=2, seconds=30)
+    assert turns[2].assistant_content == "extra"
+    assert turns[2].assistant_timestamp == START + timedelta(minutes=4)
+    assert [turn.user_content for turn in turns[3:]] == ["unanswered", "last"]
+    assert turns[3].assistant_content is None
 
 
 def test_load_sorts_sessions_by_date(tmp_path):

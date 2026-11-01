@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from common.schema.primitives import ImportedExchange
+from common.schema.primitives import ImportedAssistantTurn, ImportedExchange
 
 logger = logging.getLogger("longmemeval")
 
@@ -19,7 +19,7 @@ REPLY_DELAY = timedelta(seconds=30)
 class ReplaySession:
     session_id: str
     started_at: datetime
-    exchanges: list[ImportedExchange]
+    exchanges: list[ImportedExchange | ImportedAssistantTurn]
 
 
 @dataclass(frozen=True)
@@ -47,46 +47,39 @@ def parse_date(value: str) -> datetime:
 
 def pair_turns(
     turns: list[dict], started_at: datetime, *, label: str
-) -> list[ImportedExchange]:
-    """Pair each user turn with the assistant turn after it.
+) -> list[ImportedExchange | ImportedAssistantTurn]:
+    """Preserve ordered messages, pairing only adjacent user/assistant turns."""
 
-    A user turn with no reply stays user-only. An assistant turn with no user
-    turn before it joins the previous reply, or is dropped at the start.
-    """
-
-    pairs: list[list[str | None]] = []
+    segments: list[list[str | None]] = []
     for turn in turns:
         role, content = turn["role"], turn["content"]
+        if not content or not content.strip():
+            logger.warning("%s: dropped a blank %s turn", label, role)
+            continue
         if role == "user":
-            pairs.append([content, None])
+            segments.append(["user", content, None])
         elif role == "assistant":
-            if not pairs:
-                logger.warning("%s: dropped a leading assistant turn", label)
-            elif pairs[-1][1] is None:
-                pairs[-1][1] = content
+            if segments and segments[-1][0] == "user" and segments[-1][2] is None:
+                segments[-1][2] = content
             else:
-                logger.warning("%s: joined an extra assistant turn", label)
-                pairs[-1][1] = f"{pairs[-1][1]}\n\n{content}"
+                segments.append(["assistant", content, None])
         else:
             logger.warning("%s: dropped a turn with role %r", label, role)
 
-    exchanges = []
-    for index, (user, assistant) in enumerate(pairs):
-        if not user or not user.strip():
-            logger.warning("%s: dropped a blank user turn", label)
-            continue
-        if assistant is not None and not assistant.strip():
-            assistant = None
-        user_at = started_at + index * TURN_SPACING
-        exchanges.append(
-            ImportedExchange(
-                user_content=user,
-                user_timestamp=user_at,
-                assistant_content=assistant,
-                assistant_timestamp=user_at + REPLY_DELAY if assistant else None,
-            )
-        )
-    return exchanges
+    result: list[ImportedExchange | ImportedAssistantTurn] = []
+    for index, (role, content, reply) in enumerate(segments):
+        at = started_at + index * TURN_SPACING
+        if role == "assistant":
+            result.append(ImportedAssistantTurn(
+                assistant_content=content, assistant_timestamp=at,
+            ))
+        else:
+            result.append(ImportedExchange(
+                user_content=content, user_timestamp=at,
+                assistant_content=reply,
+                assistant_timestamp=at + REPLY_DELAY if reply else None,
+            ))
+    return result
 
 
 def load_questions(path: Path) -> list[Question]:

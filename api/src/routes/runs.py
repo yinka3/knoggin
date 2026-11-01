@@ -22,7 +22,7 @@ from core.project.notebook_store import NotebookConflict
 
 from contracts.sessions import QueueFollowUp, StartRun, SteerRun
 from annotations import resolve_annotations, with_annotations
-from runtime.session_runtime import FollowUpQueueFull
+from runtime.session_runtime import FollowUpQueueFull, SteerQueueFull
 from routes.project_settings import _error, _json
 
 
@@ -335,10 +335,10 @@ async def steer_run(request):
     try:
         annotations = await resolve_annotations(request.app.state.runtime, session.session_id, session.project_id, body.annotations)
         result = await session.submit_steer(request.path_params["run_id"], body.instruction, annotations=annotations)
+    except SteerQueueFull:
+        return _error("steer_queue_full", "Wait for pending instructions to be applied", 409)
     except ValueError:
         return _error("invalid_annotation", "Selected response text is unavailable or changed", 422)
-    except SessionBusyError:
-        return _error("steer_exists", "This run already has an instruction", 409)
     if result is None:
         return _error("run_not_active", "Run is no longer active", 409)
     return JSONResponse(result, status_code=202)
@@ -367,10 +367,10 @@ async def queue_follow_up(request):
     try:
         annotations = await resolve_annotations(request.app.state.runtime, session.session_id, session.project_id, body.annotations)
         result = await session.queue_follow_up(request.path_params["run_id"], body.query, annotations=annotations)
-    except ValueError:
-        return _error("invalid_annotation", "Selected response text is unavailable or changed", 422)
     except FollowUpQueueFull:
         return _error("follow_up_queue_full", "Follow-up queue is full", 409)
+    except ValueError:
+        return _error("invalid_annotation", "Selected response text is unavailable or changed", 422)
     if result is None:
         return _error("run_not_active", "Run is no longer active", 409)
     return JSONResponse(result, status_code=202)
