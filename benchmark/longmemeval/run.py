@@ -66,6 +66,9 @@ def _args() -> argparse.Namespace:
                         help="comma-separated; each answers every question from "
                              "the same memory, built once")
     parser.add_argument("--extraction-model", default="google/gemini-2.5-flash")
+    parser.add_argument("--merge-model", default="google/gemini-2.5-pro")
+    parser.add_argument("--maintenance-model",
+                        help="Context maintainer model; defaults to extraction model")
     parser.add_argument("--domain", type=Path, default=DEFAULT_DOMAIN,
                         help="project domain: topics, entity and relationship types")
     parser.add_argument("--budget-usd", type=float, default=5.0,
@@ -76,6 +79,14 @@ def _args() -> argparse.Namespace:
                         help="run the Context maintainer this often (default: the setting)")
     parser.add_argument("--settle-timeout", type=float, default=900.0,
                         help="seconds to wait for one session's memory")
+    parser.add_argument("--sessions-per-settle", type=int, default=1,
+                        help="import this many history sessions before waiting for memory")
+    parser.add_argument("--episode-source-tokens", type=int,
+                        help="maximum source tokens in one generated episode")
+    parser.add_argument("--episode-source-messages", type=int,
+                        help="maximum source messages in one generated episode")
+    parser.add_argument("--idle-flush-seconds", type=int,
+                        help="replayed idle time before an automatic semantic-window flush")
     return parser.parse_args()
 
 
@@ -96,6 +107,7 @@ def _write_config(config_dir: Path, args) -> dict:
         "llm": {
             "agent_model": args.agent_models.split(",")[0],
             "extraction_model": args.extraction_model,
+            "merge_model": args.merge_model,
             "spending_budget": {"limit_usd": args.budget_usd},
         },
         "developer_settings": {
@@ -107,10 +119,25 @@ def _write_config(config_dir: Path, args) -> dict:
             "chat_compaction": {"enabled": False},
         },
     }
+    context_overrides = {}
     if args.maintain_every_episodes is not None:
-        config["developer_settings"]["ingestion"] = {
-            "context": {"maintain_every_episodes": args.maintain_every_episodes}
-        }
+        context_overrides["maintain_every_episodes"] = args.maintain_every_episodes
+    if args.maintenance_model is not None:
+        context_overrides["maintenance_model"] = args.maintenance_model
+    ingestion_overrides = {}
+    if context_overrides:
+        ingestion_overrides["context"] = context_overrides
+    if args.idle_flush_seconds is not None:
+        ingestion_overrides["idle_flush_seconds"] = args.idle_flush_seconds
+    if ingestion_overrides:
+        config["developer_settings"]["ingestion"] = ingestion_overrides
+    episode_overrides = {}
+    if args.episode_source_tokens is not None:
+        episode_overrides["max_episode_source_tokens"] = args.episode_source_tokens
+    if args.episode_source_messages is not None:
+        episode_overrides["max_episode_source_messages"] = args.episode_source_messages
+    if episode_overrides:
+        config["developer_settings"]["jobs"]["episode"] = episode_overrides
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "knoggin.yml").write_text(yaml.safe_dump(config))
     return config
@@ -181,6 +208,7 @@ async def _replay(
     question: Question,
     out: Path,
     settle_timeout: float,
+    sessions_per_settle: int,
     domain: DomainConfig,
     models: list[str],
     no_message_tools: bool = False,
@@ -195,16 +223,51 @@ async def _replay(
     started = time.monotonic()
     history = await runtime.sessions.create_session(project_id)
     exchanges = 0
+    source_messages = 0
+    source_tokens_est = 0
+    sessions_since_settle = 0
+    batch_started = time.monotonic()
     try:
-        for index, session in enumerate(question.sessions):
-            if not session.exchanges:
-                continue
+        nonempty_sessions = [
+            (index, session) for index, session in enumerate(question.sessions)
+            if session.exchanges
+        ]
+        for position, (index, session) in enumerate(nonempty_sessions, 1):
             set_test_clock(_ReplayClock(session.started_at))
             await history.import_exchanges(session.exchanges)
             exchanges += len(session.exchanges)
+            for exchange in session.exchanges:
+                for content in (
+                    getattr(exchange, "user_content", None),
+                    getattr(exchange, "assistant_content", None),
+                ):
+                    if content:
+                        source_messages += 1
+                        source_tokens_est += max(1, (len(content) + 2) // 3)
+            sessions_since_settle += 1
+            if sessions_since_settle < sessions_per_settle and position != len(nonempty_sessions):
+                continue
             revision = await history.project.wait_for_semantic_idle(
                 timeout_s=settle_timeout
             )
+            window_progress = await runtime.resources.postgres.fetch_one(
+                "SELECT count(*) FILTER (WHERE stage = 'completed') AS completed, "
+                "COALESCE(sum(source_token_count) FILTER "
+                "(WHERE stage = 'completed'), 0) AS completed_tokens "
+                "FROM public.project_semantic_windows WHERE project_id = %s",
+                (project_id,),
+            )
+            logger.info(
+                "%s memory progress: sessions=%d/%d messages=%d "
+                "source_tokens_est=%d windows_completed=%d "
+                "window_tokens=%d batch_seconds=%.1f",
+                question.question_id, position, len(nonempty_sessions),
+                source_messages, source_tokens_est,
+                window_progress["completed"], window_progress["completed_tokens"],
+                time.monotonic() - batch_started,
+            )
+            batch_started = time.monotonic()
+            sessions_since_settle = 0
             snapshot_dir = out / "snapshots" / question.question_id
             snapshot_dir.mkdir(parents=True, exist_ok=True)
             number = revision.revision_number if revision else 0
@@ -262,12 +325,15 @@ def _manifest(args, config: dict, domain: dict) -> dict:
         "domain": domain,
         "selection": {"types": args.types, "question_ids": args.question_ids,
                       "limit": args.limit},
+        "replay": {"sessions_per_settle": args.sessions_per_settle},
         "started_at": datetime.now(timezone.utc).isoformat(),
     }
 
 
 async def main() -> int:
     args = _args()
+    if args.sessions_per_settle < 1:
+        sys.exit("--sessions-per-settle must be at least 1")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
@@ -304,7 +370,8 @@ async def main() -> int:
                         len(question.sessions))
             try:
                 result = await _replay(
-                    runtime, question, out, args.settle_timeout, domain, models,
+                    runtime, question, out, args.settle_timeout,
+                    args.sessions_per_settle, domain, models,
                     args.no_message_tools,
                 )
             except Exception as exc:

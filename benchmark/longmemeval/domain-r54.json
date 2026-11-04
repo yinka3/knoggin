@@ -1,0 +1,37 @@
+{
+  "version": 0,
+  "extraction_guidance": "These are everyday conversations between one user and an assistant. Identity is only for the user: their own attributes, background, and enduring self-description. Put other people in the topic where they matter, such as relationships, work, or travel. Keep specific names, dates, amounts, quantities, preferences, plans, and changes over time. Distinguish what the user said or did from information or suggestions supplied only by the assistant.",
+  "topics": {
+    "Identity": {"description": "The user's own background, attributes, beliefs, and self-description; not other people"},
+    "Relationships": {"description": "Family, friends, partners, pets, and shared personal events"},
+    "Home": {"description": "Home, food, routines, belongings, shopping, and daily life"},
+    "Work": {"description": "Jobs, coworkers, organizations, school, courses, and research"},
+    "Health": {"description": "Health, care, exercise, fitness, and physical goals"},
+    "Travel": {"description": "Places, trips, transport, lodging, and outings"},
+    "Interests": {"description": "Hobbies, sports, media, faith, culture, and leisure"},
+    "Money": {"description": "Prices, spending, purchases, gifts, rewards, and financial plans"},
+    "General": {"description": "Other facts, explanations, and prior assistant statements"}
+  },
+  "entity_types": {
+    "Identity": {"topic": "Identity", "description": "The user only; other people are Person", "labels": ["self"]},
+    "Person": {"topic": "Relationships", "description": "A person other than the user", "allowed_topics": ["Relationships", "Work", "Health", "Travel", "Interests", "Home"], "labels": ["person", "friend", "relative", "coworker"]},
+    "Pet": {"topic": "Relationships", "allowed_topics": ["Relationships", "Home"], "labels": ["pet", "animal"]},
+    "Place": {"topic": "Travel", "allowed_topics": ["Travel", "Home", "Work", "Interests"], "labels": ["city", "country", "location", "venue"]},
+    "Organization": {"topic": "Work", "allowed_topics": ["Work", "Travel", "Health", "Money", "Interests"], "labels": ["company", "organization", "store", "school"]},
+    "Product": {"topic": "Home", "allowed_topics": ["Home", "Work", "Health", "Interests", "Money"], "labels": ["product", "device", "vehicle", "brand"]},
+    "Event": {"topic": "Relationships", "allowed_topics": ["Relationships", "Home", "Work", "Health", "Travel", "Interests"], "labels": ["event", "trip", "occasion"]},
+    "Activity": {"topic": "Interests", "allowed_topics": ["Interests", "Home", "Work", "Health", "Travel"], "labels": ["hobby", "sport", "activity"]},
+    "Media": {"topic": "Interests", "allowed_topics": ["Interests", "Work", "General"], "labels": ["book", "movie", "show", "song", "game"]},
+    "Concept": {"topic": "General", "allowed_topics": ["General", "Identity", "Work", "Health", "Interests", "Money"], "labels": ["concept"]}
+  },
+  "relationships": {
+    "FAMILY_OF": {"source_types": ["Identity", "Person"], "target_types": ["Identity", "Person"], "symmetric": true, "labels": ["family of", "sibling of", "parent of", "child of", "married to"]},
+    "FRIEND_OF": {"source_types": ["Identity", "Person"], "target_types": ["Identity", "Person"], "symmetric": true, "labels": ["friend of", "knows"]},
+    "WORKS_AT": {"source_types": ["Identity", "Person"], "target_types": ["Organization"], "labels": ["works at", "works for", "employed by"]},
+    "MEMBER_OF": {"source_types": ["Identity", "Person"], "target_types": ["Organization"], "labels": ["member of", "studies at", "belongs to"]},
+    "LIVES_IN": {"source_types": ["Identity", "Person"], "target_types": ["Place"], "labels": ["lives in", "moved to", "resides in"]},
+    "VISITED": {"source_types": ["Identity", "Person"], "target_types": ["Place", "Event"], "labels": ["visited", "traveled to", "attended"]},
+    "OWNS": {"source_types": ["Identity", "Person"], "target_types": ["Product", "Pet"], "labels": ["owns", "bought", "has"]},
+    "LIKES": {"source_types": ["Identity", "Person"], "target_types": ["Activity", "Media", "Product", "Place"], "labels": ["likes", "enjoys", "prefers", "loves"]}
+  }
+}
