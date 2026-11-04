@@ -165,12 +165,12 @@ class EpisodeWriter:
         user_name: str,
         project_id: str,
     ) -> dict[str, int]:
-        """Attach Context-committed graph evidence to this window's Episodes.
+        """Attach this window's Knowledge evidence to its Episodes.
 
-        Episode narration is intentionally written before Knowledge. This
-        idempotent post-Knowledge pass joins only the frozen Episode messages to
-        active Context block supports, so a retry cannot manufacture duplicate
-        episode links or revive retired relationship evidence.
+        Episode narration is written before Knowledge. This idempotent
+        post-Knowledge pass joins the Episodes' messages to the entity
+        occurrences and relationship evidence the window committed, so a retry
+        cannot duplicate links or revive retired relationship evidence.
         """
 
         user_name = require_scope_value(
@@ -182,7 +182,7 @@ class EpisodeWriter:
         async with self.client.transaction() as cur:
             await cur.execute(
                 """
-                SELECT context_revision_id
+                SELECT window_id
                 FROM public.project_semantic_windows
                 WHERE window_id = %s
                   AND user_name = %s
@@ -192,58 +192,30 @@ class EpisodeWriter:
                 """,
                 (window_id, user_name, project_id),
             )
-            window = await cur.fetchone()
-            if window is None:
+            if await cur.fetchone() is None:
                 raise ValueError("Episode enrichment requires a Knowledge-committed window")
-            revision_id = window["context_revision_id"]
-            if revision_id is None:
-                raise RuntimeError("Knowledge-committed window has no Context revision")
 
             await cur.execute(
                 """
                 WITH links AS (
-                    SELECT episode.episode_id,
-                           block_entity.entity_id,
-                           count(DISTINCT support.message_id)::integer AS source_count,
+                    SELECT membership.episode_id,
+                           coalesce(occurrence.corrected_entity_id,
+                                    occurrence.resolved_entity_id) AS entity_id,
+                           count(DISTINCT occurrence.message_id)::integer AS source_count,
                            min(message.timestamp_ms) AS first_timestamp_ms,
-                           max(message.timestamp_ms) AS last_timestamp_ms,
-                           bool_and(
-                               block_entity.occurrence_provenance_complete
-                               AND EXISTS (
-                                   SELECT 1
-                                   FROM public.context_block_entity_occurrences AS occurrence
-                                   WHERE occurrence.block_id = block_entity.block_id
-                                     AND occurrence.project_id = block_entity.project_id
-                                     AND coalesce(occurrence.corrected_entity_id,
-                                                  occurrence.resolved_entity_id)
-                                         = block_entity.entity_id
-                               )
-                           ) AS provenance_complete
+                           max(message.timestamp_ms) AS last_timestamp_ms
                     FROM public.project_semantic_window_episodes AS membership
-                    JOIN public.episodes AS episode
-                      ON episode.episode_id = membership.episode_id
-                     AND episode.project_id = membership.project_id
                     JOIN public.episode_messages AS episode_message
-                      ON episode_message.episode_id = episode.episode_id
-                     AND episode_message.project_id = episode.project_id
+                      ON episode_message.episode_id = membership.episode_id
+                     AND episode_message.project_id = membership.project_id
+                    JOIN public.message_entity_occurrences AS occurrence
+                      ON occurrence.window_id = membership.window_id
+                     AND occurrence.message_id = episode_message.message_id
                     JOIN public.messages AS message
-                      ON message.message_id = episode_message.message_id
-                     AND message.project_id = episode_message.project_id
-                     AND message.session_id = episode_message.session_id
-                    JOIN public.project_context_block_supports AS support
-                      ON support.project_id = message.project_id
-                     AND support.message_id = message.message_id
-                     AND support.session_id = message.session_id
-                    JOIN public.project_context_revision_blocks AS revision_block
-                      ON revision_block.revision_id = %s
-                     AND revision_block.project_id = support.project_id
-                     AND revision_block.block_id = support.block_id
-                    JOIN public.context_block_entities AS block_entity
-                      ON block_entity.project_id = support.project_id
-                     AND block_entity.block_id = support.block_id
+                      ON message.message_id = occurrence.message_id
                     WHERE membership.window_id = %s
                       AND membership.project_id = %s
-                    GROUP BY episode.episode_id, block_entity.entity_id
+                    GROUP BY membership.episode_id, 2
                 )
                 INSERT INTO public.episode_entities (
                     episode_id, project_id, entity_id, source_message_count,
@@ -255,7 +227,7 @@ class EpisodeWriter:
                        source_count,
                        to_timestamp(first_timestamp_ms / 1000.0),
                        to_timestamp(last_timestamp_ms / 1000.0),
-                       provenance_complete
+                       true
                 FROM links
                 ON CONFLICT (episode_id, entity_id) DO UPDATE
                 SET source_message_count = GREATEST(
@@ -267,49 +239,35 @@ class EpisodeWriter:
                     ),
                     last_seen_at = GREATEST(
                         episode_entities.last_seen_at, EXCLUDED.last_seen_at
-                    ),
-                    occurrence_provenance_complete =
-                        episode_entities.occurrence_provenance_complete
-                        AND EXCLUDED.occurrence_provenance_complete
+                    )
                 """,
-                (revision_id, window_id, project_id, project_id),
+                (window_id, project_id, project_id),
             )
             entity_links = cur.rowcount
             await cur.execute(
                 """INSERT INTO public.episode_entity_occurrences
                    (episode_id, project_id, window_id, pass_number, occurrence_index,
-                    block_id, message_id, resolved_entity_id)
-                   SELECT DISTINCT membership.episode_id, membership.project_id,
+                    message_id, resolved_entity_id, corrected_entity_id,
+                    human_correction_review_id)
+                   SELECT membership.episode_id, membership.project_id,
                           occurrence.window_id, occurrence.pass_number,
-                          occurrence.occurrence_index, occurrence.block_id,
-                          support.message_id, occurrence.resolved_entity_id
+                          occurrence.occurrence_index, occurrence.message_id,
+                          occurrence.resolved_entity_id, occurrence.corrected_entity_id,
+                          occurrence.human_correction_review_id
                    FROM public.project_semantic_window_episodes AS membership
                    JOIN public.episode_messages AS episode_message
                      ON episode_message.episode_id = membership.episode_id
                     AND episode_message.project_id = membership.project_id
-                   JOIN public.project_context_block_supports AS support
-                     ON support.project_id = episode_message.project_id
-                    AND support.message_id = episode_message.message_id
-                    AND support.session_id = episode_message.session_id
-                   JOIN public.project_context_revision_blocks AS revision_block
-                     ON revision_block.revision_id = %s
-                    AND revision_block.project_id = support.project_id
-                    AND revision_block.block_id = support.block_id
-                   JOIN public.context_block_entity_occurrences AS occurrence
-                     ON occurrence.block_id = support.block_id
-                    AND occurrence.project_id = support.project_id
-                   JOIN public.context_block_entities AS association
-                     ON association.block_id = occurrence.block_id
-                    AND association.project_id = occurrence.project_id
-                    AND association.entity_id = coalesce(
-                        occurrence.corrected_entity_id, occurrence.resolved_entity_id)
+                   JOIN public.message_entity_occurrences AS occurrence
+                     ON occurrence.window_id = membership.window_id
+                    AND occurrence.message_id = episode_message.message_id
                    WHERE membership.window_id = %s AND membership.project_id = %s
                    ON CONFLICT DO NOTHING""",
-                (revision_id, window_id, project_id),
+                (window_id, project_id),
             )
-            # Rebuild this window's relationship links from active, complete
-            # observations. Earlier passes may have linked partial or since-
-            # retired evidence; an upsert alone cannot remove those links.
+            # Rebuild this window's relationship links from active
+            # observations. An upsert alone cannot remove links to evidence
+            # retired since an earlier pass.
             await cur.execute(
                 """
                 DELETE FROM public.episode_relationships AS link
@@ -323,70 +281,33 @@ class EpisodeWriter:
             )
             await cur.execute(
                 """
-                WITH matching_support AS (
-                    SELECT episode.episode_id,
-                           observation.observation_id,
-                           observation.relationship_id,
-                           support.block_id,
-                           support.message_id
-                    FROM public.project_semantic_window_episodes AS membership
-                    JOIN public.episodes AS episode
-                      ON episode.episode_id = membership.episode_id
-                     AND episode.project_id = membership.project_id
-                    JOIN public.episode_messages AS episode_message
-                      ON episode_message.episode_id = episode.episode_id
-                     AND episode_message.project_id = episode.project_id
-                    JOIN public.project_context_block_supports AS support
-                      ON support.project_id = episode_message.project_id
-                     AND support.message_id = episode_message.message_id
-                     AND support.session_id = episode_message.session_id
-                    JOIN public.project_context_revision_blocks AS revision_block
-                      ON revision_block.revision_id = %s
-                     AND revision_block.project_id = support.project_id
-                     AND revision_block.block_id = support.block_id
-                    JOIN public.relationship_observation_blocks AS observation_block
-                      ON observation_block.project_id = support.project_id
-                     AND observation_block.block_id = support.block_id
-                    JOIN public.relationship_observations AS observation
-                      ON observation.observation_id = observation_block.observation_id
-                     AND observation.project_id = observation_block.project_id
-                     AND observation.retired_at IS NULL
-                     AND observation.relationship_id IS NOT NULL
-                    WHERE membership.window_id = %s
-                      AND membership.project_id = %s
-                ),
-                complete_observations AS (
-                    SELECT episode_id, observation_id, relationship_id
-                    FROM matching_support
-                    GROUP BY episode_id, observation_id, relationship_id
-                    HAVING count(DISTINCT block_id) = (
-                        SELECT count(*)
-                        FROM public.relationship_observation_blocks AS required_block
-                        WHERE required_block.observation_id = matching_support.observation_id
-                    )
-                ),
-                links AS (
-                    SELECT complete.episode_id,
-                           complete.relationship_id,
-                           count(DISTINCT support.message_id)::integer AS source_count
-                    FROM complete_observations AS complete
-                    JOIN matching_support AS support
-                      ON support.episode_id = complete.episode_id
-                     AND support.observation_id = complete.observation_id
-                    GROUP BY complete.episode_id, complete.relationship_id
-                )
                 INSERT INTO public.episode_relationships (
                     episode_id, project_id, relationship_id, source_message_count
                 )
-                SELECT episode_id, %s, relationship_id, source_count
-                FROM links
+                SELECT membership.episode_id, %s, observation.relationship_id,
+                       count(DISTINCT support.message_id)::integer
+                FROM public.project_semantic_window_episodes AS membership
+                JOIN public.episode_messages AS episode_message
+                  ON episode_message.episode_id = membership.episode_id
+                 AND episode_message.project_id = membership.project_id
+                JOIN public.relationship_observation_messages AS support
+                  ON support.message_id = episode_message.message_id
+                 AND support.project_id = episode_message.project_id
+                JOIN public.relationship_observations AS observation
+                  ON observation.observation_id = support.observation_id
+                 AND observation.project_id = support.project_id
+                 AND observation.retired_at IS NULL
+                 AND observation.relationship_id IS NOT NULL
+                WHERE membership.window_id = %s
+                  AND membership.project_id = %s
+                GROUP BY membership.episode_id, observation.relationship_id
                 ON CONFLICT (episode_id, relationship_id) DO UPDATE
                 SET source_message_count = GREATEST(
                     episode_relationships.source_message_count,
                     EXCLUDED.source_message_count
                 )
                 """,
-                (revision_id, window_id, project_id, project_id),
+                (project_id, window_id, project_id),
             )
             relationship_links = cur.rowcount
         return {"entities": entity_links, "relationships": relationship_links}

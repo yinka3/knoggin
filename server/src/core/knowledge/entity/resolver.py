@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import re
 import threading
 import time
 from collections.abc import Iterable
 from contextlib import asynccontextmanager
-from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 from uuid import UUID
@@ -17,13 +15,11 @@ from loguru import logger
 from rapidfuzz import fuzz, process
 from wordfreq import word_frequency
 
-from common.exceptions import MaintenanceConflictError
 from common.schema.ingestion.contracts import (
-    ContextBlockEntityAssociation,
-    ContextBlockMention,
+    EntityMention,
     EntityWrite,
     ProjectEntityClassification,
-    ResolvedContextBlockMention,
+    ResolvedEntityMention,
 )
 from common.schema.jev import JevDecisionRecord, JevResult
 from common.schema.settings import EntityResolutionSettings
@@ -101,8 +97,8 @@ class EntityCandidate:
 
 
 @dataclass(frozen=True)
-class ContextEntityResolution:
-    """Typed output from one context-block entity-resolution pass."""
+class EntityResolution:
+    """Typed output from one entity-resolution pass."""
 
     entity_ids: tuple[int, ...]
     new_entity_ids: frozenset[int]
@@ -110,15 +106,14 @@ class ContextEntityResolution:
     alias_updates: dict[int, tuple[str, ...]]
     pending_entity_writes: dict[int, EntityWrite]
     project_classifications: dict[int, ProjectEntityClassification]
-    resolved_mentions: tuple[ResolvedContextBlockMention, ...]
-    block_entity_associations: tuple[ContextBlockEntityAssociation, ...]
+    resolved_mentions: tuple[ResolvedEntityMention, ...]
     identity_decisions: tuple[dict[str, Any], ...]
     classification_decisions: tuple[dict[str, Any], ...]
     classification_aggregates: tuple[dict[str, Any], ...]
 
 
 @dataclass
-class _ContextEntityResolutionState:
+class _EntityResolutionState:
     """Mutable state accumulated during one resolution pass."""
 
     entity_ids: list[int] = field(default_factory=list)
@@ -131,8 +126,7 @@ class _ContextEntityResolutionState:
     project_classifications: dict[int, ProjectEntityClassification] = field(
         default_factory=dict
     )
-    resolved_mentions: list[ResolvedContextBlockMention] = field(default_factory=list)
-    associations: list[ContextBlockEntityAssociation] = field(default_factory=list)
+    resolved_mentions: list[ResolvedEntityMention] = field(default_factory=list)
     identity_decisions: list[dict[str, Any]] = field(default_factory=list)
     classification_decisions: list[dict[str, Any]] = field(default_factory=list)
     classification_aggregates: list[dict[str, Any]] = field(default_factory=list)
@@ -192,48 +186,29 @@ class EntityResolver:
 
         return name.strip().casefold()
 
-    async def resolve_context_block_mentions(
+    async def resolve_mentions(
         self,
-        mentions: list[ContextBlockMention],
+        mentions: list[EntityMention],
         *,
-        block_text_by_id: dict[object, str],
+        message_text_by_id: dict[int, str],
         policy: IngestionPolicy,
         allocate_entity_id,
         window_id: UUID | None = None,
         pass_number: int = 1,
         work_budget: JevWorkBudget | None = None,
         timing: dict[str, float] | None = None,
-        previous_identity_decisions: tuple[dict, ...] = (),
-        previous_classification_decisions: tuple[dict, ...] = (),
-    ) -> ContextEntityResolution:
-        """Resolve typed Context-block mentions without manufacturing message refs.
+    ) -> EntityResolution:
+        """Resolve typed Episode mentions to existing or new entities."""
 
-        Context-first callers use this boundary: block associations are returned
-        independently, and literal message evidence is deliberately left to the
-        result assembler.
-        """
-
-        if any(not isinstance(mention, ContextBlockMention) for mention in mentions):
-            raise TypeError(
-                "Context entity resolution requires ContextBlockMention values"
-            )
-        if not isinstance(block_text_by_id, dict) or any(
-            not isinstance(text, str) for text in block_text_by_id.values()
+        if any(not isinstance(mention, EntityMention) for mention in mentions):
+            raise TypeError("Entity resolution requires EntityMention values")
+        if not isinstance(message_text_by_id, dict) or any(
+            not isinstance(text, str) for text in message_text_by_id.values()
         ):
-            raise TypeError("Context entity resolution requires block text by ID")
+            raise TypeError("Entity resolution requires message text by ID")
 
         async with self._measured_resolution_lock(timing):
-            state = _ContextEntityResolutionState()
-            previous_acceptances = [
-                deepcopy(item["jev"])
-                for item in previous_identity_decisions
-                if item.get("jev", {}).get("accepted_entity_id") is not None
-            ]
-            previous_topic_proposals = [
-                deepcopy(item)
-                for item in previous_classification_decisions
-                if item["record"]["result"]["outcome"] == "available"
-            ]
+            state = _EntityResolutionState()
             identity_work_budget = work_budget or JevWorkBudget(
                 policy.jev.max_calls_per_window,
                 policy.jev.max_elapsed_seconds_per_window,
@@ -241,10 +216,9 @@ class EntityResolver:
 
             candidate_snapshot: EntityCandidateSnapshot | None = None
             candidate_entries: list[Optional[Tuple[str, Any]]] = []
-            human_overrides = await self._human_identity_overrides(mentions)
             if mentions:
                 candidate_snapshot = await self._load_candidate_snapshot()
-                candidate_entries = self._candidate_entries_for_context_block_mentions(
+                candidate_entries = self._candidate_entries_for_mentions(
                     mentions,
                     policy=policy,
                     snapshot=candidate_snapshot,
@@ -252,8 +226,7 @@ class EntityResolver:
 
             for index, mention in enumerate(mentions):
                 entry = candidate_entries[index]
-                forced_id = human_overrides.get(index)
-                if entry is None and forced_id is None:
+                if entry is None:
                     continue
                 surface_key = self._candidate_search_key(mention.name)
                 # New-entity mentions record no identity decision; never let one
@@ -261,26 +234,11 @@ class EntityResolver:
                 decision: dict = {}
                 entity_id: int | None = None
                 selected_profile: EntityProfile | None = None
-                support_text = "\n".join(
-                    block_text_by_id.get(block_id, "") for block_id in mention.block_ids
-                )
+                support_text = self._support_text(mention, message_text_by_id)
 
-                if forced_id is not None:
-                    profile = await self.get_profile(forced_id)
-                    if profile is None or not self.is_profile_visible(profile):
-                        raise MaintenanceConflictError()
-                    entity_id = forced_id
-                    selected_profile = profile
-                    decision = {
-                        "mention": mention.name,
-                        "candidate_id": forced_id,
-                        "outcome": "reused",
-                        "selection_source": "human_correction",
-                    }
-                    state.identity_decisions.append(decision)
-                elif entry[0] == "candidates":
+                if entry[0] == "candidates":
                     if candidate_snapshot is None:
-                        raise RuntimeError("Context candidate snapshot is unavailable")
+                        raise RuntimeError("Entity candidate snapshot is unavailable")
                     ranked = []
                     for candidate in entry[1]:
                         candidate_id = candidate.entity_id
@@ -396,7 +354,6 @@ class EntityResolver:
                                 if accepted
                                 else "deterministic_abstention"
                             ),
-                            previous_acceptances=previous_acceptances,
                         )
                         if observation is not None:
                             decision["jev"] = observation
@@ -492,7 +449,7 @@ class EntityResolver:
                     classification,
                 ):
                     raise ValueError(
-                        "Context entity resolution produced conflicting project classifications"
+                        "Entity resolution produced conflicting project classifications"
                     )
                 if (
                     classification is not None
@@ -517,7 +474,6 @@ class EntityResolver:
                         pass_number=pass_number,
                         occurrence_index=index,
                         work_budget=identity_work_budget,
-                        previous_proposals=previous_topic_proposals,
                     )
                     if observation is not None:
                         state.classification_decisions.append(observation)
@@ -530,7 +486,7 @@ class EntityResolver:
                     decision["jev"]["operational_entity_id"] = entity_id
                     decision["jev"]["mention_text"] = mention.name
                 state.resolved_mentions.append(
-                    ResolvedContextBlockMention(
+                    ResolvedEntityMention(
                         mention=mention, entity_id=entity_id,
                         occurrence_index=index,
                         identity_decision_key=(
@@ -539,25 +495,7 @@ class EntityResolver:
                         ),
                     )
                 )
-                state.associations.extend(
-                    ContextBlockEntityAssociation(
-                        block_id=block_id,
-                        entity_id=entity_id,
-                        mention_text=mention.name,
-                    )
-                    for block_id in mention.block_ids
-                )
 
-            unique_associations = tuple(
-                {
-                    (
-                        association.block_id,
-                        association.entity_id,
-                        association.mention_text.casefold(),
-                    ): association
-                    for association in state.associations
-                }.values()
-            )
             if policy.jev.classification_mode == "active":
                 for item in state.classification_decisions:
                     if (
@@ -613,7 +551,7 @@ class EntityResolver:
                         elif item["record"]["result"]["outcome"] == "available":
                             item["record"]["acceptance_status"] = "rejected"
             state.classification_aggregates.extend(aggregates)
-            return ContextEntityResolution(
+            return EntityResolution(
                 entity_ids=tuple(state.entity_ids),
                 new_entity_ids=frozenset(state.new_ids),
                 alias_updated_ids=frozenset(state.alias_ids),
@@ -624,44 +562,19 @@ class EntityResolver:
                 pending_entity_writes=state.pending_entity_writes,
                 project_classifications=state.project_classifications,
                 resolved_mentions=tuple(state.resolved_mentions),
-                block_entity_associations=unique_associations,
                 identity_decisions=tuple(state.identity_decisions),
                 classification_decisions=tuple(state.classification_decisions),
                 classification_aggregates=tuple(state.classification_aggregates),
             )
 
-    async def _human_identity_overrides(
-        self, mentions: list[ContextBlockMention],
-    ) -> dict[int, int]:
-        reader = getattr(self.knowledge_store, "get_active_identity_corrections", None)
-        if reader is None or not mentions:
-            return {}
-        block_ids = sorted({str(block_id) for mention in mentions for block_id in mention.block_ids})
-        rows = await reader(self.project_id, block_ids)
-        by_key: dict[tuple, list[dict]] = {}
-        for row in rows:
-            key = (
-                row["block_id"], row["mention_text"].casefold(),
-                row["source_start"], row["source_end"],
-            )
-            by_key.setdefault(key, []).append(row)
-        overrides = {}
-        for index, mention in enumerate(mentions):
-            matches = [
-                by_key.get((str(block_id), mention.name.casefold(),
-                            mention.source_start, mention.source_end), [])
-                for block_id in mention.block_ids
-            ]
-            if not any(matches):
-                continue
-            if any(len(group) != 1 for group in matches):
-                raise MaintenanceConflictError()
-            targets = {int(group[0]["corrected_entity_id"]) for group in matches}
-            reviews = {group[0]["human_correction_review_id"] for group in matches}
-            if len(targets) != 1 or len(reviews) != 1:
-                raise MaintenanceConflictError()
-            overrides[index] = targets.pop()
-        return overrides
+    @staticmethod
+    def _support_text(mention: EntityMention, message_text_by_id: dict[int, str]) -> str:
+        """The cited messages, capped so long chats stay cheap to score."""
+
+        return "\n".join(
+            message_text_by_id.get(message_id, "")[:2_000]
+            for message_id in mention.message_ids[:3]
+        )
 
     @asynccontextmanager
     async def _measured_resolution_lock(self, timing):
@@ -679,7 +592,7 @@ class EntityResolver:
     async def _observe_jev_classification(
         self,
         *,
-        mention: ContextBlockMention,
+        mention: EntityMention,
         support_text: str,
         entity_id: int,
         baseline_topic: str,
@@ -688,9 +601,8 @@ class EntityResolver:
         pass_number: int,
         occurrence_index: int,
         work_budget: JevWorkBudget,
-        previous_proposals: list[dict] | None = None,
     ) -> dict[str, Any] | None:
-        """Reuse unchanged topic evidence or observe it for this resolved ID."""
+        """Observe topic evidence for this resolved ID."""
 
         request = prepare_topic_request(
             mention,
@@ -703,47 +615,18 @@ class EntityResolver:
         if window_id is None:
             raise TypeError("JEV classification observation requires the window ID")
         state, questions, mapping, option_set_truncated = request
-        # Allocated IDs can change between passes; the semantic question cannot.
-        fingerprint = hashlib.sha256(
-            json.dumps(
-                {
-                    "window_id": str(window_id),
-                    "project_id": self.project_id,
-                    "blocks": list(map(str, mention.block_ids)),
-                    "name": mention.name,
-                    "support": support_text,
-                    "baseline_topic": baseline_topic,
-                    "state": state,
-                    "questions": {
-                        key: question.model_dump()
-                        for key, question in questions.items()
-                    },
-                    "policy": policy.semantic_window_snapshot(),
-                },
-                sort_keys=True,
-            ).encode("utf-8")
-        ).hexdigest()
-        result = None
-        reused_from_pass = None
-        for previous in previous_proposals or ():
-            if previous.get("request_fingerprint") == fingerprint:
-                result = JevResult.model_validate(previous["record"]["result"])
-                reused_from_pass = previous["record"]["pass_number"]
-                previous_proposals.remove(previous)
-                break
-        if result is None:
-            if not work_budget.take_observation():
-                return None
-            try:
-                result = await self._jev_client.evaluate(
-                    state=state,
-                    questions=questions,
-                    capability="classification",
-                    policy=policy.jev,
-                    work_budget=work_budget,
-                )
-            except Exception:
-                result = JevResult(outcome="unavailable", reason="provider_error")
+        if not work_budget.take_observation():
+            return None
+        try:
+            result = await self._jev_client.evaluate(
+                state=state,
+                questions=questions,
+                capability="classification",
+                policy=policy.jev,
+                work_budget=work_budget,
+            )
+        except Exception:
+            result = JevResult(outcome="unavailable", reason="provider_error")
         suggested_topic = proposed_topic(
             result,
             mapping,
@@ -758,9 +641,9 @@ class EntityResolver:
             window_id=window_id,
             pass_number=pass_number,
             occurrence_key=(
-                f"{occurrence_index}:{','.join(map(str, mention.block_ids))}:topic"
+                f"{occurrence_index}:{','.join(map(str, mention.message_ids))}:topic"
             ),
-            evidence_block_ids=mention.block_ids,
+            evidence_message_ids=mention.message_ids,
             domain_version=policy.domain.version,
             question_version=policy.jev.classification_question_version,
             acceptance_policy_version=(
@@ -779,8 +662,6 @@ class EntityResolver:
             ),
         )
         return {
-            "request_fingerprint": fingerprint,
-            **({"reused_from_pass": reused_from_pass} if reused_from_pass is not None else {}),
             "record": record.model_dump(mode="json"),
             "entity_id": entity_id,
             "entity_type": mention.entity_type,
@@ -796,7 +677,7 @@ class EntityResolver:
     async def _observe_jev_identity(
         self,
         *,
-        mention: ContextBlockMention,
+        mention: EntityMention,
         support_text: str,
         snapshot: EntityCandidateSnapshot,
         policy: IngestionPolicy,
@@ -806,7 +687,6 @@ class EntityResolver:
         occurrence_index: int,
         work_budget: JevWorkBudget,
         baseline_outcome: str,
-        previous_acceptances: list[dict] | None = None,
     ) -> dict[str, Any] | None:
         """Collect a shadow suggestion without changing resolver acceptance."""
 
@@ -853,31 +733,6 @@ class EntityResolver:
         if window_id is None:
             raise TypeError("JEV identity observation requires the semantic window ID")
         state, questions, mapping = request
-        fingerprint_inputs = {
-            "window_id": str(window_id),
-            "project_id": self.project_id,
-            "blocks": list(map(str, mention.block_ids)),
-            "support": support_text,
-            "state": state,
-            "questions": {key: q.model_dump() for key, q in questions.items()},
-            "mapping": mapping,
-            "eligible_ids": [option.entity_id for option in options],
-            "policy": policy.semantic_window_snapshot(),
-        }
-        fingerprint = hashlib.sha256(
-            json.dumps(fingerprint_inputs, sort_keys=True).encode("utf-8")
-        ).hexdigest()
-        # Carry only already accepted, unchanged window decisions. The fresh
-        # snapshot/eligibility checks above run under the resolver lock.
-        for previous in previous_acceptances or ():
-            if previous.get("request_fingerprint") == fingerprint:
-                result = JevResult.model_validate(previous["record"]["result"])
-                if accepted_identity(
-                    result, mapping, policy.jev, candidate_set_truncated=False
-                ) == previous["accepted_entity_id"]:
-                    previous_acceptances.remove(previous)
-                    previous["reused_for_pass"] = pass_number
-                    return previous
         if not work_budget.take_observation():
             return None
         candidate_set_truncated = len(options) > len(mapping)
@@ -912,8 +767,8 @@ class EntityResolver:
             project_id=self.project_id,
             window_id=window_id,
             pass_number=pass_number,
-            occurrence_key=f"{occurrence_index}:{','.join(map(str, mention.block_ids))}",
-            evidence_block_ids=mention.block_ids,
+            occurrence_key=f"{occurrence_index}:{','.join(map(str, mention.message_ids))}",
+            evidence_message_ids=mention.message_ids,
             domain_version=policy.domain.version,
             question_version=policy.jev.identity_question_version,
             acceptance_policy_version=policy.jev.acceptance_policy_version,
@@ -936,7 +791,6 @@ class EntityResolver:
         )
         return {
             "record": record.model_dump(mode="json"),
-            "request_fingerprint": fingerprint,
             "baseline_entity_id": None,
             "suggested_entity_id": suggested_entity_id,
             "accepted_entity_id": accepted_entity_id,
@@ -953,7 +807,7 @@ class EntityResolver:
         self,
         candidate_id: int,
         profile: EntityProfile,
-        mention: ContextBlockMention,
+        mention: EntityMention,
         policy: IngestionPolicy,
         staged: dict[int, ProjectEntityClassification],
     ) -> bool:
@@ -980,7 +834,7 @@ class EntityResolver:
         window_id: UUID | None,
         pass_number: int,
         occurrence_index: int,
-        mention: ContextBlockMention,
+        mention: EntityMention,
         policy: IngestionPolicy,
     ) -> bool:
         """Stable sample of baseline reuses for a false-reuse audit."""
@@ -990,7 +844,7 @@ class EntityResolver:
             return False
         if rate >= 1:
             return True
-        key = f"{window_id}:{pass_number}:{occurrence_index}:{','.join(map(str, mention.block_ids))}"
+        key = f"{window_id}:{pass_number}:{occurrence_index}:{','.join(map(str, mention.message_ids))}"
         digest = hashlib.sha256(key.encode("ascii")).digest()
         return int.from_bytes(digest[:8], "big") / 2**64 < rate
 
@@ -1047,7 +901,7 @@ class EntityResolver:
     def _classification_for_resolution(
         self,
         entity_id: int,
-        mention: ContextBlockMention,
+        mention: EntityMention,
         profile: EntityProfile | None,
     ) -> ProjectEntityClassification | None:
         """Stage the type storage must use in this resolver's target project."""
@@ -1087,14 +941,14 @@ class EntityResolver:
             project_id=self.project_id,
         )
 
-    def _candidate_entries_for_context_block_mentions(
+    def _candidate_entries_for_mentions(
         self,
-        mentions: list[ContextBlockMention],
+        mentions: list[EntityMention],
         *,
         policy: IngestionPolicy,
         snapshot: EntityCandidateSnapshot,
     ) -> list[Optional[Tuple[str, Any]]]:
-        """Build candidate searches for Context-block mention identity decisions."""
+        """Build candidate searches for mention identity decisions."""
 
         entries: list[Optional[Tuple[str, Any]]] = []
         seen: Dict[str, Tuple[str, Any]] = {}
@@ -1114,7 +968,7 @@ class EntityResolver:
 
     def _should_reuse_pending_entity(
         self,
-        mention: ContextBlockMention,
+        mention: EntityMention,
         support_text: str,
         pending_write: EntityWrite,
         pending_support_text: str,
@@ -1301,6 +1155,18 @@ class EntityResolver:
             return "strong"
         if not exact_name:
             return "weak" if candidate is not None else "none"
+        # A one-word name written exactly like this entity's name, capitals
+        # included, and owned by no other entity, names the same thing even in
+        # a short sentence. A lowercase common word ("target") still needs
+        # surrounding context.
+        surface = " ".join(name.split())
+        if (
+            compatibility == "compatible"
+            and len(self._word_tokens(name)) == 1
+            and surface != surface.lower()
+            and surface == " ".join((profile.canonical_name or "").split())
+        ):
+            return "strong"
         if self._is_common_word_mention(
             name, policy
         ) and not self._has_positive_entity_context(
@@ -1432,7 +1298,7 @@ class EntityResolver:
     ) -> None:
         """Refresh this resolver from the rows durably committed for one window.
 
-        The caller supplies only IDs read from the committed Context revision.
+        The caller supplies only IDs read from the committed window.
         This deliberately never accepts a pending semantic build: the commit
         writer may resume at its checkpoint without validating such a rebuild.
         """

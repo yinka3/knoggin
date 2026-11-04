@@ -3,109 +3,54 @@ from pydantic import ValidationError
 
 from common.schema.episode.generation import LLMEpisodeDecision
 from common.schema.ingestion.extraction import (
-    ContextRelationshipExtraction,
-    EntityExtraction,
-    RelationshipExtraction,
+    EpisodeEntityExtraction,
+    EpisodeRelationshipExtraction,
 )
 
 
 @pytest.mark.unit
 @pytest.mark.no_network
-def test_ner_output_rejects_unknown_and_blank_entity_fields():
+def test_entity_output_drops_bad_mentions_and_keeps_good_ones():
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
-        EntityExtraction.model_validate(
-            {
-                "mentions": [],
-                "unexpected": True,
-            }
-        )
+        EpisodeEntityExtraction.model_validate({"mentions": [], "unexpected": True})
 
-    with pytest.raises(ValidationError, match="name must not be blank"):
-        EntityExtraction.model_validate(
-            {
-                "mentions": [
-                    {
-                        "name": "  ",
-                        "type": "person",
-                        "topic": "Identity",
-                        "msg_id": "m1",
-                    }
-                ]
-            }
-        )
+    output = EpisodeEntityExtraction.model_validate({
+        "mentions": [
+            {"messages": ["M1"], "name": "  ", "type": "Person"},
+            {"messages": ["m1"], "name": "Ada", "type": "Person"},
+            {"messages": [], "name": "Ada", "type": "Person"},
+            {"messages": ["M2"], "name": " Ada ", "type": "Person"},
+        ]
+    })
+
+    assert [(m.messages, m.name) for m in output.mentions] == [(["M2"], "Ada")]
 
 
 @pytest.mark.unit
 @pytest.mark.no_network
-def test_connection_output_strips_required_text_and_rejects_blank_evidence():
-    output = RelationshipExtraction.model_validate(
-        {
-            "connections": [
-                {
-                    "entity_a": " Ada ",
-                    "entity_b": " Knoggin ",
-                    "relationship": " uses ",
-                    "context": " Ada uses Knoggin. ",
-                    "msg_id": "m1",
-                }
-            ]
-        }
-    )
-
-    assert output.connections[0].entity_a == "Ada"
-    assert output.connections[0].context == "Ada uses Knoggin."
-
-    with pytest.raises(ValidationError, match="context must not be blank"):
-        RelationshipExtraction.model_validate(
+def test_relationship_output_strips_text_and_requires_local_handles():
+    output = EpisodeRelationshipExtraction.model_validate({
+        "connections": [
             {
-                "connections": [
-                    {
-                        "entity_a": "Ada",
-                        "entity_b": "Knoggin",
-                        "relationship": "uses",
-                        "context": " ",
-                        "msg_id": "m1",
-                    }
-                ]
-            }
-        )
+                "messages": ["M1"], "entity_a": " e1 ", "entity_b": "e999",
+                "relationship": " owns ", "context": " Ada owns it. ",
+            },
+            *(
+                {"messages": ["M1"], "entity_a": endpoint, "entity_b": "e2",
+                 "relationship": "owns"}
+                for endpoint in ("Alice", "10", "e0", "e01", "e-1", "e")
+            ),
+            {"messages": ["b1"], "entity_a": "e1", "entity_b": "e2", "relationship": "owns"},
+            {"messages": ["M1"], "entity_a": "e1", "entity_b": "e2", "relationship": "owns",
+             "context": " "},
+        ]
+    })
 
-
-@pytest.mark.unit
-@pytest.mark.no_network
-def test_context_connection_output_requires_local_entity_handles():
-    output = ContextRelationshipExtraction.model_validate(
-        {
-            "connections": [
-                {
-                    "block_ids": ["b1"],
-                    "entity_a": " e1 ",
-                    "entity_b": "e999",
-                    "relationship": " owns ",
-                }
-            ]
-        }
-    )
-
+    assert len(output.connections) == 1
     connection = output.connections[0]
-    assert connection.entity_a == "e1"
-    assert connection.entity_b == "e999"
+    assert (connection.entity_a, connection.entity_b) == ("e1", "e999")
     assert connection.relationship == "owns"
-
-    for endpoint in ("Alice", "10", "e0", "e01", "e-1", "e"):
-        with pytest.raises(ValidationError, match="local eN entity handle"):
-            ContextRelationshipExtraction.model_validate(
-                {
-                    "connections": [
-                        {
-                            "block_ids": ["b999"],
-                            "entity_a": endpoint,
-                            "entity_b": "e2",
-                            "relationship": "owns",
-                        }
-                    ]
-                }
-            )
+    assert connection.context == "Ada owns it."
 
 
 @pytest.mark.unit

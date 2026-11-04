@@ -1,6 +1,7 @@
 from uuid import uuid4
 
 import pytest
+from loguru import logger
 
 from common.conf.domain_config import DomainConfig
 from common.schema.context import (
@@ -14,6 +15,7 @@ from common.schema.context import (
     LLMContextMaintenance,
 )
 from core.knowledge.context.maintainer import (
+    ContextMaintainer,
     ContextMaintenanceBuild,
     combine_maintenance,
     maintenance_snapshot,
@@ -94,14 +96,20 @@ def test_merge_keeps_one_block_with_the_evidence_of_both():
 @pytest.mark.no_network
 def test_compress_must_be_shorter_than_what_it_replaces():
     build = _build([_block("Demolition started.")])
-
-    result = build.apply(_edits({
-        "operation": "compress", "targets": [{"handle": "C1"}],
-        "markdown": "Demolition started on the kitchen and the bathroom last spring.",
-    }))
+    messages = []
+    sink = logger.add(lambda message: messages.append(str(message)), format="{message}")
+    try:
+        result = build.apply(_edits({
+            "operation": "compress", "targets": [{"handle": "C1"}],
+            "markdown": "Demolition started on the kitchen and the bathroom last spring.",
+        }))
+    finally:
+        logger.remove(sink)
 
     assert result.materialization is None
     assert "shorter" in result.rejected_edits[0]
+    assert any("targets=['C1'] before_tokens=" in message
+               and "proposed_tokens=" in message for message in messages)
 
 
 @pytest.mark.unit
@@ -171,3 +179,27 @@ def test_maintaining_a_block_the_same_window_wrote_points_back_to_saved_history(
     # Only blocks from the saved revision can be superseded; the window's own
     # unsaved blocks never existed in history.
     assert [block.supersedes_block_id for block in combined.blocks] == [saved.block_id, None]
+
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+@pytest.mark.asyncio
+async def test_context_maintainer_uses_optional_model_override():
+    class RecordingLLM:
+        def __init__(self):
+            self.model = None
+
+        async def generate_structured(self, **kwargs):
+            self.model = kwargs["model"]
+            return _edits()
+
+    llm = RecordingLLM()
+    build = _build([_block("A lasting fact.")])
+    await ContextMaintainer(llm=llm).maintain(user_name="user", build=build)
+    assert llm.model is None
+
+    await ContextMaintainer(llm=llm, model="other-model").maintain(
+        user_name="user", build=build
+    )
+    assert llm.model == "other-model"

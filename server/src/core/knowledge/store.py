@@ -767,12 +767,12 @@ class KnowledgeStore:
             offset=offset,
         )
 
-    async def list_jev_decisions_for_block(
-        self, block_id: str, *, user_name: str, project_id: str,
+    async def list_jev_decisions_for_message(
+        self, message_id: int, *, user_name: str, project_id: str,
         limit: int = 50,
     ) -> dict | None:
-        return await self._semantic_window_reader.list_jev_decisions_for_block(
-            block_id, user_name=user_name, project_id=project_id, limit=limit,
+        return await self._semantic_window_reader.list_jev_decisions_for_message(
+            message_id, user_name=user_name, project_id=project_id, limit=limit,
         )
 
     async def list_jev_decisions_for_entity(
@@ -790,25 +790,6 @@ class KnowledgeStore:
         return await self._semantic_window_reader.get_jev_decision(
             capability, window_id, pass_number, occurrence_key,
             user_name=user_name, project_id=project_id,
-        )
-
-    async def list_jev_extraction_decisions(
-        self,
-        window_id: str,
-        *,
-        user_name: str,
-        project_id: str,
-        limit: int = 100,
-        offset: int = 0,
-    ) -> list[dict]:
-        """Return private bounded-extraction records for one owned window."""
-
-        return await self._semantic_window_reader.list_jev_extraction_decisions(
-            window_id,
-            user_name=user_name,
-            project_id=project_id,
-            limit=limit,
-            offset=offset,
         )
 
     async def list_jev_classification_decisions(
@@ -1175,13 +1156,6 @@ class KnowledgeStore:
             visible_project_ids=visible_project_ids,
         )
 
-    async def get_active_identity_corrections(
-        self, project_id: str, block_ids: list[str],
-    ) -> list[dict]:
-        return await self._entity_reader.get_active_identity_corrections(
-            project_id, block_ids,
-        )
-
     async def list_entities(
         self,
         limit: int = 20,
@@ -1341,6 +1315,20 @@ class KnowledgeStore:
             user_name=user_name,
             visible_project_ids=visible_project_ids,
             limits=limits,
+        )
+
+    async def get_message_evidence(
+        self,
+        message_id: int,
+        *,
+        user_name: str,
+        project_id: str,
+        limits: EvidenceTraversalLimits | None = None,
+    ) -> EvidenceBundle:
+        """Return bounded provenance for one project-owned message."""
+
+        return await self._evidence_service.for_message(
+            message_id, user_name=user_name, project_id=project_id, limits=limits,
         )
 
     async def get_context_block_evidence(

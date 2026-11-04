@@ -124,7 +124,7 @@ def test_advisories_do_not_promote_repetition_within_one_semantic_window():
 @pytest.mark.no_network
 def test_context_observations_from_separate_windows_create_advisory():
     context_rows = [
-        {**unknown_observation(index, index, index + 10), "evidence_origin": "context"}
+        {**unknown_observation(index, index, index + 10), "evidence_origin": "conversation"}
         for index in range(1, 4)
     ]
     advisories = build_relationship_advisories(context_rows)
@@ -151,7 +151,7 @@ def test_context_observations_in_one_window_remain_below_evidence_floor():
     context_rows = [
         {
             **unknown_observation(index, index, index + 10, semantic_window_id="one-window"),
-            "evidence_origin": "context",
+            "evidence_origin": "conversation",
         }
         for index in range(1, 4)
     ]
@@ -165,7 +165,7 @@ def test_repeated_context_extraction_of_one_pair_is_not_domain_advisory():
     rows = [
         {
             **unknown_observation(index, 101, 201),
-            "evidence_origin": "context",
+            "evidence_origin": "conversation",
         }
         for index in range(1, 4)
     ]

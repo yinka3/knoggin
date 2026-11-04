@@ -22,8 +22,8 @@ from common.schema.semantic_window import (
 )
 from common.schema.settings import (
     EntityResolutionSettings,
+    ExtractionSettings,
     IngestionSettings,
-    TextProcessorSettings,
 )
 from core.ingestion.policy import IngestionPolicy
 from core.ingestion.project_semantic_processor import ProjectSemanticProcessor
@@ -46,7 +46,7 @@ def _domain(version=1):
 
 def _policy(domain=None):
     return IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(),
+        extraction=ExtractionSettings(),
         entity_resolution=EntityResolutionSettings(),
         compiled_domain=domain or _domain(),
     )
@@ -384,8 +384,8 @@ def _job(
         capture_semantic_policy=capture_semantic_policy,
         context_updater=updater,
         context_projection=projection or _NoopProjection(),
-        context_entity_builder=_UnexpectedBuilder(),
-        context_relationship_extractor=_UnexpectedRelationships(),
+        entity_builder=_UnexpectedBuilder(),
+        relationship_extractor=_UnexpectedRelationships(),
         publish_committed_entity_ids=_publish_nothing,
         now_ms=now_ms,
         context_maintainer=maintainer,
@@ -399,8 +399,8 @@ def _job(
     [
         "context_updater",
         "context_projection",
-        "context_entity_builder",
-        "context_relationship_extractor",
+        "entity_builder",
+        "relationship_extractor",
     ],
 )
 def test_semantic_processor_rejects_a_missing_required_collaborator(missing):
@@ -410,8 +410,8 @@ def test_semantic_processor_rejects_a_missing_required_collaborator(missing):
     collaborators = {
         "context_updater": _NoopUpdater(),
         "context_projection": _NoopProjection(),
-        "context_entity_builder": _UnexpectedBuilder(),
-        "context_relationship_extractor": _UnexpectedRelationships(),
+        "entity_builder": _UnexpectedBuilder(),
+        "relationship_extractor": _UnexpectedRelationships(),
     }
     collaborators[missing] = None
 
@@ -442,8 +442,8 @@ def test_semantic_processor_requires_an_entity_publication_callback():
             capture_semantic_policy=capture_semantic_policy,
             context_updater=_NoopUpdater(),
             context_projection=_NoopProjection(),
-            context_entity_builder=_UnexpectedBuilder(),
-            context_relationship_extractor=_UnexpectedRelationships(),
+            entity_builder=_UnexpectedBuilder(),
+            relationship_extractor=_UnexpectedRelationships(),
             publish_committed_entity_ids=None,
         )
 
@@ -485,8 +485,8 @@ async def test_scheduler_cadence_runs_context_sync_without_semantic_work():
         capture_semantic_policy=capture_semantic_policy,
         context_updater=_NoopUpdater(),
         context_projection=projection,
-        context_entity_builder=_UnexpectedBuilder(),
-        context_relationship_extractor=_UnexpectedRelationships(),
+        entity_builder=_UnexpectedBuilder(),
+        relationship_extractor=_UnexpectedRelationships(),
         publish_committed_entity_ids=_publish_nothing,
     )
     scheduler = Scheduler("ada", "project-1")
@@ -534,8 +534,8 @@ async def test_readiness_does_not_select_and_claim_uses_one_captured_policy():
         capture_semantic_policy=capture_semantic_policy,
         context_updater=_NoopUpdater(),
         context_projection=_NoopProjection(),
-        context_entity_builder=_UnexpectedBuilder(),
-        context_relationship_extractor=_UnexpectedRelationships(),
+        entity_builder=_UnexpectedBuilder(),
+        relationship_extractor=_UnexpectedRelationships(),
         publish_committed_entity_ids=_publish_nothing,
     )
 
@@ -576,8 +576,8 @@ async def test_projection_failure_does_not_block_new_semantic_admission():
         capture_semantic_policy=capture_policy,
         context_updater=_NoopUpdater(),
         context_projection=_FailingProjection(),
-        context_entity_builder=_UnexpectedBuilder(),
-        context_relationship_extractor=_UnexpectedRelationships(),
+        entity_builder=_UnexpectedBuilder(),
+        relationship_extractor=_UnexpectedRelationships(),
         publish_committed_entity_ids=_publish_nothing,
     )
 
@@ -606,8 +606,8 @@ async def test_unresolved_user_edit_blocks_new_semantic_admission():
         capture_semantic_policy=capture_policy,
         context_updater=_NoopUpdater(),
         context_projection=_BlockedUserEditProjection(),
-        context_entity_builder=_UnexpectedBuilder(),
-        context_relationship_extractor=_UnexpectedRelationships(),
+        entity_builder=_UnexpectedBuilder(),
+        relationship_extractor=_UnexpectedRelationships(),
         publish_committed_entity_ids=_publish_nothing,
     )
 
@@ -679,8 +679,8 @@ async def test_successful_user_edit_retry_finishes_before_conversation_admission
         capture_semantic_policy=capture_policy,
         context_updater=_NoopUpdater(),
         context_projection=projection,
-        context_entity_builder=_UnexpectedBuilder(),
-        context_relationship_extractor=_UnexpectedRelationships(),
+        entity_builder=_UnexpectedBuilder(),
+        relationship_extractor=_UnexpectedRelationships(),
         publish_committed_entity_ids=_publish_nothing,
     )
     context = JobContext(user_name="ada", project_id="project-1")
@@ -936,8 +936,8 @@ async def test_save_now_flushes_admission_until_nothing_is_left():
         capture_semantic_policy=capture_policy,
         context_updater=_NoopUpdater(),
         context_projection=_RecordingProjection(),
-        context_entity_builder=_UnexpectedBuilder(),
-        context_relationship_extractor=_UnexpectedRelationships(),
+        entity_builder=_UnexpectedBuilder(),
+        relationship_extractor=_UnexpectedRelationships(),
         publish_committed_entity_ids=_publish_nothing,
     )
     context = JobContext(user_name="ada", project_id="project-1")
@@ -978,8 +978,8 @@ async def test_flush_requested_during_an_unflushed_claim_is_kept():
         capture_semantic_policy=capture_policy,
         context_updater=_NoopUpdater(),
         context_projection=_RecordingProjection(),
-        context_entity_builder=_UnexpectedBuilder(),
-        context_relationship_extractor=_UnexpectedRelationships(),
+        entity_builder=_UnexpectedBuilder(),
+        relationship_extractor=_UnexpectedRelationships(),
         publish_committed_entity_ids=_publish_nothing,
     )
     admission.job = job
@@ -997,7 +997,7 @@ async def test_flush_requested_during_an_unflushed_claim_is_kept():
 @pytest.mark.no_network
 async def test_context_stage_reads_earlier_episodes_oldest_first_without_this_windows():
     store = _ContextStore(_window())
-    store.window_episodes = [SimpleNamespace(episode_id="now")]
+    store.window_episodes = [SimpleNamespace(episode_id="now", summary="now", messages=[])]
     store.recent_episodes = [
         EpisodeCard(episode_id=episode_id, project_id="project-1", summary=episode_id)
         for episode_id in ("now", "third", "second", "first")
@@ -1043,7 +1043,7 @@ class _Maintainer:
 def _maintenance_case(*, every, episodes_since=0, fail=False):
     old = _block("An old fact that nobody has touched in a long while.")
     store = _ContextStore(_window(), current_snapshot=_snapshot(old))
-    store.window_episodes = [SimpleNamespace(episode_id="now")]
+    store.window_episodes = [SimpleNamespace(episode_id="now", summary="now", messages=[])]
     store.maintenance_state = ContextMaintenanceState(episodes_since, {old.block_id: 9})
     maintainer = _Maintainer(fail=fail)
     job = _job(store, _Updater(), maintainer=maintainer)

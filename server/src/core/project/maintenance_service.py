@@ -386,7 +386,7 @@ class ProjectMaintenanceService:
 
         async with self._lock:
             await self._require_domain_project(project_id, allow_archived=False)
-            if capability not in {"extraction", "classification"}:
+            if capability != "classification":
                 raise ValueError("This decision cannot change entity type or topic")
             row = await self._require_knowledge_store().get_jev_decision(
                 capability, window_id, pass_number, occurrence_key,
@@ -395,11 +395,7 @@ class ProjectMaintenanceService:
             if row is None:
                 raise FileNotFoundError("JEV decision not found")
             observation = row["decision"]
-            linked_id = (
-                observation.get("entity_id") if capability == "classification"
-                else observation.get("operational_entity_id")
-            )
-            if linked_id != entity_id:
+            if observation.get("entity_id") != entity_id:
                 raise ValueError("JEV decision does not identify this entity")
             current = await self.pg.fetch_one(
                 """SELECT entity_type, topic, human_correction_review_id
@@ -424,14 +420,14 @@ class ProjectMaintenanceService:
                 raise ValueError("Topic is not allowed for this entity type")
             if (target_type, target_topic) == (current["entity_type"], current["topic"]):
                 raise ValueError("Correction leaves the entity unchanged")
-            block_ids = observation["record"]["evidence_block_ids"]
-            if not block_ids or len(block_ids) > 8:
+            message_ids = observation["record"]["evidence_message_ids"]
+            if not message_ids or len(message_ids) > 72:
                 raise ValueError("JEV decision evidence is unavailable or too large")
             bundles = tuple([
-                await self._require_knowledge_store().get_context_block_evidence(
-                    block_id, user_name=self.user_name, project_id=project_id,
+                await self._require_knowledge_store().get_message_evidence(
+                    message_id, user_name=self.user_name, project_id=project_id,
                 )
-                for block_id in block_ids
+                for message_id in message_ids
             ])
             if any(node.status == "missing" for bundle in bundles for node in bundle.nodes):
                 raise ValueError("JEV decision evidence is missing")
@@ -446,8 +442,8 @@ class ProjectMaintenanceService:
                     entity_id=entity_id, project_id=project_id,
                     entity_type=target_type, topic=target_topic,
                 ),
-                evidence_refs=[EvidencePointer(kind="context_block", identifier=block_id)
-                               for block_id in block_ids],
+                evidence_refs=[EvidencePointer(kind="message", identifier=str(message_id))
+                               for message_id in message_ids],
                 evidence_snapshot=snapshot,
                 expected_state={
                     "decision_hash": decision_hash,
@@ -480,12 +476,12 @@ class ProjectMaintenanceService:
                 observation.get("superseded_by_pass") is not None
             ):
                 raise MaintenanceConflictError()
-            block_ids = tuple(UUID(str(value)) for value in observation["record"]["evidence_block_ids"])
+            message_ids = tuple(int(value) for value in observation["record"]["evidence_message_ids"])
             plan = IdentityReassignmentPlan(
                 window_id=UUID(window_id), occurrence_key=occurrence_key,
                 source_entity_id=source_entity_id, target_entity_id=target_entity_id,
                 new_entity_name=new_entity_name, entity_type=entity_type,
-                topic=topic, block_ids=block_ids,
+                topic=topic, message_ids=message_ids,
             )
             state = await self._identity_occurrence_state(project_id, plan, observation)
             domain = await self._domain_store.load(self.user_name, project_id)
@@ -496,9 +492,9 @@ class ProjectMaintenanceService:
                 ):
                     raise ValueError("New identity classification is not in the project domain")
             bundles = tuple([
-                await self._require_knowledge_store().get_context_block_evidence(
-                    str(block_id), user_name=self.user_name, project_id=project_id,
-                ) for block_id in block_ids
+                await self._require_knowledge_store().get_message_evidence(
+                    message_id, user_name=self.user_name, project_id=project_id,
+                ) for message_id in message_ids
             ])
             if any(node.status == "missing" for bundle in bundles for node in bundle.nodes):
                 raise MaintenanceConflictError()
@@ -509,8 +505,8 @@ class ProjectMaintenanceService:
                 user_name=self.user_name, scope="project", project_id=project_id,
                 kind="jev_identity_reassignment", reasoning=reasoning,
                 proposed_plan=plan,
-                evidence_refs=[EvidencePointer(kind="context_block", identifier=str(block_id))
-                               for block_id in block_ids],
+                evidence_refs=[EvidencePointer(kind="message", identifier=str(message_id))
+                               for message_id in message_ids],
                 evidence_snapshot=EvidenceService.snapshot(bundles),
                 expected_state={
                     "decision_hash": decision_hash,
@@ -527,55 +523,40 @@ class ProjectMaintenanceService:
     ) -> dict:
         """Prove that stored occurrence rows cover the current associations."""
 
-        query = """SELECT occurrence.block_id::text AS block_id,
+        query = """SELECT occurrence.message_id,
                       occurrence.pass_number, occurrence.occurrence_index,
                       occurrence.resolved_entity_id, occurrence.mention_text,
-                      occurrence.source_start, occurrence.source_end,
                       occurrence.corrected_entity_id,
                       occurrence.human_correction_review_id,
-                      block.content_hash,
-                      association.entity_id IS NOT NULL AS association_exists,
-                      coalesce(association.occurrence_provenance_complete, false)
+                      ref.entity_id IS NOT NULL AS ref_exists,
+                      coalesce(ref.occurrence_provenance_complete, false)
                         AS provenance_complete,
-                      EXISTS (
-                          SELECT 1 FROM public.project_contexts AS context
-                          JOIN public.project_context_revision_blocks AS membership
-                            ON membership.revision_id = context.current_revision_id
-                           AND membership.project_id = context.project_id
-                          WHERE context.project_id = occurrence.project_id
-                            AND membership.block_id = occurrence.block_id
-                      ) AS current_block,
                       semantic_window.stage AS window_stage
-               FROM public.context_block_entity_occurrences AS occurrence
+               FROM public.message_entity_occurrences AS occurrence
                JOIN public.project_semantic_windows AS semantic_window
                  ON semantic_window.window_id = occurrence.window_id
                 AND semantic_window.project_id = occurrence.project_id
-               JOIN public.project_context_blocks AS block
-                 ON block.block_id = occurrence.block_id
-                AND block.project_id = occurrence.project_id
-               LEFT JOIN public.context_block_entities AS association
-                 ON association.block_id = occurrence.block_id
-                AND association.project_id = occurrence.project_id
-                AND association.entity_id = occurrence.resolved_entity_id
+               LEFT JOIN public.message_entity_refs AS ref
+                 ON ref.message_id = occurrence.message_id
+                AND ref.entity_id = occurrence.resolved_entity_id
                WHERE occurrence.window_id = %s AND occurrence.project_id = %s
                  AND occurrence.identity_decision_key = %s
                  AND semantic_window.user_name = %s
-               ORDER BY occurrence.block_id"""
+               ORDER BY occurrence.message_id"""
         args = (plan.window_id, project_id, plan.occurrence_key, self.user_name)
         if cur is None:
             rows = await self.pg.fetch_all(query, args)
         else:
             await cur.execute(query, args)
             rows = await cur.fetchall()
-        expected_blocks = {str(block_id) for block_id in plan.block_ids}
-        if (not rows or len(rows) != len(expected_blocks)
-                or {row["block_id"] for row in rows} != expected_blocks) or any(
+        expected = set(plan.message_ids)
+        if (not rows or len(rows) != len(expected)
+                or {int(row["message_id"]) for row in rows} != expected) or any(
             row["resolved_entity_id"] != plan.source_entity_id
             or row["corrected_entity_id"] is not None
             or row["human_correction_review_id"] is not None
-            or not row["association_exists"]
+            or not row["ref_exists"]
             or not row["provenance_complete"]
-            or not row["current_block"]
             or row["window_stage"] != "completed"
             or row["mention_text"].casefold() != observation.get("mention_text", "").casefold()
             for row in rows
@@ -664,10 +645,15 @@ class ProjectMaintenanceService:
             for pointer in review.evidence_refs
             if pointer.kind == "context_block"
         ]
+        message_ids = [
+            int(pointer.identifier)
+            for pointer in review.evidence_refs
+            if pointer.kind == "message"
+        ]
         unsupported = tuple(
             pointer
             for pointer in review.evidence_refs
-            if pointer.kind not in {"relationship_observation", "context_block"}
+            if pointer.kind not in {"relationship_observation", "context_block", "message"}
         )
         store = self._require_knowledge_store()
         bundles = list(
@@ -684,6 +670,12 @@ class ProjectMaintenanceService:
                     block_id,
                     user_name=self.user_name,
                     project_id=project_id,
+                )
+            )
+        for message_id in message_ids:
+            bundles.append(
+                await store.get_message_evidence(
+                    message_id, user_name=self.user_name, project_id=project_id,
                 )
             )
         current_snapshot = EvidenceService.snapshot(tuple(bundles))
@@ -802,7 +794,7 @@ class ProjectMaintenanceService:
     async def _preview_identity_reassignment(self, project_id, review) -> MaintenanceImpactPreview:
         await self._require_current_identity_review(project_id, review)
         plan = review.proposed_plan
-        blocks = [str(block_id) for block_id in plan.block_ids]
+        message_ids = list(plan.message_ids)
 
         async def affected(query, args):
             rows = await self.pg.fetch_all(
@@ -816,47 +808,38 @@ class ProjectMaintenanceService:
         observations, observation_count = await affected(
             """SELECT DISTINCT observation.observation_id::text AS id
                FROM public.relationship_observations AS observation
-               JOIN public.relationship_observation_blocks AS support
+               JOIN public.relationship_observation_messages AS support
                  ON support.observation_id = observation.observation_id
                 AND support.project_id = observation.project_id
                WHERE observation.user_name = %s AND observation.project_id = %s
-                 AND support.block_id = ANY(%s::uuid[])
+                 AND support.message_id = ANY(%s)
                  AND (observation.source_entity_id = %s OR observation.target_entity_id = %s)
                  AND observation.retired_at IS NULL""",
-            (self.user_name, project_id, blocks, plan.source_entity_id, plan.source_entity_id),
+            (self.user_name, project_id, message_ids, plan.source_entity_id,
+             plan.source_entity_id),
         )
-        messages, message_count = await affected(
-            """SELECT DISTINCT link.message_id::text AS id
-               FROM public.message_entity_occurrences AS link
-               JOIN public.context_block_entity_occurrences AS occurrence
-                 ON occurrence.window_id = link.window_id
-                AND occurrence.pass_number = link.pass_number
-                AND occurrence.occurrence_index = link.occurrence_index
-                AND occurrence.block_id = link.block_id
-               WHERE occurrence.window_id = %s AND occurrence.project_id = %s
-                 AND occurrence.identity_decision_key = %s""",
-            (plan.window_id, project_id, plan.occurrence_key),
-        )
+        messages = tuple(str(message_id) for message_id in message_ids)
+        message_count = len(messages)
         episodes, episode_count = await affected(
             """SELECT DISTINCT link.episode_id AS id
                FROM public.episode_entity_occurrences AS link
-               JOIN public.context_block_entity_occurrences AS occurrence
+               JOIN public.message_entity_occurrences AS occurrence
                  ON occurrence.window_id = link.window_id
                 AND occurrence.pass_number = link.pass_number
                 AND occurrence.occurrence_index = link.occurrence_index
-                AND occurrence.block_id = link.block_id
+                AND occurrence.message_id = link.message_id
                WHERE occurrence.window_id = %s AND occurrence.project_id = %s
                  AND occurrence.identity_decision_key = %s""",
             (plan.window_id, project_id, plan.occurrence_key),
         )
         if observation_count:
             other = await self.pg.fetch_one(
-                """SELECT 1 FROM public.context_block_entity_occurrences
-                   WHERE project_id = %s AND block_id = ANY(%s::uuid[])
+                """SELECT 1 FROM public.message_entity_occurrences
+                   WHERE project_id = %s AND message_id = ANY(%s)
                      AND coalesce(corrected_entity_id, resolved_entity_id) = %s
                      AND NOT (window_id = %s AND identity_decision_key = %s)
                    LIMIT 1""",
-                (project_id, blocks, plan.source_entity_id,
+                (project_id, message_ids, plan.source_entity_id,
                  plan.window_id, plan.occurrence_key),
             )
             if other is not None:
@@ -894,7 +877,6 @@ class ProjectMaintenanceService:
             review_id=review.review_id,
             evidence_state_token=review.evidence_snapshot.state_token,
             impacts=(
-                impact("context_block_entity", "direct_mutation", blocks, len(blocks)),
                 impact("relationship_observation", "direct_mutation", observations, observation_count),
                 impact("message_entity_ref", "direct_mutation", messages, message_count),
                 impact("episode_entity_link", "derived_rebuild", episodes, episode_count),
@@ -936,13 +918,6 @@ class ProjectMaintenanceService:
                 ):
                     raise MaintenanceConflictError()
                 await cur.execute(
-                    """SELECT current_revision_id FROM public.project_contexts
-                       WHERE user_name = %s AND project_id = %s FOR UPDATE""",
-                    (self.user_name, project_id),
-                )
-                if await cur.fetchone() is None:
-                    raise MaintenanceConflictError()
-                await cur.execute(
                     """SELECT status FROM public.maintenance_reviews
                        WHERE review_id = %s AND user_name = %s AND project_id = %s
                        FOR UPDATE""",
@@ -952,21 +927,12 @@ class ProjectMaintenanceService:
                 if locked_review is None or locked_review["status"] != "open":
                     raise MaintenanceConflictError()
                 await cur.execute(
-                    """SELECT block_id FROM public.context_block_entity_occurrences
+                    """SELECT message_id FROM public.message_entity_occurrences
                        WHERE window_id = %s AND project_id = %s
                          AND identity_decision_key = %s FOR UPDATE""",
                     (plan.window_id, project_id, plan.occurrence_key),
                 )
-                if len(await cur.fetchall()) != len(plan.block_ids):
-                    raise MaintenanceConflictError()
-                await cur.execute(
-                    """SELECT block_id FROM public.context_block_entities
-                       WHERE project_id = %s AND block_id = ANY(%s::uuid[])
-                         AND entity_id = %s FOR UPDATE""",
-                    (project_id, [str(block_id) for block_id in plan.block_ids],
-                     plan.source_entity_id),
-                )
-                if len(await cur.fetchall()) != len(plan.block_ids):
+                if len(await cur.fetchall()) != len(plan.message_ids):
                     raise MaintenanceConflictError()
                 state = await self._identity_occurrence_state(
                     project_id, plan, observation, cur=cur,
@@ -1012,7 +978,7 @@ class ProjectMaintenanceService:
                 if project is None or project["status"] != "active":
                     raise MaintenanceConflictError()
                 await cur.execute(
-                    """SELECT block_id FROM public.context_block_entity_occurrences
+                    """SELECT message_id FROM public.message_entity_occurrences
                        WHERE window_id = %s AND project_id = %s
                          AND identity_decision_key = %s
                          AND human_correction_review_id = %s
@@ -1022,12 +988,11 @@ class ProjectMaintenanceService:
                      expected_target_entity_id),
                 )
                 rows = await cur.fetchall()
-                if {str(row["block_id"]) for row in rows} != {
-                    str(block_id) for block_id in review.proposed_plan.block_ids
-                } or len(rows) != len(review.proposed_plan.block_ids):
+                if {int(row["message_id"]) for row in rows} != set(
+                    review.proposed_plan.message_ids
+                ):
                     raise MaintenanceConflictError()
                 for table in (
-                    "context_block_entity_occurrences",
                     "message_entity_occurrences",
                     "episode_entity_occurrences",
                 ):

@@ -1,8 +1,7 @@
-"""Typed contracts for Context-first semantic processing."""
+"""Typed contracts for semantic-window Knowledge processing."""
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Literal, Optional
-from uuid import UUID
 
 from pydantic import BaseModel, Field
 
@@ -22,17 +21,13 @@ class ValidationIssue(BaseModel):
 
 
 class ExtractionTrace(BaseModel):
-    """Counters and labels describing an ingestion extraction pass."""
+    """Counters and labels describing one Knowledge extraction pass."""
 
-    message_ids: List[int] = Field(default_factory=list)
-    batch_size: int = 0
     entity_model: Optional[str] = None
-    entity_prompt: Optional[str] = None
     relationship_model: Optional[str] = None
-    relationship_prompt: Optional[str] = None
+    episodes: int = 0
+    episodes_refused: int = 0
     known_mentions: int = 0
-    gliner_raw_mentions: int = 0
-    gliner_accepted_mentions: int = 0
     llm_mentions_seen: int = 0
     llm_mentions_accepted: int = 0
     llm_mentions_rejected: int = 0
@@ -41,25 +36,10 @@ class ExtractionTrace(BaseModel):
     relationships_rejected: int = 0
     relationships_recognized: int = 0
     relationships_unrecognized: int = 0
-    user_relationships_seen: int = 0
-    user_relationships_accepted: int = 0
-    user_relationships_rejected: int = 0
-    fallbacks: List[Dict[str, str]] = Field(default_factory=list)
     identity_decisions: List[Dict[str, Any]] = Field(default_factory=list)
-    extraction_decisions: List[Dict[str, Any]] = Field(default_factory=list)
     classification_decisions: List[Dict[str, Any]] = Field(default_factory=list)
     classification_aggregates: List[Dict[str, Any]] = Field(default_factory=list)
     resolver_timings: List[Dict[str, Any]] = Field(default_factory=list)
-    jev_extraction_candidates: int = 0
-    jev_extraction_observed: int = 0
-    jev_extraction_accepted: int = 0
-    jev_extraction_rejected: int = 0
-    jev_extraction_avoided_fallback_calls: int = 0
-    jev_extraction_avoided_fallback_blocks: int = 0
-    jev_extraction_avoided_prompt_characters: int = 0
-    llm_ner_fallback_calls: int = 0
-    llm_ner_fallback_blocks: int = 0
-    llm_ner_prompt_characters: int = 0
 
 
 def normalize_relationship_type(value: object) -> str:
@@ -206,15 +186,14 @@ class ProjectEntityClassification:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class ContextRelationshipWrite:
-    """One Context-grounded relationship support set ready for reconciliation.
+class RelationshipWrite:
+    """One message-grounded relationship support set ready for reconciliation.
 
-    Its evidence is one independently sufficient set of immutable Context
-    block versions, never a single message or session. Separate sufficient
-    sets and observed labels remain separate durable observations.
+    Its evidence is the set of Episode messages that state it. Separate
+    support sets and observed labels remain separate durable observations.
     """
 
-    support_block_ids: tuple[UUID, ...]
+    support_message_ids: tuple[int, ...]
     entity_a_id: int
     entity_b_id: int
     relationship_type: str
@@ -229,21 +208,17 @@ class ContextRelationshipWrite:
     domain_version: int = 0
 
     def __post_init__(self) -> None:
-        if not isinstance(self.support_block_ids, tuple) or not self.support_block_ids:
-            raise ValueError(
-                "ContextRelationshipWrite requires supporting Context block IDs"
-            )
-        if len(self.support_block_ids) != len(set(self.support_block_ids)) or not all(
-            isinstance(block_id, UUID) for block_id in self.support_block_ids
-        ):
-            raise ValueError(
-                "ContextRelationshipWrite support block IDs must be unique UUIDs"
-            )
-        _require_positive_id(self.entity_a_id, "ContextRelationshipWrite.entity_a_id")
-        _require_positive_id(self.entity_b_id, "ContextRelationshipWrite.entity_b_id")
+        if not isinstance(self.support_message_ids, tuple) or not self.support_message_ids:
+            raise ValueError("RelationshipWrite requires supporting message IDs")
+        if len(self.support_message_ids) != len(set(self.support_message_ids)):
+            raise ValueError("RelationshipWrite support message IDs must be unique")
+        for message_id in self.support_message_ids:
+            _require_positive_id(message_id, "RelationshipWrite.support_message_ids entry")
+        _require_positive_id(self.entity_a_id, "RelationshipWrite.entity_a_id")
+        _require_positive_id(self.entity_b_id, "RelationshipWrite.entity_b_id")
         if self.entity_a_id == self.entity_b_id:
             raise ValueError(
-                "ContextRelationshipWrite requires distinct positive entity IDs"
+                "RelationshipWrite requires distinct positive entity IDs"
             )
         if self.symmetric:
             entity_a_id, entity_b_id = sorted((self.entity_a_id, self.entity_b_id))
@@ -279,12 +254,12 @@ class ContextRelationshipWrite:
             or self.domain_version < 0
         ):
             raise ValueError(
-                "ContextRelationshipWrite.domain_version must be a non-negative integer"
+                "RelationshipWrite.domain_version must be a non-negative integer"
             )
         if self.context is not None:
             if not isinstance(self.context, str):
                 raise ValueError(
-                    "ContextRelationshipWrite.context must be a string or None"
+                    "RelationshipWrite.context must be a string or None"
                 )
             object.__setattr__(self, "context", self.context.strip() or None)
 
@@ -302,164 +277,57 @@ class MessageEntityRef:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class ContextBlockMention:
-    """One VP-01 candidate grounded to its smallest supporting Context blocks.
+class EntityMention:
+    """One extracted entity name and the Episode messages that contain it."""
 
-    ``block_ids`` are block *versions*, never message identifiers.  A mention can
-    span adjacent Context blocks, while ``literal_message_ids`` is intentionally
-    left empty until the result assembler proves that a canonical message really
-    contains the resolved mention.
-    """
-
-    block_ids: tuple[UUID, ...]
+    message_ids: tuple[int, ...]
     name: str
     entity_type: str
     topic: str
-    origin: Literal["known_alias", "vp01", "llm_fallback", "jev_fallback"]
-    literal_message_ids: tuple[int, ...] = ()
-    source_start: int | None = None
-    source_end: int | None = None
+    origin: Literal["known_alias", "vp01"]
 
     def __post_init__(self) -> None:
-        if not self.block_ids or len(self.block_ids) != len(set(self.block_ids)):
-            raise ValueError("ContextBlockMention requires unique supporting block IDs")
-        if not all(isinstance(block_id, UUID) for block_id in self.block_ids):
-            raise TypeError("ContextBlockMention block_ids must be UUID instances")
+        if not self.message_ids or len(self.message_ids) != len(set(self.message_ids)):
+            raise ValueError("EntityMention requires unique supporting message IDs")
+        for message_id in self.message_ids:
+            _require_positive_id(message_id, "EntityMention.message_ids entry")
         object.__setattr__(
-            self,
-            "name",
-            _require_nonblank_text(self.name, "ContextBlockMention.name"),
+            self, "name", _require_nonblank_text(self.name, "EntityMention.name")
         )
         object.__setattr__(
             self,
             "entity_type",
-            _require_nonblank_text(
-                self.entity_type, "ContextBlockMention.entity_type"
-            ),
+            _require_nonblank_text(self.entity_type, "EntityMention.entity_type"),
         )
         object.__setattr__(
-            self,
-            "topic",
-            _require_nonblank_text(self.topic, "ContextBlockMention.topic"),
+            self, "topic", _require_nonblank_text(self.topic, "EntityMention.topic")
         )
-        if self.origin not in {
-            "known_alias",
-            "vp01",
-            "llm_fallback",
-            "jev_fallback",
-        }:
-            raise ValueError("ContextBlockMention origin is unsupported")
-        message_ids = tuple(
-            _require_positive_id(
-                message_id, "ContextBlockMention.literal_message_ids entry"
-            )
-            for message_id in self.literal_message_ids
-        )
-        if len(message_ids) != len(set(message_ids)):
-            raise ValueError("ContextBlockMention literal message IDs must be unique")
-        object.__setattr__(self, "literal_message_ids", message_ids)
-        if (self.source_start is None) != (self.source_end is None):
-            raise ValueError(
-                "ContextBlockMention source offsets must be provided together"
-            )
-        if self.source_start is not None:
-            if (
-                not isinstance(self.source_start, int)
-                or isinstance(self.source_start, bool)
-                or not isinstance(self.source_end, int)
-                or isinstance(self.source_end, bool)
-                or self.source_start < 0
-                or self.source_end <= self.source_start
-            ):
-                raise ValueError(
-                    "ContextBlockMention source offsets must be an increasing range"
-                )
+        if self.origin not in {"known_alias", "vp01"}:
+            raise ValueError("EntityMention origin is unsupported")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class ContextBlockEntityAssociation:
-    """One pending current-block-to-entity association for Batch 7 persistence."""
+class ResolvedEntityMention:
+    """One mention after identity resolution but before persistence."""
 
-    block_id: UUID
-    entity_id: int
-    mention_text: str
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.block_id, UUID):
-            raise TypeError("ContextBlockEntityAssociation.block_id must be a UUID")
-        _require_positive_id(self.entity_id, "ContextBlockEntityAssociation.entity_id")
-        object.__setattr__(
-            self,
-            "mention_text",
-            _require_nonblank_text(
-                self.mention_text, "ContextBlockEntityAssociation.mention_text"
-            ),
-        )
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class UnknownEndpointDiagnostic:
-    """Validated relationship endpoint observation that cannot write state."""
-
-    block_id: UUID
-    name: str
-    entity_type: str
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.block_id, UUID):
-            raise TypeError("UnknownEndpointDiagnostic.block_id must be a UUID")
-        object.__setattr__(
-            self,
-            "name",
-            _require_nonblank_text(self.name, "UnknownEndpointDiagnostic.name"),
-        )
-        object.__setattr__(
-            self,
-            "entity_type",
-            _require_nonblank_text(
-                self.entity_type, "UnknownEndpointDiagnostic.entity_type"
-            ),
-        )
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class ResolvedContextBlockMention:
-    """One typed Context mention after identity resolution but before persistence."""
-
-    mention: ContextBlockMention
+    mention: EntityMention
     entity_id: int
     occurrence_index: int
     identity_decision_key: str | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.mention, ContextBlockMention):
-            raise TypeError("ResolvedContextBlockMention.mention must be typed")
-        _require_positive_id(self.entity_id, "ResolvedContextBlockMention.entity_id")
+        if not isinstance(self.mention, EntityMention):
+            raise TypeError("ResolvedEntityMention.mention must be typed")
+        _require_positive_id(self.entity_id, "ResolvedEntityMention.entity_id")
         if not isinstance(self.occurrence_index, int) or self.occurrence_index < 0:
-            raise ValueError("ResolvedContextBlockMention occurrence index must be non-negative")
+            raise ValueError("ResolvedEntityMention occurrence index must be non-negative")
         if self.identity_decision_key is not None and not self.identity_decision_key:
-            raise ValueError("ResolvedContextBlockMention identity decision key must not be blank")
+            raise ValueError("ResolvedEntityMention identity decision key must not be blank")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class ResolvedMessageEntityOccurrence:
-    """One literal message mention traced to a resolved Context occurrence."""
-
-    block_id: UUID
-    occurrence_index: int
-    message_id: int
-    entity_id: int
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.block_id, UUID) or self.occurrence_index < 0:
-            raise ValueError("Message occurrence needs a Context block and occurrence index")
-        _require_positive_id(self.message_id, "ResolvedMessageEntityOccurrence.message_id")
-        _require_positive_id(self.entity_id, "ResolvedMessageEntityOccurrence.entity_id")
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class ContextEntityResult:
-    """The non-persisted entity portion of one Context-first semantic build."""
+class EntityResult:
+    """The non-persisted entity portion of one semantic-window build."""
 
     entity_ids: tuple[int, ...]
     new_entity_ids: frozenset[int]
@@ -467,122 +335,81 @@ class ContextEntityResult:
     alias_updates: dict[int, tuple[str, ...]]
     pending_entity_writes: dict[int, EntityWrite]
     project_classifications: dict[int, ProjectEntityClassification]
-    block_entity_associations: tuple[ContextBlockEntityAssociation, ...]
-    message_entity_refs: tuple[MessageEntityRef, ...]
-    resolved_mentions: tuple[ResolvedContextBlockMention, ...] = ()
-    message_occurrence_links: tuple[ResolvedMessageEntityOccurrence, ...] = ()
+    resolved_mentions: tuple[ResolvedEntityMention, ...] = ()
+
+    @property
+    def message_entity_refs(self) -> tuple[MessageEntityRef, ...]:
+        """Each message that names each resolved entity, once."""
+
+        refs = dict.fromkeys(
+            (message_id, resolved.entity_id)
+            for resolved in self.resolved_mentions
+            for message_id in resolved.mention.message_ids
+        )
+        return tuple(
+            MessageEntityRef(message_id=message_id, entity_id=entity_id)
+            for message_id, entity_id in refs
+        )
 
     def __post_init__(self) -> None:
         entity_ids = tuple(
-            _require_positive_id(entity_id, "ContextEntityResult.entity_ids entry")
+            _require_positive_id(entity_id, "EntityResult.entity_ids entry")
             for entity_id in self.entity_ids
         )
         if len(entity_ids) != len(set(entity_ids)):
-            raise ValueError("ContextEntityResult entity IDs must be unique")
+            raise ValueError("EntityResult entity IDs must be unique")
         object.__setattr__(self, "entity_ids", entity_ids)
         for field_name, values in (
             ("new_entity_ids", self.new_entity_ids),
             ("alias_updated_ids", self.alias_updated_ids),
         ):
             if not isinstance(values, frozenset):
-                raise TypeError(f"ContextEntityResult.{field_name} must be a frozenset")
+                raise TypeError(f"EntityResult.{field_name} must be a frozenset")
             if not values.issubset(set(entity_ids)):
-                raise ValueError(f"ContextEntityResult.{field_name} must reference entity IDs")
+                raise ValueError(f"EntityResult.{field_name} must reference entity IDs")
         if set(self.pending_entity_writes) != set(self.new_entity_ids):
-            raise ValueError("pending Context entity writes must cover exactly new entities")
+            raise ValueError("pending entity writes must cover exactly new entities")
         if any(
             not isinstance(entity_id, int)
             or not isinstance(write, EntityWrite)
             or write.entity_id != entity_id
             for entity_id, write in self.pending_entity_writes.items()
         ):
-            raise TypeError("pending Context entity writes must be keyed EntityWrite values")
+            raise TypeError("pending entity writes must be keyed EntityWrite values")
         if IDENTITY_ENTITY_ID in self.new_entity_ids:
-            raise ValueError("Context entity writes cannot create the reserved identity")
+            raise ValueError("Entity writes cannot create the reserved identity")
         classified_ids = set(entity_ids) - {IDENTITY_ENTITY_ID}
         if set(self.project_classifications) != classified_ids:
-            raise ValueError(
-                "Context project classifications must cover every non-identity entity"
-            )
+            raise ValueError("Project classifications must cover every non-identity entity")
         if any(
             not isinstance(entity_id, int)
             or not isinstance(classification, ProjectEntityClassification)
             or classification.entity_id != entity_id
             for entity_id, classification in self.project_classifications.items()
         ):
-            raise TypeError(
-                "Context project classifications must be keyed typed classifications"
-            )
+            raise TypeError("Project classifications must be keyed typed classifications")
         for entity_id in self.new_entity_ids:
             classification = self.project_classifications[entity_id]
             write = self.pending_entity_writes[entity_id]
             if classification.membership != "missing":
-                raise ValueError(
-                    "New Context identities require missing project membership"
-                )
+                raise ValueError("New identities require missing project membership")
             if (
                 classification.entity_type != write.entity_type
                 or classification.topic != write.topic
             ):
-                raise ValueError(
-                    "New Context identity classification must match its entity write"
-                )
+                raise ValueError("New identity classification must match its entity write")
         if any(
             entity_id not in set(entity_ids)
             or not isinstance(aliases, tuple)
             or any(not isinstance(alias, str) or not alias.strip() for alias in aliases)
             for entity_id, aliases in self.alias_updates.items()
         ):
-            raise ValueError("Context alias updates must be typed resolved entity aliases")
+            raise ValueError("Alias updates must be typed resolved entity aliases")
         if any(
-            association.entity_id not in set(entity_ids)
-            for association in self.block_entity_associations
-        ):
-            raise ValueError("Context block associations must reference resolved entities")
-        associated_entity_ids = {
-            association.entity_id for association in self.block_entity_associations
-        }
-        if associated_entity_ids != set(entity_ids):
-            raise ValueError(
-                "Context block associations must cover every resolved entity"
-            )
-        if any(
-            reference.entity_id not in set(entity_ids)
-            for reference in self.message_entity_refs
-        ):
-            raise ValueError("Context message refs must reference resolved entities")
-        if any(
-            not isinstance(resolved, ResolvedContextBlockMention)
+            not isinstance(resolved, ResolvedEntityMention)
             or resolved.entity_id not in set(entity_ids)
             for resolved in self.resolved_mentions
         ):
-            raise ValueError("Context resolved mentions must reference resolved entities")
-        if self.resolved_mentions:
-            mention_associations = {
-                (block_id, resolved.entity_id, resolved.mention.name.casefold())
-                for resolved in self.resolved_mentions
-                for block_id in resolved.mention.block_ids
-            }
-            persisted_associations = {
-                (item.block_id, item.entity_id, item.mention_text.casefold())
-                for item in self.block_entity_associations
-            }
-            if mention_associations != persisted_associations:
-                raise ValueError("Resolved mentions must cover exactly the block associations")
-        if self.message_occurrence_links:
-            known_occurrences = {
-                (block_id, resolved.occurrence_index, resolved.entity_id)
-                for resolved in self.resolved_mentions
-                for block_id in resolved.mention.block_ids
-            }
-            if any(
-                not isinstance(link, ResolvedMessageEntityOccurrence)
-                or (link.block_id, link.occurrence_index, link.entity_id)
-                not in known_occurrences
-                for link in self.message_occurrence_links
-            ):
-                raise ValueError("Message occurrence links must use resolved Context mentions")
-            if {(link.message_id, link.entity_id) for link in self.message_occurrence_links} != {
-                (ref.message_id, ref.entity_id) for ref in self.message_entity_refs
-            }:
-                raise ValueError("Message occurrence links must cover the message entity refs")
+            raise ValueError("Resolved mentions must reference resolved entities")
+        if {resolved.entity_id for resolved in self.resolved_mentions} != set(entity_ids):
+            raise ValueError("Every resolved entity needs a mention")

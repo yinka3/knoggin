@@ -244,7 +244,7 @@ async def test_review_detail_separates_snapshot_from_current_evidence():
 @pytest.mark.no_network
 async def test_changed_evidence_prevents_apply_before_canonical_mutation():
     observation = EvidencePointer.for_observation(10)
-    block = EvidencePointer(kind="context_block", identifier=str(uuid4()))
+    message = EvidencePointer(kind="message", identifier="7")
 
     def bundle(token):
         return EvidenceBundle(
@@ -253,11 +253,11 @@ async def test_changed_evidence_prevents_apply_before_canonical_mutation():
             ),
             nodes=(
                 EvidenceNode(pointer=observation, status="active"),
-                EvidenceNode(pointer=block, content_hash="1" * 64),
+                EvidenceNode(pointer=message, role="user"),
             ),
             edges=(
                 EvidenceEdge(
-                    source=block,
+                    source=message,
                     target=observation,
                     relation="supports_relationship_observation",
                 ),

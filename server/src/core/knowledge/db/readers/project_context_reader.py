@@ -314,12 +314,7 @@ class ProjectContextReader:
         user_name: str,
         project_id: str,
     ) -> tuple[int, ...]:
-        """Return the entity IDs durably affected by one owned committed window.
-
-        A later no-op window can reuse an earlier Context revision.  Requiring
-        the revision owner to equal the requested window prevents that later
-        window from publishing the earlier window's cached entity changes.
-        """
+        """Return the entity IDs one owned committed window resolved."""
 
         user_name, project_id = self._scope(
             user_name, project_id, "get_committed_window_affected_entity_ids"
@@ -328,23 +323,16 @@ class ProjectContextReader:
         rows = await self._fetch_all(
             "get_committed_window_affected_entity_ids",
             """
-            SELECT DISTINCT association.entity_id
+            SELECT DISTINCT occurrence.resolved_entity_id AS entity_id
             FROM public.project_semantic_windows AS semantic_window
-            JOIN public.project_context_revisions AS revision
-              ON revision.revision_id = semantic_window.context_revision_id
-             AND revision.project_id = semantic_window.project_id
-             AND revision.window_id = semantic_window.window_id
-            JOIN public.project_context_revision_impact_blocks AS impact
-              ON impact.revision_id = revision.revision_id
-             AND impact.project_id = revision.project_id
-            JOIN public.context_block_entities AS association
-              ON association.block_id = impact.block_id
-             AND association.project_id = impact.project_id
+            JOIN public.message_entity_occurrences AS occurrence
+              ON occurrence.window_id = semantic_window.window_id
+             AND occurrence.project_id = semantic_window.project_id
             WHERE semantic_window.window_id = %s
               AND semantic_window.user_name = %s
               AND semantic_window.project_id = %s
               AND semantic_window.stage = 'knowledge_committed'
-            ORDER BY association.entity_id ASC
+            ORDER BY occurrence.resolved_entity_id ASC
             """,
             (window_id, user_name, project_id),
         )

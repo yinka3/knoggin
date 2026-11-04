@@ -25,7 +25,6 @@ from core.project.maintenance_service import ProjectMaintenanceService
 
 _PROJECT_ONE_RELATIONSHIP = "project-1:2:3:works_at"
 _PROJECT_TWO_RELATIONSHIP = "project-2:2:4:works_at"
-_RETIRED_BLOCK_ID = "55555555-5555-4555-8555-555555555555"
 _NOW_MS = 1_700_000_100_000
 
 
@@ -147,11 +146,11 @@ async def _seed_observation_matrix(client) -> None:
              '33333333-3333-4333-8333-333333333333', 2, 4, 'works at',
              md5('[]'), 'Ade works at Other Co.', 300, NULL, NULL);
 
-        INSERT INTO relationship_observation_blocks (
-            observation_id, project_id, block_id
+        INSERT INTO relationship_observation_messages (
+            observation_id, project_id, message_id
         ) VALUES
-            (1, 'project-1', '44444444-4444-4444-8444-444444444444'),
-            (2, 'project-1', '55555555-5555-4555-8555-555555555555');
+            (1, 'project-1', 101),
+            (2, 'project-1', 102);
         """
     )
 
@@ -159,7 +158,7 @@ async def _seed_observation_matrix(client) -> None:
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
-async def test_current_context_backed_observations_reach_conflict_discovery(
+async def test_current_message_backed_observations_reach_conflict_discovery(
     real_postgres_client,
 ):
     await _seed_observation_matrix(real_postgres_client)
@@ -183,7 +182,7 @@ async def test_current_context_backed_observations_reach_conflict_discovery(
 
     assert package is not None
     assert [row["observation_id"] for row in package.observations] == [1]
-    assert package.observations[0]["evidence_origin"] == "context"
+    assert package.observations[0]["evidence_origin"] == "conversation"
 
 
 @pytest.mark.storage
@@ -484,6 +483,5 @@ async def test_current_readers_exclude_retired_observations_and_history_retains_
         (node.pointer.kind, node.pointer.identifier) for node in historical.nodes
     } == {
         ("relationship_observation", "2"),
-        ("context_block", _RETIRED_BLOCK_ID),
         ("message", "102"),
     }

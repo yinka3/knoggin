@@ -40,7 +40,7 @@ class RollbackSelection(BaseModel):
 class FlagJevContextDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    capability: Literal["extraction", "classification"]
+    capability: Literal["classification"]
     window_id: UUID
     pass_number: int = Field(ge=1, le=2)
     occurrence_key: str = Field(min_length=1, max_length=500)

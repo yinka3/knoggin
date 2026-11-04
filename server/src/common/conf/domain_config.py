@@ -147,7 +147,6 @@ class DomainConfig:
     relationships: tuple[RelationshipDefinition, ...] = ()
     context_sections: tuple[ContextSectionDefinition, ...] = DEFAULT_CONTEXT_SECTIONS
     extraction_guidance: str = ""
-    vp01_language: str = "en"
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any]) -> "DomainConfig":
@@ -176,15 +175,18 @@ class DomainConfig:
         if not isinstance(payload, Mapping):
             raise DomainConfigError("Domain configuration must be an object")
 
-        unknown_keys = set(payload) - {
+        allowed_keys = {
             "version",
             "topics",
             "entity_types",
             "relationships",
             "context_sections",
             "extraction_guidance",
-            "vp01_language",
         }
+        if allow_legacy_relationship_collisions:
+            # Stored definitions still name the removed local entity model.
+            allowed_keys.add("vp01_language")
+        unknown_keys = set(payload) - allowed_keys
         if unknown_keys:
             raise DomainConfigError(
                 f"Unknown domain configuration fields: {sorted(unknown_keys)!r}"
@@ -482,10 +484,6 @@ class DomainConfig:
             "extraction_guidance",
             required=False,
         )
-        vp01_language = _text(payload.get("vp01_language", "en"), "vp01_language")
-        if vp01_language not in {"en", "multilingual"}:
-            raise DomainConfigError("vp01_language must be 'en' or 'multilingual'")
-
         return cls(
             version=version,
             topics=tuple(topics),
@@ -493,7 +491,6 @@ class DomainConfig:
             relationships=tuple(relationships),
             context_sections=context_sections,
             extraction_guidance=extraction_guidance,
-            vp01_language=vp01_language,
         )
 
     def with_version(self, version: int) -> "DomainConfig":
@@ -506,7 +503,6 @@ class DomainConfig:
             relationships=self.relationships,
             context_sections=self.context_sections,
             extraction_guidance=self.extraction_guidance,
-            vp01_language=self.vp01_language,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -542,7 +538,6 @@ class DomainConfig:
                 for section in self.context_sections
             ],
             "extraction_guidance": self.extraction_guidance,
-            "vp01_language": self.vp01_language,
         }
 
     def compile(self) -> "CompiledDomain":
@@ -601,7 +596,6 @@ class DomainConfig:
                 {section.key: section for section in self.context_sections}
             ),
             extraction_guidance=self.extraction_guidance,
-            vp01_language=self.vp01_language,
         )
 
 
@@ -634,7 +628,6 @@ class CompiledDomain:
         )
     )
     extraction_guidance: str = ""
-    vp01_language: str = "en"
 
     @classmethod
     def empty(cls, version: int = 0) -> "CompiledDomain":
@@ -693,7 +686,6 @@ class CompiledDomain:
                 for section in self.context_sections
             ],
             "extraction_guidance": self.extraction_guidance,
-            "vp01_language": self.vp01_language,
         }
 
     @classmethod
@@ -733,7 +725,6 @@ class CompiledDomain:
                     for value in context_sections_payload
                 )
             extraction_guidance = payload.get("extraction_guidance", "")
-            vp01_language = payload.get("vp01_language", "en")
             relationships = {
                 key: RelationshipDefinition(
                     name=value["name"],
@@ -749,11 +740,7 @@ class CompiledDomain:
 
         if not isinstance(version, int) or isinstance(version, bool) or version < 0:
             raise ValueError("CompiledDomain version must be a non-negative integer")
-        if (
-            not isinstance(extraction_guidance, str)
-            or not isinstance(vp01_language, str)
-            or vp01_language not in {"en", "multilingual"}
-        ):
+        if not isinstance(extraction_guidance, str):
             raise ValueError("Invalid compiled Context configuration")
         if any(
             not isinstance(value, str) or not value.strip()
@@ -819,7 +806,6 @@ class CompiledDomain:
             context_sections=context_sections,
             context_section_by_key=_frozen_mapping(context_section_by_key),
             extraction_guidance=extraction_guidance,
-            vp01_language=vp01_language,
         )
 
     @property

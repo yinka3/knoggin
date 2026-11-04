@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from common.conf.domain_config import CompiledDomain
 from common.schema.ingestion.contracts import (
-    ContextBlockMention,
+    EntityMention,
     ProjectEntityClassification,
 )
 from common.schema.jev import (
@@ -18,7 +18,7 @@ from common.schema.jev import (
 
 
 def prepare_topic_request(
-    mention: ContextBlockMention,
+    mention: EntityMention,
     support_text: str,
     domain: CompiledDomain,
     policy: JevPolicy,

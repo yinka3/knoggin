@@ -11,8 +11,8 @@ from common.schema.context import ContextRevisionOrigin, ContextSnapshot
 from common.schema.settings import (
     EntityResolutionSettings,
     EpisodeSettings,
+    ExtractionSettings,
     IngestionSettings,
-    TextProcessorSettings,
 )
 from common.utils.time_utils import frozen_time
 from core.ingestion.policy import IngestionPolicy
@@ -83,7 +83,7 @@ def _admission(rows, *, target=128_000, now_ms=1_000):
 
 def _policy(domain):
     return IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(),
+        extraction=ExtractionSettings(),
         entity_resolution=EntityResolutionSettings(),
         compiled_domain=domain,
     )
@@ -283,7 +283,7 @@ async def test_selection_reuses_the_last_exact_prefix_token_count():
 async def test_admission_persists_the_exact_context_entity_policy():
     compiled_domain = make_domain_config().compile()
     frozen_policy = IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(gliner_threshold=0.42),
+        extraction=ExtractionSettings(),
         entity_resolution=EntityResolutionSettings(resolution_threshold=0.71),
         compiled_domain=compiled_domain,
     )
@@ -301,8 +301,8 @@ async def test_admission_persists_the_exact_context_entity_policy():
     assert IngestionPolicy.from_semantic_window_snapshot(ingestion_snapshot) == frozen_policy
     assert set(ingestion_snapshot) == {
         "jev_policy",
-        "gliner_threshold",
-        "llm_ner_mode",
+        "vp01_episode_lookback",
+        "vp02_episode_lookback",
         "candidate_fuzzy_threshold",
             "resolution_threshold",
             "resolution_margin",
@@ -676,8 +676,8 @@ def _job(
         capture_semantic_policy=capture_semantic_policy,
         context_updater=context_updater or _NoopContextUpdater(),
         context_projection=_NoopProjection(),
-        context_entity_builder=_UnexpectedBuilder(),
-        context_relationship_extractor=_UnexpectedRelationships(),
+        entity_builder=_UnexpectedBuilder(),
+        relationship_extractor=_UnexpectedRelationships(),
         publish_committed_entity_ids=_publish_nothing,
         now_ms=now_ms,
     )

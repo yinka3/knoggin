@@ -993,10 +993,12 @@ async def test_provider_content_block_is_a_refusal(monkeypatch):
         "metadata": {"error_type": "content_policy_violation"},
     }})
 
-    with pytest.raises(LLMRefusalError):
+    with pytest.raises(LLMRefusalError) as raised:
         await service.generate_structured(
             response_model=DummyModel, system="Extract.", user="text"
         )
+    assert raised.value.details["refusal_reason"] == "provider_content_policy"
+    assert raised.value.details["finish_reason"] == "none"
     assert len(requests) == 1
     await service.close()
 
@@ -1008,10 +1010,12 @@ async def test_model_apology_instead_of_json_is_a_refusal(monkeypatch):
         monkeypatch, _reply("I'm sorry, but I cannot assist with that request.")
     )
 
-    with pytest.raises(LLMRefusalError):
+    with pytest.raises(LLMRefusalError) as raised:
         await service.generate_structured(
             response_model=DummyModel, system="Extract.", user="text"
         )
+    assert raised.value.details["refusal_reason"] == "refusal_text"
+    assert raised.value.details["finish_reason"] == "stop"
     await service.close()
 
 

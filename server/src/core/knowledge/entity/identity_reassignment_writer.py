@@ -1,4 +1,4 @@
-"""Atomic reassignment of one reviewed Context identity occurrence."""
+"""Atomic reassignment of one reviewed identity occurrence."""
 
 from __future__ import annotations
 
@@ -21,41 +21,37 @@ class IdentityReassignmentWriter:
         self, cur, *, user_name: str, project_id: str, review_id: str,
         plan: IdentityReassignmentPlan,
     ) -> int:
-        blocks = [str(block_id) for block_id in plan.block_ids]
+        message_ids = tuple(plan.message_ids)
         source_id = plan.source_entity_id
-        message_ids = await self._linked_ids(
-            cur, "message_entity_occurrences", "message_id", project_id, plan,
-        )
-        episode_ids = await self._linked_ids(
-            cur, "episode_entity_occurrences", "episode_id", project_id, plan,
-        )
+        episode_ids = await self._linked_episode_ids(cur, project_id, plan)
         await self._require_complete_links(cur, message_ids, episode_ids, source_id)
         await cur.execute(
             """SELECT observation.observation_id
                FROM public.relationship_observations AS observation
                WHERE observation.user_name = %s AND observation.project_id = %s
                  AND EXISTS (
-                     SELECT 1 FROM public.relationship_observation_blocks AS support
+                     SELECT 1 FROM public.relationship_observation_messages AS support
                      WHERE support.observation_id = observation.observation_id
                        AND support.project_id = observation.project_id
-                       AND support.block_id = ANY(%s::uuid[])
+                       AND support.message_id = ANY(%s)
                  )
                  AND (observation.source_entity_id = %s OR observation.target_entity_id = %s)
                  AND observation.retired_at IS NULL
                FOR UPDATE OF observation""",
-            (user_name, project_id, blocks, source_id, source_id),
+            (user_name, project_id, list(message_ids), source_id, source_id),
         )
         observation_ids = [int(row["observation_id"]) for row in await cur.fetchall()]
         if observation_ids:
             # A relationship names an entity, not a text span. If another old
-            # occurrence shares the block, we cannot tell which one it used.
+            # occurrence shares the message, we cannot tell which one it used.
             await cur.execute(
-                """SELECT 1 FROM public.context_block_entity_occurrences
-                   WHERE project_id = %s AND block_id = ANY(%s::uuid[])
+                """SELECT 1 FROM public.message_entity_occurrences
+                   WHERE project_id = %s AND message_id = ANY(%s)
                      AND coalesce(corrected_entity_id, resolved_entity_id) = %s
                      AND NOT (window_id = %s AND identity_decision_key = %s)
                    LIMIT 1""",
-                (project_id, blocks, source_id, plan.window_id, plan.occurrence_key),
+                (project_id, list(message_ids), source_id, plan.window_id,
+                 plan.occurrence_key),
             )
             if await cur.fetchone() is not None:
                 raise MaintenanceConflictError()
@@ -77,65 +73,35 @@ class IdentityReassignmentWriter:
             )
 
         await cur.execute(
-            """UPDATE public.context_block_entity_occurrences
+            """UPDATE public.message_entity_occurrences
                SET corrected_entity_id = %s, human_correction_review_id = %s
                WHERE window_id = %s AND project_id = %s
                  AND identity_decision_key = %s
                  AND resolved_entity_id = %s AND corrected_entity_id IS NULL
-               RETURNING block_id""",
+               RETURNING message_id""",
             (target_id, review_id, plan.window_id, project_id,
              plan.occurrence_key, source_id),
         )
-        changed_blocks = {str(row["block_id"]) for row in await cur.fetchall()}
-        if changed_blocks != set(blocks):
+        if {int(row["message_id"]) for row in await cur.fetchall()} != set(message_ids):
             raise MaintenanceConflictError()
-        for block_id in blocks:
-            await cur.execute(
-                """INSERT INTO public.context_block_entities
-                   (block_id, project_id, entity_id, mention_text,
-                    occurrence_provenance_complete)
-                   SELECT occurrence.block_id, occurrence.project_id, %s,
-                          occurrence.mention_text, true
-                   FROM public.context_block_entity_occurrences AS occurrence
-                   WHERE occurrence.window_id = %s AND occurrence.project_id = %s
-                     AND occurrence.identity_decision_key = %s
-                     AND occurrence.block_id = %s
-                   ON CONFLICT (block_id, entity_id) DO NOTHING""",
-                (target_id, plan.window_id, project_id, plan.occurrence_key, block_id),
-            )
-            await cur.execute(
-                """SELECT 1 FROM public.context_block_entity_occurrences
-                   WHERE project_id = %s AND block_id = %s
-                     AND coalesce(corrected_entity_id, resolved_entity_id) = %s
-                   LIMIT 1""",
-                (project_id, block_id, source_id),
-            )
-            if await cur.fetchone() is None:
-                await cur.execute(
-                    """DELETE FROM public.context_block_entities
-                       WHERE project_id = %s AND block_id = %s AND entity_id = %s""",
-                    (project_id, block_id, source_id),
-                )
-
-        for table in ("message_entity_occurrences", "episode_entity_occurrences"):
-            await cur.execute(
-                f"""UPDATE public.{table} AS link
-                    SET corrected_entity_id = %s, human_correction_review_id = %s
-                    FROM public.context_block_entity_occurrences AS occurrence
-                    WHERE occurrence.window_id = link.window_id
-                      AND occurrence.pass_number = link.pass_number
-                      AND occurrence.occurrence_index = link.occurrence_index
-                      AND occurrence.block_id = link.block_id
-                      AND occurrence.project_id = link.project_id
-                      AND occurrence.window_id = %s
-                      AND occurrence.project_id = %s
-                      AND occurrence.identity_decision_key = %s
-                      AND occurrence.human_correction_review_id = %s
-                      AND link.resolved_entity_id = %s
-                      AND link.corrected_entity_id IS NULL""",
-                (target_id, review_id, plan.window_id, project_id,
-                 plan.occurrence_key, review_id, source_id),
-            )
+        await cur.execute(
+            """UPDATE public.episode_entity_occurrences AS link
+               SET corrected_entity_id = %s, human_correction_review_id = %s
+               FROM public.message_entity_occurrences AS occurrence
+               WHERE occurrence.window_id = link.window_id
+                 AND occurrence.pass_number = link.pass_number
+                 AND occurrence.occurrence_index = link.occurrence_index
+                 AND occurrence.message_id = link.message_id
+                 AND occurrence.project_id = link.project_id
+                 AND occurrence.window_id = %s
+                 AND occurrence.project_id = %s
+                 AND occurrence.identity_decision_key = %s
+                 AND occurrence.human_correction_review_id = %s
+                 AND link.resolved_entity_id = %s
+                 AND link.corrected_entity_id IS NULL""",
+            (target_id, review_id, plan.window_id, project_id,
+             plan.occurrence_key, review_id, source_id),
+        )
         await self._reconcile_messages(cur, message_ids, source_id, target_id)
         await self._reconcile_episodes(cur, episode_ids, project_id, source_id, target_id)
         if observation_ids:
@@ -160,15 +126,15 @@ class IdentityReassignmentWriter:
         return target_id
 
     @staticmethod
-    async def _linked_ids(cur, table, id_column, project_id, plan):
+    async def _linked_episode_ids(cur, project_id, plan):
         await cur.execute(
-            f"""SELECT DISTINCT link.{id_column} AS id
-                FROM public.{table} AS link
-                JOIN public.context_block_entity_occurrences AS occurrence
+            """SELECT DISTINCT link.episode_id AS id
+                FROM public.episode_entity_occurrences AS link
+                JOIN public.message_entity_occurrences AS occurrence
                   ON occurrence.window_id = link.window_id
                  AND occurrence.pass_number = link.pass_number
                  AND occurrence.occurrence_index = link.occurrence_index
-                 AND occurrence.block_id = link.block_id
+                 AND occurrence.message_id = link.message_id
                  AND occurrence.project_id = link.project_id
                 WHERE occurrence.window_id = %s AND occurrence.project_id = %s
                   AND occurrence.identity_decision_key = %s""",

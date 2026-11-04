@@ -15,11 +15,8 @@ from tests.fixtures.factories import make_domain_config
 @pytest.mark.requires_pgvector
 @pytest.mark.no_network
 async def test_a_project_holds_up_to_its_limit_of_workspaces(real_postgres_client, tmp_path):
-    async def get_vp01(_language):
-        return SimpleNamespace(extract_entities=lambda *_args, **_kwargs: ())
-
     manager = ProjectManager(
-        SimpleNamespace(postgres=real_postgres_client, get_vp01=get_vp01),
+        SimpleNamespace(postgres=real_postgres_client),
         user_name="ada",
         filesystem_factory=ProjectFilesystemFactory(tmp_path / "projects"),
         config_manager=SimpleNamespace(config=RootConfig()),

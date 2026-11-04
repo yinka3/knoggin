@@ -253,10 +253,13 @@ class GraphWriter:
             """,
             (project_id, entity_ids),
         )
+        # Finalize rebuilds Episode links from occurrences; remove them too so
+        # a retry cannot link the deleted entity again.
         await cur.execute(
             """
-            DELETE FROM context_block_entities
-            WHERE project_id = %s AND entity_id = ANY(%s)
+            DELETE FROM message_entity_occurrences
+            WHERE project_id = %s
+              AND coalesce(corrected_entity_id, resolved_entity_id) = ANY(%s)
             """,
             (project_id, entity_ids),
         )

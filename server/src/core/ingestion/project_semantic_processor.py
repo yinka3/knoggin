@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from time import monotonic
 from typing import Awaitable, Callable, Protocol
 
 from loguru import logger
@@ -22,10 +23,10 @@ from common.schema.semantic_window import (
 )
 from common.schema.settings import EpisodeSettings, IngestionSettings
 from common.utils.time_utils import get_now_ms
-from core.ingestion.batch import SemanticWindowBuild
-from core.ingestion.context_entity_build import ContextEntityBuildService
+from core.ingestion.batch import EpisodeEvidence, EvidenceMessage, SemanticWindowBuild
+from core.ingestion.entity_build import EntityBuildService
 from core.ingestion.policy import IngestionPolicy
-from core.ingestion.relationship_extractor import ContextRelationshipExtractor
+from core.ingestion.relationship_extractor import RelationshipExtractor
 from core.ingestion.semantic_window_admission import SemanticWindowAdmission
 from core.knowledge.context.maintainer import (
     ContextMaintainer,
@@ -83,10 +84,6 @@ class SemanticEpisodeStore(Protocol):
     async def get_recent_project_episodes(
         self, *, user_name: str, project_id: str, limit: int
     ) -> list[EpisodeCard]: ...
-
-    async def get_project_context_revision_impact_block_ids(
-        self, revision_id: str, *, user_name: str, project_id: str
-    ) -> frozenset: ...
 
     async def get_project_context_block_supports(
         self, block_ids: list[str], *, user_name: str, project_id: str
@@ -204,8 +201,8 @@ class ProjectSemanticProcessor(BaseJob):
         capture_semantic_policy: Callable[[], Awaitable[IngestionPolicy]],
         context_updater: ContextUpdater,
         context_projection: ContextProjection,
-        context_entity_builder: ContextEntityBuildService,
-        context_relationship_extractor: ContextRelationshipExtractor,
+        entity_builder: EntityBuildService,
+        relationship_extractor: RelationshipExtractor,
         publish_committed_entity_ids: Callable[[tuple[int, ...]], Awaitable[None]],
         signal_relationship_advisories: Callable[[], bool] | None = None,
         now_ms: Callable[[], int] | None = None,
@@ -216,8 +213,8 @@ class ProjectSemanticProcessor(BaseJob):
         required_collaborators = {
             "context_updater": context_updater,
             "context_projection": context_projection,
-            "context_entity_builder": context_entity_builder,
-            "context_relationship_extractor": context_relationship_extractor,
+            "entity_builder": entity_builder,
+            "relationship_extractor": relationship_extractor,
         }
         missing = [
             name for name, collaborator in required_collaborators.items()
@@ -238,8 +235,8 @@ class ProjectSemanticProcessor(BaseJob):
         self._context_updater = context_updater
         self._context_maintainer = context_maintainer
         self._context_projection = context_projection
-        self._context_entity_builder = context_entity_builder
-        self._context_relationship_extractor = context_relationship_extractor
+        self._entity_builder = entity_builder
+        self._relationship_extractor = relationship_extractor
         self._publish_committed_entity_ids = publish_committed_entity_ids
         self._signal_relationship_advisories = signal_relationship_advisories
         self._capture_semantic_policy = capture_semantic_policy
@@ -336,6 +333,14 @@ class ProjectSemanticProcessor(BaseJob):
                     self._flush_requested = False
                 return JobResult(success=True, summary="No semantic window is due")
             window = claimed.window
+            if claimed.claimed:
+                logger.info(
+                    "Semantic window claimed project={} window={} tokens={} reason={}",
+                    ctx.project_id,
+                    window.window_id,
+                    window.source_token_count,
+                    window.policy_snapshot.get("admission_policy", {}).get("close_reason"),
+                )
         return await self._drain_window(window, ctx)
 
     async def _embed_closed_exchanges(self, ctx: JobContext) -> None:
@@ -399,6 +404,7 @@ class ProjectSemanticProcessor(BaseJob):
 
             stage_name, execute_stage = stage
             self._timeout_stage = (window, stage_name)
+            stage_started = monotonic()
             result = await execute_stage(window, ctx)
             self._timeout_stage = None
             if not result.success:
@@ -410,6 +416,13 @@ class ProjectSemanticProcessor(BaseJob):
                 project_id=ctx.project_id,
             )
             if reloaded is None:
+                logger.info(
+                    "Semantic stage committed project={} window={} stage={} duration_s={:.2f} "
+                    "next=completed recovered={} result={}",
+                    ctx.project_id, window.window_id, stage_name,
+                    monotonic() - stage_started,
+                    window.last_failure_code is not None, result.summary,
+                )
                 return JobResult(
                     success=True,
                     summary=(
@@ -436,6 +449,13 @@ class ProjectSemanticProcessor(BaseJob):
                     success=True,
                     summary="Semantic processor stopped without durable progress",
                 )
+            logger.info(
+                "Semantic stage committed project={} window={} stage={} duration_s={:.2f} "
+                "next={} recovered={} result={}",
+                ctx.project_id, window.window_id, stage_name,
+                monotonic() - stage_started, reloaded.stage.value,
+                window.last_failure_code is not None, result.summary,
+            )
             window = reloaded
 
     async def on_timeout(self, ctx: JobContext) -> None:
@@ -902,63 +922,15 @@ class ProjectSemanticProcessor(BaseJob):
     async def _execute_knowledge_stage(
         self, window: SemanticWindowRecord, ctx: JobContext
     ) -> JobResult:
-        """Rebuild one frozen Context impact closure and atomically commit it."""
+        """Extract this window's Episodes into Knowledge and commit it atomically."""
 
         try:
-            if window.context_revision_id is None:
-                raise RuntimeError("Context-committed window has no Context revision")
-            context = await self.knowledge_store.get_project_context_snapshot(
-                str(window.context_revision_id),
-                user_name=ctx.user_name,
-                project_id=ctx.project_id,
-            )
-            if context is None:
-                raise RuntimeError("Context checkpoint was not materialized")
-            # The revision-owned window is the only window allowed to replay
-            # its persisted impact.  A later no-op window checkpoints the
-            # same immutable revision with an empty effective impact; the
-            # writer rechecks that durable ownership before advancing it.
-            impact_block_ids = (
-                await self.knowledge_store.get_project_context_revision_impact_block_ids(
-                    str(context.revision_id),
-                    user_name=ctx.user_name,
-                    project_id=ctx.project_id,
-                )
-                if context.window_id == window.window_id
-                else frozenset()
-            )
-            if impact_block_ids:
-                supports = await self.knowledge_store.get_project_context_block_supports(
-                    [str(block.block_id) for block in context.blocks],
-                    user_name=ctx.user_name,
-                    project_id=ctx.project_id,
-                )
-                messages = (
-                    await self.knowledge_store.get_project_semantic_window_evidence_messages(
-                        str(window.window_id),
-                        user_name=ctx.user_name,
-                        project_id=ctx.project_id,
-                    )
-                )
-            else:
-                supports = {}
-                messages = []
             build = SemanticWindowBuild.from_committed_window(
-                window=window,
-                context=context,
-                impact_block_ids=impact_block_ids,
-                block_supports=supports,
-                message_text_by_id={
-                    int(message["message_id"]): str(message["content"])
-                    for message in messages
-                },
+                window=window, **await self._knowledge_input(window, ctx),
             )
-            if build.impact_block_ids:
-                await self._context_entity_builder.build(build)
-                await self._context_relationship_extractor.extract(build)
-                if build.unknown_endpoint_diagnostics:
-                    await self._context_entity_builder.build(build)
-                    await self._context_relationship_extractor.extract(build)
+            if build.episodes:
+                await self._entity_builder.build(build)
+                await self._relationship_extractor.extract(build)
             else:
                 build.set_empty_knowledge_result()
             summary = await self.knowledge_store.commit_project_semantic_knowledge(build)
@@ -985,6 +957,84 @@ class ProjectSemanticProcessor(BaseJob):
                 failure_stage="knowledge_reconciliation",
             )
             return JobResult(success=False, summary="Semantic Knowledge stage failed")
+
+    async def _knowledge_input(self, window: SemanticWindowRecord, ctx: JobContext) -> dict:
+        """The window's Episodes with their messages, earlier summaries, and hints."""
+
+        scope = {"user_name": ctx.user_name, "project_id": ctx.project_id}
+        episodes = await self.knowledge_store.get_project_semantic_window_episode_result(
+            str(window.window_id), **scope
+        ) or []
+        if not episodes:
+            return {"episodes": ()}
+        messages = {
+            int(row["message_id"]): row
+            for row in await self.knowledge_store.get_project_semantic_window_evidence_messages(
+                str(window.window_id), **scope
+            )
+        }
+        evidence = []
+        for episode in episodes:
+            covered = tuple(
+                EvidenceMessage(
+                    message_id=item.message_id,
+                    role=str(messages[item.message_id]["role"]),
+                    content=str(messages[item.message_id]["content"]),
+                    timestamp_ms=int(messages[item.message_id]["timestamp_ms"] or 0),
+                )
+                for item in sorted(episode.messages, key=lambda m: m.message_position)
+                if item.message_id in messages
+            )
+            if covered:
+                evidence.append(EpisodeEvidence(
+                    episode_id=episode.episode_id, summary=episode.summary, messages=covered,
+                ))
+        policy = self._frozen_policy(window)
+        lookback = max(policy.vp01_episode_lookback, policy.vp02_episode_lookback)
+        earlier: list[str] = []
+        if lookback:
+            own = {episode.episode_id for episode in episodes}
+            recent = await self.knowledge_store.get_recent_project_episodes(
+                limit=lookback + len(own), **scope
+            )
+            earlier = [card.summary for card in recent if card.episode_id not in own][
+                :lookback
+            ][::-1]
+        return {
+            "episodes": tuple(evidence),
+            "earlier_summaries": earlier,
+            "context_hints": await self._context_hints(window, ctx, set(messages)),
+        }
+
+    async def _context_hints(
+        self, window: SemanticWindowRecord, ctx: JobContext, message_ids: set[int]
+    ) -> dict[int, tuple[str, ...]]:
+        """For each message, the current Context blocks it supports."""
+
+        if window.context_revision_id is None:
+            return {}
+        scope = {"user_name": ctx.user_name, "project_id": ctx.project_id}
+        context = await self.knowledge_store.get_project_context_snapshot(
+            str(window.context_revision_id), **scope
+        )
+        if context is None or not context.blocks:
+            return {}
+        supports = await self.knowledge_store.get_project_context_block_supports(
+            [str(block.block_id) for block in context.blocks], **scope
+        )
+        markdown = {block.block_id: block.markdown for block in context.blocks}
+        hints: dict[int, list[str]] = {}
+        for block_id, rows in supports.items():
+            for support in rows:
+                if support.message_id in message_ids:
+                    hints.setdefault(support.message_id, []).append(markdown[block_id])
+        return {message_id: tuple(values) for message_id, values in hints.items()}
+
+    @staticmethod
+    def _frozen_policy(window: SemanticWindowRecord) -> IngestionPolicy:
+        return IngestionPolicy.from_semantic_window_snapshot(
+            window.policy_snapshot.get("ingestion_policy")
+        )
 
     async def _execute_finalization_stage(
         self, window: SemanticWindowRecord, ctx: JobContext
@@ -1140,4 +1190,11 @@ class ProjectSemanticProcessor(BaseJob):
             consume_attempt=consume_attempt,
             **attempt_guard,
             **checkpoint_guard,
+        )
+        logger.warning(
+            "Semantic window failed project={} window={} stage={} error={} "
+            "attempt={} charged={} retry_at_ms={} terminal={}",
+            ctx.project_id, window.window_id, failure_stage,
+            type(exc).__name__, attempt, consume_attempt,
+            next_retry_at_ms, next_retry_at_ms is None,
         )

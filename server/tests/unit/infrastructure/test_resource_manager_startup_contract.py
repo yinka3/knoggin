@@ -20,7 +20,6 @@ from runtime import resources as resources_module
         "tokenizer",
         "embedding",
         "spacy",
-        "vp01",
         "postgres",
     ],
 )
@@ -130,15 +129,6 @@ async def test_resource_manager_cleans_every_partial_startup_stage(
             assert language == "en"
             return FakeProcessor()
 
-    class FakeGLiNER25VP01Adapter:
-        @staticmethod
-        def load(*, language, device=None):
-            if failure == "vp01":
-                raise RuntimeError("vp01 failed")
-            assert language == "en"
-            assert device == "cpu"
-            return object()
-
     config = RootConfig(
         llm=LLMSettings(
             base_url="https://llm.example/v1",
@@ -170,11 +160,6 @@ async def test_resource_manager_cleans_every_partial_startup_stage(
     monkeypatch.setattr(resources_module, "PostgresClient", FakePostgres)
     monkeypatch.setattr(resources_module, "migrate", lambda _dsn: [])
     monkeypatch.setattr(resources_module, "spacy", FakeSpacy)
-    monkeypatch.setattr(
-        resources_module,
-        "GLiNER25VP01Adapter",
-        FakeGLiNER25VP01Adapter,
-    )
     with pytest.raises(DependencyError, match=failure):
         await resources_module.RuntimeResources.create(thread_workers=2)
 

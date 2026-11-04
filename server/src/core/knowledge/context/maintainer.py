@@ -7,6 +7,7 @@ same Context stage, and its edits go into the same revision.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Protocol, TypeVar
@@ -43,6 +44,7 @@ class StructuredGenerator(Protocol):
         response_model: type[ResponseT],
         system: str,
         user: str,
+        model: str | None = None,
         temperature: float = 1.0,
     ) -> ResponseT: ...
 
@@ -126,6 +128,7 @@ class ContextMaintenanceBuild:
         removed = 0
         tokens = self.context_tokens()
         for edit in output.edits:
+            targets: tuple[ContextBlockRecord, ...] = ()
             try:
                 targets = self._targets(edit, used)
                 planned, change = self._plan(edit, targets, tokens, removed)
@@ -135,6 +138,28 @@ class ContextMaintenanceBuild:
                 )
             except ValueError as exc:
                 rejected.append(f"{edit.operation}: {exc}")
+                logger.warning(
+                    "Dropped Context maintenance edit operation={} reason={} "
+                    "targets={} before_tokens={} proposed_tokens={}",
+                    edit.operation,
+                    exc,
+                    [target.handle for target in edit.targets],
+                    sum(self._tokens(target.markdown) for target in targets)
+                    if targets else None,
+                    self._tokens(edit.markdown or "")
+                    if edit.operation != "drop" else None,
+                )
+                if (
+                    edit.operation == "merge"
+                    and os.getenv("TRACE_REJECTED_CONTEXT_EDITS", "false").lower() == "true"
+                ):
+                    logger.warning(
+                        "Rejected Context merge content targets={} source_markdown={!r} "
+                        "proposed_markdown={!r}",
+                        [target.handle for target in edit.targets],
+                        [target.markdown for target in targets],
+                        edit.markdown,
+                    )
                 continue
             used.update(target.handle for target in edit.targets)
             removed += len(targets) - (0 if edit.operation == "drop" else 1)
@@ -144,8 +169,6 @@ class ContextMaintenanceBuild:
                 [targets] + [()] * (len(planned) - 1)
                 if edit.operation != "drop" else [()]
             )
-        for reason in rejected:
-            logger.warning("Dropped Context maintenance edit: {}", reason)
         materialization = apply_context_edits(
             self.snapshot, operations, self.domain, project_id=self.snapshot.project_id,
         )
@@ -285,8 +308,9 @@ def maintenance_snapshot(
 class ContextMaintainer:
     """Call the maintainer model once, then keep only the edits that pass."""
 
-    def __init__(self, *, llm: StructuredGenerator | None) -> None:
+    def __init__(self, *, llm: StructuredGenerator | None, model: str | None = None) -> None:
         self._llm = llm
+        self._model = model
         self.count_tokens: Callable[[str], int] | None = getattr(llm, "count_tokens", None)
 
     async def maintain(
@@ -298,6 +322,7 @@ class ContextMaintainer:
             response_model=LLMContextMaintenance,
             system=load_named_prompt("maintain_context", user_name=user_name),
             user=build.brief(),
+            model=self._model,
             temperature=0.0,
         )
         return build.apply(output)

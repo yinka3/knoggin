@@ -953,10 +953,20 @@ class LLMService:
                             details={"model": model, "error": str(provider_exc)},
                             transient=self._is_transient_provider_error(provider_exc),
                         ) from exc
-                    if self._is_refusal(completion):
+                    refusal_reason = self._refusal_reason(completion)
+                    if refusal_reason is not None:
+                        details = self._structured_validation_error_details(model, exc)
+                        details["refusal_reason"] = refusal_reason
+                        details["finish_reason"] = self._completion_finish_reason(completion) or "none"
+                        logger.warning(
+                            "LLM structured request declined model={} reason={} "
+                            "finish_reason={} validation_error={}",
+                            model, refusal_reason, details["finish_reason"],
+                            details.get("validation_error_type"),
+                        )
                         raise LLMRefusalError(
                             "LLM declined the structured request",
-                            details=self._structured_validation_error_details(model, exc),
+                            details=details,
                         ) from exc
                     if validation_failures < VALIDATION_RETRIES:
                         validation_failures += 1
@@ -1019,14 +1029,20 @@ class LLMService:
                             aac_budget=aac_budget,
                         )
                         recorded = True
-                    error = (
-                        LLMRefusalError
-                        if self._is_refusal(getattr(exc, "raw_response", None))
-                        else LLMResponseError
-                    )
+                    raw_response = getattr(exc, "raw_response", None)
+                    refusal_reason = self._refusal_reason(raw_response)
+                    error = LLMRefusalError if refusal_reason else LLMResponseError
+                    details = {"model": model, "error": str(exc)}
+                    if refusal_reason:
+                        details["refusal_reason"] = refusal_reason
+                        details["finish_reason"] = self._completion_finish_reason(raw_response) or "none"
+                        logger.warning(
+                            "LLM structured request declined model={} reason={} finish_reason={}",
+                            model, refusal_reason, details["finish_reason"],
+                        )
                     raise error(
                         "LLM structured generation failed",
-                        details={"model": model, "error": str(exc)},
+                        details=details,
                     ) from exc
                 finally:
                     if not recorded:
@@ -1064,19 +1080,36 @@ class LLMService:
     def _is_refusal(completion: Any) -> bool:
         """A provider content block, or a model that declined instead of answering."""
 
+        return LLMService._refusal_reason(completion) is not None
+
+    @staticmethod
+    def _completion_finish_reason(completion: Any) -> str | None:
+        choices = getattr(completion, "choices", None) or ()
+        return getattr(choices[0], "finish_reason", None) if choices else None
+
+    @staticmethod
+    def _refusal_reason(completion: Any) -> str | None:
+        """Return a safe category without retaining response text in logs."""
+
         error = getattr(completion, "error", None)
         if isinstance(error, dict):
             metadata = error.get("metadata") or {}
-            return metadata.get("error_type") == "content_policy_violation"
+            return (
+                "provider_content_policy"
+                if metadata.get("error_type") == "content_policy_violation"
+                else None
+            )
         choices = getattr(completion, "choices", None) or ()
         if not choices:
-            return False
+            return None
         if getattr(choices[0], "finish_reason", None) == "content_filter":
-            return True
+            return "content_filter"
         message = getattr(choices[0], "message", None)
         if getattr(message, "refusal", None):
-            return True
-        return bool(_REFUSAL_TEXT.match(getattr(message, "content", None) or ""))
+            return "message_refusal"
+        if _REFUSAL_TEXT.match(getattr(message, "content", None) or ""):
+            return "refusal_text"
+        return None
 
     @staticmethod
     def _is_transient_provider_error(exc: Exception) -> bool:
@@ -1093,6 +1126,11 @@ class LLMService:
         """Preserve bounded model-output diagnostics for retry handling."""
 
         details = {"model": model, "error": str(exc)}
+        attempts = getattr(exc, "failed_attempts", None) or ()
+        if attempts:
+            validation_error = getattr(attempts[-1], "exception", None)
+            if validation_error is not None:
+                details["validation_error_type"] = type(validation_error).__name__
         last_completion = getattr(exc, "last_completion", None)
         if last_completion is not None:
             excerpt = str(last_completion)

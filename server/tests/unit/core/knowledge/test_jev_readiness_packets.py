@@ -3,9 +3,6 @@ from pathlib import Path
 
 import pytest
 
-from tests.fixtures.run_jev_extraction_pilot import (
-    load_reviewed_cases as load_extraction,
-)
 from tests.fixtures.run_jev_identity_pilot import load_reviewed_cases as load_identity
 
 
@@ -13,7 +10,6 @@ from tests.fixtures.run_jev_identity_pilot import load_reviewed_cases as load_id
     "filename,loader,count",
     [
         ("jev_identity_readiness_cases.json", load_identity, 200),
-        ("jev_extraction_readiness_cases.json", load_extraction, 60),
     ],
 )
 def test_readiness_packets_are_approved_and_loadable(filename, loader, count):

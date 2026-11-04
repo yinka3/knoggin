@@ -1,157 +1,98 @@
+"""VP-01: find entity mentions in each Episode's messages."""
+
 import asyncio
-import hashlib
-import json
 import re
 import threading
-from copy import deepcopy
-from dataclasses import dataclass
-from typing import Awaitable, Callable, Dict, Iterable, Optional, Tuple
-from uuid import UUID
+from typing import Awaitable, Callable, Dict, Optional, Tuple
 
 import spacy
+from loguru import logger
 from spacy.matcher import PhraseMatcher
 
-from common.schema.context import ContextBlockRecord
-from common.schema.ingestion.contracts import (
-    ContextBlockMention,
-    ValidationIssue,
-)
-from common.schema.ingestion.extraction import ContextEntityExtraction
-from common.schema.jev import JevDecisionRecord, JevResult
-from common.schema.settings import TextProcessorSettings
-from core.ingestion.batch import SemanticWindowBuild
+from common.exceptions import LLMRefusalError
+from common.schema.ingestion.contracts import EntityMention, ValidationIssue
+from common.schema.ingestion.extraction import EpisodeEntityExtraction
+from common.schema.settings import ExtractionSettings
+from core.ingestion.batch import EpisodeEvidence, SemanticWindowBuild
 from core.ingestion.entity_validation import validate_entity
-from core.ingestion.jev_extraction import (
-    ExtractionCandidate,
-    accepted_extraction_type,
-    prepare_extraction_request,
-)
-from core.ingestion.policy import IngestionPolicy
-from core.ingestion.prompts import context_ner_fallback_prompt
-from core.ingestion.vp01 import VP01EntityExtractor, VP01EntitySpan
+from core.ingestion.prompts import entity_prompt
 from core.knowledge.entity.profile import EntityProfile
-from infrastructure.jev_client import JevWorkBudget
 from infrastructure.model_work import ModelWorkCoordinator, ModelWorkPriority
-from infrastructure.work_record import WorkRecord
 
 
-@dataclass(frozen=True, slots=True)
-class _ContextBlockText:
-    """One offset-preserving VP-01 input assembled from Context block versions."""
+def literal_expression(name: str) -> str:
+    """A token-bounded, case-insensitive pattern for one name."""
 
-    text: str
-    offsets: tuple[tuple[UUID, int, int], ...]
-
-    @classmethod
-    def from_blocks(cls, blocks: Iterable[ContextBlockRecord]) -> "_ContextBlockText":
-        text_parts: list[str] = []
-        offsets: list[tuple[UUID, int, int]] = []
-        position = 0
-        for block in blocks:
-            if text_parts:
-                text_parts.append("\n\n")
-                position += 2
-            markdown = block.markdown
-            text_parts.append(markdown)
-            offsets.append((block.block_id, position, position + len(markdown)))
-            position += len(markdown)
-        return cls(text="".join(text_parts), offsets=tuple(offsets))
-
-    def block_ids_for_span(self, start: int, end: int) -> tuple[UUID, ...]:
-        """Return the smallest ordered block-version set touched by a span."""
-
-        return tuple(
-            block_id
-            for block_id, block_start, block_end in self.offsets
-            if start < block_end and end > block_start
-        )
+    expression = r"\s+".join(re.escape(part) for part in name.split())
+    if name[:1].isalnum():
+        expression = r"(?<!\w)" + expression
+    if name[-1:].isalnum():
+        expression += r"(?!\w)"
+    return expression
 
 
-@dataclass(frozen=True, slots=True)
-class _FallbackGap:
-    block: ContextBlockRecord
-    reasons: tuple[str, ...]
-    support_text: str
+def name_appears(name: str, text: str) -> bool:
+    return bool(name.strip()) and re.search(
+        literal_expression(name), text, re.IGNORECASE
+    ) is not None
 
 
-_JEV_EXTRACTION_PREPARATION_CHECK_LIMIT = 512
+def message_lines(episode: EpisodeEvidence) -> tuple[list[str], dict[str, int]]:
+    """Episode messages as ``[M1] USER: ...`` lines and their local handles."""
+
+    lines: list[str] = []
+    handles: dict[str, int] = {}
+    for index, message in enumerate(episode.messages, start=1):
+        handle = f"M{index}"
+        handles[handle] = message.message_id
+        speaker = "USER" if message.role == "user" else "ASSISTANT"
+        lines.append(f"[{handle}] {speaker}: {message.content}")
+    return lines, handles
+
+
+def background_lines(summaries: tuple[str, ...]) -> list[str]:
+    if not summaries:
+        return ["(none)"]
+    return [f"- {' '.join(summary.split())}" for summary in summaries]
 
 
 class TextProcessor:
-    """Extract typed Context-block mentions for Context-first resolution."""
+    """Extract typed entity mentions from a window's Episodes.
+
+    Known names come from a free text match against aliases already in the
+    graph; the model finds the rest, one Episode per call.
+    """
 
     def __init__(
         self,
         get_known_aliases: Callable[[], Dict[str, int]],
         get_alias_version: Callable[[], int],
         get_profile: Callable[[int], Awaitable[Optional[EntityProfile]]],
-        vp01: VP01EntityExtractor,
         spacy: spacy.Language,
-        settings: TextProcessorSettings,
+        settings: ExtractionSettings,
+        llm,
+        user_name: str,
         model_work: Optional[ModelWorkCoordinator] = None,
-        get_vp01: Callable[[str], Awaitable[VP01EntityExtractor]] | None = None,
-        llm=None,
-        user_name: str | None = None,
-        jev_client=None,
     ):
         self.get_known_aliases = get_known_aliases
         self.get_alias_version = get_alias_version
         self.get_profile = get_profile
         self._nlp = spacy
-        self._vp01 = vp01
         self._model_work = model_work
-        if get_vp01 is not None and not callable(get_vp01):
-            raise TypeError("get_vp01 must be callable")
-        self._get_vp01 = get_vp01
         self._llm = llm
-        self._jev_client = jev_client
         self._user_name = user_name
         self._spacy_lock = threading.Lock()
         self._phrase_matcher_cache_version: Optional[int] = None
-        self._phrase_matcher_cache: Optional[Tuple[PhraseMatcher, Dict[str, int]]] = (
-            None
-        )
+        self._phrase_matcher_cache: Optional[Tuple[PhraseMatcher, Dict[str, int]]] = None
         self.update_settings(settings)
 
-    def update_settings(self, config: TextProcessorSettings):
-        """Update settings dynamically while running."""
-        self.gliner_threshold = config.gliner_threshold
-        self.llm_ner_mode = config.llm_ner_mode
+    def update_settings(self, config: ExtractionSettings):
+        self.max_parallel_episodes = config.max_parallel_episodes
 
-    def set_vp01(self, vp01: VP01EntityExtractor) -> None:
-        """Install the adapter selected by the next active domain snapshot."""
-
-        if not callable(getattr(vp01, "extract_entities", None)):
-            raise TypeError("VP-01 adapter must expose extract_entities")
-        self._vp01 = vp01
-
-    async def _run_model_work(
-        self,
-        operation,
-        *,
-        name: str,
-        work_kind: str,
-        parent_work_record: Optional[WorkRecord] = None,
-    ):
-        if parent_work_record is not None and not isinstance(
-            parent_work_record, WorkRecord
-        ):
-            raise TypeError("parent_work_record must be a WorkRecord")
+    async def _run_model_work(self, operation, *, name: str):
         if self._model_work is not None:
-            work_record = None
-            if parent_work_record is not None:
-                work_record = WorkRecord.for_model_operation(
-                    work_kind,
-                    parent_work_record.scope,
-                    parent_id=parent_work_record.id,
-                    priority=parent_work_record.priority,
-                )
             return await self._model_work.run_blocking(
-                operation,
-                priority=ModelWorkPriority.BACKGROUND,
-                name=name,
-                work_record=work_record,
-                parent_work_record=parent_work_record,
+                operation, priority=ModelWorkPriority.BACKGROUND, name=name,
             )
         return await asyncio.to_thread(operation)
 
@@ -170,955 +111,162 @@ class TextProcessor:
             if alias and alias.strip()
         }
         matcher = PhraseMatcher(self._nlp.vocab, attr="LOWER")
-
         if aliases:
-            patterns = [self._nlp.make_doc(alias) for alias in aliases.keys()]
-            matcher.add("KNOWN", patterns)
-
+            matcher.add("KNOWN", [self._nlp.make_doc(alias) for alias in aliases])
         self._phrase_matcher_cache_version = alias_version
         self._phrase_matcher_cache = (matcher, aliases)
         return self._phrase_matcher_cache
 
-    async def extract_context_mentions(self, build) -> list[ContextBlockMention]:
-        """Extract Context-block mentions without accepting a session transcript.
-
-        The model receives only eligible current Context blocks in the durable
-        impact closure.  Block boundaries are kept as offsets so a span may
-        cite multiple block versions; it is never coerced into a message ID.
-        """
+    async def extract_mentions(self, build: SemanticWindowBuild) -> list[EntityMention]:
+        """Every Episode's mentions, in Episode order."""
 
         if not isinstance(build, SemanticWindowBuild):
-            raise TypeError("extract_context_mentions requires a SemanticWindowBuild")
-        previous_acceptances = [
-            deepcopy(item)
-            for item in build.trace.extraction_decisions
-            if item.get("accepted_entity_type") is not None
-        ]
-        for item in build.trace.extraction_decisions:
-            if item.get("accepted_entity_type") is not None:
-                item["accepted_entity_type"] = None
-                item["record"]["acceptance_status"] = "rejected"
-                item["superseded_by_pass"] = max(1, build.identity_pass_number)
-        blocks = build.knowledge_input_blocks
-        if not blocks:
-            build.set_mentions(())
-            return []
-        assembled = _ContextBlockText.from_blocks(blocks)
-        if not assembled.text.strip():
-            build.set_mentions(())
-            return []
+            raise TypeError("extract_mentions requires a SemanticWindowBuild")
+        build.trace.episodes = len(build.episodes)
+        build.trace.entity_model = getattr(self._llm, "extraction_model", None)
+        limit = asyncio.Semaphore(self.max_parallel_episodes)
 
-        matcher, aliases = self._build_phrase_matcher()
-        vp01 = (
-            self._vp01
-            if self._get_vp01 is None
-            else await self._get_vp01(build.policy.domain.vp01_language)
+        async def one(index: int, episode: EpisodeEvidence) -> list[EntityMention]:
+            async with limit:
+                return await self._episode_mentions(build, index, episode)
+
+        per_episode = await asyncio.gather(
+            *(one(index, episode) for index, episode in enumerate(build.episodes))
         )
-        if not callable(getattr(vp01, "extract_entities", None)):
-            raise TypeError("VP-01 adapter must expose extract_entities")
-
-        def _match_known_aliases():
-            matches: list[tuple[str, int, int, int]] = []
-            with self._spacy_lock:
-                doc = self._nlp(assembled.text)
-                for _, start, end in matcher(doc):
-                    span = doc[start:end]
-                    start_char = getattr(span, "start_char", None)
-                    end_char = getattr(span, "end_char", None)
-                    if not isinstance(start_char, int) or not isinstance(end_char, int):
-                        continue
-                    entity_id = aliases.get(span.text.strip().casefold())
-                    if entity_id is not None:
-                        matches.append((span.text, start_char, end_char, entity_id))
-            return matches
-
-        known_matches = await self._run_model_work(
-            _match_known_aliases,
-            name="spacy-context-known-aliases",
-            work_kind="spacy",
-            parent_work_record=None,
-        )
-        build.trace.known_mentions = len(known_matches)
-        mentions: list[ContextBlockMention] = []
-        seen_occurrences: set[tuple[tuple[UUID, ...], int, int, str, str]] = set()
-
-        def add_mention(mention: ContextBlockMention) -> bool:
-            """Keep distinct typed occurrences, not just distinct surfaces."""
-
-            if (
-                mention.origin not in {"llm_fallback", "jev_fallback"}
-                and (mention.source_start is None or mention.source_end is None)
-            ):
-                raise ValueError("Extracted Context mentions require source offsets")
-            key = (
-                mention.block_ids,
-                mention.source_start if mention.source_start is not None else -1,
-                mention.source_end if mention.source_end is not None else -1,
-                mention.name.casefold(),
-                mention.entity_type.casefold(),
-            )
-            if key in seen_occurrences:
-                return False
-            seen_occurrences.add(key)
-            mentions.append(mention)
-            return True
-
-        for span_text, start, end, entity_id in known_matches:
-            block_ids = assembled.block_ids_for_span(start, end)
-            if not block_ids:
-                continue
-            profile = await self.get_profile(entity_id)
-            if profile is None:
-                build.issues.append(
-                    ValidationIssue(
-                        stage="context_mentions",
-                        code="known_alias_profile_missing",
-                        message="Known Context alias resolved to a missing entity",
-                        item_ref=span_text,
-                        metadata={"entity_id": entity_id},
-                    )
-                )
-                continue
-            if not profile.is_classified_in(build.project_id):
-                # A foreign alias can identify a candidate later, but it cannot
-                # supply this project's type or suppress VP-01 classification.
-                continue
-            entity_type = build.policy.domain.canonical_entity_type(
-                profile.entity_type
-            ) or build.policy.domain.resolve_entity_type(profile.entity_type)
-            topic = build.policy.domain.topic_for_entity_type(entity_type or "")
-            if entity_type is None or topic is None:
-                continue
-            normalized = " ".join(span_text.split())
-            add_mention(
-                ContextBlockMention(
-                    block_ids=block_ids,
-                    name=normalized,
-                    entity_type=entity_type,
-                    topic=topic,
-                    origin="known_alias",
-                    source_start=start,
-                    source_end=end,
-                )
-            )
-
-        def _run_vp01() -> list[VP01EntitySpan]:
-            return vp01.extract_entities(
-                assembled.text,
-                build.policy.domain,
-                threshold=build.policy.gliner_threshold,
-            )
-
-        extracted = await self._run_model_work(
-            _run_vp01,
-            name="vp01-context-mentions",
-            work_kind="gliner",
-            parent_work_record=None,
-        )
-        build.trace.gliner_raw_mentions = len(extracted)
-        accepted = 0
-        for entity in extracted:
-            block_ids = assembled.block_ids_for_span(entity.start, entity.end)
-            if not block_ids:
-                continue
-            normalized = " ".join(entity.text.split())
-            if not normalized:
-                continue
-            entity_type = build.policy.domain.resolve_entity_type(entity.label)
-            topic = build.policy.domain.topic_for_entity_type(entity_type or "")
-            if entity_type is None or topic is None:
-                continue
-            if not self._validate_domain_mention(
-                normalized,
-                entity_type,
-                build.policy,
-                label=entity.label,
-            ):
-                continue
-            if add_mention(
-                ContextBlockMention(
-                    block_ids=block_ids,
-                    name=normalized,
-                    entity_type=entity_type,
-                    topic=topic,
-                    origin="vp01",
-                    source_start=entity.start,
-                    source_end=entity.end,
-                )
-            ):
-                accepted += 1
-        build.trace.gliner_accepted_mentions = accepted
-        await self._add_llm_fallback_mentions(
-            build,
-            assembled=assembled,
-            mentions=mentions,
-            add_mention=add_mention,
-            previous_acceptances=previous_acceptances,
-        )
+        mentions = [mention for found in per_episode for mention in found]
         build.set_mentions(mentions)
         return mentions
 
-    async def _add_llm_fallback_mentions(
-        self,
-        build: SemanticWindowBuild,
-        *,
-        assembled: _ContextBlockText,
-        mentions: list[ContextBlockMention],
-        add_mention,
-        previous_acceptances: list[dict] | None = None,
-    ) -> None:
-        """Run structured NER only for meaningful blocks left uncovered."""
-
-        extraction_mode = build.policy.jev.extraction_mode
-        if build.policy.llm_ner_mode == "disabled" and extraction_mode == "disabled":
-            return
-        gaps, alias_gap_blocks, endpoint_gap_blocks = self._prepare_fallback_gaps(
-            build, mentions
-        )
-        if not gaps:
-            return
-        baseline_gap_count = len(gaps)
-        baseline_prompt_characters = sum(
-            len(gap.block.markdown) + len(gap.support_text) for gap in gaps
-        )
-        baseline_uncovered = {
-            gap.block.block_id
-            for gap in gaps
-            if "meaningful_context_without_candidates" in gap.reasons
-        }
-        resolved_endpoints: set[tuple[UUID, str]] = set()
-        if extraction_mode != "disabled" and self._jev_client is not None:
-            candidates = await self._prepare_jev_extraction_candidates(
-                build,
-                assembled=assembled,
-                gaps=gaps,
-                mentions=mentions,
-                previous_acceptances=previous_acceptances,
+    async def _episode_mentions(
+        self, build: SemanticWindowBuild, index: int, episode: EpisodeEvidence
+    ) -> list[EntityMention]:
+        known = await self._known_mentions(build, episode)
+        found: dict[str, EntityMention] = {m.name.casefold(): m for m in known}
+        lines, handles = message_lines(episode)
+        prompt = "\n".join((
+            "DOMAIN ENTITY TYPES:",
+            build.policy.domain.label_block or "(none)",
+            *(
+                ("", "EXTRACTION GUIDANCE:", build.policy.domain.extraction_guidance)
+                if build.policy.domain.extraction_guidance else ()
+            ),
+            "",
+            "KNOWN NAMES (already in the graph; do not return them):",
+            *([f"- {m.name}" for m in known] or ["(none)"]),
+            "",
+            "EARLIER EPISODES (background, oldest first; cannot be cited):",
+            *background_lines(
+                build.background_for(index, build.policy.vp01_episode_lookback)
+            ),
+            "",
+            "MESSAGES:",
+            *lines,
+        ))
+        try:
+            result: EpisodeEntityExtraction = await self._llm.generate_structured(
+                response_model=EpisodeEntityExtraction,
+                system=entity_prompt(self._user_name),
+                user=prompt,
+                temperature=0.0,
             )
-            build.trace.jev_extraction_candidates += len(candidates)
-            for index, candidate in enumerate(candidates, start=1):
-                accepted = await self._observe_or_accept_jev_extraction(
-                    build,
-                    candidate=candidate,
-                    occurrence_index=index,
-                    previous_acceptances=previous_acceptances,
-                )
-                if accepted is None:
-                    continue
-                entity_type, decision = accepted
-                topic = build.policy.domain.topic_for_entity_type(entity_type)
-                if topic is None or not self._validate_domain_mention(
-                    candidate.name,
-                    entity_type,
-                    build.policy,
-                    label=entity_type,
-                ):
-                    decision["record"]["acceptance_status"] = "rejected"
-                    decision["accepted_entity_type"] = None
-                    build.trace.jev_extraction_rejected += 1
-                    continue
-                if add_mention(
-                    ContextBlockMention(
-                        block_ids=(candidate.block_id,),
-                        name=candidate.name,
-                        entity_type=entity_type,
-                        topic=topic,
-                        origin="jev_fallback",
-                        source_start=candidate.source_start,
-                        source_end=candidate.source_end,
-                    )
-                ):
-                    build.trace.jev_extraction_accepted += 1
-                    if candidate.evidence_origin == "unknown_relationship_endpoint":
-                        resolved_endpoints.add(
-                            (candidate.block_id, candidate.name.casefold())
-                        )
-                else:
-                    decision["record"]["acceptance_status"] = "rejected"
-                    decision["accepted_entity_type"] = None
-                    build.trace.jev_extraction_rejected += 1
-            if extraction_mode == "active":
-                gaps, alias_gap_blocks, endpoint_gap_blocks = (
-                    self._prepare_fallback_gaps(
-                        build,
-                        mentions,
-                        resolved_endpoints=resolved_endpoints,
-                        forced_uncovered_blocks=baseline_uncovered,
-                    )
-                )
-                if build.policy.llm_ner_mode != "disabled":
-                    build.trace.jev_extraction_avoided_fallback_blocks += (
-                        baseline_gap_count - len(gaps)
-                    )
-                    residual_characters = sum(
-                        len(gap.block.markdown) + len(gap.support_text)
-                        for gap in gaps
-                    )
-                    build.trace.jev_extraction_avoided_prompt_characters += (
-                        baseline_prompt_characters - residual_characters
-                    )
-                if not gaps:
-                    if build.policy.llm_ner_mode != "disabled":
-                        build.trace.jev_extraction_avoided_fallback_calls += 1
-                    return
-        if build.policy.llm_ner_mode == "disabled":
-            return
-        # Keep the existing prompt-level trigger until per-block decisions are
-        # consumed by bounded extraction. The prompt and disabled path stay stable.
-        if endpoint_gap_blocks:
-            trigger = "unknown_relationship_endpoint"
-        elif alias_gap_blocks:
-            trigger = "known_alias_missing_from_extraction"
-        else:
-            trigger = "meaningful_context_without_candidates"
-        build.trace.fallbacks.append(
-            {"stage": "context_mentions", "trigger": trigger}
-        )
-        if self._llm is None or not self._user_name:
-            build.issues.append(
-                ValidationIssue(
-                    stage="context_mentions",
-                    code="llm_ner_fallback_unavailable",
-                    message="Context NER fallback was triggered but has no LLM runtime",
-                    metadata={"trigger": trigger},
-                )
-            )
-            return
-
-        build.trace.llm_ner_fallback_calls += 1
-        build.trace.llm_ner_fallback_blocks += len(gaps)
-
-        local_to_block = {f"b{index}": gap.block for index, gap in enumerate(gaps, 1)}
-        support_text_by_block = {gap.block.block_id: gap.support_text for gap in gaps}
-        # Name the known entities that actually occur in these gap blocks or
-        # their support, so the model does not re-propose them; an arbitrary
-        # alphabetical slice of all aliases tells it nothing.
-        gap_text = "\n".join(f"{gap.block.markdown}\n{gap.support_text}" for gap in gaps)
-        known_names = sorted(
-            {
-                name
-                for name in self.get_known_aliases()
-                if name.strip()
-                and re.search(self._literal_expression(name), gap_text, re.IGNORECASE)
-            }
-        )[:50]
-        supporting_excerpts = []
-        local_message_ref_by_id: dict[int, str] = {}
-        local_message_text_by_ref: dict[str, str] = {}
-        local_message_refs_by_block: dict[UUID, set[str]] = {}
-        for local_id, block in local_to_block.items():
-            messages = []
-            for support in build.block_supports.get(block.block_id, ())[:3]:
-                message_id = int(support.message_id)
-                message_text = build.message_text_by_id.get(message_id)
-                if not message_text:
-                    continue
-                local_message_ref = local_message_ref_by_id.get(message_id)
-                if local_message_ref is None:
-                    local_message_ref = f"m{len(local_message_ref_by_id) + 1}"
-                    local_message_ref_by_id[message_id] = local_message_ref
-                    local_message_text_by_ref[local_message_ref] = message_text
-                local_message_refs_by_block.setdefault(block.block_id, set()).add(
-                    local_message_ref
-                )
-                messages.append(
-                    {
-                        "message_id": local_message_ref,
-                        "excerpt": message_text[:500],
-                    }
-                )
-            supporting_excerpts.append({"block_id": local_id, "messages": messages})
-        prompt = json.dumps(
-            {
-                "trigger": trigger,
-                "allowed_entity_types": list(build.policy.domain.active_entity_types),
-                "known_candidate_names": known_names,
-                "context_blocks": [
-                    {
-                        "block_id": local_id,
-                        "section_key": block.section_key,
-                        "markdown": block.markdown,
-                    }
-                    for local_id, block in local_to_block.items()
-                ],
-                "supporting_excerpts": supporting_excerpts,
-                "unknown_endpoint_observations": [
-                    {
-                        "block_id": next(
-                            local_id
-                            for local_id, block in local_to_block.items()
-                            if block.block_id == item.block_id
-                        ),
-                        "name": item.name,
-                        "type": item.entity_type,
-                    }
-                    for item in build.unknown_endpoint_diagnostics
-                    if item.block_id in {block.block_id for block in local_to_block.values()}
-                    and (item.block_id, item.name.casefold()) not in resolved_endpoints
-                ],
-            },
-            ensure_ascii=False,
-        )
-        build.trace.llm_ner_prompt_characters += len(prompt)
-        build.trace.entity_model = getattr(self._llm, "extraction_model", None)
-        build.trace.entity_prompt = "VEGAPUNK-01-CONTEXT-FALLBACK"
-        result: ContextEntityExtraction = await self._llm.generate_structured(
-            response_model=ContextEntityExtraction,
-            system=context_ner_fallback_prompt(self._user_name),
-            user=prompt,
-            temperature=0.0,
-        )
+        except LLMRefusalError:
+            # A refused Episode keeps its known names; the window moves on.
+            logger.warning("Entity extraction refused Episode {}", episode.episode_id)
+            build.trace.episodes_refused += 1
+            return known
         build.trace.llm_mentions_seen += len(result.mentions)
-        block_offsets = {block_id: (start, end) for block_id, start, end in assembled.offsets}
+        text_by_id = {m.message_id: m.content for m in episode.messages}
         for returned in result.mentions:
-            block = local_to_block.get(returned.block_id)
-            if block is None:
-                self._reject_fallback(build, returned.name, "unknown_block")
-                continue
+            name = " ".join(returned.name.split())
             entity_type = build.policy.domain.canonical_entity_type(returned.type)
             topic = build.policy.domain.topic_for_entity_type(entity_type or "")
-            if entity_type is None or topic is None or not self._validate_domain_mention(
-                returned.name,
-                entity_type,
-                build.policy,
-                label=returned.type,
-            ):
-                self._reject_fallback(build, returned.name, "invalid_type_or_mention")
-                continue
-            literal = re.search(
-                r"(?<!\w)" + r"\s+".join(re.escape(part) for part in returned.name.split()) + r"(?!\w)",
-                block.markdown,
-                flags=re.IGNORECASE,
+            message_ids = tuple(
+                handles[handle] for handle in returned.messages
+                if handle in handles and name_appears(name, text_by_id[handles[handle]])
             )
-            supporting_literal = re.search(
-                r"(?<!\w)" + r"\s+".join(re.escape(part) for part in returned.name.split()) + r"(?!\w)",
-                support_text_by_block.get(block.block_id, ""),
-                flags=re.IGNORECASE,
-            )
-            if literal is None and supporting_literal is None:
-                self._reject_fallback(build, returned.name, "literal_support_missing")
+            if entity_type is None or topic is None:
+                self._reject(build, name, "unknown_type")
+            elif not validate_entity(name, "", build.policy.domain, label=entity_type):
+                self._reject(build, name, "invalid_name")
+            elif not message_ids:
+                self._reject(build, name, "not_in_cited_messages")
+            elif name.casefold() in found:
                 continue
-            if literal is None:
-                message_ref = returned.supporting_message_id
-                message_text = local_message_text_by_ref.get(message_ref or "")
-                quote = returned.evidence_quote
-                if (
-                    message_ref not in local_message_refs_by_block.get(block.block_id, set())
-                    or message_text is None
-                    or not quote
-                    or quote not in message_text
-                    or not re.search(
-                        self._literal_expression(returned.name),
-                        quote,
-                        re.IGNORECASE,
-                    )
-                ):
-                    self._reject_fallback(
-                        build,
-                        returned.name,
-                        "supporting_message_evidence_invalid",
-                    )
-                    continue
-                self._reject_fallback(
-                    build,
-                    returned.name,
-                    "supporting_message_name_unresolved",
-                    metadata={
-                        "block_id": str(block.block_id),
-                        "supporting_message_id": message_ref,
-                        "evidence_quote": quote,
-                    },
+            else:
+                found[name.casefold()] = EntityMention(
+                    message_ids=message_ids, name=name, entity_type=entity_type,
+                    topic=topic, origin="vp01",
                 )
-                continue
-            block_start, _ = block_offsets[block.block_id]
-            if add_mention(
-                ContextBlockMention(
-                    block_ids=(block.block_id,),
-                    name=" ".join(returned.name.split()),
-                    entity_type=entity_type,
-                    topic=topic,
-                    origin="llm_fallback",
-                    source_start=block_start + literal.start(),
-                    source_end=block_start + literal.end(),
-                )
-            ):
                 build.trace.llm_mentions_accepted += 1
+        return list(found.values())
 
-    def _prepare_fallback_gaps(
-        self,
-        build: SemanticWindowBuild,
-        mentions: list[ContextBlockMention],
-        *,
-        resolved_endpoints: set[tuple[UUID, str]] | None = None,
-        forced_uncovered_blocks: set[UUID] | None = None,
-    ) -> tuple[list[_FallbackGap], set[UUID], set[UUID]]:
-        """Describe existing per-block NER gaps without changing fallback policy."""
+    async def _known_mentions(
+        self, build: SemanticWindowBuild, episode: EpisodeEvidence
+    ) -> list[EntityMention]:
+        """Aliases already classified in this project, per message they appear in."""
 
-        resolved_endpoints = resolved_endpoints or set()
-        forced_uncovered_blocks = forced_uncovered_blocks or set()
-        covered = {block_id for mention in mentions for block_id in mention.block_ids}
-        represented_names = {
-            (block_id, mention.name.casefold())
-            for mention in mentions
-            for block_id in mention.block_ids
-        }
-        known_aliases = {
-            name.casefold(): name for name in self.get_known_aliases() if name.strip()
-        }
-        support_text_by_block: dict[UUID, str] = {}
-        alias_gap_blocks: set[UUID] = set()
-        for block in build.knowledge_input_blocks:
-            support_text = "\n".join(
-                build.message_text_by_id.get(support.message_id, "")
-                for support in build.block_supports.get(block.block_id, ())[:3]
-            )
-            support_text_by_block[block.block_id] = support_text
-            normalized_support = support_text.casefold()
-            if any(
-                (block.block_id, alias) not in represented_names
-                and alias in normalized_support
-                for alias in known_aliases
-            ):
-                alias_gap_blocks.add(block.block_id)
-        endpoint_gap_blocks = {
-            item.block_id
-            for item in build.unknown_endpoint_diagnostics
-            if (item.block_id, item.name.casefold()) not in resolved_endpoints
-        }
-        gaps: list[_FallbackGap] = []
-        for block in build.knowledge_input_blocks:
-            reasons = tuple(
-                reason
-                for condition, reason in (
-                    (
-                        block.block_id not in covered
-                        or block.block_id in forced_uncovered_blocks,
-                        "meaningful_context_without_candidates",
-                    ),
-                    (block.block_id in alias_gap_blocks, "known_alias_missing_from_extraction"),
-                    (block.block_id in endpoint_gap_blocks, "unknown_relationship_endpoint"),
-                )
-                if condition
-            )
-            if reasons and len(re.findall(r"[A-Za-z0-9]+", block.markdown)) >= 3:
-                gaps.append(
-                    _FallbackGap(
-                        block=block,
-                        reasons=reasons,
-                        support_text=support_text_by_block[block.block_id],
-                    )
-                )
-        return gaps, alias_gap_blocks, endpoint_gap_blocks
-
-    async def _prepare_jev_extraction_candidates(
-        self,
-        build: SemanticWindowBuild,
-        *,
-        assembled: _ContextBlockText,
-        gaps: list[_FallbackGap],
-        mentions: list[ContextBlockMention],
-        previous_acceptances: list[dict] | None = None,
-    ) -> list[ExtractionCandidate]:
-        """Create bounded literal candidates from existing diagnostics and aliases."""
-
-        if build.jev_work_budget is None:
-            build.jev_work_budget = JevWorkBudget(
-                build.policy.jev.max_calls_per_window,
-                build.policy.jev.max_elapsed_seconds_per_window,
-            )
-        budget = build.jev_work_budget
-        fresh_limit = max(0, budget.max_observations - budget.observations)
-        replay_origins = {
-            (block_id, name.casefold()): previous.get("evidence_origin")
-            for previous in previous_acceptances or ()
-            if isinstance(name := previous.get("candidate_name"), str)
-            for block_id in previous.get("record", {}).get("evidence_block_ids", ())
-            if isinstance(block_id, str)
-        }
-        replay_keys = set(replay_origins)
-        if fresh_limit == 0 and not replay_keys:
+        matcher, aliases = self._build_phrase_matcher()
+        if not aliases:
             return []
-        gaps_by_id = {gap.block.block_id: gap for gap in gaps}
-        known_aliases = sorted(
-            self.get_known_aliases().items(), key=lambda item: item[0].casefold()
-        )
-        block_offsets = {
-            block_id: start for block_id, start, _end in assembled.offsets
-        }
-        represented = {
-            (block_id, mention.name.casefold())
-            for mention in mentions
-            for block_id in mention.block_ids
-        }
-        candidates: list[ExtractionCandidate] = []
-        replay_candidates: list[ExtractionCandidate] = []
-        seen: set[tuple[UUID, str]] = set()
-        checks = 0
 
-        def capacity_reached() -> bool:
-            return (
-                len(candidates) >= fresh_limit
-                and len(replay_candidates) >= len(replay_keys)
-            )
+        def match() -> list[tuple[int, str, int]]:
+            hits = []
+            with self._spacy_lock:
+                for message in episode.messages:
+                    doc = self._nlp(message.content)
+                    for _, start, end in matcher(doc):
+                        text = " ".join(doc[start:end].text.split())
+                        entity_id = aliases.get(text.casefold())
+                        if entity_id is not None:
+                            hits.append((message.message_id, text, entity_id))
+            return hits
 
-        def append_candidate(
-            *,
-            gap: _FallbackGap,
-            name: str,
-            origin: str,
-            proposed_type: str | None,
-        ) -> None:
-            normalized = " ".join(name.split())
-            if not normalized:
-                return
-            key = (gap.block.block_id, normalized.casefold())
-            if key in seen:
-                return
-            replay_key = (str(gap.block.block_id), key[1])
-            replay = replay_key in replay_keys and replay_origins[replay_key] in (
-                None,
-                origin,
-            )
-            if not replay and len(candidates) >= fresh_limit:
-                return
-            expression = self._literal_expression(normalized)
-            literal = re.search(expression, gap.block.markdown, re.IGNORECASE)
-            if literal is None:
-                return
-            seen.add(key)
-            block_start = block_offsets[gap.block.block_id]
-            target = replay_candidates if replay else candidates
-            target.append(
-                ExtractionCandidate(
-                    block_id=gap.block.block_id,
-                    name=normalized,
-                    evidence_origin=origin,
-                    support_text=(
-                        f"Context block:\n{gap.block.markdown}\n\n"
-                        f"Supporting excerpts:\n{gap.support_text}"
-                    ),
-                    proposed_type=proposed_type,
-                    source_start=block_start + literal.start(),
-                    source_end=block_start + literal.end(),
-                )
-            )
-
-        # Rebuilds can reuse accepted judgments after the observation budget is
-        # spent. Locate those exact block/name pairs before the bounded scan of
-        # new diagnostics, or a long list of new gaps can hide an old acceptance.
-        if replay_keys:
-            checked_replays: set[tuple[str, str]] = set()
-            for diagnostic in build.unknown_endpoint_diagnostics:
-                replay_key = (
-                    str(diagnostic.block_id),
-                    " ".join(diagnostic.name.split()).casefold(),
-                )
-                if (
-                    replay_key not in replay_keys
-                    or replay_key in checked_replays
-                    or replay_origins[replay_key]
-                    not in (None, "unknown_relationship_endpoint")
-                ):
-                    continue
-                if checks >= _JEV_EXTRACTION_PREPARATION_CHECK_LIMIT:
-                    break
-                checked_replays.add(replay_key)
-                checks += 1
-                gap = gaps_by_id.get(diagnostic.block_id)
-                if gap is None or (
-                    diagnostic.block_id, diagnostic.name.casefold()
-                ) in represented:
-                    continue
-                append_candidate(
-                    gap=gap,
-                    name=diagnostic.name,
-                    origin="unknown_relationship_endpoint",
-                    proposed_type=build.policy.domain.canonical_entity_type(
-                        diagnostic.entity_type
-                    ),
-                )
-
-            gaps_by_string_id = {
-                str(gap.block.block_id): gap for gap in gaps
-            }
-            replay_gaps: dict[str, list[_FallbackGap]] = {}
-            for block_id, name in replay_keys:
-                if replay_origins[(block_id, name)] not in (None, "known_alias_gap"):
-                    continue
-                gap = gaps_by_string_id.get(block_id)
-                if gap is not None:
-                    replay_gaps.setdefault(name, []).append(gap)
-            for alias, entity_id in known_aliases:
-                alias_key = " ".join(alias.split()).casefold()
-                if alias_key not in replay_gaps:
-                    continue
-                matching_gaps = []
-                expression = self._literal_expression(alias)
-                for gap in replay_gaps[alias_key]:
-                    if checks >= _JEV_EXTRACTION_PREPARATION_CHECK_LIMIT:
-                        break
-                    checks += 1
-                    key = (gap.block.block_id, alias_key)
-                    if key in represented or key in seen:
-                        continue
-                    if re.search(expression, gap.block.markdown, re.IGNORECASE):
-                        matching_gaps.append(gap)
-                if not matching_gaps:
-                    continue
-                profile = await self.get_profile(entity_id)
-                proposed_type = None
-                if profile is not None and profile.is_classified_in(build.project_id):
-                    proposed_type = build.policy.domain.canonical_entity_type(
-                        profile.entity_type
-                    ) or build.policy.domain.resolve_entity_type(profile.entity_type)
-                for gap in matching_gaps:
-                    append_candidate(
-                        gap=gap,
-                        name=alias,
-                        origin="known_alias_gap",
-                        proposed_type=proposed_type,
-                    )
-        if fresh_limit == 0:
-            return replay_candidates
-
-        for diagnostic in build.unknown_endpoint_diagnostics:
-            if (
-                checks >= _JEV_EXTRACTION_PREPARATION_CHECK_LIMIT
-                or capacity_reached()
-            ):
-                break
-            checks += 1
-            gap = gaps_by_id.get(diagnostic.block_id)
-            if gap is None or (
-                diagnostic.block_id, diagnostic.name.casefold()
-            ) in represented:
-                continue
-            append_candidate(
-                gap=gap,
-                name=diagnostic.name,
-                origin="unknown_relationship_endpoint",
-                proposed_type=build.policy.domain.canonical_entity_type(
-                    diagnostic.entity_type
-                ),
-            )
-
-        for alias, entity_id in known_aliases:
-            if (
-                checks >= _JEV_EXTRACTION_PREPARATION_CHECK_LIMIT
-                or capacity_reached()
-            ):
-                break
-            if not alias.strip():
-                continue
-            matching_gaps = []
-            expression = self._literal_expression(alias)
-            for gap in gaps:
-                if (
-                    checks >= _JEV_EXTRACTION_PREPARATION_CHECK_LIMIT
-                    or capacity_reached()
-                ):
-                    break
-                checks += 1
-                if (gap.block.block_id, alias.casefold()) in represented or (
-                    gap.block.block_id,
-                    alias.casefold(),
-                ) in seen:
-                    continue
-                if (
-                    (str(gap.block.block_id), alias.casefold()) not in replay_keys
-                    and len(candidates) >= fresh_limit
-                ):
-                    continue
-                if re.search(expression, gap.block.markdown, re.IGNORECASE):
-                    matching_gaps.append(gap)
-            if not matching_gaps:
-                continue
+        hits = await self._run_model_work(match, name="known-aliases")
+        message_ids_by_name: dict[str, list[int]] = {}
+        names: dict[str, tuple[str, int]] = {}
+        for message_id, text, entity_id in hits:
+            key = text.casefold()
+            names.setdefault(key, (text, entity_id))
+            ids = message_ids_by_name.setdefault(key, [])
+            if message_id not in ids:
+                ids.append(message_id)
+        mentions = []
+        for key, (text, entity_id) in names.items():
             profile = await self.get_profile(entity_id)
-            proposed_type = None
-            if profile is not None and profile.is_classified_in(build.project_id):
-                proposed_type = build.policy.domain.canonical_entity_type(
-                    profile.entity_type
-                ) or build.policy.domain.resolve_entity_type(profile.entity_type)
-            for gap in matching_gaps:
-                append_candidate(
-                    gap=gap,
-                    name=alias,
-                    origin="known_alias_gap",
-                    proposed_type=proposed_type,
-                )
-        return replay_candidates + candidates
-
-    async def _observe_or_accept_jev_extraction(
-        self,
-        build: SemanticWindowBuild,
-        *,
-        candidate: ExtractionCandidate,
-        occurrence_index: int,
-        previous_acceptances: list[dict] | None = None,
-    ) -> tuple[str, dict] | None:
-        """Record one bounded judgment and return active positive recovery only."""
-
-        if build.jev_work_budget is None:
-            build.jev_work_budget = JevWorkBudget(
-                build.policy.jev.max_calls_per_window,
-                build.policy.jev.max_elapsed_seconds_per_window,
-            )
-        state, questions, mapping, candidate_set_truncated = (
-            prepare_extraction_request(candidate, build.policy)
-        )
-        fingerprint_inputs = {
-            "window_id": str(build.window_id),
-            "project_id": build.project_id,
-            "block_id": str(candidate.block_id),
-            "name": candidate.name,
-            "support": candidate.support_text,
-            "offsets": [candidate.source_start, candidate.source_end],
-            "state": state,
-            "questions": {key: value.model_dump() for key, value in questions.items()},
-            "policy": build.policy.semantic_window_snapshot(),
-        }
-        fingerprint = hashlib.sha256(
-            json.dumps(fingerprint_inputs, sort_keys=True).encode("utf-8")
-        ).hexdigest()
-        for previous in previous_acceptances or ():
-            if previous.get("request_fingerprint") != fingerprint:
+            if profile is None:
+                build.issues.append(ValidationIssue(
+                    stage="entity_mentions",
+                    code="known_alias_profile_missing",
+                    message="Known alias resolved to a missing entity",
+                    item_ref=text,
+                    metadata={"entity_id": entity_id},
+                ))
                 continue
-            accepted = accepted_extraction_type(
-                JevResult.model_validate(previous["record"]["result"]),
-                candidate,
-                mapping,
-                build.policy.jev,
-                candidate_set_truncated=candidate_set_truncated,
-            )
-            if accepted is None or build.policy.jev.extraction_mode != "active":
+            if not profile.is_classified_in(build.project_id):
+                # A foreign alias may identify a candidate later, but cannot
+                # supply this project's type; the model classifies it.
                 continue
-            previous_acceptances.remove(previous)
-            previous["reused_for_pass"] = max(1, build.identity_pass_number)
-            key = (
-                previous["record"]["pass_number"],
-                previous["record"]["occurrence_key"],
-            )
-            for index, item in enumerate(build.trace.extraction_decisions):
-                if (item["record"]["pass_number"], item["record"]["occurrence_key"]) == key:
-                    build.trace.extraction_decisions[index] = previous
-                    break
-            return accepted, previous
-        if not build.jev_work_budget.take_observation():
-            return None
-        try:
-            result = await self._jev_client.evaluate(
-                state=state,
-                questions=questions,
-                capability="extraction",
-                policy=build.policy.jev,
-                work_budget=build.jev_work_budget,
-            )
-        except Exception:
-            result = JevResult(outcome="unavailable", reason="provider_error")
-        suggested_type = accepted_extraction_type(
-            result,
-            candidate,
-            mapping,
-            build.policy.jev,
-            candidate_set_truncated=candidate_set_truncated,
-        )
-        active_accept = (
-            build.policy.jev.extraction_mode == "active"
-            and suggested_type is not None
-        )
-        record = JevDecisionRecord(
-            capability="extraction",
-            mode=build.policy.jev.extraction_mode,
-            project_id=build.project_id,
-            window_id=build.window_id,
-            pass_number=max(1, build.identity_pass_number),
-            occurrence_key=(
-                f"{occurrence_index}:{candidate.block_id}:"
-                f"{candidate.name.casefold()}"
-            ),
-            evidence_block_ids=(candidate.block_id,),
-            domain_version=build.policy.domain.version,
-            question_version=build.policy.jev.extraction_question_version,
-            acceptance_policy_version=(
-                build.policy.jev.extraction_acceptance_policy_version
-            ),
-            pinned_model=build.policy.jev.model,
-            option_mapping=mapping,
-            result=result,
-            baseline_outcome=candidate.evidence_origin,
-            acceptance_status=(
-                "indeterminate"
-                if result.outcome == "available" and candidate_set_truncated
-                else "accepted"
-                if active_accept
-                else "rejected"
-                if result.outcome == "available"
-                and build.policy.jev.extraction_mode == "active"
-                else "proposed"
-                if result.outcome == "available"
-                else "unavailable"
-            ),
-        )
-        observation = {
-            "request_fingerprint": fingerprint,
-            "record": record.model_dump(mode="json"),
-            "candidate_name": candidate.name,
-            "evidence_origin": candidate.evidence_origin,
-            "proposed_entity_type": candidate.proposed_type,
-            "suggested_entity_type": suggested_type,
-            "accepted_entity_type": suggested_type if active_accept else None,
-            "candidate_set_truncated": candidate_set_truncated,
-            "has_context_offsets": candidate.source_start is not None,
-        }
-        build.trace.extraction_decisions.append(observation)
-        build.trace.jev_extraction_observed += 1
-        if (
-            not active_accept
-            and build.policy.jev.extraction_mode == "active"
-            and result.outcome == "available"
-        ):
-            build.trace.jev_extraction_rejected += 1
-        if not active_accept:
-            return None
-        return suggested_type, observation
+            domain = build.policy.domain
+            entity_type = domain.canonical_entity_type(
+                profile.entity_type
+            ) or domain.resolve_entity_type(profile.entity_type)
+            topic = domain.topic_for_entity_type(entity_type or "")
+            if entity_type is None or topic is None:
+                continue
+            mentions.append(EntityMention(
+                message_ids=tuple(message_ids_by_name[key]), name=text,
+                entity_type=entity_type, topic=topic, origin="known_alias",
+            ))
+        build.trace.known_mentions += len(mentions)
+        return mentions
 
     @staticmethod
-    def _literal_expression(name: str) -> str:
-        return (
-            r"(?<!\w)"
-            + r"\s+".join(re.escape(part) for part in name.split())
-            + r"(?!\w)"
-        )
-
-    @staticmethod
-    def _reject_fallback(
-        build: SemanticWindowBuild,
-        name: str,
-        reason: str,
-        *,
-        metadata: dict | None = None,
-    ) -> None:
+    def _reject(build: SemanticWindowBuild, name: str, reason: str) -> None:
         build.trace.llm_mentions_rejected += 1
-        build.issues.append(
-            ValidationIssue(
-                stage="context_mentions",
-                code="llm_ner_mention_rejected",
-                message="Context NER fallback mention failed validation",
-                item_ref=name,
-                metadata={"reason": reason, **(metadata or {})},
-            )
-        )
-
-    @staticmethod
-    def _validate_domain_mention(
-        name: str,
-        entity_type: str,
-        policy: IngestionPolicy,
-        *,
-        label: Optional[str] = None,
-    ) -> bool:
-        """Validate a mention after its type/topic came from the domain."""
-
-        if not policy.domain.is_active_entity_type(entity_type):
-            return False
-        return validate_entity(name, "", policy.domain, label=label or entity_type)
+        build.issues.append(ValidationIssue(
+            stage="entity_mentions",
+            code="entity_mention_rejected",
+            message="Extracted entity mention failed validation",
+            item_ref=name,
+            metadata={"reason": reason},
+        ))

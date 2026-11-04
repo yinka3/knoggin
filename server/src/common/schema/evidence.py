@@ -20,6 +20,7 @@ EvidenceKind = Literal[
     "maintenance_review",
 ]
 EvidenceSubjectKind = Literal[
+    "message",
     "context_block",
     "relationship_observation",
     "maintenance_review",
@@ -132,7 +133,7 @@ class EvidenceEdge(_FrozenEvidenceModel):
                 ("source_reference", "context_block"),
             },
             "supports_relationship_observation": {
-                ("context_block", "relationship_observation")
+                ("message", "relationship_observation")
             },
             "cited_by_maintenance_review": {
                 ("relationship_observation", "maintenance_review"),

@@ -15,9 +15,9 @@ from common.scoping import (
     require_scope_value,
     require_visible_project_ids,
 )
-from core.ingestion.context_entity_build import ContextEntityBuildService
+from core.ingestion.entity_build import EntityBuildService
 from core.ingestion.project_semantic_processor import ProjectSemanticProcessor
-from core.ingestion.relationship_extractor import ContextRelationshipExtractor
+from core.ingestion.relationship_extractor import RelationshipExtractor
 from core.ingestion.semantic_window_admission import SemanticWindowAdmission
 from core.ingestion.text_processor import TextProcessor
 from core.knowledge.context.maintainer import ContextMaintainer
@@ -116,14 +116,11 @@ class ProjectRuntimeFactory:
                 get_known_aliases=entities.get_known_aliases,
                 get_alias_version=entities.get_alias_version,
                 get_profile=entities.get_profile,
-                vp01=await resources.get_vp01(compiled_domain.vp01_language),
                 spacy=resources.spacy,
-                settings=developer_settings.nlp_pipeline,
-                model_work=resources.model_work,
-                get_vp01=resources.get_vp01,
+                settings=developer_settings.extraction,
                 llm=resources.llm_service,
-                jev_client=getattr(resources, "jev_client", None),
                 user_name=self.user_name,
+                model_work=resources.model_work,
             ),
         )
         scheduler = Scheduler(
@@ -152,7 +149,6 @@ class ProjectRuntimeFactory:
             domain_config_store=domain_store,
             config_manager=config_manager,
             background_work=resources.background_work,
-            get_vp01=resources.get_vp01,
         )
         project_semantic_processor = self._create_project_semantic_processor(
             runtime,
@@ -299,6 +295,17 @@ class ProjectRuntimeFactory:
             writer=ProjectContextWriter(resources.postgres),
             filesystem=context_filesystem,
         )
+        relationship_extractor = RelationshipExtractor(
+            user_name=self.user_name,
+            llm=resources.llm_service,
+            entities=runtime.entities,
+            settings=developer_settings.extraction,
+        )
+        runtime.add_config_unsubscriber(
+            config_manager.subscribe(
+                relationship_extractor.update_settings, "developer_settings.extraction",
+            )
+        )
         return ProjectSemanticProcessor(
             admission,
             resources.knowledge_store,
@@ -307,18 +314,17 @@ class ProjectRuntimeFactory:
             settings=developer_settings.ingestion,
             capture_semantic_policy=runtime.capture_semantic_policy,
             context_updater=ContextUpdater(llm=resources.llm_service),
-            context_maintainer=ContextMaintainer(llm=resources.llm_service),
+            context_maintainer=ContextMaintainer(
+                llm=resources.llm_service,
+                model=developer_settings.ingestion.context.maintenance_model,
+            ),
             context_projection=context_projection,
-            context_entity_builder=ContextEntityBuildService(
+            entity_builder=EntityBuildService(
                 processor=runtime.text_processor,
                 resolver=runtime.entities,
                 allocate_entity_id=resources.knowledge_store.allocate_entity_id,
             ),
-            context_relationship_extractor=ContextRelationshipExtractor(
-                user_name=self.user_name,
-                llm=resources.llm_service,
-                entities=runtime.entities,
-            ),
+            relationship_extractor=relationship_extractor,
             publish_committed_entity_ids=runtime.entities.publish_committed_entity_ids,
             signal_relationship_advisories=lambda: runtime.scheduler.wake_job(
                 "relationship_advisories"
@@ -378,7 +384,7 @@ class ProjectRuntimeFactory:
         runtime.add_config_unsubscriber(
             config_manager.subscribe(
                 processor.update_settings,
-                "developer_settings.nlp_pipeline",
+                "developer_settings.extraction",
             )
         )
         scheduler.register(project_semantic_processor)

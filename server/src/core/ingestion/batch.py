@@ -1,4 +1,4 @@
-"""Frozen, Context-first state for one semantic-window Knowledge build."""
+"""Frozen state for one semantic-window Knowledge build."""
 
 from __future__ import annotations
 
@@ -6,47 +6,68 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Iterable, List, Mapping
 from uuid import UUID
 
-from common.schema.context import ContextBlockSupportRecord, ContextSnapshot
 from common.schema.ingestion.contracts import (
-    ContextBlockMention,
-    ContextEntityResult,
-    ContextRelationshipWrite,
+    EntityMention,
+    EntityResult,
     ExtractionTrace,
-    UnknownEndpointDiagnostic,
+    RelationshipWrite,
     ValidationIssue,
 )
 from common.schema.semantic_window import SemanticWindowRecord, SemanticWindowStage
+from common.scoping import IDENTITY_ENTITY_ID
 from core.ingestion.policy import IngestionPolicy
 
 if TYPE_CHECKING:
     from infrastructure.jev_client import JevWorkBudget
 
 
+@dataclass(frozen=True, slots=True)
+class EvidenceMessage:
+    message_id: int
+    role: str
+    content: str
+    timestamp_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class EpisodeEvidence:
+    """One Episode of this window and the messages it covers, in order."""
+
+    episode_id: str
+    summary: str
+    messages: tuple[EvidenceMessage, ...]
+
+    def __post_init__(self) -> None:
+        if not self.messages:
+            raise ValueError("EpisodeEvidence requires messages")
+
+
 @dataclass(slots=True)
 class SemanticWindowBuild:
-    """Non-writing Context-first entity build for one committed semantic window.
+    """Non-writing Knowledge build for one Context-committed semantic window.
 
-    It has no session transcript and owns only a frozen Context revision, its
-    window-specific effective impact closure, evidence catalog, policy snapshot,
-    trace, and pending Knowledge changes.
+    It owns the window's Episodes and their messages, the summaries of
+    earlier Episodes (background only), Context blocks as hints, the policy
+    snapshot, the trace, and the pending Knowledge changes.
     """
 
     window_id: UUID
     user_name: str
     project_id: str
-    context: ContextSnapshot
-    impact_block_ids: frozenset[UUID]
     policy: IngestionPolicy
     policy_snapshot: Mapping[str, object]
-    block_supports: Mapping[UUID, tuple[ContextBlockSupportRecord, ...]]
-    message_text_by_id: Mapping[int, str]
+    episodes: tuple[EpisodeEvidence, ...]
+    # Summaries of the Episodes before this window's, oldest first.
+    earlier_summaries: tuple[str, ...] = ()
+    # Context blocks each message supports: a hint for relationships.
+    context_hints: Mapping[int, tuple[str, ...]] = field(default_factory=dict)
     trace: ExtractionTrace = field(default_factory=ExtractionTrace)
     issues: List[ValidationIssue] = field(default_factory=list)
-    mentions: tuple[ContextBlockMention, ...] = ()
-    entity_result: ContextEntityResult | None = None
-    relationship_writes: tuple[ContextRelationshipWrite, ...] = ()
-    unknown_endpoint_diagnostics: tuple[UnknownEndpointDiagnostic, ...] = ()
-    identity_pass_number: int = 0
+    mentions: tuple[EntityMention, ...] = ()
+    entity_result: EntityResult | None = None
+    relationship_writes: tuple[RelationshipWrite, ...] = ()
+    # One identity pass per window; JEV records and occurrences carry it.
+    identity_pass_number: int = 1
     jev_work_budget: JevWorkBudget | None = None
 
     @classmethod
@@ -54,192 +75,112 @@ class SemanticWindowBuild:
         cls,
         *,
         window: SemanticWindowRecord,
-        context: ContextSnapshot,
-        impact_block_ids: frozenset[UUID],
-        block_supports: Mapping[UUID, tuple[ContextBlockSupportRecord, ...]],
-        message_text_by_id: Mapping[int, str],
+        episodes: Iterable[EpisodeEvidence],
+        earlier_summaries: Iterable[str] = (),
+        context_hints: Mapping[int, tuple[str, ...]] | None = None,
     ) -> "SemanticWindowBuild":
-        """Reopen the exact Context-first entity build after a process restart.
-
-        The revision's persisted impact belongs to the window that created the
-        revision.  A later window may checkpoint that already-published
-        revision after a no-op Context update, but has no new Knowledge work.
-        The semantic writer verifies this ownership rule again against durable
-        state before it advances the later window.
-        """
-
         if not isinstance(window, SemanticWindowRecord):
             raise TypeError("Semantic window build requires a SemanticWindowRecord")
         if window.stage is not SemanticWindowStage.CONTEXT_COMMITTED:
             raise ValueError("Semantic window build requires context_committed stage")
-        if window.context_revision_id != context.revision_id:
-            raise ValueError(
-                "Semantic window Context revision does not match its checkpoint"
-            )
-        if window.project_id != context.project_id:
-            raise ValueError("Semantic window and Context must share a project")
-        if window.domain_version != context.domain_version:
-            raise ValueError("Semantic window and Context domain versions differ")
         policy = IngestionPolicy.from_semantic_window_snapshot(
             window.policy_snapshot.get("ingestion_policy")
         )
         if policy.domain.version != window.domain_version:
             raise ValueError("Semantic window policy and domain versions differ")
-        effective_impact_block_ids = (
-            impact_block_ids if context.window_id == window.window_id else frozenset()
-        )
         return cls(
             window_id=window.window_id,
             user_name=window.user_name,
             project_id=window.project_id,
-            context=context,
-            impact_block_ids=effective_impact_block_ids,
             policy=policy,
             policy_snapshot=window.policy_snapshot,
-            block_supports=block_supports,
-            message_text_by_id=message_text_by_id,
+            episodes=tuple(episodes),
+            earlier_summaries=tuple(earlier_summaries),
+            context_hints=dict(context_hints or {}),
         )
 
     def __post_init__(self) -> None:
         if not isinstance(self.window_id, UUID):
             raise TypeError("SemanticWindowBuild.window_id must be a UUID")
-        if not isinstance(self.context, ContextSnapshot):
-            raise TypeError("SemanticWindowBuild.context must be a ContextSnapshot")
-        if self.context.project_id != self.project_id:
-            raise ValueError("SemanticWindowBuild Context must belong to its project")
         if not isinstance(self.policy, IngestionPolicy):
             raise TypeError("SemanticWindowBuild.policy must be an IngestionPolicy")
-        if self.policy.domain.version != self.context.domain_version:
-            raise ValueError(
-                "SemanticWindowBuild policy and Context domain versions differ"
-            )
         if not isinstance(self.policy_snapshot, Mapping):
             raise TypeError("SemanticWindowBuild.policy_snapshot must be a mapping")
-        current_ids = {block.block_id for block in self.context.blocks}
-        if not isinstance(self.impact_block_ids, frozenset):
-            raise TypeError("SemanticWindowBuild impact block IDs must be a frozenset")
-        if not all(isinstance(block_id, UUID) for block_id in self.impact_block_ids):
-            raise TypeError("SemanticWindowBuild impact block IDs must be UUIDs")
-        for block_id, supports in self.block_supports.items():
-            if block_id not in current_ids:
-                raise ValueError(
-                    "Context supports must belong to current Context blocks"
-                )
-            if not isinstance(supports, tuple) or any(
-                not isinstance(support, ContextBlockSupportRecord)
-                for support in supports
-            ):
-                raise TypeError("Context supports must be typed support records")
-            if any(support.block_id != block_id for support in supports):
-                raise ValueError(
-                    "Context support block IDs must match their mapping key"
-                )
-        for message_id, text in self.message_text_by_id.items():
-            if (
-                not isinstance(message_id, int)
-                or message_id <= 0
-                or not isinstance(text, str)
-            ):
-                raise TypeError(
-                    "Context evidence messages must map positive IDs to text"
-                )
+        if any(not isinstance(episode, EpisodeEvidence) for episode in self.episodes):
+            raise TypeError("SemanticWindowBuild episodes must be EpisodeEvidence")
+        ids = [message.message_id for message in self.messages]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Episodes of one window cannot share a message")
 
     @property
-    def knowledge_input_blocks(self):
-        """Current extractable Context blocks inside the durable impact closure."""
+    def messages(self) -> tuple[EvidenceMessage, ...]:
+        return tuple(m for episode in self.episodes for m in episode.messages)
 
-        from common.schema.context import AssertionKind
+    @property
+    def message_text_by_id(self) -> dict[int, str]:
+        return {message.message_id: message.content for message in self.messages}
 
-        return tuple(
-            block
-            for block in self.context.blocks
-            if block.block_id in self.impact_block_ids
-            and block.assertion_kind
-            in {
-                AssertionKind.USER_ASSERTED,
-                AssertionKind.SOURCE_GROUNDED,
-                AssertionKind.HUMAN_ASSERTED,
-            }
+    def background_for(self, index: int, count: int) -> tuple[str, ...]:
+        """The ``count`` Episode summaries just before Episode ``index``."""
+
+        if count <= 0:
+            return ()
+        before = (
+            *self.earlier_summaries,
+            *(episode.summary for episode in self.episodes[:index]),
         )
+        return before[-count:]
 
-    def set_mentions(self, mentions: Iterable[ContextBlockMention]) -> None:
+    def set_mentions(self, mentions: Iterable[EntityMention]) -> None:
         values = tuple(mentions)
-        if any(not isinstance(mention, ContextBlockMention) for mention in values):
-            raise TypeError("SemanticWindowBuild mentions must be ContextBlockMention")
-        input_ids = {block.block_id for block in self.knowledge_input_blocks}
-        if any(not set(mention.block_ids).issubset(input_ids) for mention in values):
-            raise ValueError("Context mentions must cite eligible input block versions")
+        if any(not isinstance(mention, EntityMention) for mention in values):
+            raise TypeError("SemanticWindowBuild mentions must be EntityMention")
+        known = set(self.message_text_by_id)
+        if any(not set(mention.message_ids) <= known for mention in values):
+            raise ValueError("Mentions must cite this window's Episode messages")
         self.mentions = values
 
-    def set_entity_result(self, result: ContextEntityResult) -> None:
-        if not isinstance(result, ContextEntityResult):
-            raise TypeError(
-                "SemanticWindowBuild entity result must be ContextEntityResult"
-            )
-        input_ids = {block.block_id for block in self.knowledge_input_blocks}
+    def set_entity_result(self, result: EntityResult) -> None:
+        if not isinstance(result, EntityResult):
+            raise TypeError("SemanticWindowBuild entity result must be EntityResult")
+        known = set(self.message_text_by_id)
         if any(
-            association.block_id not in input_ids
-            for association in result.block_entity_associations
+            not set(resolved.mention.message_ids) <= known
+            for resolved in result.resolved_mentions
         ):
-            raise ValueError("Context associations must cite eligible current blocks")
+            raise ValueError("Resolved mentions must cite this window's Episode messages")
         self.entity_result = result
 
-    def set_empty_knowledge_result(self) -> ContextEntityResult:
-        """Attach the valid no-work result for an empty effective impact."""
+    def set_empty_knowledge_result(self) -> EntityResult:
+        """Attach the valid no-work result for a window with no Episodes."""
 
-        if self.impact_block_ids:
-            raise ValueError(
-                "Empty Knowledge result requires an empty effective impact"
-            )
-        result = ContextEntityResult(
+        result = EntityResult(
             entity_ids=(),
             new_entity_ids=frozenset(),
             alias_updated_ids=frozenset(),
             alias_updates={},
             pending_entity_writes={},
             project_classifications={},
-            block_entity_associations=(),
-            message_entity_refs=(),
         )
         self.set_entity_result(result)
         self.set_relationship_writes(())
         return result
 
-    def set_relationship_writes(
-        self, writes: Iterable[ContextRelationshipWrite]
-    ) -> None:
-        """Attach Context-only VP-02 output after entity resolution."""
-
+    def set_relationship_writes(self, writes: Iterable[RelationshipWrite]) -> None:
         values = tuple(writes)
-        if any(not isinstance(write, ContextRelationshipWrite) for write in values):
+        if any(not isinstance(write, RelationshipWrite) for write in values):
             raise TypeError("SemanticWindowBuild relationship writes must be typed")
         if self.entity_result is None:
-            raise ValueError(
-                "Context relationship extraction requires resolved entities"
-            )
-        input_ids = {block.block_id for block in self.knowledge_input_blocks}
-        entity_ids = set(self.entity_result.entity_ids)
-        from common.scoping import IDENTITY_ENTITY_ID
-
-        allowed_entity_ids = entity_ids | {IDENTITY_ENTITY_ID}
+            raise ValueError("Relationship extraction requires resolved entities")
+        known = set(self.message_text_by_id)
+        allowed = set(self.entity_result.entity_ids) | {IDENTITY_ENTITY_ID}
         if any(
-            not set(write.support_block_ids).issubset(input_ids)
-            or write.entity_a_id not in allowed_entity_ids
-            or write.entity_b_id not in allowed_entity_ids
+            not set(write.support_message_ids) <= known
+            or write.entity_a_id not in allowed
+            or write.entity_b_id not in allowed
             for write in values
         ):
             raise ValueError(
-                "Context relationship writes must cite eligible blocks and resolved endpoints"
+                "Relationship writes must cite this window's messages and resolved endpoints"
             )
         self.relationship_writes = values
-
-    def set_unknown_endpoint_diagnostics(
-        self, diagnostics: Iterable[UnknownEndpointDiagnostic]
-    ) -> None:
-        values = tuple(diagnostics)
-        if any(not isinstance(item, UnknownEndpointDiagnostic) for item in values):
-            raise TypeError("Unknown endpoint diagnostics must be typed")
-        input_ids = {block.block_id for block in self.knowledge_input_blocks}
-        if any(item.block_id not in input_ids for item in values):
-            raise ValueError("Unknown endpoint diagnostics must cite eligible blocks")
-        self.unknown_endpoint_diagnostics = values

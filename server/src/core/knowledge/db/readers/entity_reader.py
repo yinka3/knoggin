@@ -22,34 +22,6 @@ class EntityReader:
     def __init__(self, client: PostgresClient):
         self.client = client
 
-    async def get_active_identity_corrections(
-        self, project_id: str, block_ids: list[str],
-    ) -> list[dict]:
-        """Return exact current-block overrides confirmed by the user."""
-
-        if not block_ids:
-            return []
-        return await self.client.fetch_all(
-            """SELECT occurrence.block_id::text AS block_id,
-                      occurrence.mention_text, occurrence.source_start,
-                      occurrence.source_end, occurrence.corrected_entity_id,
-                      occurrence.human_correction_review_id
-               FROM public.context_block_entity_occurrences AS occurrence
-               JOIN public.entities AS target
-                 ON target.entity_id = occurrence.corrected_entity_id
-                AND target.status = 'active'
-               JOIN public.project_entity_contexts AS context
-                 ON context.project_id = occurrence.project_id
-                AND context.entity_id = target.entity_id
-                AND context.user_name = target.user_name
-               WHERE occurrence.project_id = %s
-                 AND occurrence.block_id = ANY(%s::uuid[])
-                 AND occurrence.human_correction_review_id IS NOT NULL
-               ORDER BY occurrence.block_id, occurrence.mention_text,
-                        occurrence.source_start, occurrence.occurrence_index""",
-            (project_id, block_ids),
-        )
-
     def _parse_json_value(self, val):
         """Decode a JSON string value; other values pass through unchanged."""
         if not val:
@@ -651,8 +623,7 @@ class EntityReader:
             context.last_mentioned_ms,
             COUNT(DISTINCT mer.message_id) AS message_reference_count,
             COUNT(DISTINCT relationship.relationship_id) AS relationship_count,
-            COUNT(DISTINCT episode_entity.episode_id) AS episode_reference_count,
-            COUNT(DISTINCT block_entity.block_id) AS context_block_association_count
+            COUNT(DISTINCT episode_entity.episode_id) AS episode_reference_count
         FROM public.entities e
         JOIN public.project_entity_contexts context
             ON context.entity_id = e.entity_id
@@ -669,9 +640,6 @@ class EntityReader:
         LEFT JOIN public.episode_entities episode_entity
             ON episode_entity.project_id = context.project_id
            AND episode_entity.entity_id = e.entity_id
-        LEFT JOIN public.context_block_entities block_entity
-            ON block_entity.project_id = context.project_id
-           AND block_entity.entity_id = e.entity_id
         WHERE e.user_name = %s
           AND context.project_id = %s
           AND e.entity_id <> %s
@@ -866,12 +834,11 @@ class EntityReader:
           ON observation.relationship_id = relationship.relationship_id
          AND observation.project_id = relationship.project_id
          AND observation.retired_at IS NULL
-        LEFT JOIN relationship_observation_blocks observation_block
-          ON observation_block.observation_id = observation.observation_id
-         AND observation_block.project_id = observation.project_id
-        LEFT JOIN project_context_block_supports support
-          ON support.block_id = observation_block.block_id
-         AND support.project_id = observation_block.project_id
+        LEFT JOIN relationship_observation_messages observation_message
+          ON observation_message.observation_id = observation.observation_id
+         AND observation_message.project_id = observation.project_id
+        LEFT JOIN messages support
+          ON support.message_id = observation_message.message_id
         WHERE (
               relationship.entity_a_id = ANY(%s)
               OR relationship.entity_b_id = ANY(%s)

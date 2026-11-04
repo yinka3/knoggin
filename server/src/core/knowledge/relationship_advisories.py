@@ -290,10 +290,10 @@ def build_relationship_advisories(
             group["source_entities"].add(int(source_id))
         if target_id is not None:
             group["target_entities"].add(int(target_id))
-        # Context extraction is the normal observation source. Separate
+        # Conversation extraction is the normal observation source. Separate
         # semantic windows and entities provide the evidence floor; the
         # advisory remains a suggestion until a person changes the domain.
-        if row.get("evidence_origin", "independent") in {"independent", "context"}:
+        if row.get("evidence_origin", "independent") in {"independent", "conversation"}:
             group["qualifying_occurrences"] += 1
             group["qualifying_windows"].add(str(row["semantic_window_id"]))
             if source_id is not None:

@@ -1,10 +1,9 @@
 """Optional topic provider failure retains deterministic classification."""
 
-from uuid import uuid4
 
 import pytest
 
-from common.schema.ingestion.contracts import ContextBlockMention
+from common.schema.ingestion.contracts import EntityMention
 from core.knowledge.entity.resolver import EntityResolver
 from tests.unit.core.knowledge.test_jev_topic_observe import Store, policy, resolve
 
@@ -25,7 +24,7 @@ async def test_topic_provider_exception_retains_default_and_unavailable_provenan
 
 
 async def test_topic_observation_requires_window_scope_before_provider_work():
-    block_id = uuid4()
+    message_id = 1
 
     async def allocate():
         return 900
@@ -33,17 +32,17 @@ async def test_topic_observation_requires_window_scope_before_provider_work():
     with pytest.raises(TypeError, match="window ID"):
         await EntityResolver(
             Store(), "project-1", ["project-1"], jev_client=BrokenJev()
-        ).resolve_context_block_mentions(
+        ).resolve_mentions(
             [
-                ContextBlockMention(
-                    block_ids=(block_id,),
+                EntityMention(
+                    message_ids=(message_id,),
                     name="Acme",
                     entity_type="Company",
                     topic="Work",
                     origin="vp01",
                 )
             ],
-            block_text_by_id={block_id: "Acme manages the budget."},
+            message_text_by_id={message_id: "Acme manages the budget."},
             policy=policy(),
             allocate_entity_id=allocate,
         )

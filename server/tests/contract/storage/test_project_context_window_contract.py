@@ -29,7 +29,7 @@ from common.schema.semantic_window import (
 from common.schema.settings import (
     EntityResolutionSettings,
     EpisodeSettings,
-    TextProcessorSettings,
+    ExtractionSettings,
 )
 from core.agent.notebook import RunNotebook
 from core.agent.notebook_renderer import render_notebook
@@ -85,7 +85,7 @@ def _materialization(*blocks: ContextBlockRecord, supports=()) -> ContextMateria
 
 def _ingestion_policy() -> IngestionPolicy:
     return IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(gliner_threshold=0.42),
+        extraction=ExtractionSettings(vp01_episode_lookback=3),
         entity_resolution=EntityResolutionSettings(resolution_threshold=0.71),
         compiled_domain=_domain(),
     )
@@ -1683,7 +1683,7 @@ async def test_context_revision_retry_and_projection_import_are_durable(
         """,
         (imported.reconciliation_window_id,),
     )
-    assert policy_row["policy_snapshot"]["ingestion_policy"]["gliner_threshold"] == 0.42
+    assert policy_row["policy_snapshot"]["ingestion_policy"]["vp01_episode_lookback"] == 3
     assert (
         policy_row["policy_snapshot"]["ingestion_policy"]["compiled_domain"]
         == policy_row["policy_snapshot"]["compiled_domain"]

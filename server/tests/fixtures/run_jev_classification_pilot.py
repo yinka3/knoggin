@@ -18,9 +18,9 @@ from uuid import NAMESPACE_URL, uuid5
 from dotenv import load_dotenv
 
 from common.conf.domain_config import DomainConfig
-from common.schema.ingestion.contracts import ContextBlockMention
+from common.schema.ingestion.contracts import EntityMention
 from common.schema.jev import JevSettings
-from common.schema.settings import EntityResolutionSettings, TextProcessorSettings
+from common.schema.settings import EntityResolutionSettings, ExtractionSettings
 from core.ingestion.policy import IngestionPolicy
 from core.knowledge.entity.resolver import EntityResolver
 from infrastructure.external_model_budget import ExternalModelSpendingLedger
@@ -138,11 +138,12 @@ def load_reviewed_cases(path: Path) -> list[dict]:
 
 def _ids(case_id: str, occurrence_index: int):
     window_id = uuid5(NAMESPACE_URL, f"knoggin:jev:classification:window:{case_id}")
-    block_id = uuid5(
+    # A stable positive message ID per occurrence.
+    message_id = uuid5(
         NAMESPACE_URL,
-        f"knoggin:jev:classification:block:{case_id}:{occurrence_index}",
-    )
-    return window_id, block_id
+        f"knoggin:jev:classification:message:{case_id}:{occurrence_index}",
+    ).int % 2**31 + 1
+    return window_id, message_id
 
 
 def build_review_labels(cases: list[dict]) -> dict[str, list[dict]]:
@@ -151,8 +152,8 @@ def build_review_labels(cases: list[dict]) -> dict[str, list[dict]]:
     for case in cases:
         occurrence_keys = []
         for index, occurrence in enumerate(case["occurrences"]):
-            window_id, block_id = _ids(case["id"], index)
-            occurrence_key = f"{index}:{block_id}:topic"
+            window_id, message_id = _ids(case["id"], index)
+            occurrence_key = f"{index}:{message_id}:topic"
             occurrence_keys.append(occurrence_key)
             proposed = occurrence["proposed_choice"]
             occurrence_labels.append(
@@ -227,7 +228,7 @@ def _policy(case: dict, settings: JevSettings) -> IngestionPolicy:
         }
     ).compile()
     return IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(),
+        extraction=ExtractionSettings(),
         entity_resolution=EntityResolutionSettings(),
         compiled_domain=domain,
         jev=settings.capture_policy(),
@@ -250,7 +251,7 @@ async def run_pilot(cases: list[dict], api_key: str):
     try:
         for case_index, case in enumerate(cases):
             window_id, _ = _ids(case["id"], 0)
-            block_ids = [_ids(case["id"], index)[1] for index in range(len(case["occurrences"]))]
+            message_ids = [_ids(case["id"], index)[1] for index in range(len(case["occurrences"]))]
             next_id = iter(range(90_000 + case_index * 100, 90_100 + case_index * 100))
 
             async def allocate_entity_id():
@@ -262,21 +263,21 @@ async def run_pilot(cases: list[dict], api_key: str):
                 "project-1",
                 ["project-1"],
                 jev_client=client,
-            ).resolve_context_block_mentions(
+            ).resolve_mentions(
                 [
-                    ContextBlockMention(
-                        block_ids=(block_id,),
+                    EntityMention(
+                        message_ids=(message_id,),
                         name=case["entity_name"],
                         entity_type=case["entity_type"],
                         topic=case["default_topic"],
                         origin="vp01",
                     )
-                    for block_id in block_ids
+                    for message_id in message_ids
                 ],
-                block_text_by_id={
-                    block_id: occurrence["context"]
-                    for block_id, occurrence in zip(
-                        block_ids, case["occurrences"], strict=True
+                message_text_by_id={
+                    message_id: occurrence["context"]
+                    for message_id, occurrence in zip(
+                        message_ids, case["occurrences"], strict=True
                     )
                 },
                 policy=_policy(case, settings),

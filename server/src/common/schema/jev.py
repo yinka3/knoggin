@@ -13,7 +13,7 @@ from pydantic import (
     model_validator,
 )
 
-Capability = Literal["identity", "extraction", "classification", "board"]
+Capability = Literal["identity", "classification", "board"]
 Mode = Literal["disabled", "observe", "active"]
 Probability = Annotated[float, Field(ge=0, le=1, allow_inf_nan=False, strict=True)]
 
@@ -26,7 +26,6 @@ class JevPolicy(JevModel):
     """Serializable admitted policy; contains no credentials or endpoint."""
 
     identity_mode: Mode = "disabled"
-    extraction_mode: Mode = "disabled"
     classification_mode: Mode = "disabled"
     board_mode: Mode = "observe"
     model: str = Field(
@@ -34,7 +33,6 @@ class JevPolicy(JevModel):
         pattern=r"^(?:jev-\d+\.\d+\.\d+|typesafe/jev-\d+\.\d+)$",
     )
     identity_question_version: Literal["identity-v1"] = "identity-v1"
-    extraction_question_version: Literal["extraction-v1"] = "extraction-v1"
     classification_question_version: Literal[
         "classification-v1", "classification-v2"
     ] = "classification-v2"
@@ -52,9 +50,6 @@ class JevPolicy(JevModel):
     identity_min_choice_probability: Probability = 0.8
     identity_min_probability_margin: Probability = 0.2
     identity_min_evidence_noul: Probability = 0.8
-    extraction_acceptance_policy_version: Literal["positive-v1"] = "positive-v1"
-    extraction_min_choice_confidence: Probability = 0.8
-    extraction_min_entity_noul: Probability = 0.8
     max_candidates: int = Field(8, ge=1, le=50)
     identity_match_sample_rate: float = Field(0, ge=0, le=1, allow_inf_nan=False)
     max_calls_per_window: int = Field(12, ge=1, le=100)
@@ -74,7 +69,7 @@ class JevPolicy(JevModel):
         return self
 
     def mode_for(self, capability: Capability) -> Mode:
-        if capability not in {"identity", "extraction", "classification", "board"}:
+        if capability not in {"identity", "classification", "board"}:
             raise ValueError("Unknown JEV capability")
         return getattr(self, f"{capability}_mode")
 
@@ -193,8 +188,8 @@ class JevDecisionRecord(JevModel):
     window_id: UUID
     pass_number: int = Field(ge=1, le=2)
     occurrence_key: str = Field(min_length=1)
-    # UUIDs identify immutable block versions in the current Context schema.
-    evidence_block_ids: tuple[UUID, ...]
+    # The Episode messages that contain the mention.
+    evidence_message_ids: tuple[int, ...]
     domain_version: int = Field(ge=0)
     question_version: str
     acceptance_policy_version: str

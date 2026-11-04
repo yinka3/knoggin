@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from uuid import UUID
 
 from common.schema.semantic_window import SemanticWindowMessage, SemanticWindowRecord
@@ -114,28 +115,27 @@ class SemanticWindowReader:
     def __init__(self, client: PostgresClient) -> None:
         self.client = client
 
-    async def list_jev_decisions_for_block(
-        self, block_id: UUID | str, *, user_name: str,
+    async def list_jev_decisions_for_message(
+        self, message_id: int, *, user_name: str,
         project_id: str, limit: int = 50,
     ) -> dict | None:
-        """Read decisions that cited one owned Context block as evidence."""
+        """Read decisions that cited one owned message as evidence."""
 
         user_name, project_id = self._scope(
-            user_name, project_id, "list_jev_decisions_for_block"
+            user_name, project_id, "list_jev_decisions_for_message"
         )
-        block_id = self._uuid(block_id, "block_id")
-        if not 1 <= limit <= 100:
-            raise ValueError("JEV decision limit is out of bounds")
-        block = await self.client.fetch_one(
-            """SELECT block.block_id, left(block.markdown, 2000) AS excerpt
-               FROM public.project_context_blocks AS block
-               JOIN public.projects AS project ON project.project_id = block.project_id
-               WHERE block.block_id = %s AND block.project_id = %s
-                 AND project.user_name = %s""",
-            (block_id, project_id, user_name),
+        if not isinstance(message_id, int) or message_id <= 0 or not 1 <= limit <= 100:
+            raise ValueError("JEV message decision request is out of bounds")
+        message = await self.client.fetch_one(
+            """SELECT message.message_id, left(message.content, 2000) AS excerpt
+               FROM public.messages AS message
+               WHERE message.message_id = %s AND message.project_id = %s
+                 AND message.user_name = %s""",
+            (message_id, project_id, user_name),
         )
-        if block is None:
+        if message is None:
             return None
+        cited = json.dumps([message_id])
         rows = await self.client.fetch_all(
             """SELECT capability, decision, window_id, pass_number, occurrence_key
                FROM (
@@ -145,15 +145,7 @@ class SemanticWindowReader:
                    JOIN public.project_semantic_windows AS semantic_window
                      ON semantic_window.window_id = item.window_id AND semantic_window.project_id = item.project_id
                    WHERE item.project_id = %s AND semantic_window.user_name = %s
-                     AND item.decision -> 'record' -> 'evidence_block_ids' ? %s
-                   UNION ALL
-                   SELECT 'extraction', item.decision, item.window_id,
-                          item.pass_number, item.occurrence_key, item.created_at
-                   FROM public.project_jev_extraction_decisions AS item
-                   JOIN public.project_semantic_windows AS semantic_window
-                     ON semantic_window.window_id = item.window_id AND semantic_window.project_id = item.project_id
-                   WHERE item.project_id = %s AND semantic_window.user_name = %s
-                     AND item.decision -> 'record' -> 'evidence_block_ids' ? %s
+                     AND item.decision -> 'record' -> 'evidence_message_ids' @> %s::jsonb
                    UNION ALL
                    SELECT 'classification', item.decision, item.window_id,
                           item.pass_number, item.occurrence_key, item.created_at
@@ -161,17 +153,13 @@ class SemanticWindowReader:
                    JOIN public.project_semantic_windows AS semantic_window
                      ON semantic_window.window_id = item.window_id AND semantic_window.project_id = item.project_id
                    WHERE item.project_id = %s AND semantic_window.user_name = %s
-                     AND item.decision -> 'record' -> 'evidence_block_ids' ? %s
+                     AND item.decision -> 'record' -> 'evidence_message_ids' @> %s::jsonb
                ) AS decisions
                ORDER BY created_at DESC, window_id, pass_number, occurrence_key
                LIMIT %s""",
-            (
-                project_id, user_name, str(block_id),
-                project_id, user_name, str(block_id),
-                project_id, user_name, str(block_id), limit,
-            ),
+            (project_id, user_name, cited, project_id, user_name, cited, limit),
         )
-        return {"block_id": str(block_id), "excerpt": block["excerpt"],
+        return {"message_id": message_id, "excerpt": message["excerpt"],
                 "decisions": rows}
 
     async def list_jev_decisions_for_entity(
@@ -205,14 +193,6 @@ class SemanticWindowReader:
                    WHERE item.project_id = %s AND semantic_window.user_name = %s
                      AND (item.decision ->> 'operational_entity_id')::bigint = %s
                    UNION ALL
-                   SELECT 'extraction', item.decision, item.window_id,
-                          item.pass_number, item.occurrence_key, item.created_at
-                   FROM public.project_jev_extraction_decisions AS item
-                   JOIN public.project_semantic_windows AS semantic_window
-                     ON semantic_window.window_id = item.window_id AND semantic_window.project_id = item.project_id
-                   WHERE item.project_id = %s AND semantic_window.user_name = %s
-                     AND (item.decision ->> 'operational_entity_id')::bigint = %s
-                   UNION ALL
                    SELECT 'classification', item.decision, item.window_id,
                           item.pass_number, item.occurrence_key, item.created_at
                    FROM public.project_jev_classification_decisions AS item
@@ -224,7 +204,6 @@ class SemanticWindowReader:
                ORDER BY created_at DESC, window_id, pass_number, occurrence_key
                LIMIT %s""",
             (
-                project_id, user_name, entity_id,
                 project_id, user_name, entity_id,
                 project_id, user_name, entity_id, limit,
             ),
@@ -240,7 +219,6 @@ class SemanticWindowReader:
         window_id = self._uuid(window_id, "window_id")
         tables = {
             "identity": "project_jev_identity_decisions",
-            "extraction": "project_jev_extraction_decisions",
             "classification": "project_jev_classification_decisions",
         }
         if capability not in tables or pass_number not in {1, 2} or not occurrence_key:
@@ -278,40 +256,6 @@ class SemanticWindowReader:
             """
             SELECT decision.decision
             FROM public.project_jev_identity_decisions AS decision
-            JOIN public.project_semantic_windows AS semantic_window
-              ON semantic_window.window_id = decision.window_id
-             AND semantic_window.project_id = decision.project_id
-            WHERE semantic_window.window_id = %s
-              AND semantic_window.user_name = %s
-              AND semantic_window.project_id = %s
-            ORDER BY decision.pass_number, decision.occurrence_key
-            LIMIT %s OFFSET %s
-            """,
-            (window_id, user_name, project_id, limit, offset),
-        )
-        return [row["decision"] for row in rows]
-
-    async def list_jev_extraction_decisions(
-        self,
-        window_id: UUID | str,
-        *,
-        user_name: str,
-        project_id: str,
-        limit: int = 100,
-        offset: int = 0,
-    ) -> list[dict]:
-        """Read a bounded page of private extraction decisions."""
-
-        user_name, project_id = self._scope(
-            user_name, project_id, "list_jev_extraction_decisions"
-        )
-        window_id = self._uuid(window_id, "window_id")
-        if not 1 <= limit <= 500 or offset < 0:
-            raise ValueError("JEV decision page is out of bounds")
-        rows = await self.client.fetch_all(
-            """
-            SELECT decision.decision
-            FROM public.project_jev_extraction_decisions AS decision
             JOIN public.project_semantic_windows AS semantic_window
               ON semantic_window.window_id = decision.window_id
              AND semantic_window.project_id = decision.project_id

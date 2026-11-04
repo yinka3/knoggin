@@ -156,16 +156,12 @@ class KnowledgeQueryReader:
         FROM message_entity_refs mention
         JOIN messages message ON message.message_id = mention.message_id
         JOIN entities entity ON entity.entity_id = mention.entity_id
-        LEFT JOIN project_context_block_supports support
-          ON support.project_id = message.project_id
-         AND support.session_id = message.session_id
-         AND support.message_id = message.message_id
-        LEFT JOIN relationship_observation_blocks observation_block
-          ON observation_block.project_id = support.project_id
-         AND observation_block.block_id = support.block_id
+        LEFT JOIN relationship_observation_messages observation_message
+          ON observation_message.message_id = message.message_id
+         AND observation_message.project_id = message.project_id
         LEFT JOIN relationship_observations observation
-          ON observation.observation_id = observation_block.observation_id
-         AND observation.project_id = observation_block.project_id
+          ON observation.observation_id = observation_message.observation_id
+         AND observation.project_id = observation_message.project_id
          AND observation.retired_at IS NULL
          AND (
              observation.source_entity_id = mention.entity_id

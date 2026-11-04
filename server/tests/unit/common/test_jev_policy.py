@@ -6,8 +6,8 @@ from pydantic import ValidationError
 from common.schema.jev import JevDecisionRecord, JevPolicy, JevResult, JevSettings
 from common.schema.settings import (
     EntityResolutionSettings,
+    ExtractionSettings,
     RootConfig,
-    TextProcessorSettings,
 )
 from core.ingestion.policy import IngestionPolicy
 from tests.fixtures.factories import make_domain_config, make_project_state
@@ -15,7 +15,7 @@ from tests.fixtures.factories import make_domain_config, make_project_state
 
 def policy(jev=None):
     return IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(),
+        extraction=ExtractionSettings(),
         entity_resolution=EntityResolutionSettings(),
         compiled_domain=make_domain_config().compile(),
         jev=jev,
@@ -77,8 +77,6 @@ def test_phase_a_v1_snapshot_retains_admitted_question_version(mode):
         {"identity_min_choice_probability": -0.1},
         {"identity_min_probability_margin": 1.1},
         {"identity_min_evidence_noul": -0.1},
-        {"extraction_min_choice_confidence": 1.1},
-        {"extraction_min_entity_noul": -0.1},
         {"request_timeout_seconds": 10, "total_timeout_seconds": 1},
         {"total_timeout_seconds": float("nan")},
         {"max_elapsed_seconds_per_window": 0},
@@ -106,7 +104,7 @@ def test_runtime_credentials_cannot_be_captured_as_policy():
 
 
 async def test_project_admission_captures_live_jev_settings_once():
-    state = make_project_state(text_processor=TextProcessorSettings())
+    state = make_project_state()
     state._config_manager.config.jev = JevSettings(identity_mode="observe")
     captured = await state.capture_semantic_policy()
     state._config_manager.config.jev = JevSettings(identity_mode="active")
@@ -122,7 +120,7 @@ def test_observe_provenance_serializes_but_cannot_be_accepted():
         window_id=uuid4(),
         pass_number=1,
         occurrence_key="b2:0:4",
-        evidence_block_ids=(uuid4(),),
+        evidence_message_ids=(7,),
         domain_version=1,
         question_version="identity-v1",
         acceptance_policy_version="observe-v1",

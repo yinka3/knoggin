@@ -1,6 +1,5 @@
 """Bounded, project-scoped reads for the knowledge explorer."""
 
-from uuid import UUID
 
 from starlette.responses import JSONResponse
 from starlette.routing import Route
@@ -233,7 +232,6 @@ def _jev_explanation(item, *, advanced=False):
     capability = item["capability"]
     baseline_field, suggestion_field, operational_field = {
         "identity": ("baseline_entity_id", "suggested_entity_id", "operational_entity_id"),
-        "extraction": ("proposed_entity_type", "suggested_entity_type", "accepted_entity_type"),
         "classification": ("baseline_topic", "suggested_topic", "operational_topic"),
     }[capability]
     baseline = observation.get(baseline_field)
@@ -246,10 +244,8 @@ def _jev_explanation(item, *, advanced=False):
         "operational_result": operational,
         "operational_result_recorded": operational is not None,
         "acceptance_status": record["acceptance_status"],
-        "evidence_block_ids": record["evidence_block_ids"],
+        "evidence_message_ids": record["evidence_message_ids"],
     }
-    if capability == "extraction":
-        result["candidate_name"] = observation.get("candidate_name")
     if advanced:
         response = (record["result"].get("response") or {})
         result["advanced"] = {
@@ -269,26 +265,25 @@ def _jev_explanation(item, *, advanced=False):
     return result
 
 
-async def block_jev_decisions(request):
+async def message_jev_decisions(request):
     runtime, project_id, error = await _scope(request)
     if error:
         return error
-    try:
-        block_id = UUID(request.path_params["block_id"])
-    except ValueError:
-        return _error("block_not_found", "Context block not found", 404)
+    message_id = _entity_id(request, "message_id")
+    if message_id is None:
+        return _error("message_not_found", "Message not found", 404)
     limit = _positive(request, "limit", default=50, maximum=100)
     if limit is None or request.query_params.get("advanced", "false") not in {"true", "false"}:
         return _error("invalid_query", "Invalid decision query", 422)
     advanced = request.query_params.get("advanced") == "true"
-    bundle = await runtime.resources.knowledge_store.list_jev_decisions_for_block(
-        str(block_id), user_name=runtime.sessions.user_name,
+    bundle = await runtime.resources.knowledge_store.list_jev_decisions_for_message(
+        message_id, user_name=runtime.sessions.user_name,
         project_id=project_id, limit=limit,
     )
     if bundle is None:
-        return _error("block_not_found", "Context block not found", 404)
+        return _error("message_not_found", "Message not found", 404)
     return JSONResponse({
-        "block_id": bundle["block_id"], "evidence_excerpt": bundle["excerpt"],
+        "message_id": bundle["message_id"], "evidence_excerpt": bundle["excerpt"],
         "items": [_jev_explanation(item, advanced=advanced) for item in bundle["decisions"]],
     })
 
@@ -322,5 +317,5 @@ routes = [
     Route("/v1/projects/{project_id}/knowledge/entities/{entity_id}/activity", entity_activity, methods=["GET"]),
     Route("/v1/projects/{project_id}/knowledge/entities/{entity_id}/path/{target_id}", entity_path, methods=["GET"]),
     Route("/v1/projects/{project_id}/knowledge/observations/{observation_id}/evidence", observation_evidence, methods=["GET"]),
-    Route("/v1/projects/{project_id}/knowledge/context-blocks/{block_id}/jev-decisions", block_jev_decisions, methods=["GET"]),
+    Route("/v1/projects/{project_id}/knowledge/messages/{message_id}/jev-decisions", message_jev_decisions, methods=["GET"]),
 ]

@@ -48,9 +48,7 @@ Context is a readable summary of a project's current state, active work, decisio
 
 Knoggin saves each Context revision in Postgres and renders the latest one as `CONTEXT.md`. A person can edit that file; Knoggin reconciles the edit into a new revision. The agent receives the committed Context in its project prompt as current working memory. It can use Episodes, messages, and documents to check details when needed.
 
-When Context changes, the knowledge stage examines the affected blocks for entity mentions and relationships. It sends their text to GLiNER to find entity spans, alongside known-alias matching and other configured extraction steps. GLiNER's entity labels and descriptions come from the project's domain configuration; Context supplies the text to examine rather than model instructions.
-
-User assertions, source-grounded information, and human edits can contribute to the project's entity contexts and graph observations; agent-derived notes are excluded from that extraction. Links to the blocks and their available evidence let Knoggin update or retire derived observations when a block is changed or removed.
+The knowledge stage builds the entity graph from each Episode's messages, one Episode per model call, with calls run in parallel. Names already in the graph are matched directly; the extraction model finds the rest and then the relationships between them, using the entity types and relationship vocabulary from the project's domain configuration. Every entity and relationship cites the messages that state it, so it disappears with those messages. A later message that changes a fact adds a newer observation; the older one stays as history. Notes you write in `CONTEXT.md` stay in Context for every agent but do not feed the graph.
 
 ### Ingestion
 
@@ -100,13 +98,13 @@ Model files download when first needed. After that, Knoggin loads them from the 
 uv run --package server python server/scripts/prefetch_models.py
 ```
 
-Each default model is pinned to the exact version Knoggin was tested with (`PINNED_REVISIONS` in `server/src/common/model_cache.py`), so a download never picks up an unreviewed change. To use a different version, set `EMBEDDING_MODEL_REVISION`, `RERANKER_MODEL_REVISION`, `GLINER_EN_MODEL_REVISION`, or `GLINER_MULTI_MODEL_REVISION` in `.env`; a version that is not cached downloads on first use. Models never run code from their repositories.
+Each default model is pinned to the exact version Knoggin was tested with (`PINNED_REVISIONS` in `server/src/common/model_cache.py`), so a download never picks up an unreviewed change. To use a different version, set `EMBEDDING_MODEL_REVISION` or `RERANKER_MODEL_REVISION` in `.env`; a version that is not cached downloads on first use. Models never run code from their repositories.
 
 Stop Postgres with `docker compose down`. This keeps the database volume; `docker compose down -v` deletes it.
 
 ### Running everything in Docker
 
-`docker compose up -d` also builds and starts the API on `http://127.0.0.1:8000`, after Postgres is healthy. The image is a CPU build with the default embedding, reranker, GLiNER (English and multilingual), and Docling models already inside, so the first start downloads nothing.
+`docker compose up -d` also builds and starts the API on `http://127.0.0.1:8000`, after Postgres is healthy. The image is a CPU build with the default embedding, reranker, and Docling models already inside, so the first start downloads nothing.
 
 - The API reads `.env` for `RUNTIME_USER_NAME` and provider keys. Compose points it at the `postgres` service and mounts the host folder named by `SETTINGS_DIR` (default `./config`), so `knoggin.yml` and project files are shared with a local run.
 - The container runs as UID 1000. If your user has a different UID, set `UID` in `.env` before building.
@@ -115,12 +113,12 @@ Stop Postgres with `docker compose down`. This keeps the database volume; `docke
 
 ## Where your data goes
 
-Knoggin stores your memory locally: the database, your project files, search indexes, embeddings, reranking, entity extraction (GLiNER), and document parsing all run on your machine.
+Knoggin stores your memory locally: the database, your project files, search indexes, embeddings, reranking, and document parsing all run on your machine.
 
 The language model is the exception. By default Knoggin uses OpenRouter, so this text is sent to the model provider you configure:
 
 - each agent step: the system prompt, Project Context, retrieved results, and recent conversation;
-- memory building: each conversation window, for Episodes, Context updates, and relationship extraction;
+- memory building: each conversation window, for Episodes, Context updates, and entity and relationship extraction;
 - web search queries, when web tools are enabled;
 - JEV requests, when JEV is enabled (it is off by default).
 

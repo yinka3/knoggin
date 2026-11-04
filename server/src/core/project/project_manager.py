@@ -379,7 +379,6 @@ class ProjectManager:
         )
         if self._filesystem_factory is None:
             raise RuntimeError("Project filesystem is not configured")
-        await self._prepare_vp01(active_domain)
         project_query = """
             INSERT INTO public.projects (
                 project_id, user_name, name, description, status,
@@ -501,13 +500,6 @@ class ProjectManager:
 
         return validate_domain_candidate(candidate)
 
-    async def _prepare_vp01(self, candidate: DomainConfig) -> None:
-        """Fail before durable writes if the selected extraction model cannot load."""
-
-        adapter = await self.resources.get_vp01(candidate.vp01_language)
-        if not callable(getattr(adapter, "extract_entities", None)):
-            raise TypeError("VP-01 adapter must expose extract_entities")
-
     async def get_domain_config(self, project_id: str) -> DomainConfig:
         """Read the durable active domain configuration for one project."""
 
@@ -571,9 +563,6 @@ class ProjectManager:
             raise RuntimeError("ProjectManager is shutting down")
         parsed = parse_candidate(candidate)
         await self._require_domain_project(project_id, allow_archived=False)
-        # Model loading can be slow. Finish it before locking project lifecycle
-        # work, then recheck status and revision under the lock and store CAS.
-        await self._prepare_vp01(parsed)
         async with self.maintenance_service.lock:
             if self._closed:
                 raise RuntimeError("ProjectManager is shutting down")

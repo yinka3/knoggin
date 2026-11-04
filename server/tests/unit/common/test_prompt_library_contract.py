@@ -8,19 +8,11 @@ from common.utils.prompt_loader import (
 
 @pytest.mark.unit
 @pytest.mark.no_network
-def test_legacy_relationship_prompt_distinguishes_colocation_from_shared_action():
+def test_relationship_prompt_separates_co_mention_from_shared_action():
     validate_prompt_library()
     prompt = load_pipeline_prompt_template(
         "prompts/extraction.md", "Extract Relationships"
     )
-    colocation_example = prompt.split('Input: [USER] "Alice and Bob were there."', 1)[
-        1
-    ].split('Input: [USER] "Alice and Bob worked out together."', 1)[0]
-    shared_action_example = prompt.split(
-        'Input: [USER] "Alice and Bob worked out together."', 1
-    )[1]
 
-    assert '"connections": []' in colocation_example
-    assert '"entity_a": "Alice", "entity_b": "Bob"' not in colocation_example
-    assert '"entity_a": "Alice", "entity_b": "Bob"' in shared_action_example
-    assert "Merely attending the same event is not enough" in prompt
+    assert "Naming two entities in the same message is not a relationship." in prompt
+    assert "a shared action" in prompt

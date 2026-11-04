@@ -27,19 +27,9 @@ PIPELINE_PROMPTS: Dict[str, PromptDefinition] = {
         "Extract Entities",
         frozenset({"user_name"}),
     ),
-    "extract_context_entities": PromptDefinition(
-        "prompts/extraction.md",
-        "Extract Context Entities",
-        frozenset({"user_name"}),
-    ),
     "extract_relationships": PromptDefinition(
         "prompts/extraction.md",
         "Extract Relationships",
-        frozenset({"user_name"}),
-    ),
-    "extract_context_relationships": PromptDefinition(
-        "prompts/extraction.md",
-        "Extract Context Relationships",
         frozenset({"user_name"}),
     ),
     "generate_episode": PromptDefinition(

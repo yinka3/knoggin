@@ -52,14 +52,13 @@ def test_relationship_preview_lists_only_direct_row_impacts():
 
 @pytest.mark.unit
 @pytest.mark.no_network
-def test_merge_preview_lists_context_scopes_projection_and_cache_impacts():
+def test_merge_preview_lists_entity_scopes_and_cache_impacts():
     preview = MaintenanceImpactPlanner.preview(
         _review(
             EntityMergePlan(
                 survivor_entity_id=2,
                 retired_entity_id=3,
                 frontier_tokens={"project-2": "token-2", "project-1": "token-1"},
-                context_block_association_counts={"project-1": 2, "project-2": 1},
             ),
             project_id=None,
         )
@@ -71,11 +70,7 @@ def test_merge_preview_lists_context_scopes_projection_and_cache_impacts():
         "project-2",
     )
     assert by_kind["live_entity_cache"].mode == "cache_invalidation"
-    assert by_kind["context_block_entity"].identifiers == (
-        "project-1",
-        "project-2",
-    )
-    assert by_kind["context_block_entity"].total_count == 3
+    assert "context_block_entity" not in by_kind
 
 
 @pytest.mark.unit

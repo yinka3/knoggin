@@ -59,6 +59,8 @@ class SemanticWindowRetrySettings(ConfigModel):
 class ContextSettings(ConfigModel):
     """Project Context size and what each update reads."""
 
+    # Optional per-run maintainer override; otherwise use the extraction model.
+    maintenance_model: str | None = None
     # The size Context is kept under. The update is told how full it is.
     max_tokens: int = Field(40_000, ge=1_000, le=1_000_000)
     # Episodes from earlier windows the update reads as background.
@@ -151,9 +153,14 @@ class JobSettings(ConfigModel):
     )
 
 
-class TextProcessorSettings(ConfigModel):
-    gliner_threshold: float = Field(0.85, ge=0.0, le=1.0)
-    llm_ner_mode: Literal["disabled", "fallback"] = "fallback"
+class ExtractionSettings(ConfigModel):
+    """Entity and relationship extraction, one Episode's messages per call."""
+
+    # Earlier Episode summaries each call reads as background; 0 turns it off.
+    vp01_episode_lookback: int = Field(1, ge=0, le=20)
+    vp02_episode_lookback: int = Field(2, ge=0, le=20)
+    # Episode calls one window runs at once.
+    max_parallel_episodes: int = Field(8, ge=1, le=64)
 
 
 class SearchSettings(ConfigModel):
@@ -299,7 +306,7 @@ class DeveloperSettings(ConfigModel):
     entity_resolution: EntityResolutionSettings = Field(
         default_factory=EntityResolutionSettings
     )
-    nlp_pipeline: TextProcessorSettings = Field(default_factory=TextProcessorSettings)
+    extraction: ExtractionSettings = Field(default_factory=ExtractionSettings)
     search: SearchSettings = Field(default_factory=SearchSettings)
     documents: DocumentSettings = Field(default_factory=DocumentSettings)
     community: CommunitySettings = Field(default_factory=CommunitySettings)
