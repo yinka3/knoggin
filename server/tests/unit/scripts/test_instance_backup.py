@@ -1,4 +1,3 @@
-from pathlib import Path
 
 import pytest
 import yaml
@@ -18,10 +17,10 @@ def test_backup_verification_and_restore_into_fresh_targets(monkeypatch, tmp_pat
     )
     commands = []
 
-    def postgres(command, _database_url):
+    def postgres(command, _database_url, *, stdin_path=None, stdout_path=None):
         commands.append(command[0])
         if command[0] == "pg_dump":
-            Path(command[-1]).write_bytes(b"disposable database dump")
+            stdout_path.write_bytes(b"disposable database dump")
 
     monkeypatch.setattr(instance_backup, "_run_postgres", postgres)
     monkeypatch.setattr(instance_backup, "_empty_database", lambda _url: None)
@@ -45,8 +44,8 @@ def test_backup_verification_and_restore_into_fresh_targets(monkeypatch, tmp_pat
 
 
 def test_restore_rejects_modified_backup_or_populated_target(monkeypatch, tmp_path):
-    monkeypatch.setattr(instance_backup, "_run_postgres", lambda command, url: (
-        Path(command[-1]).write_bytes(b"dump") if command[0] == "pg_dump" else None
+    monkeypatch.setattr(instance_backup, "_run_postgres", lambda command, url, stdin_path=None, stdout_path=None: (
+        stdout_path.write_bytes(b"dump") if command[0] == "pg_dump" else None
     ))
     monkeypatch.setattr(instance_backup, "_empty_database", lambda _url: None)
     settings = tmp_path / "settings"
@@ -73,8 +72,8 @@ def test_backup_rejects_symlinked_project_files(monkeypatch, tmp_path):
     library = settings / "data" / "projects"
     library.mkdir(parents=True)
     (library / "outside").symlink_to(tmp_path)
-    monkeypatch.setattr(instance_backup, "_run_postgres", lambda command, url: (
-        Path(command[-1]).write_bytes(b"dump") if command[0] == "pg_dump" else None
+    monkeypatch.setattr(instance_backup, "_run_postgres", lambda command, url, stdin_path=None, stdout_path=None: (
+        stdout_path.write_bytes(b"dump") if command[0] == "pg_dump" else None
     ))
     with pytest.raises(ValueError, match="symlinks"):
         instance_backup.create_backup(
@@ -94,8 +93,8 @@ def test_absolute_library_path_requires_explicit_restore_destination(monkeypatch
             "project_library_root": str(library),
         }}}), encoding="utf-8",
     )
-    monkeypatch.setattr(instance_backup, "_run_postgres", lambda command, url: (
-        Path(command[-1]).write_bytes(b"dump") if command[0] == "pg_dump" else None
+    monkeypatch.setattr(instance_backup, "_run_postgres", lambda command, url, stdin_path=None, stdout_path=None: (
+        stdout_path.write_bytes(b"dump") if command[0] == "pg_dump" else None
     ))
     monkeypatch.setattr(instance_backup, "_empty_database", lambda _url: None)
     backup = instance_backup.create_backup(

@@ -416,6 +416,11 @@ def test_run_steer_and_stop_routes_target_only_the_active_run(monkeypatch, tmp_p
         async def get_run_status(self, run_id):
             return {"run_id": run_id, "state": "cancelled" if self.stopped else "running", "steer": None} if run_id == "run-1" else None
 
+        def answer_decision(self, run_id, decision_id, choice):
+            if choice not in {"approve", "deny"}:
+                raise ValueError("choice must be one of approve, deny")
+            return run_id == "run-1" and decision_id == "d1" and not self.stopped
+
         async def submit_steer(self, run_id, instruction, *, annotations=None):
             if instruction == "full":
                 raise SteerQueueFull("Steer queue is full")
@@ -508,6 +513,13 @@ def test_run_steer_and_stop_routes_target_only_the_active_run(monkeypatch, tmp_p
                 full = await client.post(base + "/steers", json={"instruction": "full"})
                 assert full.status_code == 409
                 assert full.json()["error"]["code"] == "steer_queue_full"
+                answered = await client.post(base + "/decisions/d1", json={"choice": "approve"})
+                assert answered.json() == {"decision_id": "d1", "choice": "approve"}
+                bad = await client.post(base + "/decisions/d1", json={"choice": "maybe"})
+                assert bad.status_code == 422
+                assert (await client.post(base + "/decisions/d1", json={})).status_code == 422
+                gone = await client.post(base + "/decisions/d9", json={"choice": "deny"})
+                assert gone.json()["error"]["code"] == "decision_not_found"
                 assert (await client.post(base + "/follow-ups", json={"query": " "})).status_code == 422
                 queued = await client.post(base + "/follow-ups", json={"query": " Later question "})
                 assert queued.status_code == 202
@@ -522,3 +534,23 @@ def test_run_steer_and_stop_routes_target_only_the_active_run(monkeypatch, tmp_p
                 assert (await client.post("/v1/sessions/session-1/runs/old/follow-ups", json={"query": "Later question"})).status_code == 409
 
     asyncio.run(exercise())
+
+
+def test_a_tool_question_reaches_the_client_stream():
+    async def raw():
+        yield {"event": "decision_required", "data": {
+            "decision_id": "d1", "question": "Allow network?", "options": ["approve", "deny"],
+            "default": "deny", "timeout_seconds": 60, "tool": "run_command", "call_id": "c1",
+            "internal": "dropped",
+        }}
+        yield {"event": "decision_resolved", "data": {"decision_id": "d1", "choice": "approve"}}
+
+    async def collect():
+        return [frame async for frame in _events(raw(), "run-1")]
+
+    frames = asyncio.run(collect())
+    asked = json.loads(frames[1].decode().split("data: ", 1)[1])
+    assert frames[1].startswith(b"event: decision_required")
+    assert asked["question"] == "Allow network?" and asked["options"] == ["approve", "deny"]
+    assert "internal" not in asked
+    assert frames[2].startswith(b"event: decision_resolved")

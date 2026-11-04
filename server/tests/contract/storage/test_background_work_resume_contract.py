@@ -5,7 +5,7 @@ import pytest
 
 from common.schema.settings import IngestionNoticeSettings
 from core.session.document_batch_notices import DocumentBatchNotices
-from tests.unit.core.session.test_research_jobs import (
+from tests.unit.core.session.test_background_tasks import (
     _answer,
     _finish,
     _jobs,
@@ -176,3 +176,35 @@ async def test_a_folder_notice_survives_a_restart(real_postgres_client, monkeypa
     await last.resume()
     assert not last._tasks and len(reports) == 2
     assert await pg.fetch_all("SELECT 1 FROM public.background_work WHERE kind = 'folder_notice'") == []
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_handed_off_work_cut_off_by_a_restart_is_interrupted(real_postgres_client):
+    import asyncio
+
+    from common.schema.settings import RootConfig
+    from core.session.tool_handoffs import ToolHandoffs
+
+    async def no_chat(_session_id):
+        return None
+
+    sessions = SimpleNamespace(pg=real_postgres_client, user_name="ada",
+                               get_or_resume_session=no_chat)
+    config = SimpleNamespace(config=RootConfig())
+    first = ToolHandoffs(sessions, config)
+    first.adopt(asyncio.create_task(asyncio.Event().wait()), project_id="project-1",
+                session_id="session-1", tool="run_command", label="server")
+    await asyncio.sleep(0.05)  # recorded as running
+    first._tasks.clear()  # the process dies without a clean shutdown
+
+    after_restart = ToolHandoffs(sessions, config)
+    await after_restart.resume()
+
+    [item] = after_restart.list(session_id="session-1")
+    assert item["state"] == "interrupted" and item["finished_at"] is not None
+    row = await real_postgres_client.fetch_one(
+        "SELECT state FROM public.background_work WHERE kind = 'tool_handoff'"
+    )
+    assert row["state"] == "interrupted"

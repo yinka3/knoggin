@@ -32,6 +32,13 @@ from common.schema.source.references import SourceReferenceCandidate
 from common.utils.events import emit
 from common.utils.time_utils import get_now
 from core.agent.run import AgentIdentity
+from core.agent.tool_events import (
+    DecisionBroker,
+    bind_decision_broker,
+    bind_handoffs,
+    unbind_decision_broker,
+    unbind_handoffs,
+)
 from core.knowledge.documents import DocumentService
 from core.session.chat_compaction import ChatCompaction
 from runtime.project_runtime import ProjectRuntime
@@ -153,10 +160,10 @@ class SessionRuntime:
         health_service: Any | None = None,
         agent_orchestrator: Any | None = None,
         config_manager: ConfigManager | None = None,
-        research_jobs: Any | None = None,
+        background_tasks: Any | None = None,
     ):
         self.resources = resources
-        self.research_jobs = research_jobs
+        self.background_tasks = background_tasks
         self.health_service = health_service
         self.agent_orchestrator = agent_orchestrator
         self._config_manager = config_manager
@@ -177,6 +184,10 @@ class SessionRuntime:
         self._active_agent_task: Optional[asyncio.Task] = None
         self._active_agent_stream: _AdmittedAgentStream | None = None
         self._active_idempotency_key: str | None = None
+        self._active_decisions: DecisionBroker | None = None
+        self._run_stop_requested = False
+        # Set by the session manager; work handed off outlives this runtime.
+        self._tool_handoffs = None
         self._active_request_fingerprint: str | None = None
         self._active_run_id: str | None = None
         self._active_user_message_id: int | None = None
@@ -217,6 +228,9 @@ class SessionRuntime:
                 return False
             task = self._active_agent_task
             stream = self._active_agent_stream
+            # The user asked to stop, so tool work stops too instead of
+            # moving to the background.
+            self._run_stop_requested = True
         if stream is not None and not stream.closed:
             await stream.aclose()
             return True
@@ -435,6 +449,14 @@ class SessionRuntime:
             self._active_steers.append(steer)
             self._signal_exchange_closed()
             return {"steer_id": steer_id, "state": "pending"}
+
+    def answer_decision(self, run_id: str, decision_id: str, choice: str) -> bool:
+        """Deliver the user's choice to a tool waiting in the active run;
+        False when that run or question is no longer waiting. Raises
+        ValueError for a choice that was not offered."""
+        if run_id != self._active_run_id or self._active_decisions is None:
+            return False
+        return self._active_decisions.answer(decision_id, choice)
 
     async def _take_steer(self) -> dict[str, str] | None:
         async with self._agent_run_lock:
@@ -722,81 +744,96 @@ class SessionRuntime:
                 raise RuntimeError("Session has no application-owned AgentOrchestrator")
 
             response_seen = False
-            async for event in orchestrator.run_stream(
-                user_query=accepted.content.strip(),
-                context=self,
-                user_timezone=user_timezone,
-                model=model,
-                agent_id=agent_id,
-                enabled_tools=enabled_tools,
-                request_document_focus=document_focus,
-                conversation_history=history,
-                history_summary=history_summary,
-                user_message_id=accepted.id,
-                pasted_text_spans=pasted_text_spans,
-                research_mode=research_mode,
-                selected_notebook=selected_notebook,
-                run_settings=run_settings,
-                run_id=run_id,
-                take_steer=self._take_steer,
-            ):
-                if event["event"] == "response":
-                    if response_seen:
-                        raise RuntimeError(
-                            "Agent stream emitted multiple final responses"
+            # Tools in this run can ask the user something and wait for it.
+            decisions = self._active_decisions = DecisionBroker()
+            decision_binding = bind_decision_broker(decisions)
+            self._run_stop_requested = False
+            handoff_binding = bind_handoffs(
+                self._tool_handoffs, project_id=self.project_id, session_id=self.session_id,
+                may_hand_off=lambda: not self._run_stop_requested and not self._closed,
+            ) if self._tool_handoffs is not None else None
+            try:
+                async for event in orchestrator.run_stream(
+                    user_query=accepted.content.strip(),
+                    context=self,
+                    user_timezone=user_timezone,
+                    model=model,
+                    agent_id=agent_id,
+                    enabled_tools=enabled_tools,
+                    request_document_focus=document_focus,
+                    conversation_history=history,
+                    history_summary=history_summary,
+                    user_message_id=accepted.id,
+                    pasted_text_spans=pasted_text_spans,
+                    research_mode=research_mode,
+                    selected_notebook=selected_notebook,
+                    run_settings=run_settings,
+                    run_id=run_id,
+                    take_steer=self._take_steer,
+                ):
+                    if event["event"] == "response":
+                        if response_seen:
+                            raise RuntimeError(
+                                "Agent stream emitted multiple final responses"
+                            )
+                        response_seen = True
+                        response = event["data"]
+                        resolved_agent_id = response.get("resolved_agent_id")
+                        commit = await self.add_assistant_turn(
+                            content=response["content"],
+                            timestamp=get_now(),
+                            metadata=self._assistant_response_metadata(response),
+                            user_msg_id=accepted.id,
+                            source_candidates=self._response_source_candidates(response),
+                            artifact=self._response_artifact(response),
+                            readable_project_ids=captured_readable_project_ids,
                         )
-                    response_seen = True
-                    response = event["data"]
-                    resolved_agent_id = response.get("resolved_agent_id")
-                    commit = await self.add_assistant_turn(
-                        content=response["content"],
-                        timestamp=get_now(),
-                        metadata=self._assistant_response_metadata(response),
-                        user_msg_id=accepted.id,
-                        source_candidates=self._response_source_candidates(response),
-                        artifact=self._response_artifact(response),
-                        readable_project_ids=captured_readable_project_ids,
-                    )
-                    exchange_outcome = "assistant_final"
-                    await self._record_durable_agent_turn(
-                        orchestrator,
-                        agent_id=(
-                            resolved_agent_id
-                            if isinstance(resolved_agent_id, str)
-                            and resolved_agent_id.strip()
-                            else agent_id or run_settings.agent_id
-                        ),
-                    )
-                    response = dict(response)
-                    response.pop("resolved_agent_id", None)
-                    response["assistant_message_id"] = commit["message_id"]
-                    response["source_ref_ids"] = commit["source_ref_ids"]
-                    event = {"event": "response", "data": response}
-                    exchange_outcome = "assistant_final"
-                elif event["event"] == "clarification":
-                    clarification = dict(event["data"])
-                    commit = await self.add_assistant_turn(
-                        content=str(clarification["question"]),
-                        timestamp=get_now(),
-                        metadata=self._assistant_clarification_metadata(clarification),
-                        user_msg_id=accepted.id,
-                        source_candidates=self._response_source_candidates(
-                            clarification
-                        ),
-                        readable_project_ids=captured_readable_project_ids,
-                        outcome="clarification",
-                    )
-                    clarification["assistant_message_id"] = commit["message_id"]
-                    clarification["source_ref_ids"] = commit["source_ref_ids"]
-                    event = {"event": "clarification", "data": clarification}
-                    exchange_outcome = "clarification"
-                elif event["event"] == "error":
-                    exchange_outcome = "failed"
-                    terminal_error = self._terminal_error_record(event.get("data"))
-                yield event
-                if event["event"] in {"response", "clarification", "error"}:
-                    return
+                        exchange_outcome = "assistant_final"
+                        await self._record_durable_agent_turn(
+                            orchestrator,
+                            agent_id=(
+                                resolved_agent_id
+                                if isinstance(resolved_agent_id, str)
+                                and resolved_agent_id.strip()
+                                else agent_id or run_settings.agent_id
+                            ),
+                        )
+                        response = dict(response)
+                        response.pop("resolved_agent_id", None)
+                        response["assistant_message_id"] = commit["message_id"]
+                        response["source_ref_ids"] = commit["source_ref_ids"]
+                        event = {"event": "response", "data": response}
+                        exchange_outcome = "assistant_final"
+                    elif event["event"] == "clarification":
+                        clarification = dict(event["data"])
+                        commit = await self.add_assistant_turn(
+                            content=str(clarification["question"]),
+                            timestamp=get_now(),
+                            metadata=self._assistant_clarification_metadata(clarification),
+                            user_msg_id=accepted.id,
+                            source_candidates=self._response_source_candidates(
+                                clarification
+                            ),
+                            readable_project_ids=captured_readable_project_ids,
+                            outcome="clarification",
+                        )
+                        clarification["assistant_message_id"] = commit["message_id"]
+                        clarification["source_ref_ids"] = commit["source_ref_ids"]
+                        event = {"event": "clarification", "data": clarification}
+                        exchange_outcome = "clarification"
+                    elif event["event"] == "error":
+                        exchange_outcome = "failed"
+                        terminal_error = self._terminal_error_record(event.get("data"))
+                    yield event
+                    if event["event"] in {"response", "clarification", "error"}:
+                        return
 
+            finally:
+                if handoff_binding is not None:
+                    unbind_handoffs(handoff_binding)
+                unbind_decision_broker(decision_binding)
+                decisions.close()
+                self._active_decisions = None
             if not response_seen and exchange_outcome == "failed":
                 logger.error(
                     "Agent stream ended without a final response for session {}",

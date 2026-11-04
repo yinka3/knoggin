@@ -2549,3 +2549,29 @@ async def test_feedback_errors_reach_the_model_without_ending_the_run(monkeypatc
     assert "not in what was read" in results[-1]["error"]
     assert run.consecutive_errors == 0
     assert "not in what was read" in run.last_error
+
+
+@pytest.mark.no_network
+async def test_events_a_tool_sends_while_running_reach_the_run_stream(monkeypatch):
+    from core.agent.tool_events import emit_tool_event
+
+    run = make_run(limits=AgentRunLimits(max_calls=3))
+    executor = AgentExecutor(run, ScriptedLLM([]), SimpleNamespace())
+
+    async def fake_execute(_tools, name, _args):
+        emit_tool_event("command_output", {"text": "building..."})
+        return {"data": [{"id": "ok", "message": "done"}]}
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", fake_execute)
+
+    events = [
+        event
+        async for event in executor._execute_tools(
+            [ToolCall("search_knowledge_entities", {"query": "Ada"}, call_id="c1")], []
+        )
+    ]
+
+    assert [event["event"] for event in events] == ["tool_start", "command_output", "tool_end"]
+    assert events[1]["data"] == {
+        "text": "building...", "call_id": "c1", "tool": "search_knowledge_entities",
+    }

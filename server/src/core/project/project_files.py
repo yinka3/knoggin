@@ -1,6 +1,9 @@
 """Small project-file conventions shared by project creation and agent tools."""
 
+import json
 from typing import Iterable, Optional
+
+from pydantic import BaseModel, ConfigDict
 
 from core.knowledge.documents.scanning import normalize_relative_path
 
@@ -21,6 +24,26 @@ def workspace_name(name: str) -> str:
     if "/" in name or name.startswith(".") or len(name) > 100:
         raise ValueError("workspace name must be one folder name of at most 100 characters")
     return name
+
+
+class WorkspaceSettings(BaseModel):
+    """Per-workspace settings; every field has a default."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Agents cannot change files in it; the user still can.
+    read_only: bool = False
+
+
+def parse_workspaces(stored) -> dict[str, WorkspaceSettings]:
+    """The stored ``projects.workspaces`` object, ordered by name."""
+
+    if isinstance(stored, str):
+        stored = json.loads(stored)
+    return {
+        name: WorkspaceSettings.model_validate(settings or {})
+        for name, settings in sorted((stored or {}).items())
+    }
 
 
 def workspace_of(path: str, workspaces: Iterable[str]) -> Optional[str]:

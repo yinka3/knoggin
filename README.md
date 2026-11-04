@@ -98,7 +98,7 @@ Model files download when first needed. After that, Knoggin loads them from the 
 uv run --package server python server/scripts/prefetch_models.py
 ```
 
-Each default model is pinned to the exact version Knoggin was tested with (`PINNED_REVISIONS` in `server/src/common/model_cache.py`), so a download never picks up an unreviewed change. To use a different version, set `EMBEDDING_MODEL_REVISION` or `RERANKER_MODEL_REVISION` in `.env`; a version that is not cached downloads on first use. Models never run code from their repositories.
+Each default model is pinned to the exact version Knoggin was tested with (`PINNED_REVISIONS` in `server/src/common/model_cache.py`), so a download never picks up an unreviewed change. To use a different version, set `EMBEDDING_MODEL_REVISION` or `RERANKER_MODEL_REVISION` in `.env`; a version that is not cached downloads on first use. Models never run code from their repositories. Docling's PDF models are checked file by file against `server/src/common/docling_models.json`.
 
 Stop Postgres with `docker compose down`. This keeps the database volume; `docker compose down -v` deletes it.
 

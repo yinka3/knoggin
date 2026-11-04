@@ -23,6 +23,7 @@ from core.knowledge.db.writers.document_writer import DocumentWriter
 from core.knowledge.documents.constants import (
     EXPECTED_EMBEDDING_DIMENSION,
     MAX_ERROR_MESSAGE_LENGTH,
+    READ_DIRECTLY_EXTENSIONS,
 )
 from core.knowledge.documents.extraction import (
     DocumentChunk,
@@ -123,6 +124,16 @@ class DocumentIndexer:
         metadata = rows[0] if rows else None
         if metadata is None or metadata["project_id"] != self.project_id:
             raise FileNotFoundError("Document not found")
+        if metadata["extension"] in READ_DIRECTLY_EXTENSIONS:
+            # Code in a workspace is read directly; skip it before any embedding.
+            await self._writer.apply_workspace_index_rule(
+                extensions=READ_DIRECTLY_EXTENSIONS, document_id=document_id
+            )
+            metadata = (await self._reader.fetch_documents_by_reference(
+                document_id=document_id, relative_path=None,
+            ))[0]
+            if metadata["status"] == "skipped":
+                return metadata
         if metadata["status"] == "indexed" and not force:
             return metadata
 
@@ -577,9 +588,15 @@ class DocumentIndexer:
             return
         try:
             result = await callback()
+            # Also catches workspaces added or removed since the last pass.
+            requeued = await self._writer.apply_workspace_index_rule(
+                extensions=READ_DIRECTLY_EXTENSIONS
+            )
         except Exception:
             logger.exception("Document filesystem reconciliation failed for {}", self.project_id)
             return
+        if requeued:
+            self._request_drain()
         if any(result.get(key, 0) for key in ("created", "changed", "deleted")):
             logger.info(
                 "Document filesystem reconciliation for {}: created={}, changed={}, deleted={}",

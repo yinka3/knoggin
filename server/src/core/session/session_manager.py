@@ -18,8 +18,9 @@ from common.utils.json_utils import safe_json_loads
 from common.utils.time_utils import get_now_iso
 from core.knowledge.db.writers.session_deletion_writer import SessionDeletionWriter
 from core.project.project_manager import ProjectManager
+from core.session.background_tasks import BackgroundTasks
 from core.session.document_batch_notices import DocumentBatchNotices
-from core.session.research_jobs import ResearchJobs
+from core.session.tool_handoffs import ToolHandoffs
 from runtime.session_runtime import SessionRuntime
 
 
@@ -59,8 +60,9 @@ class SessionManager:
         self._closing = False
         self._closing_sessions: set[str] = set()
         self._bootstrap_cleanup: dict[str, _BootstrapCleanup] = {}
-        self.research_jobs = ResearchJobs(self, config_manager)
+        self.background_tasks = BackgroundTasks(self, config_manager)
         self.document_notices = DocumentBatchNotices(self, config_manager)
+        self.tool_handoffs = ToolHandoffs(self, config_manager)
 
     async def resume_background_work(self) -> None:
         """Recover interrupted work before exposing resumed sessions."""
@@ -68,7 +70,7 @@ class SessionManager:
         await self.resources.knowledge_store.mark_orphaned_run_steers_undelivered(
             user_name=self.user_name,
         )
-        for owner in (self.research_jobs, self.document_notices):
+        for owner in (self.background_tasks, self.document_notices, self.tool_handoffs):
             try:
                 await owner.resume()
             except Exception:
@@ -123,7 +125,7 @@ class SessionManager:
             raise RuntimeError("project semantic job is not registered")
         if project_state.document_service is None:
             raise RuntimeError("project document service is unavailable")
-        return SessionRuntime(
+        runtime = SessionRuntime(
             self.user_name,
             self.resources,
             project=project_state,
@@ -131,9 +133,11 @@ class SessionManager:
             health_service=self._health_service,
             agent_orchestrator=self._agent_orchestrator,
             config_manager=self._config_manager,
-            research_jobs=self.research_jobs,
+            background_tasks=self.background_tasks,
             **settings,
         )
+        runtime._tool_handoffs = self.tool_handoffs
+        return runtime
 
     async def _hard_delete_failed_session(self, session_id: str) -> None:
         """Remove a partially created session instead of preserving a tombstone."""
@@ -416,8 +420,9 @@ class SessionManager:
     async def shutdown(self) -> None:
         """Unload every live session before global infrastructure shuts down."""
         # Jobs unload their own chats, which needs the lifecycle lock.
-        await self.research_jobs.shutdown()
+        await self.background_tasks.shutdown()
         await self.document_notices.shutdown()
+        await self.tool_handoffs.shutdown()
         async with self._lifecycle_lock:
             if self._closed:
                 return

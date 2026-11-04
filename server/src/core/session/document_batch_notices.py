@@ -151,7 +151,7 @@ class DocumentBatchNotices:
 
 
 def _finished(row: dict) -> bool:
-    return row["status"] in {"indexed", "deleted"} or (
+    return row["status"] in {"indexed", "skipped", "deleted"} or (
         row["status"] == "failed" and row["next_index_retry_at"] is None
     )
 
@@ -164,12 +164,18 @@ def _report_text(label: str, document_ids: list[str], rows: list[dict] | None) -
             "still running and that the documents list shows each file's status."
         )
     indexed = [row for row in rows if row["status"] == "indexed"]
+    skipped = [row for row in rows if row["status"] == "skipped"]
     failed = [row for row in rows if row["status"] == "failed"]
     missing = len(document_ids) - len(rows) + sum(row["status"] == "deleted" for row in rows)
     lines = [
         f"Folder import \"{label}\" finished indexing: {len(indexed)} of "
         f"{len(document_ids)} files are ready to search."
     ]
+    if skipped:
+        lines.append(
+            f"{len(skipped)} code, config or data files sit in a workspace, so they are "
+            "read directly instead of searched."
+        )
     if failed:
         lines.append(f"{len(failed)} failed:")
         lines += [

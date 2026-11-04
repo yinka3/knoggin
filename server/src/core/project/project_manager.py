@@ -43,12 +43,20 @@ from core.project.maintenance_service import ProjectMaintenanceService
 from core.project.notebook_store import ProjectNotebookStore
 from core.project.project_files import (
     PROJECT_FILE_PATH,
+    WorkspaceSettings,
     build_project_markdown,
+    parse_workspaces,
     workspace_name,
 )
+from core.sandbox.manager import SandboxManager
 from runtime.project_factory import ProjectRuntimeFactory
 from runtime.project_runtime import ProjectRuntime
 from runtime.resources import RuntimeResources
+
+
+def _workspace_dicts(stored) -> dict[str, dict]:
+    """Workspaces ordered by name, each with every setting filled in."""
+    return {name: settings.model_dump() for name, settings in parse_workspaces(stored).items()}
 
 
 class ProjectStatus(str, Enum):
@@ -105,6 +113,7 @@ class ProjectManager:
         self.pg = resources.postgres
         self._filesystem_factory = filesystem_factory
         self._config_manager = config_manager
+        self._sandbox_manager: SandboxManager | None = None
         self._project_deletion_writer = ProjectDeletionWriter(self.pg)
         self.notebooks = ProjectNotebookStore(self.pg, user_name)
         self.evidence_boards = EvidenceBoardService(
@@ -149,6 +158,17 @@ class ProjectManager:
             config_manager=config_manager,
         )
         self._closed = False
+
+    def attach_sandbox_manager(self, manager: SandboxManager) -> None:
+        self._sandbox_manager = manager
+
+    async def _remove_project_sandbox(self, project_id: str) -> None:
+        if self._sandbox_manager is None:
+            return
+        try:
+            await self._sandbox_manager.remove_project(project_id)
+        except Exception:
+            logger.exception("Sandbox cleanup failed for deleted project {}", project_id)
 
     def _invalidate_entity_caches(self, result: dict) -> dict[str, int]:
         explicit_entity_ids = result.get("affected_entity_ids")
@@ -469,6 +489,7 @@ class ProjectManager:
             meta = dict(row)
             meta["id"] = meta.pop("project_id")
             meta["allowed_projects"] = meta["allowed_projects"] or []
+            meta["workspaces"] = _workspace_dicts(meta.get("workspaces"))
             meta.pop("domain_config", None)
             projects.append(meta)
 
@@ -492,6 +513,7 @@ class ProjectManager:
         meta = dict(rows[0])
         meta["id"] = meta.pop("project_id")
         meta["allowed_projects"] = meta["allowed_projects"] or []
+        meta["workspaces"] = _workspace_dicts(meta.get("workspaces"))
         meta.pop("domain_config", None)
         return meta
 
@@ -827,28 +849,62 @@ class ProjectManager:
             name=name, description=description, allowed_projects=allowed_projects,
         )
 
-    async def add_workspace(self, project_id: str, name: str) -> list[str]:
+    async def add_workspace(
+        self, project_id: str, name: str, *, read_only: bool = False
+    ) -> dict[str, WorkspaceSettings]:
         """Name a top-level folder as a workspace; raises ValueError for a bad
         name, a duplicate, or a project already at the workspace limit."""
         name = workspace_name(name)
+        settings = WorkspaceSettings(read_only=read_only)
         limit = (
             self._config_manager or ConfigManager.get()
         ).config.developer_settings.documents.max_workspaces_per_project
         row = await self.pg.fetch_one(
             """UPDATE public.projects
-               SET workspaces = array_append(workspaces, %(name)s), updated_at = now()
+               SET workspaces = workspaces || jsonb_build_object(%(name)s, %(settings)s::jsonb),
+                   updated_at = now()
                WHERE user_name = %(user_name)s AND project_id = %(project_id)s
-                 AND NOT %(name)s = ANY(workspaces)
-                 AND cardinality(workspaces) < %(limit)s
+                 AND NOT workspaces ? %(name)s
+                 AND (SELECT count(*) FROM jsonb_object_keys(workspaces)) < %(limit)s
                RETURNING workspaces""",
-            {"user_name": self.user_name, "project_id": project_id,
-             "name": name, "limit": limit},
+            {"user_name": self.user_name, "project_id": project_id, "name": name,
+             "settings": settings.model_dump_json(), "limit": limit},
         )
         if row is None:
             raise ValueError(f"Workspace exists or the project has {limit} already")
-        return row["workspaces"]
+        return parse_workspaces(row["workspaces"])
 
-    async def remove_workspace(self, project_id: str, name: str) -> list[str] | None:
+    async def update_workspace(
+        self, project_id: str, name: str, changes: dict
+    ) -> dict[str, WorkspaceSettings] | None:
+        """Change some of a workspace's settings; None when it does not exist.
+        Raises ValueError for an unknown setting or a bad value."""
+        current = (await self._workspaces(project_id)).get(name)
+        if current is None:
+            return None
+        settings = WorkspaceSettings.model_validate({**current.model_dump(), **changes})
+        row = await self.pg.fetch_one(
+            """UPDATE public.projects
+               SET workspaces = jsonb_set(workspaces, ARRAY[%(name)s], %(settings)s::jsonb),
+                   updated_at = now()
+               WHERE user_name = %(user_name)s AND project_id = %(project_id)s
+                 AND workspaces ? %(name)s
+               RETURNING workspaces""",
+            {"user_name": self.user_name, "project_id": project_id, "name": name,
+             "settings": settings.model_dump_json()},
+        )
+        return None if row is None else parse_workspaces(row["workspaces"])
+
+    async def _workspaces(self, project_id: str) -> dict[str, WorkspaceSettings]:
+        row = await self.pg.fetch_one(
+            "SELECT workspaces FROM public.projects WHERE user_name = %s AND project_id = %s",
+            (self.user_name, project_id),
+        )
+        return {} if row is None else parse_workspaces(row["workspaces"])
+
+    async def remove_workspace(
+        self, project_id: str, name: str
+    ) -> dict[str, WorkspaceSettings] | None:
         """Forget a workspace whose folder holds no documents; None when the
         project has no workspace by that name. The folder itself stays."""
         row = await self.pg.fetch_one(
@@ -863,13 +919,13 @@ class ProjectManager:
             raise WorkspaceConflictError(f"Workspace '{name}' still has documents")
         row = await self.pg.fetch_one(
             """UPDATE public.projects
-               SET workspaces = array_remove(workspaces, %(name)s), updated_at = now()
+               SET workspaces = workspaces - %(name)s, updated_at = now()
                WHERE user_name = %(user_name)s AND project_id = %(project_id)s
-                 AND %(name)s = ANY(workspaces)
+                 AND workspaces ? %(name)s
                RETURNING workspaces""",
             {"user_name": self.user_name, "project_id": project_id, "name": name},
         )
-        return None if row is None else row["workspaces"]
+        return None if row is None else parse_workspaces(row["workspaces"])
 
     async def _mutate_project(self, operation, *args, **kwargs):
         """Keep admission excluded until an already-started mutation settles."""
@@ -1022,12 +1078,12 @@ class ProjectManager:
                     project_id=project_id,
                 ):
                     return None
+                file_cleanup_status = await self._finish_project_file_cleanup(project_id)
+                await self._remove_project_sandbox(project_id)
                 return {
                     "id": project_id,
                     "status": ProjectStatus.DELETED.value,
-                    "file_cleanup_status": await self._finish_project_file_cleanup(
-                        project_id
-                    ),
+                    "file_cleanup_status": file_cleanup_status,
                 }
 
             active_state = self.active_projects.get(project_id)
@@ -1054,6 +1110,8 @@ class ProjectManager:
                 file_cleanup_status = await self._finish_project_file_cleanup(
                     project_id, lease=lease
                 )
+
+            await self._remove_project_sandbox(project_id)
 
             logger.info(
                 "Hard deleted project {} database state: {}; file cleanup: {}; "

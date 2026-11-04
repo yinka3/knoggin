@@ -32,7 +32,7 @@ def test_resume_reruns_only_an_interrupted_job_of_this_chat(monkeypatch, tmp_pat
             pass
 
         return SimpleNamespace(
-            projects=Projects(), sessions=SimpleNamespace(user_name="ada", research_jobs=Jobs()),
+            projects=Projects(), sessions=SimpleNamespace(user_name="ada", background_tasks=Jobs()),
             shutdown=shutdown,
         )
 
@@ -44,13 +44,13 @@ def test_resume_reruns_only_an_interrupted_job_of_this_chat(monkeypatch, tmp_pat
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
-                other_chat = await client.post("/v1/sessions/s2/research-jobs/cut/resume")
-                finished = await client.post("/v1/sessions/s1/research-jobs/done/resume")
-                resumed = await client.post("/v1/sessions/s1/research-jobs/cut/resume")
+                other_chat = await client.post("/v1/sessions/s2/background-tasks/cut/resume")
+                finished = await client.post("/v1/sessions/s1/background-tasks/done/resume")
+                resumed = await client.post("/v1/sessions/s1/background-tasks/cut/resume")
         return other_chat, finished, resumed
 
     other_chat, finished, resumed = asyncio.run(exercise())
     assert other_chat.status_code == 404
     assert finished.status_code == 409
-    assert finished.json()["error"]["code"] == "research_job_not_interrupted"
+    assert finished.json()["error"]["code"] == "background_task_not_interrupted"
     assert resumed.status_code == 202 and resumed.json()["state"] == "queued"

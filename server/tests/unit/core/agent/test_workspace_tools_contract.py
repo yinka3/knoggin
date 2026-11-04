@@ -260,3 +260,48 @@ async def test_files_written_after_a_web_read_are_marked():
     tools.agent_run = SimpleNamespace(read_web=True)
     await tools.create_project_file("research/findings.md", "quoted from a page")
     assert service.derived_from_web is True
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize("path", [".env", "api/.env.local", "certs/server.pem", "id_rsa"])
+async def test_agents_cannot_open_files_that_may_hold_credentials(path):
+    tools = ProjectFileHarness(FakeDocumentService())
+    with pytest.raises(PermissionError, match="keys or credentials"):
+        await tools.read_project_file(path)
+    with pytest.raises(PermissionError, match="keys or credentials"):
+        await tools.create_project_file(path, "SECRET=1")
+
+
+@pytest.mark.no_network
+async def test_agents_cannot_change_files_in_a_read_only_workspace():
+    service = FakeDocumentService()
+    tools = ProjectFileHarness(service)
+    tools.user_name, tools.project_id = "ada", "project-1"
+
+    async def fetch_one(query, params):
+        return {"workspaces": {"docs": {"read_only": True}, "api": {"read_only": False}}}
+
+    tools.postgres = SimpleNamespace(fetch_one=fetch_one)
+    content_hash = "a" * 64
+
+    async def recorded(*args, **kwargs):
+        service.calls.append(("other", args))
+
+    service.delete_project_file = service.create_project_folder = recorded
+    service.move_project_file = recorded
+
+    for attempt in (
+        tools.create_project_file("docs/new.md", "text"),
+        tools.update_project_file("docs/a.md", "text", content_hash),
+        tools.append_project_file("docs/a.md", "more", content_hash),
+        tools.delete_project_file("docs/a.md", content_hash),
+        tools.create_project_folder("docs/sub"),
+        tools.move_project_file("api/a.md", "docs/a.md", content_hash),
+        tools.move_project_file("docs/a.md", "api/a.md", content_hash),
+    ):
+        with pytest.raises(PermissionError, match="docs workspace is read-only"):
+            await attempt
+
+    await tools.create_project_file("api/new.md", "text")  # a writable workspace
+    await tools.create_project_file("notes.md", "text")  # outside every workspace
+    assert [call[0] for call in service.calls] == ["create", "create"]

@@ -19,6 +19,7 @@ from core.community.runtime import AACRuntime
 from core.health.service import RuntimeHealthService
 from core.knowledge.documents import ProjectFilesystemFactory
 from core.project.project_manager import ProjectManager
+from core.sandbox.manager import SandboxManager
 from core.session.session_manager import SessionManager
 from runtime.resources import RuntimeResources
 
@@ -50,13 +51,15 @@ class _StartupCleanup:
     async def shutdown(self):
         async with self._lock:
             failures = []
-            for phase in ("aac", "sessions", "projects", "resources"):
+            for phase in ("aac", "sessions", "sandbox", "projects", "resources"):
                 if phase not in self.owners:
                     continue
-                if phase == "projects" and "sessions" in self.owners:
+                if phase == "projects" and any(
+                    name in self.owners for name in ("sessions", "sandbox")
+                ):
                     continue
                 if phase == "resources" and any(
-                    name in self.owners for name in ("aac", "sessions", "projects")
+                    name in self.owners for name in ("aac", "sessions", "sandbox", "projects")
                 ):
                     continue
                 try:
@@ -81,6 +84,7 @@ class ApplicationRuntime:
     agent_orchestrator: AgentOrchestrator
     aac_runtime: AACRuntime
     startup_config: RootConfig | None = None
+    sandbox: SandboxManager | None = None
     health_service: RuntimeHealthService = field(init=False)
     started_at: datetime = field(init=False)
     _shutdown_complete: bool = field(init=False, default=False, repr=False)
@@ -98,6 +102,7 @@ class ApplicationRuntime:
             resources=self.resources,
             projects=self.projects,
             sessions=self.sessions,
+            sandbox=self.sandbox,
             started_at=self.started_at,
         )
         self.sessions.attach_health_service(self.health_service)
@@ -134,18 +139,30 @@ class ApplicationRuntime:
                 logger.warning(
                     "Closed {} exchange(s) left open by a previous process", orphaned
                 )
+            filesystem_factory = ProjectFilesystemFactory(
+                config_manager.resolve_path(
+                    config_manager.config.developer_settings.documents.project_library_root
+                )
+            )
             projects = ProjectManager(
                 resources=resources,
                 user_name=user_name,
-                filesystem_factory=ProjectFilesystemFactory(
-                    config_manager.resolve_path(
-                        config_manager.config.developer_settings.documents.project_library_root
-                    )
-                ),
+                filesystem_factory=filesystem_factory,
                 config_manager=config_manager,
             )
             startup_cleanup.owners["projects"] = projects
             await projects.start()
+            settings = config_manager.config.developer_settings
+            sandbox = SandboxManager(
+                user_name=user_name,
+                runtime_settings=settings.container_runtime,
+                command_settings=settings.workspace_commands,
+                project_manager=projects,
+                library_root=filesystem_factory.library_root,
+            )
+            projects.attach_sandbox_manager(sandbox)
+            startup_cleanup.owners["sandbox"] = sandbox
+            await sandbox.start()
             agent_manager = AgentManager(resources, user_name)
             await agent_manager.ensure_default_agent()
             await agent_manager.ensure_maintenance_agent()
@@ -181,6 +198,7 @@ class ApplicationRuntime:
                 agent_orchestrator=agent_orchestrator,
                 aac_runtime=aac_runtime,
                 startup_config=startup_config,
+                sandbox=sandbox,
             )
         except BaseException as exc:
             cleanup = asyncio.create_task(startup_cleanup.shutdown())
@@ -215,16 +233,23 @@ class ApplicationRuntime:
         for phase, owner in (
             ("aac", self.aac_runtime),
             ("sessions", self.sessions),
+            ("sandbox", self.sandbox),
             ("projects", self.projects),
             ("resources", self.resources),
         ):
+            if owner is None:
+                continue
             if phase in self._completed_shutdown_phases:
                 continue
-            if phase == "projects" and "sessions" not in self._completed_shutdown_phases:
-                continue
-            if phase == "resources" and not {"aac", "sessions", "projects"}.issubset(
-                self._completed_shutdown_phases
+            if phase == "projects" and (
+                "sessions" not in self._completed_shutdown_phases
+                or (self.sandbox is not None and "sandbox" not in self._completed_shutdown_phases)
             ):
+                continue
+            required = {"aac", "sessions", "projects"}
+            if self.sandbox is not None:
+                required.add("sandbox")
+            if phase == "resources" and not required.issubset(self._completed_shutdown_phases):
                 continue
             try:
                 logger.info(f"Application shutdown phase started: {phase}")

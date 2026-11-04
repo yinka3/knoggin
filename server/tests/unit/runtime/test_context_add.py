@@ -1928,7 +1928,7 @@ async def test_research_report_runs_on_an_idle_chat_and_is_marked(context):
     # No run is active: a follow-up would be refused, a report is not.
     queued = await ctx.queue_report(
         "Background research job-1 finished.",
-        origin="research_job_report", metadata={"job_id": "job-1"},
+        origin="background_task_report", metadata={"job_id": "job-1"},
     )
     assert queued is not None
 
@@ -1944,4 +1944,93 @@ async def test_research_report_runs_on_an_idle_chat_and_is_marked(context):
         row for batch in resources.knowledge_store.saved_message_logs
         for row in batch if row.get("role") == "user"
     ]
-    assert user_rows[-1]["metadata"] == {"origin": "research_job_report", "job_id": "job-1"}
+    assert user_rows[-1]["metadata"] == {"origin": "background_task_report", "job_id": "job-1"}
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_a_tool_in_a_live_run_waits_for_the_users_answer(context):
+    from core.agent.tool_events import RESULTS, ask_user, stream_tool_calls
+
+    ctx, _ = context
+    answers = []
+
+    async def tool():
+        return await ask_user("Allow network?", ("approve", "deny"), timeout_seconds=5, default="deny")
+
+    async def handler(_kwargs):
+        async for item in stream_tool_calls([("c1", "run_command", tool)]):
+            if item["event"] == RESULTS:
+                answers.append(item["data"][0])
+            else:
+                yield item
+        yield _response_event("Done")
+
+    stream = await ctx.open_agent_run_stream(
+        Message(content="Install it"), orchestrator=_FakeTurnOrchestrator(handler), run_id="run-1"
+    )
+    async for event in stream:
+        if event["event"] == "decision_required":
+            decision_id = event["data"]["decision_id"]
+            assert ctx.answer_decision("other-run", decision_id, "approve") is False
+            assert ctx.answer_decision("run-1", decision_id, "approve") is True
+    assert answers == ["approve"]
+    # Once the run is over nothing is waiting.
+    assert ctx.answer_decision("run-1", decision_id, "approve") is False
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+@pytest.mark.parametrize("how", ["nobody_watching", "user_stop"])
+async def test_tool_work_outlives_an_unwatched_run_but_not_a_stop(context, how):
+    from types import SimpleNamespace
+
+    from common.schema.settings import RootConfig
+    from core.agent.tool_events import finish_or_hand_off
+    from core.session.tool_handoffs import ToolHandoffs
+
+    ctx, _ = context
+    reports = []
+
+    async def get_or_resume_session(_session_id):
+        return SimpleNamespace(queue_report=lambda text, **kw: reports.append(text) or asyncio.sleep(0))
+
+    handoffs = ToolHandoffs(
+        SimpleNamespace(user_name="ada", get_or_resume_session=get_or_resume_session),
+        SimpleNamespace(config=RootConfig()),
+    )
+    ctx._tool_handoffs = handoffs
+    started, release, work_cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def work():
+        started.set()
+        try:
+            await release.wait()
+            return "build finished"
+        except asyncio.CancelledError:
+            work_cancelled.set()
+            raise
+
+    async def handler(_kwargs):
+        yield {"event": "token", "data": {"content": "building"}}
+        await finish_or_hand_off(work(), tool="run_command", label="make")
+        yield _response_event("Done")
+
+    stream = await ctx.open_agent_run_stream(
+        Message(content="Build it"), orchestrator=_FakeTurnOrchestrator(handler), run_id="run-1"
+    )
+    consumer = asyncio.create_task(_consume(stream))
+    await started.wait()
+    if how == "nobody_watching":
+        consumer.cancel()  # what the unwatched-run timer does
+        await asyncio.gather(consumer, return_exceptions=True)
+        release.set()
+        await asyncio.gather(*list(handoffs._tasks.values()), return_exceptions=True)
+        assert not work_cancelled.is_set()
+        assert handoffs.list(session_id=ctx.session_id)[0]["state"] == "completed"
+        assert "build finished" in reports[0]
+    else:
+        assert await ctx.cancel_active_agent_run(run_id="run-1")
+        await asyncio.gather(consumer, return_exceptions=True)
+        assert work_cancelled.is_set()
+        assert handoffs.list(session_id=ctx.session_id) == []

@@ -65,6 +65,17 @@ async def _events(raw: AsyncIterator, run_id: str, *, runtime=None, session=None
                 }
             elif name == "steer_applied":
                 event, public = "steer_applied", {"steer_id": data["steer_id"]}
+            elif name == "decision_required":
+                event, public = "decision_required", {
+                    key: data.get(key) for key in (
+                        "decision_id", "question", "options", "default",
+                        "timeout_seconds", "tool", "call_id",
+                    )
+                }
+            elif name == "decision_resolved":
+                event, public = "decision_resolved", {
+                    "decision_id": data.get("decision_id"), "choice": data.get("choice"),
+                }
             elif name in {"tool_start", "tool_end", "tool_error"}:
                 event = "tool"
                 public = {"name": str(data.get("tool", "")), "state": name}
@@ -324,6 +335,26 @@ async def run_events(request):
     return _stream_response(events.stream(run, after=after))
 
 
+async def answer_decision(request):
+    """Answer a question a tool in the active run is waiting on."""
+    body = await _json(request)
+    choice = body.get("choice") if isinstance(body, dict) else None
+    if not isinstance(choice, str) or not choice or len(choice) > 100:
+        return _error("invalid_decision", "Give a choice", 422)
+    session = await _active_session(request)
+    if session is None:
+        return _error("decision_not_found", "Nothing is waiting for that answer", 404)
+    try:
+        delivered = session.answer_decision(
+            request.path_params["run_id"], request.path_params["decision_id"], choice
+        )
+    except ValueError as exc:
+        return _error("invalid_decision", str(exc), 422)
+    if not delivered:
+        return _error("decision_not_found", "Nothing is waiting for that answer", 404)
+    return JSONResponse({"decision_id": request.path_params["decision_id"], "choice": choice})
+
+
 async def steer_run(request):
     try:
         body = SteerRun.model_validate(await _json(request))
@@ -434,6 +465,10 @@ routes = [
     Route("/v1/sessions/{session_id}/runs/{run_id}/events", run_events, methods=["GET"]),
     Route("/v1/sessions/{session_id}/runs/{run_id}", stop_run, methods=["DELETE"]),
     Route("/v1/sessions/{session_id}/runs/{run_id}/steers", steer_run, methods=["POST"]),
+    Route(
+        "/v1/sessions/{session_id}/runs/{run_id}/decisions/{decision_id}", answer_decision,
+        methods=["POST"],
+    ),
     Route("/v1/sessions/{session_id}/runs/{run_id}/follow-ups", queue_follow_up, methods=["POST"]),
     Route("/v1/sessions/{session_id}/follow-ups", list_follow_ups, methods=["GET"]),
     Route("/v1/sessions/{session_id}/follow-ups/{queue_id}", get_follow_up, methods=["GET"]),

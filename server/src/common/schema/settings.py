@@ -102,6 +102,8 @@ class DocumentSettings(ConfigModel):
     rerank_candidates: int = Field(15, ge=1, le=50)
     max_workspaces_per_project: int = Field(3, ge=1, le=20)
     max_document_upload_bytes: int = Field(50 * 1024 * 1024, ge=1, le=512 * 1024 * 1024)
+    # Most files one project's scan will track; a scan past it fails.
+    max_reconciled_files: int = Field(10_000, ge=100, le=1_000_000)
     max_staged_folder_bytes: int = Field(2 * 1024 * 1024 * 1024, ge=1)
     max_active_folder_intakes: int = Field(2, ge=1)
     folder_intake_idle_seconds: int = Field(2 * 60 * 60, ge=1)
@@ -239,7 +241,7 @@ class CoordinationLogSettings(ConfigModel):
     rotation_mb: int = Field(10, ge=1)
 
 
-class ResearchJobSettings(ConfigModel):
+class BackgroundTaskSettings(ConfigModel):
     # Each job makes many model calls; more at once costs more and loads the
     # machine more. Extra jobs wait their turn.
     max_running_per_project: int = Field(3, ge=1, le=100)
@@ -248,6 +250,8 @@ class ResearchJobSettings(ConfigModel):
     # A job cut off by a restart reruns from the start and pays for its model
     # calls again, so by default it waits as `interrupted` for the user.
     resume_after_restart: bool = False
+    # Tool work that keeps running after its run (a long command); per chat.
+    max_handoffs_per_chat: int = Field(1, ge=1, le=20)
 
 
 class ChatCompactionSettings(ConfigModel):
@@ -293,12 +297,27 @@ class RunEventSettings(ConfigModel):
     unwatched_run_grace_seconds: float = Field(120.0, ge=0, le=86_400, allow_inf_nan=False)
 
 
+class ContainerRuntimeSettings(ConfigModel):
+    socket: str = ""
+    host_library_root: str = ""
+
+
+class WorkspaceCommandSettings(ConfigModel):
+    enabled: bool = True
+    default_image: str = "docker.io/library/ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852"
+    memory_mb: int = Field(4096, ge=256, le=262_144)
+    cpus: float = Field(2.0, gt=0, le=64)
+    pids: int = Field(512, ge=32, le=65_536)
+    idle_minutes: int = Field(30, ge=1, le=1_440)
+    check_timeout_seconds: float = Field(120.0, gt=0, le=3_600, allow_inf_nan=False)
+
+
 class DeveloperSettings(ConfigModel):
     ingestion: IngestionSettings = Field(default_factory=IngestionSettings)
     jobs: JobSettings = Field(default_factory=JobSettings)
     limits: AgentLimitSettings = Field(default_factory=AgentLimitSettings)
     prompt_memory: PromptMemorySettings = Field(default_factory=PromptMemorySettings)
-    research_jobs: ResearchJobSettings = Field(default_factory=ResearchJobSettings)
+    background_tasks: BackgroundTaskSettings = Field(default_factory=BackgroundTaskSettings)
     tools: ToolSettings = Field(default_factory=ToolSettings)
     chat_compaction: ChatCompactionSettings = Field(default_factory=ChatCompactionSettings)
     ingestion_notices: IngestionNoticeSettings = Field(default_factory=IngestionNoticeSettings)
@@ -312,6 +331,12 @@ class DeveloperSettings(ConfigModel):
     community: CommunitySettings = Field(default_factory=CommunitySettings)
     coordination_log: CoordinationLogSettings = Field(
         default_factory=CoordinationLogSettings
+    )
+    container_runtime: ContainerRuntimeSettings = Field(
+        default_factory=ContainerRuntimeSettings
+    )
+    workspace_commands: WorkspaceCommandSettings = Field(
+        default_factory=WorkspaceCommandSettings
     )
 
 

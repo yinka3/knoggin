@@ -5,11 +5,13 @@ from __future__ import annotations
 from typing import Dict, List, Optional
 
 from common.exceptions import ToolExecutionError
-from core.knowledge.documents.scanning import normalize_relative_path
+from core.knowledge.documents.constants import SENSITIVE_FILE_PATTERNS
+from core.knowledge.documents.scanning import matches_pattern, normalize_relative_path
 from core.project.project_files import (
     CONTEXT_FILE_PATH,
     PROJECT_FILE_PATH,
     is_controlled_context_file,
+    parse_workspaces,
 )
 
 PROJECT_FILE_TOOL_MAX_PATH_LENGTH = 512
@@ -25,7 +27,15 @@ def _normalize_tool_path(path: str) -> str:
             "path must be a string no longer than "
             f"{PROJECT_FILE_TOOL_MAX_PATH_LENGTH} characters"
         )
-    return normalize_relative_path(path, path)
+    normalized = normalize_relative_path(path, path)
+    if matches_pattern(normalized.lower(), SENSITIVE_FILE_PATTERNS):
+        # Keys and credentials stay out of the index for the same reason: once
+        # read, an injected instruction could carry them out in a search query.
+        raise PermissionError(
+            "This file may hold keys or credentials, so agents cannot open it. "
+            "The user can open it themselves."
+        )
+    return normalized
 
 
 def _editable_path(path: str) -> str:
@@ -117,7 +127,9 @@ class ProjectFileTools:
             )
             # A document waiting to be reindexed has no passage to cite yet,
             # and read_project_document refuses it; the file itself is current.
-            unindexed = registered and document.get("status") in {"queued", "indexing", "failed"}
+            unindexed = registered and document.get("status") in {
+                "queued", "indexing", "failed", "skipped",
+            }
             if registered and not unindexed:
                 raise ToolExecutionError(
                     "read_project_file",
@@ -156,22 +168,56 @@ class ProjectFileTools:
                 **result,
                 "indexed": False,
                 "note": (
+                    "Read from disk: code in a workspace is not indexed."
+                    if document.get("status") == "skipped" else
                     "Read from disk: this document changed and is waiting to be "
                     "reindexed, so it cannot be cited as a source yet."
                 ),
             }
         return result
 
+    async def _writable_path(self, path: str) -> str:
+        """An editable path outside every read-only workspace."""
+        normalized = _editable_path(path)
+        workspace = normalized.partition("/")[0] if "/" in normalized else None
+        postgres = getattr(self, "postgres", None)
+        if workspace is not None and postgres is not None:
+            row = await postgres.fetch_one(
+                "SELECT workspaces FROM public.projects WHERE user_name = %s AND project_id = %s",
+                (self.user_name, self.project_id),
+            )
+            settings = parse_workspaces(row["workspaces"] if row else {}).get(workspace)
+            if settings is not None and settings.read_only:
+                raise PermissionError(
+                    f"The {workspace} workspace is read-only for agents. The user can "
+                    "change that in the workspace settings."
+                )
+        return normalized
+
     def _run_read_web(self) -> bool:
         """Whether this run has read web content, which a write may quote."""
         run = getattr(self, "agent_run", None)
         return bool(run is not None and run.read_web)
 
+    async def grep_project_files(
+        self,
+        text: str,
+        path_prefix: Optional[str] = None,
+        case_sensitive: bool = False,
+        max_results: int = 30,
+    ) -> Dict:
+        if self.document_service is None:
+            self._files_unavailable("grep_project_files")
+        return await self.document_service.grep_project_files(
+            text, path_prefix=path_prefix, case_sensitive=case_sensitive,
+            max_matches=max_results,
+        )
+
     async def create_project_file(self, path: str, content: str) -> Dict:
         if self.document_service is None:
             self._files_unavailable("create_project_file")
         return await self.document_service.create_project_file(
-            _editable_path(path),
+            await self._writable_path(path),
             _validate_content(content),
             derived_from_web=self._run_read_web(),
         )
@@ -185,7 +231,7 @@ class ProjectFileTools:
         if self.document_service is None:
             self._files_unavailable("update_project_file")
         return await self.document_service.update_project_file(
-            _editable_path(path),
+            await self._writable_path(path),
             _validate_content(content),
             expected_content_hash=_validate_content_hash(expected_content_hash),
             derived_from_web=self._run_read_web(),
@@ -200,7 +246,7 @@ class ProjectFileTools:
         if self.document_service is None:
             self._files_unavailable("append_project_file")
         return await self.document_service.append_project_file(
-            _editable_path(path),
+            await self._writable_path(path),
             _validate_content(content),
             expected_content_hash=_validate_content_hash(expected_content_hash),
             derived_from_web=self._run_read_web(),
@@ -215,8 +261,8 @@ class ProjectFileTools:
         if self.document_service is None:
             self._files_unavailable("move_project_file")
         return await self.document_service.move_project_file(
-            _editable_path(source_path),
-            _editable_path(destination_path),
+            await self._writable_path(source_path),
+            await self._writable_path(destination_path),
             expected_content_hash=_validate_content_hash(expected_content_hash),
         )
 
@@ -224,14 +270,14 @@ class ProjectFileTools:
         if self.document_service is None:
             self._files_unavailable("delete_project_file")
         return await self.document_service.delete_project_file(
-            _editable_path(path),
+            await self._writable_path(path),
             expected_content_hash=_validate_content_hash(expected_content_hash),
         )
 
     async def create_project_folder(self, path: str) -> Dict:
         if self.document_service is None:
             self._files_unavailable("create_project_folder")
-        return await self.document_service.create_project_folder(_editable_path(path))
+        return await self.document_service.create_project_folder(await self._writable_path(path))
 
 
 def _validate_content(content: str) -> str:

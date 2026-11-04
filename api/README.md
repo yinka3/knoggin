@@ -71,9 +71,17 @@ time is stored once, so a stopped import can be sent again. Up to
 The engine reports finished background work by adding a turn to the chat that
 asked for it (shown in `/follow-ups`):
 
-- **Research jobs** (`POST .../research-jobs`). After a restart, a job that was
-  cut off is `interrupted` and waits for `POST .../research-jobs/{job_id}/resume`
-  (or `research_jobs.resume_after_restart`), because rerunning it costs again.
+- **Background tasks** (`POST .../background-tasks` with `question` and
+  `mode`: `normal`, `research` or `deep_research`). A normal task has the chat's
+  tools except starting more tasks. After a restart, a task that was cut off is
+  `interrupted` and waits for `POST .../background-tasks/{job_id}/resume` (or
+  `background_tasks.resume_after_restart`), because rerunning it costs again.
+- **Tool work handed to the background** (a long command): when its run stops
+  because nobody was watching, it keeps going and reports when done; a stop
+  the user asked for stops it too. `GET .../handoffs` lists a chat's items,
+  `DELETE .../handoffs/{item_id}` stops one. One per chat
+  (`background_tasks.max_handoffs_per_chat`); after a restart a running item is
+  `interrupted`.
 - **Folder imports** given a `session_id` report once every file is indexed or
   has failed for good.
 - **Duplicate entities** are checked every `jobs.duplicate_review.interval_hours`
@@ -84,7 +92,8 @@ asked for it (shown in `/follow-ups`):
 
 - **Large folder upload:** `POST .../folders/intakes` with each file's path and
   size, `PUT` each file's bytes, `POST .../preview`, then `POST .../commit`
-  until `complete`. Staging lives in the API process only.
+  until `complete`. Staging lives in the API process only. Pass `workspace`
+  on either import route to place the files under that workspace.
 - **Duplicate pairs that need a choice:** `GET /v1/maintenance/duplicates`, then
   `/v1/maintenance/merges/preview` with `context_choices`, then
   `POST /v1/maintenance/merges`. Or dismiss the pair for good.
@@ -103,8 +112,10 @@ database that has tables but no `schema_migrations` table.
 
 Stop the API, then run `./backup.sh` from the repository root. It saves a
 PostgreSQL dump, `knoggin.yml`, and the project files under `~/knoggin-backups`,
-and `./backup.sh verify <dir>` checks one. It needs `pg_dump` and `pg_restore`
-matching your Postgres version. The backup can contain API keys stored in
+and `./backup.sh verify <dir>` checks one. When the `knoggin-postgres`
+container is running it uses that container's `pg_dump` and `pg_restore`, so
+no local tools are needed; otherwise they must match your Postgres version
+(set `KNOGGIN_PG_CONTAINER` to use another container). The backup can contain API keys stored in
 `knoggin.yml`, so keep it private.
 
 Restore only into a new, empty database and empty folders:
