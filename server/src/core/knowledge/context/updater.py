@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from typing import Any, Protocol, TypeVar
 from uuid import UUID
 
@@ -227,12 +228,18 @@ class ContextUpdateBuild:
         ]
         for handle, message in self._message_by_handle.items():
             raw = self.messages[int(handle[1:]) - 1]
-            source_time = "unknown" if message.timestamp_ms is None else str(message.timestamp_ms)
+            source_time = (
+                "unknown"
+                if message.timestamp_ms is None
+                else datetime.fromtimestamp(
+                    message.timestamp_ms / 1000, tz=timezone.utc
+                ).strftime("%Y-%m-%d %H:%M:%S")
+            )
             content = str(raw.get("content") or "").strip()
             kind = "clarification_question" if message.is_clarification else "message"
             lines.extend(
                 (
-                    f"[{handle}] role={message.role} kind={kind} session={message.session_id} source_time_ms={source_time}",
+                    f"[{handle}] role={message.role} kind={kind} session={message.session_id} sent={source_time}",
                     "<message>",
                     content,
                     "</message>",

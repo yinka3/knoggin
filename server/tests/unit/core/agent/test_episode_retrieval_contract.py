@@ -33,6 +33,7 @@ def episode(episode_id: str, entity_id: int = 2) -> Episode:
         entities=[
             EntityEpisode(
                 entity_id=entity_id,
+                name="Ada",
                 first_seen_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
                 last_seen_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
             )
@@ -121,6 +122,7 @@ async def test_episode_check_exact_entity_returns_scoped_episode_card():
         "What did Ada decide?", session_id="session-1", entity_id=2
     )
 
+    assert result["results"][0]["episodes"][0]["entities"][0]["name"] == "Ada"
     assert knowledge_store.entity_calls == [
         (
             [2],
@@ -272,7 +274,8 @@ async def test_read_recent_episodes_returns_latest_summaries_without_search():
         {
             "user_name": "ada",
             "project_id": "project-1",
-            "limit": 2,
+            "limit": 3,
+            "offset": 0,
             "visible_project_ids": ["project-1"],
         }
     ]
@@ -430,3 +433,151 @@ async def test_episode_and_message_hydration_share_durable_message_identity():
     assert {
         key: episode_messages[0][key] for key in identity_fields
     } == {key: hydrated_messages[0][key] for key in identity_fields}
+
+
+async def _dated_search(*, after=None, before=None, episodes=()):
+    calls = []
+
+    class Store:
+        async def search_project_episodes(self, query, **scope):
+            calls.append(("lexical", scope))
+            return list(episodes)
+
+        async def search_project_episodes_by_embedding(self, embedding, **scope):
+            calls.append(("semantic", scope))
+            return []
+
+        async def get_project_episode_source_refs(self, episode_id, **scope):
+            return []
+
+    class Embedding:
+        async def encode_query(self, query):
+            return [0.1]
+
+    tool = EpisodeTool()
+    tool.knowledge_store = Store()
+    tool.embedding_service = Embedding()
+    result = await tool.episode_check(
+        "what happened", session_id="session-1", after=after, before=before
+    )
+    return result, dict(calls)
+
+
+async def test_a_bare_before_date_covers_that_whole_day():
+    _, calls = await _dated_search(after="2023-05-20", before="2023-05-20")
+
+    assert calls["lexical"]["after"] == datetime(2023, 5, 20, tzinfo=timezone.utc)
+    assert calls["lexical"]["before"] == datetime(
+        2023, 5, 20, 23, 59, 59, 999999, tzinfo=timezone.utc
+    )
+    assert calls["semantic"]["before"] == calls["lexical"]["before"]
+
+
+async def test_similarity_threshold_applies_only_without_a_date_range():
+    _, undated = await _dated_search()
+    _, dated = await _dated_search(after="2023-05-20")
+
+    assert undated["semantic"]["score_threshold"] == 0.5
+    assert dated["semantic"]["score_threshold"] == 0.0
+
+
+async def test_an_empty_date_range_does_not_fall_back_to_undated_messages():
+    result, _ = await _dated_search(after="2023-05-20")
+
+    assert result == {"resolution": "no_episodes_in_range", "results": []}
+
+
+@pytest.mark.parametrize(
+    "after,before",
+    [("last week", None), (None, "soon"), ("2023-05-21", "2023-05-20")],
+)
+async def test_bad_date_ranges_are_rejected(after, before):
+    with pytest.raises(ValueError):
+        await _dated_search(after=after, before=before)
+
+
+async def test_episode_search_can_refuse_the_raw_message_fallback():
+    class Store:
+        async def search_project_episodes(self, query, **scope):
+            return []
+
+    class RawSearchMustNotRun(EpisodeTool):
+        async def search_messages(self, *args, **kwargs):
+            raise AssertionError("raw message search ran")
+
+    tool = RawSearchMustNotRun()
+    tool.knowledge_store = Store()
+    tool.embedding_service = None
+
+    result = await tool.episode_check("anything", session_id="session-1", raw_fallback=False)
+
+    assert result == {"resolution": "no_episodes", "results": []}
+
+
+class _ExpansionStore:
+    def __init__(self, hits):
+        self.hits = hits
+        self.searched = []
+
+    async def search_project_episodes(self, query, **scope):
+        self.searched.append(query)
+        return [episode_card(episode_id) for episode_id in self.hits.get(query, [])]
+
+    async def get_project_episode_source_refs(self, episode_id, **scope):
+        return []
+
+
+async def test_alternate_queries_merge_into_one_ranked_result():
+    tool = EpisodeTool()
+    tool.embedding_service = None
+    tool.knowledge_store = _ExpansionStore(
+        {"kitchen": ["a"], "air fryer": ["b", "a"], "blender": ["c"]}
+    )
+
+    result = await tool.episode_check(
+        "kitchen", session_id="session-1", alternate_queries=["air fryer", "blender"]
+    )
+
+    found = [item["episode_id"] for item in result["results"][0]["episodes"]]
+    # Found by two wordings, so it outranks those found by one.
+    assert found[0] == "a"
+    assert set(found) == {"a", "b", "c"}
+    assert len(result["results"]) == 1
+
+
+async def test_alternate_queries_skip_repeats_and_stop_at_the_configured_count():
+    tool = EpisodeTool()
+    tool.embedding_service = None
+    tool.knowledge_store = _ExpansionStore({"q": ["a"]})
+
+    await tool.episode_check(
+        "q",
+        session_id="session-1",
+        alternate_queries=["Q ", "two", "", "three", "four", "five"],
+    )
+
+    assert tool.knowledge_store.searched == ["q", "two", "three", "four"]
+
+
+async def test_browsing_episodes_by_date_reports_the_next_page():
+    calls = []
+
+    class Store:
+        async def get_recent_project_episodes(self, **scope):
+            calls.append(scope)
+            return [episode_card(episode_id) for episode_id in ("a", "b", "c")]
+
+        async def get_project_episode_source_refs(self, episode_id, **scope):
+            return []
+
+    tool = EpisodeTool()
+    tool.knowledge_store = Store()
+
+    result = await tool.read_recent_episodes(
+        session_id="session-1", limit=2, after="2023-05-20", before="2023-05-20", offset=4
+    )
+
+    assert calls[0]["limit"] == 3 and calls[0]["offset"] == 4
+    assert calls[0]["after"] == datetime(2023, 5, 20, tzinfo=timezone.utc)
+    assert [item["episode_id"] for item in result["results"][0]["episodes"]] == ["a", "b"]
+    assert result["has_more"] is True and result["next_offset"] == 6

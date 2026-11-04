@@ -583,7 +583,8 @@ class LLMService:
         if not self._tokenizer:
             # Fallback to rough estimation if tokenizer failed to load
             return (len(text) + 3) // 4
-        return len(self._tokenizer.encode(text))
+        # Messages may quote a control token such as <|endoftext|>; it is text here.
+        return len(self._tokenizer.encode(text, disallowed_special=()))
 
     def count_tokens_batch(self, texts: list[str]) -> list[int]:
         """Count independent rendered prefixes with the same tokenizer rule."""
@@ -591,7 +592,9 @@ class LLMService:
             return [(len(value) + 3) // 4 for value in texts]
         return [
             len(tokens)
-            for tokens in self._tokenizer.encode_batch(texts, num_threads=4)
+            for tokens in self._tokenizer.encode_batch(
+                texts, num_threads=4, disallowed_special=()
+            )
         ]
 
     async def _reserve_external_attempt(

@@ -479,7 +479,7 @@ async def test_recent_episode_tool_passes_its_session_to_retrieval():
         def __init__(self):
             self.calls = []
 
-        async def read_recent_episodes(self, *, session_id, limit):
+        async def read_recent_episodes(self, *, session_id, limit, **_):
             self.calls.append((session_id, limit))
             return {"resolution": "recent", "results": []}
 
@@ -663,7 +663,8 @@ async def test_episode_reads_receive_the_directional_readable_project_scope():
         {
             "user_name": "ada",
             "project_id": "project-1",
-            "limit": 2,
+            "limit": 3,
+            "offset": 0,
             "visible_project_ids": ["project-1", "project-2"],
         }
     ]

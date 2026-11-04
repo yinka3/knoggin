@@ -10,9 +10,12 @@ from common.schema.primitives import ImportedAssistantTurn, ImportedExchange
 
 logger = logging.getLogger("longmemeval")
 
-# Turns in one session are spaced out so each keeps its own time and order.
-TURN_SPACING = timedelta(minutes=2)
-REPLY_DELAY = timedelta(seconds=30)
+# Turns in one session are spaced out so each keeps its own time and order, but
+# tightly: M has sessions minutes apart, and overlapping times would braid two
+# conversations together once a window sorts its messages by time.
+TURN_SPACING = timedelta(seconds=2)
+REPLY_DELAY = timedelta(seconds=1)
+SESSION_GAP = timedelta(seconds=1)
 
 
 @dataclass(frozen=True)
@@ -82,29 +85,46 @@ def pair_turns(
     return result
 
 
+def _last_turn_at(turns: list[ImportedExchange | ImportedAssistantTurn]) -> datetime | None:
+    if not turns:
+        return None
+    last = turns[-1]
+    if isinstance(last, ImportedAssistantTurn):
+        return last.assistant_timestamp
+    return last.assistant_timestamp or last.user_timestamp
+
+
+def _without_overlaps(rows: list[tuple[str, datetime, list[dict]]], label: str) -> list[ReplaySession]:
+    """Replay date-ordered sessions, starting each after the previous one ends.
+
+    The dataset gives each session a start minute only, and some share one.
+    """
+
+    sessions: list[ReplaySession] = []
+    previous_end: datetime | None = None
+    for session_id, date, turns in sorted(rows, key=lambda row: row[1]):
+        started_at = max(date, previous_end + SESSION_GAP) if previous_end else date
+        exchanges = pair_turns(turns, started_at, label=f"{label}/{session_id}")
+        sessions.append(ReplaySession(session_id, started_at, exchanges))
+        previous_end = _last_turn_at(exchanges) or previous_end
+    return sessions
+
+
 def load_questions(path: Path) -> list[Question]:
     questions = []
     for row in json.loads(path.read_text()):
-        sessions = [
-            ReplaySession(
-                session_id=session_id,
-                started_at=parse_date(date),
-                exchanges=pair_turns(
-                    turns,
-                    parse_date(date),
-                    label=f"{row['question_id']}/{session_id}",
-                ),
-            )
-            for session_id, date, turns in zip(
-                row["haystack_session_ids"],
-                row["haystack_dates"],
-                row["haystack_sessions"],
-                strict=True,
-            )
-        ]
-        ordered = sorted(sessions, key=lambda session: session.started_at)
-        if ordered != sessions:
-            logger.info("%s: sorted sessions by date", row["question_id"])
+        sessions = _without_overlaps(
+            [
+                (session_id, parse_date(date), turns)
+                for session_id, date, turns in zip(
+                    row["haystack_session_ids"],
+                    row["haystack_dates"],
+                    row["haystack_sessions"],
+                    strict=True,
+                )
+            ],
+            row["question_id"],
+        )
         questions.append(
             Question(
                 question_id=row["question_id"],
@@ -112,7 +132,7 @@ def load_questions(path: Path) -> list[Question]:
                 question=row["question"],
                 answer=str(row["answer"]),
                 question_date=parse_date(row["question_date"]),
-                sessions=ordered,
+                sessions=sessions,
             )
         )
     return questions

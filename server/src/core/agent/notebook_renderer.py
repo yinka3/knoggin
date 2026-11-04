@@ -54,6 +54,8 @@ _REFERENCE_PREFIXES = {
 
 _SHORT_TEXT_LIMIT = 320
 _PASSAGE_TEXT_LIMIT = 12_000
+# The cap on a stored Episode's narrative, so a recalled Episode is shown whole.
+_EPISODE_TEXT_LIMIT = 4_000
 
 NOTEBOOK_TEMPLATE = """RUN NOTEBOOK
 {% if summary.text %}Summary: {{ summary.text }}{% if summary.references %} ({{ summary.references|join(', ') }}){% endif %}
@@ -79,6 +81,8 @@ Activities:
 Episodes:
 {% for item in episodes %}- {{ item.reference }}{% if item.summary %}: {{ item.summary }}{% endif %}
 {% if item.chronology %}  chronology: {{ item.chronology }}
+{% endif %}{% if item.entity_names %}  entities: {{ item.entity_names|join(', ') }}
+{% endif %}{% if item.relationship_lines %}  relationships: {{ item.relationship_lines|join('; ') }}
 {% endif %}{% if item.developments %}  developments: {{ item.developments|join('; ') }}
 {% endif %}{% if item.updates %}  updates: {{ item.updates|join('; ') }}
 {% endif %}{% if item.unresolved %}  unresolved: {{ item.unresolved|join('; ') }}
@@ -397,6 +401,28 @@ def _source_continuation(
     return ""
 
 
+def _episode_entity_names(item: dict[str, Any]) -> list[str]:
+    entities = item.get("entities")
+    return [
+        _safe_text(entity["name"], limit=80)
+        for entity in (entities if isinstance(entities, list) else [])
+        if isinstance(entity, dict) and entity.get("name")
+    ]
+
+
+def _episode_relationship_lines(item: dict[str, Any]) -> list[str]:
+    relationships = item.get("relationships")
+    return [
+        " ".join(
+            _safe_text(relationship[field], limit=80)
+            for field in ("source", "relationship_type", "target")
+        )
+        for relationship in (relationships if isinstance(relationships, list) else [])
+        if isinstance(relationship, dict)
+        and all(relationship.get(field) for field in ("source", "relationship_type", "target"))
+    ]
+
+
 def _observation_support(item: dict[str, Any]) -> dict[str, Any]:
     subject = item.get("subject")
     observation_id = (
@@ -543,11 +569,20 @@ def _record_list(
             )
             item["time"] = _safe_text(item.get("time") or "", limit=80)
         elif section == "episodes":
-            item["summary"] = _safe_text(item.get("summary") or "")
+            item["summary"] = _safe_text(item.get("summary") or "", limit=_EPISODE_TEXT_LIMIT)
             item["chronology"] = _episode_chronology(item)
-            item["developments"] = _bounded_text_items(item.get("new_developments"))
-            item["updates"] = _bounded_text_items(item.get("updates"))
-            item["unresolved"] = _bounded_text_items(item.get("unresolved"))
+            for field, source in (
+                ("developments", "new_developments"),
+                ("updates", "updates"),
+                ("unresolved", "unresolved"),
+            ):
+                item[field] = _bounded_text_items(
+                    item.get(source),
+                    max_items=_EPISODE_TEXT_LIMIT,
+                    item_limit=_EPISODE_TEXT_LIMIT,
+                )
+            item["entity_names"] = _episode_entity_names(item)
+            item["relationship_lines"] = _episode_relationship_lines(item)
             item["support"] = _historical_episode_support(item)
         elif section == "paths":
             item["description"] = _path_description(item, localizer)

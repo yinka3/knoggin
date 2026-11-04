@@ -11,6 +11,7 @@ from core.agent.notebook_renderer import (
     notebook_environment,
     render_notebook,
 )
+from core.agent.prompt_context import _empty_retrieval_guidance
 
 
 def test_empty_notebook_renders_a_stable_minimal_view():
@@ -398,3 +399,48 @@ def test_rollover_with_recorded_actions_keeps_them_bounded():
     notebook.rollover()
 
     assert len(notebook.actions) <= notebook.capacity.max_actions
+
+
+def test_a_recalled_episode_shows_its_whole_narrative_and_named_metadata():
+    notebook = RunNotebook()
+    tail = "the detail at the very end"
+    notebook.apply(
+        "search_episodes",
+        {"data": {
+            "resolution": "semantic",
+            "results": [{
+                "query": "launch",
+                "episodes": [{
+                    "episode_id": "episode-1",
+                    "summary": "x" * 1400 + tail,
+                    "new_developments": [f"development {n}" for n in range(5)],
+                    "updates": [],
+                    "unresolved": [],
+                    "entities": [{"entity_id": 7, "name": "Dr. Lee"}],
+                    "relationships": [{
+                        "relationship_id": "r",
+                        "source": "Dr. Lee",
+                        "relationship_type": "treats",
+                        "target": "Ada",
+                    }],
+                }],
+            }],
+        }},
+    )
+
+    rendered = render_notebook(notebook)
+
+    assert tail in rendered
+    assert "development 4" in rendered
+    assert "entities: Dr. Lee" in rendered
+    assert "relationships: Dr. Lee treats Ada" in rendered
+
+
+def test_empty_search_only_suggests_tools_the_run_has():
+    enabled = frozenset({"search_episodes", "search_knowledge_entities", "search_project_documents"})
+
+    guidance = _empty_retrieval_guidance("search_episodes", enabled)
+
+    assert "entities or documents" in guidance
+    assert "messages" not in guidance.split("If the question")[0]
+    assert "messages, entities or documents" in _empty_retrieval_guidance("search_episodes")

@@ -61,6 +61,7 @@ class EntityEpisode(BaseModel):
     """An entity observed in an episode's source messages."""
 
     entity_id: int = Field(..., gt=0)
+    name: Optional[str] = None
     source_message_count: int = Field(0, ge=0)
     first_seen_at: Optional[datetime] = None
     last_seen_at: Optional[datetime] = None
@@ -70,6 +71,9 @@ class RelationshipEpisode(BaseModel):
     """A relationship evidenced by an episode's source messages."""
 
     relationship_id: str = Field(..., min_length=1)
+    source: Optional[str] = None
+    relationship_type: Optional[str] = None
+    target: Optional[str] = None
     source_message_count: int = Field(0, ge=0)
 
 

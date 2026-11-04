@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import instructor
 import pytest
+import tiktoken
 from openai import APIConnectionError, BadRequestError
 from pydantic import BaseModel
 
@@ -1030,3 +1031,13 @@ async def test_malformed_output_is_not_a_refusal(monkeypatch):
         )
     assert not isinstance(raised.value, LLMRefusalError)
     await service.close()
+
+
+def test_counting_tokens_accepts_text_that_spells_a_special_token():
+    # A message quoting a model's control token once blocked a project's memory.
+    client = object.__new__(LLMService)
+    client._tokenizer = tiktoken.get_encoding("cl100k_base")
+    text = "the model printed <|endoftext|> and stopped"
+
+    assert client.count_tokens(text) > 0
+    assert client.count_tokens_batch([text]) == [client.count_tokens(text)]

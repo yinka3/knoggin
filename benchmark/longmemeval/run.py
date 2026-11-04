@@ -22,9 +22,11 @@ from pathlib import Path
 import yaml
 
 from common.conf.domain_config import DomainConfig
+from common.exceptions import StorageWriteError
 from common.schema.agent.tool_names import tool_groups
 from common.schema.primitives import Message
 from common.utils.time_utils import reset_clock, set_test_clock
+from core.agent import prompt_context
 from core.knowledge.context.render import render_context_markdown
 from infrastructure.schema_migrations import migrate
 from runtime.application import ApplicationRuntime
@@ -73,8 +75,9 @@ def _args() -> argparse.Namespace:
                         help="project domain: topics, entity and relationship types")
     parser.add_argument("--budget-usd", type=float, default=5.0,
                         help="LLM spending ceiling for the whole run")
-    parser.add_argument("--no-message-tools", action="store_true",
-                        help="answer without the tools that read raw messages")
+    parser.add_argument("--no-message-search", action="store_true",
+                        help="answer without free-text search over raw messages; an "
+                             "Episode's own source messages stay readable")
     parser.add_argument("--maintain-every-episodes", type=int,
                         help="run the Context maintainer this often (default: the setting)")
     parser.add_argument("--settle-timeout", type=float, default=900.0,
@@ -87,6 +90,9 @@ def _args() -> argparse.Namespace:
                         help="maximum source messages in one generated episode")
     parser.add_argument("--idle-flush-seconds", type=int,
                         help="replayed idle time before an automatic semantic-window flush")
+    parser.add_argument("--min-episode-coverage", type=float, default=0.8,
+                        help="stop the run if less than this share of a question's "
+                             "messages reach an Episode; 0 turns the check off")
     return parser.parse_args()
 
 
@@ -165,31 +171,122 @@ async def _snapshot(runtime, project, revision) -> str:
     return render_context_markdown(snapshot, project.compiled_domain)
 
 
+class EpisodeCoverageTooLow(Exception):
+    """Most of the history has no Episode, so the run would not measure memory."""
+
+
+IMPORT_ATTEMPTS = 3
+
+# Checked once this many batches have built, so one odd window cannot stop a run.
+COVERAGE_CHECK_AFTER_BATCHES = 3
+
+
+async def _episode_coverage(runtime, project_id: str) -> float:
+    """Share of the messages in finished windows that reached an Episode."""
+
+    row = await runtime.resources.postgres.fetch_one(
+        "SELECT count(*) AS total, count(attached.message_id) AS attached "
+        "FROM public.project_semantic_window_messages AS windowed "
+        "JOIN public.project_semantic_windows AS window_row USING (window_id) "
+        "LEFT JOIN (SELECT DISTINCT message_id FROM public.episode_messages "
+        "           WHERE project_id = %s) AS attached USING (message_id) "
+        "WHERE windowed.project_id = %s AND window_row.stage = 'completed'",
+        (project_id, project_id),
+    )
+    return row["attached"] / row["total"] if row["total"] else 1.0
+
+
+async def _import_with_retry(history, exchanges) -> None:
+    """Retry a lost database deadlock; imports skip what is already stored."""
+
+    for attempt in range(IMPORT_ATTEMPTS):
+        try:
+            await history.import_exchanges(exchanges)
+            return
+        except StorageWriteError:
+            if attempt == IMPORT_ATTEMPTS - 1:
+                raise
+            logger.warning("Import write failed; retrying (attempt %d)", attempt + 1)
+            await asyncio.sleep(1)
+
+
 def _agent_dir(out: Path, model: str) -> Path:
     return out / "agents" / model.replace("/", "_")
 
 
-# The tools that read raw messages; without them an answer must come from
-# Context, Episode summaries, or the entity graph.
-MESSAGE_TOOLS = frozenset({"search_knowledge_messages", "read_episode_messages"})
+# Without free-text message search, an answer must come from Context, the entity
+# graph, or an Episode found by search, opened to read its source messages.
+MESSAGE_SEARCH_TOOLS = frozenset({"search_knowledge_messages"})
+TRACED_EVENTS = frozenset({"tool_start", "tool_end", "tool_error"})
+
+
+def _record_episode_results(retrieval, seen: list[dict]) -> None:
+    """Note which Episodes each search hands the agent, for scoring afterwards."""
+
+    def wrap(name: str, episodes_of):
+        original = getattr(retrieval, name)
+
+        async def recording(*args, **kwargs):
+            result = await original(*args, **kwargs)
+            seen.append({
+                "call": name,
+                "resolution": result.get("resolution") if isinstance(result, dict) else None,
+                "episode_ids": episodes_of(result),
+            })
+            return result
+
+        setattr(retrieval, name, recording)
+
+    def from_groups(result: dict) -> list[str]:
+        return [
+            episode["episode_id"]
+            for group in result.get("results", [])
+            for episode in group.get("episodes", [])
+        ]
+
+    wrap("episode_check", from_groups)
+    wrap("read_recent_episodes", from_groups)
+
+
+def _remembering_render(pages: list[str]):
+    """Keep what the agent read: the notebook grows, so the last page shows it all."""
+
+    original = prompt_context.render_notebook
+
+    def render(*args, **kwargs):
+        page = original(*args, **kwargs)
+        pages.append(page)
+        return page
+
+    return render
 
 
 async def _ask(
-    runtime, project_id: str, question: Question, model: str, no_message_tools: bool
+    runtime, project_id: str, question: Question, model: str, no_message_search: bool,
+    trace_path: Path | None = None,
 ) -> tuple[str, dict | None]:
     """Ask in a new session, so no history turns sit in the prompt."""
 
     enabled_tools = (
-        sorted(tool_groups()["core"] - MESSAGE_TOOLS) if no_message_tools else None
+        sorted(tool_groups()["core"] - MESSAGE_SEARCH_TOOLS) if no_message_search else None
     )
+    notebook_pages: list[str] = []
+    render_notebook = prompt_context.render_notebook
     session = await runtime.sessions.create_session(
         project_id, model=model, enabled_tools=enabled_tools
     )
     try:
+        retrieval = session.project.knowledge_retrieval
+        episode_results: list[dict] = []
+        _record_episode_results(retrieval, episode_results)
+        prompt_context.render_notebook = _remembering_render(notebook_pages)
         stream = await session.open_agent_run_stream(Message(content=question.question))
         answer, usage = None, None
+        tool_events = []
         async for event in stream:
             data = event.get("data") or {}
+            if event.get("event") in TRACED_EVENTS:
+                tool_events.append({"event": event["event"], **data})
             if event.get("event") == "response":
                 answer, usage = data.get("content", ""), data.get("usage")
             elif event.get("event") == "clarification":
@@ -200,7 +297,19 @@ async def _ask(
             raise RuntimeError("Agent run ended without an answer")
         return answer, usage
     finally:
-        await runtime.sessions.deactivate_runtime_session(session.session_id)
+        # Written even for a failed run, which is when the trace matters most.
+        if trace_path is not None:
+            _append(trace_path, {
+                "question_id": question.question_id,
+                "tools": tool_events,
+                "episode_results": episode_results,
+                "notebook": notebook_pages[-1] if notebook_pages else "",
+            })
+        prompt_context.render_notebook = render_notebook
+        for name in ("episode_check", "read_recent_episodes"):
+            vars(retrieval).pop(name, None)
+        # Deleted so a later model's search cannot find this model's answer.
+        await runtime.sessions.delete_session(session.session_id)
 
 
 async def _replay(
@@ -211,7 +320,8 @@ async def _replay(
     sessions_per_settle: int,
     domain: DomainConfig,
     models: list[str],
-    no_message_tools: bool = False,
+    no_message_search: bool = False,
+    min_episode_coverage: float = 0.0,
 ) -> dict:
     name = f"lme-{question.question_id}"
     # A question cut off earlier starts over in a clean project.
@@ -226,6 +336,7 @@ async def _replay(
     source_messages = 0
     source_tokens_est = 0
     sessions_since_settle = 0
+    batches = 0
     batch_started = time.monotonic()
     try:
         nonempty_sessions = [
@@ -234,7 +345,7 @@ async def _replay(
         ]
         for position, (index, session) in enumerate(nonempty_sessions, 1):
             set_test_clock(_ReplayClock(session.started_at))
-            await history.import_exchanges(session.exchanges)
+            await _import_with_retry(history, session.exchanges)
             exchanges += len(session.exchanges)
             for exchange in session.exchanges:
                 for content in (
@@ -257,15 +368,22 @@ async def _replay(
                 "FROM public.project_semantic_windows WHERE project_id = %s",
                 (project_id,),
             )
+            coverage = await _episode_coverage(runtime, project_id)
             logger.info(
                 "%s memory progress: sessions=%d/%d messages=%d "
                 "source_tokens_est=%d windows_completed=%d "
-                "window_tokens=%d batch_seconds=%.1f",
+                "window_tokens=%d episode_coverage=%.3f batch_seconds=%.1f",
                 question.question_id, position, len(nonempty_sessions),
                 source_messages, source_tokens_est,
                 window_progress["completed"], window_progress["completed_tokens"],
-                time.monotonic() - batch_started,
+                coverage, time.monotonic() - batch_started,
             )
+            batches += 1
+            if batches >= COVERAGE_CHECK_AFTER_BATCHES and coverage < min_episode_coverage:
+                raise EpisodeCoverageTooLow(
+                    f"{question.question_id}: only {coverage:.1%} of messages have an "
+                    f"Episode after {batches} batches (minimum {min_episode_coverage:.0%})"
+                )
             batch_started = time.monotonic()
             sessions_since_settle = 0
             snapshot_dir = out / "snapshots" / question.question_id
@@ -286,7 +404,8 @@ async def _replay(
         set_test_clock(question.question_date)
         try:
             answers[model] = await _ask(
-                runtime, project_id, question, model, no_message_tools
+                runtime, project_id, question, model, no_message_search,
+                _agent_dir(out, model) / "traces.jsonl",
             )
         except Exception as exc:
             answers[model] = exc
@@ -295,6 +414,10 @@ async def _replay(
         "WHERE project_id = %s",
         (project_id,),
     )
+    spent = await runtime.resources.postgres.fetch_one(
+        "SELECT COALESCE(sum(spent_usd), 0) AS spent FROM public.llm_budget_windows"
+    )
+    llm_totals = await runtime.resources.llm_service.spending_snapshot()
     return {
         "answers": answers,
         "metrics": {
@@ -303,7 +426,11 @@ async def _replay(
             "sessions": len(question.sessions),
             "exchanges": exchanges,
             "windows": windows["count"],
+            "episode_coverage": round(await _episode_coverage(runtime, project_id), 4),
             "memory_seconds": memory_seconds,
+            # Both are running totals for this run; subtract rows for per-question.
+            "run_spent_usd": round(float(spent["spent"]), 4),
+            "run_prompt_cache": llm_totals["prompt_cache"],
             "answer_usage": {
                 model: answer[1] for model, answer in answers.items()
                 if not isinstance(answer, Exception)
@@ -326,6 +453,7 @@ def _manifest(args, config: dict, domain: dict) -> dict:
         "selection": {"types": args.types, "question_ids": args.question_ids,
                       "limit": args.limit},
         "replay": {"sessions_per_settle": args.sessions_per_settle},
+        "no_message_search": args.no_message_search,
         "started_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -372,8 +500,16 @@ async def main() -> int:
                 result = await _replay(
                     runtime, question, out, args.settle_timeout,
                     args.sessions_per_settle, domain, models,
-                    args.no_message_tools,
+                    args.no_message_search, args.min_episode_coverage,
                 )
+            except EpisodeCoverageTooLow as exc:
+                # Every later question would waste its budget the same way.
+                failures += 1
+                logger.error("Stopping the run: %s", exc)
+                _append(out / "errors.jsonl", {
+                    "question_id": question.question_id, "error": repr(exc),
+                })
+                break
             except Exception as exc:
                 failures += 1
                 logger.error("%s failed: %s", question.question_id, exc)

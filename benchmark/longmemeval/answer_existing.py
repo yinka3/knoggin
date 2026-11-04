@@ -23,8 +23,8 @@ async def main() -> None:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--model", required=True)
     parser.add_argument("--source-run-name", required=True)
-    parser.add_argument("--no-message-tools", action="store_true",
-                        help="answer from Context, Episodes, and graph without raw-message tools")
+    parser.add_argument("--no-message-search", action="store_true",
+                        help="answer without free-text search over raw messages")
     args = parser.parse_args()
     if not os.environ.get("DATABASE_URL"):
         parser.error("DATABASE_URL is required")
@@ -57,7 +57,8 @@ async def main() -> None:
             try:
                 answer, usage = await _ask(
                     runtime, projects[f"lme-{qid}"]["id"], question,
-                    args.model, args.no_message_tools,
+                    args.model, args.no_message_search,
+                    args.out / "traces.jsonl",
                 )
             except Exception as exc:
                 logger.exception("%s failed: %s", qid, exc)

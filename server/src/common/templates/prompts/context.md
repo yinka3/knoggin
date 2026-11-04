@@ -30,6 +30,8 @@ Markdown blocks, not extracted triples or a transcript.
 - Keep one block per thread. When the window continues a thread, replace its
   block instead of adding a near-duplicate. The nearer CONTEXT SIZE is to its
   budget, the shorter new blocks should be.
+- `sent=` is when a message was sent, in UTC. Write relative dates such as "last
+  weekend" as actual dates.
 - Prefer the smallest sufficient evidence set. A direct user statement is
   `user_asserted`. A claim based on retrieved source material is
   `source_grounded` and must cite its assistant source handle(s). Use

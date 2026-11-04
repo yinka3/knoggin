@@ -37,13 +37,13 @@ def aggregate_attachments():
         ],
         [
             {
-                "entity_id": 2,
+                "entity_id": 2, "canonical_name": "Ada",
                 "source_message_count": 1,
                 "first_seen_at": now,
                 "last_seen_at": now,
             }
         ],
-        [{"relationship_id": "project-1:2:3", "source_message_count": 1}],
+        [{"relationship_id": "project-1:2:3", "source": "Ada", "relationship_type": "knows", "target": "Grace", "source_message_count": 1}],
     ]
 
 
@@ -52,13 +52,13 @@ def card_attachments():
     return [
         [
             {
-                "entity_id": 2,
+                "entity_id": 2, "canonical_name": "Ada",
                 "source_message_count": 1,
                 "first_seen_at": now,
                 "last_seen_at": now,
             }
         ],
-        [{"relationship_id": "project-1:2:3", "source_message_count": 1}],
+        [{"relationship_id": "project-1:2:3", "source": "Ada", "relationship_type": "knows", "target": "Grace", "source_message_count": 1}],
     ]
 
 
@@ -207,7 +207,7 @@ async def test_project_episode_queries_short_circuit_empty_inputs_and_reject_bad
         "history", user_name="ada", project_id="project-1", limit=0
     ) == []
     assert await reader.search_project_episodes_by_embedding(
-        [0.1], user_name="ada", project_id="project-1", limit=0
+        [0.1], user_name="ada", project_id="project-1", limit=0, score_threshold=0.6
     ) == []
     assert await reader.get_project_episodes_for_entities(
         [], user_name="ada", project_id="project-1", limit=3
@@ -343,3 +343,14 @@ async def test_project_episode_reader_isolates_user_and_visible_project_scopes(
         project_id="project-1",
         visible_project_ids=["project-1"],
     ) == []
+
+
+def test_date_range_matches_episodes_overlapping_it():
+    after = datetime(2023, 5, 20, tzinfo=timezone.utc)
+    before = datetime(2023, 5, 21, tzinfo=timezone.utc)
+
+    assert EpisodeReader._date_range(None, None) == ("", [])
+    assert EpisodeReader._date_range(after, before) == (
+        " AND e.last_message_at >= %s AND e.first_message_at <= %s",
+        [after, before],
+    )

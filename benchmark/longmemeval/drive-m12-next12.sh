@@ -31,7 +31,7 @@ env -u OPENROUTER_API_KEY PREFER_GPU=true EMBEDDING_BACKEND=torch DATABASE_URL="
   --merge-model anthropic/claude-haiku-5.5 \
   --maintenance-model anthropic/claude-sonnet-5.5 \
   --agent-models anthropic/claude-haiku-5.5,anthropic/claude-sonnet-5.5 \
-  --no-message-tools \
+  --no-message-search \
   --budget-usd 100 --settle-timeout 1800 \
   --sessions-per-settle 10 --idle-flush-seconds 86400 \
   --episode-source-tokens 20000 --episode-source-messages 120

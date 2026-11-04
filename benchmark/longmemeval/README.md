@@ -39,6 +39,12 @@ PREFER_GPU=true EMBEDDING_BACKEND=torch DATABASE_URL=<benchmark db> \
 - `--budget-usd` (default 5) caps LLM spend; `--extraction-model` (default
   `google/gemini-2.5-flash`) builds memory; `--domain` (default `domain.json`)
   sets the project's topics and entity types.
+- `--no-message-search` removes free-text message search, including the raw
+  fallback in `search_episodes`. The agent can still open an Episode's source
+  messages.
+- `--min-episode-coverage` (default 0.8) stops the run when too few of a
+  question's messages reach an Episode. `metrics.jsonl` records each question's
+  `episode_coverage`; 0 turns the stop off.
 - Use the GPU: on CPU, parallel runs starve each other's embedding models and
   searches time out.
 - To split a run across processes, give each its own database, `--out` and
@@ -68,6 +74,9 @@ separate, and is saved to `scores.json`.
 - `agents/<model>/hypotheses.jsonl`: that agent's answers, the judge's input;
   `agents/<model>/errors.jsonl`: its failed answers.
 - `snapshots/<question_id>/<session>.md`: Context after each history session.
+- `agents/<model>/traces.jsonl`: each answer's tool calls, which Episodes each
+  search returned, and the last notebook the agent read, to tell "search missed
+  it" from "the agent misread it".
 - `metrics.jsonl`: sessions, exchanges, memory windows, memory time, answer
   tokens per agent.
 - `errors.jsonl`: questions whose memory failed, with tracebacks; the run

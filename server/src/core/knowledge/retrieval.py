@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from time import perf_counter
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -196,13 +196,18 @@ class KnowledgeRetrieval:
         *,
         session_id: str,
         entity_id: Optional[int] = None,
+        after: Optional[str] = None,
+        before: Optional[str] = None,
+        raw_fallback: bool = True,
+        alternate_queries: Optional[List[str]] = None,
     ) -> Dict:
-        """Retrieve episodes, then fall back to raw durable messages."""
+        """Retrieve episodes, then optionally fall back to raw durable messages."""
         session_id = require_scope_value(
             session_id, "session_id", "KnowledgeRetrieval.episode_check"
         )
         query = self._require_query(query, "episode_check")
         started_at = perf_counter()
+        date_range = self._episode_date_range(after, before)
 
         if entity_id is not None:
             profile = await self.entities.get_profile(entity_id)
@@ -214,6 +219,7 @@ class KnowledgeRetrieval:
                 project_id=self.project_id,
                 limit=DEFAULT_EPISODE_RETRIEVAL_LIMIT,
                 visible_project_ids=self.readable_project_ids,
+                **date_range,
             )
             metrics: Dict[str, int | float] = {}
             serialized = await self._serialize_episodes(episodes, metrics=metrics)
@@ -244,35 +250,51 @@ class KnowledgeRetrieval:
         # Both channels contribute: a weak semantic hit must not suppress an
         # exact keyword match. Retrieve a bounded pool before rank fusion.
         candidate_limit = DEFAULT_EPISODE_RETRIEVAL_LIMIT * 3
-        lexical = await self.knowledge_store.search_project_episodes(
-            query,
-            user_name=self.user_name,
-            project_id=self.project_id,
-            limit=candidate_limit,
-            visible_project_ids=self.readable_project_ids,
+        # A date range has already narrowed the Episodes, and a broad question
+        # about that day should still see them, so only the range filters then.
+        score_threshold = (
+            0.0 if date_range else self._search_settings.episode_similarity_threshold
         )
+        queries = self._episode_queries(query, alternate_queries)
+        lexical_found = False
         semantic_matches = []
-        if self.embedding_service is not None:
+        channels: List[List] = []
+        for variant in queries:
+            lexical = await self.knowledge_store.search_project_episodes(
+                variant,
+                user_name=self.user_name,
+                project_id=self.project_id,
+                limit=candidate_limit,
+                visible_project_ids=self.readable_project_ids,
+                **date_range,
+            )
+            lexical_found = lexical_found or bool(lexical)
+            channels.append(lexical)
+            if self.embedding_service is None:
+                continue
             try:
-                embedding = await self.embedding_service.encode_query(query)
-                semantic_matches = (
-                    await self.knowledge_store.search_project_episodes_by_embedding(
-                        embedding,
-                        user_name=self.user_name,
-                        project_id=self.project_id,
-                        limit=candidate_limit,
-                        visible_project_ids=self.readable_project_ids,
-                    )
+                embedding = await self.embedding_service.encode_query(variant)
+                matches = await self.knowledge_store.search_project_episodes_by_embedding(
+                    embedding,
+                    user_name=self.user_name,
+                    project_id=self.project_id,
+                    limit=candidate_limit,
+                    score_threshold=score_threshold,
+                    visible_project_ids=self.readable_project_ids,
+                    **date_range,
                 )
             except Exception as exc:
                 logger.warning(
                     "Episode semantic search unavailable; using lexical results: {}",
                     exc,
                 )
+                continue
+            semantic_matches.extend(matches)
+            channels.append([episode for episode, _ in matches])
 
         scores = {}
         by_id = {}
-        for channel in (lexical, [episode for episode, _ in semantic_matches]):
+        for channel in channels:
             seen = set()
             for rank, episode in enumerate(channel, start=1):
                 key = episode.episode_id
@@ -290,16 +312,14 @@ class KnowledgeRetrieval:
             metrics: Dict[str, int | float] = {}
             serialized = await self._serialize_episodes(
                 episodes,
-                similarity_by_episode={
-                    episode.episode_id: score for episode, score in semantic_matches
-                },
+                similarity_by_episode=self._best_similarity(semantic_matches),
                 metrics=metrics,
             )
             strategy = (
                 "hybrid"
-                if lexical and semantic_matches
+                if lexical_found and semantic_matches
                 else "lexical"
-                if lexical
+                if lexical_found
                 else "semantic"
             )
             await self._emit_episode_retrieval(
@@ -315,6 +335,12 @@ class KnowledgeRetrieval:
                 "results": [{"query": query, "episodes": serialized}],
             }
 
+        if date_range:
+            # Raw message search cannot honor the range.
+            return {"resolution": "no_episodes_in_range", "results": []}
+        if not raw_fallback:
+            return {"resolution": "no_episodes", "results": []}
+
         fallback = await self.search_messages(query, session_id=session_id)
         await self._emit_episode_retrieval(
             session_id=session_id,
@@ -325,6 +351,52 @@ class KnowledgeRetrieval:
             metrics={"used_raw_message_fallback": 1},
         )
         return {"resolution": "fallback", "results": fallback}
+
+    def _episode_queries(
+        self, query: str, alternate_queries: Optional[List[str]]
+    ) -> List[str]:
+        """The query first, then distinct rewordings up to the configured count."""
+
+        queries: Dict[str, str] = {query.strip().casefold(): query}
+        for alternate in alternate_queries or []:
+            text = alternate.strip() if isinstance(alternate, str) else ""
+            if text:
+                queries.setdefault(text.casefold(), text)
+        return list(queries.values())[: self._search_settings.episode_max_queries]
+
+    @staticmethod
+    def _best_similarity(matches: List[tuple]) -> Dict[str, float]:
+        best: Dict[str, float] = {}
+        for episode, score in matches:
+            best[episode.episode_id] = max(score, best.get(episode.episode_id, score))
+        return best
+
+    @staticmethod
+    def _episode_date_range(
+        after: Optional[str], before: Optional[str]
+    ) -> Dict[str, datetime]:
+        """Read inclusive date bounds; a bare date covers that whole UTC day."""
+
+        def bound(value: str, name: str, *, day_end: bool) -> datetime:
+            text = value.strip()
+            try:
+                parsed = datetime.fromisoformat(text)
+            except ValueError as exc:
+                raise ValueError(f"{name} must be an ISO date such as 2023-05-20") from exc
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            if day_end and len(text) == 10:
+                parsed += timedelta(days=1) - timedelta(microseconds=1)
+            return parsed
+
+        date_range: Dict[str, datetime] = {}
+        if after:
+            date_range["after"] = bound(after, "after", day_end=False)
+        if before:
+            date_range["before"] = bound(before, "before", day_end=True)
+        if len(date_range) == 2 and date_range["after"] > date_range["before"]:
+            raise ValueError("after must not be later than before")
+        return date_range
 
     async def read_episode(self, episode_id: str, *, session_id: str) -> List[Dict]:
         session_id = require_scope_value(
@@ -364,19 +436,35 @@ class KnowledgeRetrieval:
             for source in sources
         ]
 
-    async def read_recent_episodes(self, *, session_id: str, limit: int = 2) -> Dict:
+    async def read_recent_episodes(
+        self,
+        *,
+        session_id: str,
+        limit: int = 2,
+        after: Optional[str] = None,
+        before: Optional[str] = None,
+        offset: int = 0,
+    ) -> Dict:
         session_id = require_scope_value(
             session_id, "session_id", "KnowledgeRetrieval.read_recent_episodes"
         )
         limit = self._positive_int(limit, "read_recent_episodes limit")
         effective_limit = min(limit, DEFAULT_EPISODE_RETRIEVAL_LIMIT)
+        if offset < 0:
+            raise ValueError("offset must not be negative")
+        date_range = self._episode_date_range(after, before)
         started_at = perf_counter()
+        # One extra row says whether another page exists.
         episodes = await self.knowledge_store.get_recent_project_episodes(
             user_name=self.user_name,
             project_id=self.project_id,
-            limit=effective_limit,
+            limit=effective_limit + 1,
+            offset=offset,
             visible_project_ids=self.readable_project_ids,
+            **date_range,
         )
+        has_more = len(episodes) > effective_limit
+        episodes = episodes[:effective_limit]
         metrics: Dict[str, int | float] = {}
         serialized = await self._serialize_episodes(episodes, metrics=metrics)
         await self._emit_episode_retrieval(
@@ -389,6 +477,8 @@ class KnowledgeRetrieval:
         )
         return {
             "resolution": "recent",
+            "has_more": has_more,
+            "next_offset": offset + effective_limit if has_more else None,
             "results": [
                 {
                     "query": f"{effective_limit} most recent episodes by source chronology",
@@ -877,6 +967,7 @@ class KnowledgeRetrieval:
                 "entities": [
                     {
                         "entity_id": entity.entity_id,
+                        "name": entity.name,
                         "source_message_count": entity.source_message_count,
                         "first_seen_at": entity.first_seen_at.isoformat()
                         if entity.first_seen_at
@@ -890,6 +981,9 @@ class KnowledgeRetrieval:
                 "relationships": [
                     {
                         "relationship_id": relationship.relationship_id,
+                        "source": relationship.source,
+                        "relationship_type": relationship.relationship_type,
+                        "target": relationship.target,
                         "source_message_count": relationship.source_message_count,
                     }
                     for relationship in episode.relationships

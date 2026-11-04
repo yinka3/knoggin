@@ -1,6 +1,6 @@
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Dict, Iterable, Optional
+from typing import Dict, Iterable, List, Optional
 
 from common.conf.domain_config import CompiledDomain
 from common.exceptions import ToolExecutionError
@@ -60,7 +60,10 @@ _PREVIOUS_NOTEBOOK_PAGE_RUNTIME_INSTRUCTION = (
 _EPISODE_CHECK_RUNTIME_INSTRUCTION = (
     "[SYSTEM NOTICE: Use search_episodes for remembered history, decisions, or "
     "developments. It returns compact, evidence-backed summaries; inspect the "
-    "returned provenance when exact or sensitive detail matters.]"
+    "returned provenance when exact or sensitive detail matters. Memories use the "
+    "words of the original chat, which may differ from the question: when the "
+    "question is vague or a search misses, pass alternate_queries in the same call "
+    "instead of searching again one wording at a time.]"
 )
 _READ_EPISODE_RUNTIME_INSTRUCTION = (
     "[SYSTEM NOTICE: Use read_episode_messages with an episode handle returned in this "
@@ -732,9 +735,26 @@ class Tools(
             entity_id, session_id=self.session_id, hours=hours
         )
 
-    async def search_episodes(self, query: str, entity_id: Optional[int] = None):
+    async def search_episodes(
+        self,
+        query: str,
+        entity_id: Optional[int] = None,
+        after: Optional[str] = None,
+        before: Optional[str] = None,
+        alternate_queries: Optional[List[str]] = None,
+    ):
         return await self.knowledge_retrieval.episode_check(
-            query, session_id=self.session_id, entity_id=entity_id
+            query,
+            alternate_queries=alternate_queries,
+            session_id=self.session_id,
+            entity_id=entity_id,
+            after=after,
+            before=before,
+            # A run without message search must not get raw messages this way.
+            raw_fallback=(
+                self.tool_authorization is None
+                or "search_knowledge_messages" in self.tool_authorization.allowed_tools
+            ),
         )
 
     async def read_episode_messages(self, episode_id: str):
@@ -742,10 +762,19 @@ class Tools(
             episode_id, session_id=self.session_id
         )
 
-    async def read_recent_episodes(self, limit: int = 2):
+    async def read_recent_episodes(
+        self,
+        limit: int = 2,
+        after: Optional[str] = None,
+        before: Optional[str] = None,
+        offset: int = 0,
+    ):
         return await self.knowledge_retrieval.read_recent_episodes(
             session_id=self.session_id,
             limit=limit,
+            after=after,
+            before=before,
+            offset=offset,
         )
 
     async def find_relationship_path(self, entity_a_id: int, entity_b_id: int):

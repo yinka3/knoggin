@@ -116,7 +116,7 @@ def build_user_message(
                         "(See accumulated notebook below)\n"
                     )
                 else:
-                    msg += _empty_retrieval_guidance(tool)
+                    msg += _empty_retrieval_guidance(tool, _enabled_tools(ctx))
             elif tool in (
                 "search_knowledge_messages",
                 "search_knowledge_entities",
@@ -137,7 +137,7 @@ def build_user_message(
                         "(See accumulated notebook below)\n"
                     )
                 else:
-                    msg += _empty_retrieval_guidance(tool)
+                    msg += _empty_retrieval_guidance(tool, _enabled_tools(ctx))
             elif tool == "read_relationship_observation_evidence":
                 if isinstance(data, dict) and data.get("subject"):
                     msg += (
@@ -145,7 +145,7 @@ def build_user_message(
                         "(See accumulated notebook below)\n"
                     )
                 else:
-                    msg += _empty_retrieval_guidance(tool)
+                    msg += _empty_retrieval_guidance(tool, _enabled_tools(ctx))
             elif tool == "load_project_topic_context":
                 topic_context = data if isinstance(data, dict) else {}
                 if topic_context:
@@ -155,9 +155,9 @@ def build_user_message(
                         f"{format_topic_context(topic_context)}\n"
                     )
                 else:
-                    msg += _empty_retrieval_guidance(tool)
+                    msg += _empty_retrieval_guidance(tool, _enabled_tools(ctx))
             elif not data:
-                msg += _empty_retrieval_guidance(tool)
+                msg += _empty_retrieval_guidance(tool, _enabled_tools(ctx))
             else:
                 msg += f"- `{tool}`: {json.dumps(data, indent=2, default=str)}\n"
 
@@ -185,18 +185,60 @@ def format_conversation_history(ctx: AgentRun) -> str:
     return "".join(lines)
 
 
-def _empty_retrieval_guidance(tool: str) -> str:
-    alternatives = {
-        "search_episodes": "messages, entities, or documents",
-        "read_recent_episodes": "messages or recent activity",
-        "search_knowledge_messages": "Episodes, entities, or documents",
-        "search_knowledge_entities": "messages, Episodes, or documents",
-        "search_project_documents": "messages, Episodes, or entities",
-        "search_web": "a simpler query, synonyms, or project sources",
-        "search_news": "a broader date range, synonyms, or web search",
-        "read_web_page": "another discovered source",
-    }
-    alternative = alternatives.get(tool, "another retrieval surface")
+def _enabled_tools(ctx: AgentRun) -> frozenset[str] | None:
+    runtime = getattr(ctx, "tool_runtime", None)
+    permissions = getattr(runtime, "permissions", None)
+    allowed = getattr(permissions, "allowed_tools", None)
+    return allowed if isinstance(allowed, frozenset) else None
+
+
+# Where to look next after an empty result, and the tool each place needs.
+_EMPTY_RESULT_ALTERNATIVES = {
+    "search_episodes": (
+        ("messages", "search_knowledge_messages"),
+        ("entities", "search_knowledge_entities"),
+        ("documents", "search_project_documents"),
+    ),
+    "read_recent_episodes": (
+        ("messages", "search_knowledge_messages"),
+        ("recent activity", "get_entity_recent_activity"),
+    ),
+    "search_knowledge_messages": (
+        ("Episodes", "search_episodes"),
+        ("entities", "search_knowledge_entities"),
+        ("documents", "search_project_documents"),
+    ),
+    "search_knowledge_entities": (
+        ("messages", "search_knowledge_messages"),
+        ("Episodes", "search_episodes"),
+        ("documents", "search_project_documents"),
+    ),
+    "search_project_documents": (
+        ("messages", "search_knowledge_messages"),
+        ("Episodes", "search_episodes"),
+        ("entities", "search_knowledge_entities"),
+    ),
+}
+_EMPTY_RESULT_TEXT = {
+    "search_web": "a simpler query, synonyms, or project sources",
+    "search_news": "a broader date range, synonyms, or web search",
+    "read_web_page": "another discovered source",
+}
+
+
+def _empty_retrieval_guidance(tool: str, enabled_tools: frozenset[str] | None = None) -> str:
+    """Suggest only places this run can actually look."""
+
+    places = [
+        label
+        for label, needed in _EMPTY_RESULT_ALTERNATIVES.get(tool, ())
+        if enabled_tools is None or needed in enabled_tools
+    ]
+    alternative = (
+        _EMPTY_RESULT_TEXT.get(tool)
+        or (", ".join(places[:-1]) + " or " + places[-1] if len(places) > 1 else "".join(places))
+        or "another retrieval surface"
+    )
     return (
         f"- `{tool}`: No results found on this retrieval surface. "
         f"Simplify or paraphrase the query, or try {alternative}. If the "

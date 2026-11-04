@@ -29,11 +29,8 @@ def test_episode_generation_prompt_renders_window_source_limits():
         max_narrative_chars=4000,
         max_episode_source_messages=72,
         max_episode_source_tokens=12000,
-        max_proposals=11,
     )
 
-    assert "zero to 11" in prompt
-    assert "at most 11 new-episode proposals" in prompt
     assert "Ada" in prompt
     assert "3600" in prompt
     assert "4000" in prompt

@@ -117,7 +117,6 @@ class EpisodeGenerator:
                     max_narrative_chars=policy.max_narrative_chars,
                     max_episode_source_messages=policy.max_episode_source_messages,
                     max_episode_source_tokens=policy.max_episode_source_tokens,
-                    max_proposals=build.max_proposals,
                 ),
                 user=build.evidence_brief(),
                 temperature=0.0,

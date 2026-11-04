@@ -41,7 +41,6 @@ PIPELINE_PROMPTS: Dict[str, PromptDefinition] = {
                 "prompt_narrative_chars",
                 "max_narrative_chars",
                 "max_episode_source_messages",
-                "max_proposals",
                 "max_episode_source_tokens",
             }
         ),

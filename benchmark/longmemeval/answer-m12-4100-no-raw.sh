@@ -60,7 +60,7 @@ PY
     --ids-file "$out_root/question-ids.json" \
     --out "$out" --model "$model" \
     --source-run-name haiku-sonnet-broad-batch10-next12 \
-    --no-message-tools > "$out/run.log" 2>&1
+    --no-message-search > "$out/run.log" 2>&1
   test -s "$out/hypotheses.jsonl" || {
     echo "$model did not save an answer; inspect $out/run.log" >&2
     exit 1

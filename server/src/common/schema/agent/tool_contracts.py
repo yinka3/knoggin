@@ -379,10 +379,10 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "search_episodes",
             "description": (
-                "Retrieve contextual episodic memory about a specific entity, including "
-                "compact summaries and provenance references. Use read_episode_messages when the "
-                "original source messages are needed. Results are contextual memory, not "
-                "atomic claims."
+                "Search episodic memory by topic, optionally narrowed to one entity. Returns "
+                "compact summaries with their dates, entities and relationships. Summaries "
+                "can omit details: use read_episode_messages to read an Episode's original "
+                "source messages. Results are contextual memory, not atomic claims."
             ),
             "parameters": {
                 "type": "object",
@@ -395,6 +395,31 @@ TOOL_SCHEMAS = [
                         "type": "string",
                         "minLength": 1,
                         "description": "A natural language hint describing what you're looking for.",
+                    },
+                    "alternate_queries": {
+                        "type": "array",
+                        "items": {"type": "string", "minLength": 1},
+                        "maxItems": 3,
+                        "description": (
+                            "Optional rewordings searched together with query, with one merged "
+                            "result. Use other words the original chat may have used: synonyms, "
+                            "specific names or things, or a broader topic. For example, for "
+                            "'what did I buy for the kitchen' also try 'new kitchen gadget' and "
+                            "'air fryer blender purchase'. These only help find memories; they "
+                            "are not evidence."
+                        ),
+                    },
+                    "after": {
+                        "type": "string",
+                        "description": (
+                            "Optional earliest date, such as 2023-05-20. Use with before only "
+                            "when the question names a time. Work relative times out from the "
+                            "current time, and allow a day either side when they are vague."
+                        ),
+                    },
+                    "before": {
+                        "type": "string",
+                        "description": "Optional latest date, inclusive, such as 2023-05-27.",
                     },
                 },
                 "required": ["query"],
@@ -481,9 +506,9 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "read_recent_episodes",
             "description": (
-                "Return the most recent episode summaries by source chronology from "
-                "readable project memory without searching or requiring an episode ID. Use for "
-                "requests such as 'what was the last episode?' or 'show the last few memories'."
+                "Browse episodes newest first without searching or requiring an episode ID, "
+                "optionally within a date range. Use for requests such as 'what was the last "
+                "episode?', 'show the last few memories' or 'what happened on May 20?'."
             ),
             "parameters": {
                 "type": "object",
@@ -496,7 +521,21 @@ TOOL_SCHEMAS = [
                             "Optional number of recent episodes to return; defaults to 2 "
                             "and is bounded by the configured episode retrieval limit."
                         ),
-                    }
+                    },
+                    "after": {
+                        "type": "string",
+                        "description": "Optional earliest date, such as 2023-05-20.",
+                    },
+                    "before": {
+                        "type": "string",
+                        "description": "Optional latest date, inclusive, such as 2023-05-27.",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "default": 0,
+                        "description": "Episodes to skip; use next_offset from the last result.",
+                    },
                 },
                 "required": [],
             },

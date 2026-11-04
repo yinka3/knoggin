@@ -173,6 +173,10 @@ class SearchSettings(ConfigModel):
     default_message_limit: int = Field(8, ge=1)
     default_entity_limit: int = Field(5, ge=1)
     default_activity_hours: int = Field(24, ge=1)
+    # Below this an Episode is only vaguely related, and it crowds out real hits.
+    episode_similarity_threshold: float = Field(0.5, ge=0.0, le=1.0)
+    # The query plus rewordings one Episode search may run.
+    episode_max_queries: int = Field(4, ge=1, le=10)
 
 
 class EntityResolutionSettings(ConfigModel):

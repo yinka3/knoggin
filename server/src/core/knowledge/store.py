@@ -1041,12 +1041,18 @@ class KnowledgeStore:
         project_id: str,
         limit: int,
         visible_project_ids: Optional[List[str]] = None,
+        after: Optional[datetime] = None,
+        before: Optional[datetime] = None,
+        offset: int = 0,
     ) -> List[EpisodeCard]:
         return await self._episode_reader.get_recent_project_episodes(
             user_name=user_name,
             project_id=project_id,
             limit=limit,
             visible_project_ids=visible_project_ids,
+            after=after,
+            before=before,
+            offset=offset,
         )
 
     async def search_project_episodes(
@@ -1057,6 +1063,8 @@ class KnowledgeStore:
         project_id: str,
         limit: int,
         visible_project_ids: Optional[List[str]] = None,
+        after: Optional[datetime] = None,
+        before: Optional[datetime] = None,
     ) -> List[EpisodeCard]:
         return await self._episode_reader.search_project_episodes(
             query,
@@ -1064,6 +1072,8 @@ class KnowledgeStore:
             project_id=project_id,
             limit=limit,
             visible_project_ids=visible_project_ids,
+            after=after,
+            before=before,
         )
 
     async def search_project_episodes_by_embedding(
@@ -1073,8 +1083,10 @@ class KnowledgeStore:
         user_name: str,
         project_id: str,
         limit: int = 10,
-        score_threshold: float = 0.35,
+        score_threshold: float,
         visible_project_ids: Optional[List[str]] = None,
+        after: Optional[datetime] = None,
+        before: Optional[datetime] = None,
     ) -> List[tuple[EpisodeCard, float]]:
         return await self._episode_reader.search_project_episodes_by_embedding(
             embedding,
@@ -1083,6 +1095,8 @@ class KnowledgeStore:
             limit=limit,
             score_threshold=score_threshold,
             visible_project_ids=visible_project_ids,
+            after=after,
+            before=before,
         )
 
     async def get_project_episode_source_messages(
@@ -1112,6 +1126,8 @@ class KnowledgeStore:
         project_id: str,
         limit: int,
         visible_project_ids: Optional[List[str]] = None,
+        after: Optional[datetime] = None,
+        before: Optional[datetime] = None,
     ) -> List[EpisodeCard]:
         return await self._episode_reader.get_project_episodes_for_entities(
             entity_ids,
@@ -1119,6 +1135,8 @@ class KnowledgeStore:
             project_id=project_id,
             limit=limit,
             visible_project_ids=visible_project_ids,
+            after=after,
+            before=before,
         )
 
     # Entity, graph, and evidence retrieval
