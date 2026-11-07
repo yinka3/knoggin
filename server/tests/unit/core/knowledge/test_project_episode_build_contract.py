@@ -255,3 +255,92 @@ def test_every_distinct_topic_in_a_window_can_get_its_own_episode():
 
     assert len(decisions) == 40
     assert build.rejected_proposals == []
+
+
+def _event(**overrides):
+    event = {
+        "what": "Ada took a day hike at Muir Woods with family",
+        "kind": "trip",
+        "start_date": "2023-03-10",
+        "precision": "day",
+        "date_text": "just got back",
+        "sources": ["message:1"],
+    }
+    event.update(overrides)
+    return event
+
+
+def _apply_events(*events, influences=("message:1", "message:2")):
+    build = _build()
+    build.prepare_local_references()
+    build.apply_llm_output(
+        LLMEpisodeWindowDecision(
+            proposals=[
+                LLMEpisodeDecision(
+                    summary="Ada asked about backpacks.",
+                    message_influences=list(influences),
+                    events=list(events),
+                )
+            ]
+        )
+    )
+    return build
+
+
+def test_episode_keeps_events_from_its_own_messages_with_resolved_sources():
+    build = _apply_events(_event())
+
+    episode = build.create_episodes()[0]
+
+    assert len(episode.events) == 1
+    event = episode.events[0]
+    assert event.what == "Ada took a day hike at Muir Woods with family"
+    assert event.kind == "trip"
+    assert str(event.start_date) == "2023-03-10" and str(event.end_date) == "2023-03-10"
+    assert event.source_message_ids == [10]
+
+
+def test_event_citing_a_message_outside_its_episode_is_dropped_not_the_episode():
+    build = _apply_events(_event(), _event(what="Budget approved", sources=["message:3"]))
+
+    episode = build.create_episodes()[0]
+
+    assert [event.what for event in episode.events] == [
+        "Ada took a day hike at Muir Woods with family"
+    ]
+    assert any("event" in reason for reason in build.rejected_proposals)
+
+
+def test_vague_dates_stay_a_range_and_unknown_kinds_become_other():
+    build = _apply_events(
+        _event(
+            kind="volunteered",
+            start_date="2023-02-01",
+            end_date="2023-02-28",
+            precision="month",
+            date_text="back in February",
+        )
+    )
+
+    event = build.create_episodes()[0].events[0]
+
+    assert event.kind == "other"
+    assert (str(event.start_date), str(event.end_date)) == ("2023-02-01", "2023-02-28")
+    assert event.precision == "month" and event.date_text == "back in February"
+
+
+def test_event_with_an_unreadable_date_keeps_no_date():
+    build = _apply_events(_event(start_date="sometime", precision="approximate"))
+
+    event = build.create_episodes()[0].events[0]
+
+    assert event.start_date is None and event.end_date is None
+    assert event.precision == "unknown"
+
+
+def test_malformed_event_is_dropped_without_losing_the_episode():
+    build = _apply_events({"kind": "trip", "sources": ["message:1"]})
+
+    episodes = build.create_episodes()
+
+    assert len(episodes) == 1 and episodes[0].events == []

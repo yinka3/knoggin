@@ -43,6 +43,34 @@ at most {max_episode_source_tokens} estimated source tokens.
   contextual account grounded in the window.
 </decision_rules>
 
+<events>
+- Give every proposal an `events` list: things {user_name} or a named person
+  reports actually doing or having happen to them, such as a trip, a purchase,
+  something received, an event attended, something started or finished, a move,
+  or a meeting. Take them from every message in the proposal, including passing
+  mentions unrelated to its main topic ("by the way, I just got back from a
+  hike"). The summary may leave a passing mention out; the event keeps it.
+- Only events that happened. Plans, wishes, tickets for a future date,
+  something only considered, and the assistant's suggestions are not events.
+- `what`: one short line that names who did it, using {user_name} by name.
+- `kind`: trip, purchase, received, attended, started, finished, moved, met, or
+  other. Pick the one the words support: a gift is received, not a purchase;
+  any outing away from home, including a day trip, is a trip; use other when
+  none fits.
+- `start_date` and `end_date` (YYYY-MM-DD): when it happened, worked out from the
+  message's `sent=` time and its wording. "Today" or "just" is the sent date;
+  "last weekend" is that weekend; "back in February" is the whole of February.
+  Vague recent wording ("recently", "lately", "a few weeks ago") is an
+  approximate range ending on the sent date, such as the month before it.
+  Never invent a day the words do not give; leave both empty only when nothing
+  says when.
+- `precision`: day, week, month, approximate, or unknown. `date_text`: the
+  wording about when, copied as written, such as "back in February"; do not
+  add your own reading of it.
+- `sources`: the `message:N` handles in this proposal that report it.
+- Events do not count toward the narrative character limit.
+</events>
+
 <output_contract>
 Return exactly the structured response requested by the schema: an array named
 `proposals`, containing the new-episode proposals.
@@ -51,7 +79,8 @@ For every proposal:
 - provide `summary` and exactly one `message_influences` item for every
   `message:N` assigned to that proposal, and no unassigned `message:N`
   references;
-- keep the proposal within both source limits above.
+- keep the proposal within both source limits above;
+- give `events` (an empty list when there are none).
 
 Do not emit individual skip proposals; use an empty `proposals` array when the
 window has no episodic memory to retain.

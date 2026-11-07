@@ -1076,6 +1076,9 @@ class KnowledgeStore:
             before=before,
         )
 
+    async def list_project_events(self, **kwargs) -> List[Dict]:
+        return await self._episode_reader.list_project_events(**kwargs)
+
     async def search_project_episodes_by_embedding(
         self,
         embedding: List[float],

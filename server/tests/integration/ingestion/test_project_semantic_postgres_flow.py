@@ -5,6 +5,7 @@ publication, stage checkpoints, Knowledge commit, finalization, and Context
 projection all use their production implementations.
 """
 
+from datetime import datetime, timezone
 import asyncio
 from types import SimpleNamespace
 
@@ -128,6 +129,24 @@ class _OneEpisodeGenerator:
                     LLMEpisodeDecision(
                         summary="Both sessions asked for shared project Context.",
                         message_influences=list(build.message_ids_by_local),
+                        events=[
+                            {
+                                "what": "The user started the project Context",
+                                "kind": "started",
+                                "start_date": "2023-03-10",
+                                "precision": "day",
+                                "date_text": "today",
+                                "sources": ["message:1"],
+                            },
+                            {
+                                "what": "The user hiked a nearby trail",
+                                "kind": "other",
+                                "start_date": "2023-03-12",
+                                "precision": "day",
+                                "date_text": "Sunday",
+                                "sources": ["message:1"],
+                            },
+                        ],
                     )
                 ]
             )
@@ -678,6 +697,24 @@ async def test_project_semantic_processor_uses_real_storage_for_agent_derived_co
         "Semantic processor completed durable stages: "
         "Episode -> Context -> Knowledge -> finalization"
     )
+
+    events = await store.list_project_events(
+        user_name=user_name,
+        project_id=project_id,
+        after=datetime(2023, 3, 1, tzinfo=timezone.utc),
+        before=datetime(2023, 3, 31, tzinfo=timezone.utc),
+        limit=25,
+    )
+    assert [(e["what"], e["kind"], str(e["start_date"]), e["in_range"]) for e in events] == [
+        ("The user started the project Context", "started", "2023-03-10", "inside"),
+        ("The user hiked a nearby trail", "other", "2023-03-12", "inside"),
+    ]
+    assert events[0]["source_message_ids"] == [101]
+    # A kind is the model's guess, so events it could not label stay visible.
+    by_kind = await store.list_project_events(
+        user_name=user_name, project_id=project_id, kind="trip", limit=25
+    )
+    assert [e["what"] for e in by_kind] == ["The user hiked a nearby trail"]
 
     revision = await ProjectContextReader(postgres).get_current_revision(
         user_name=user_name,

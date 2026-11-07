@@ -2,10 +2,10 @@
 
 import math
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from common.embedding_contract import EMBEDDING_DIMENSION
 from common.utils.time_utils import get_now
@@ -46,6 +46,52 @@ class EpisodeNarrative(BaseModel):
             raise EpisodeNarrativeLimitError(
                 f"episode narrative is {count} characters; limit is {maximum}"
             )
+
+
+EVENT_KINDS = (
+    "trip", "purchase", "received", "attended", "started", "finished", "moved",
+    "met", "other",
+)
+EVENT_PRECISIONS = ("day", "week", "month", "approximate", "unknown")
+
+
+class EpisodeEvent(BaseModel):
+    """Something that happened, as one source message reports it.
+
+    A row is one mention, not a deduplicated fact: the same trip mentioned in
+    two chats is two events. Dates are when it happened, as a range when the
+    wording is vague; the mention time stays on the source message.
+    """
+
+    what: str = Field(..., min_length=1)
+    kind: str = "other"
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    precision: str = "unknown"
+    date_text: Optional[str] = None
+    source_message_ids: List[int] = Field(..., min_length=1)
+
+    @field_validator("kind")
+    @classmethod
+    def known_kind(cls, value: str) -> str:
+        value = (value or "").strip().lower()
+        return value if value in EVENT_KINDS else "other"
+
+    @field_validator("precision")
+    @classmethod
+    def known_precision(cls, value: str) -> str:
+        value = (value or "").strip().lower()
+        return value if value in EVENT_PRECISIONS else "unknown"
+
+    @model_validator(mode="after")
+    def ordered_range(self) -> "EpisodeEvent":
+        if self.start_date is None and self.end_date is None:
+            self.precision = "unknown"
+        elif self.start_date is None or self.end_date is None:
+            self.start_date = self.end_date = self.start_date or self.end_date
+        elif self.end_date < self.start_date:
+            self.start_date, self.end_date = self.end_date, self.start_date
+        return self
 
 
 class MessageEpisode(BaseModel):
@@ -90,6 +136,7 @@ class Episode(EpisodeNarrative):
     messages: List[MessageEpisode] = Field(..., min_length=1)
     entities: List[EntityEpisode] = Field(default_factory=list)
     relationships: List[RelationshipEpisode] = Field(default_factory=list)
+    events: List[EpisodeEvent] = Field(default_factory=list)
     # Automation must never silently replace an episode that a person curated.
     user_modified: bool = False
     created_at: datetime = Field(default_factory=get_now)

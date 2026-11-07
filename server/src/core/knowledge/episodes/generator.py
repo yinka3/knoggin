@@ -144,6 +144,15 @@ class EpisodeGenerator:
                     raise ValueError(
                         "episode narrative repair changed proposal source references"
                     )
+                # Repair only shortens prose; events pass through unchanged.
+                repaired = repaired.model_copy(
+                    update={
+                        "proposals": [
+                            after.model_copy(update={"events": before.events})
+                            for before, after in zip(output.proposals, repaired.proposals)
+                        ]
+                    }
+                )
                 build.apply_llm_output(repaired)
             for reason in build.rejected_proposals:
                 logger.warning("Dropped invalid Episode proposal: {}", reason)

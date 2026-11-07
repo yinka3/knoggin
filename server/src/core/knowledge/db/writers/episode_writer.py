@@ -426,6 +426,7 @@ class EpisodeWriter:
         timestamps = {int(row["message_id"]): row.get("timestamp_ms") for row in rows}
         await self._insert_semantic_episode(cur, episode, timestamps)
         await self._insert_messages(cur, episode)
+        await self._insert_events(cur, episode)
 
     @staticmethod
     async def _insert_semantic_episode(
@@ -496,6 +497,33 @@ class EpisodeWriter:
         )
         if await cur.fetchone() is None:
             raise ValueError("Finalized episode identities cannot be reused")
+
+    @staticmethod
+    async def _insert_events(cur, episode: Episode) -> None:
+        sources = {item.message_id for item in episode.messages}
+        for ordinal, event in enumerate(episode.events):
+            if not set(event.source_message_ids).issubset(sources):
+                raise ValueError("Episode events must cite the Episode's own messages")
+            await cur.execute(
+                """
+                INSERT INTO episode_events (
+                    episode_id, project_id, ordinal, what, kind, start_date,
+                    end_date, precision, date_text, source_message_ids
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    episode.episode_id,
+                    episode.project_id,
+                    ordinal,
+                    event.what,
+                    event.kind,
+                    event.start_date,
+                    event.end_date,
+                    event.precision,
+                    event.date_text,
+                    event.source_message_ids,
+                ),
+            )
 
     @staticmethod
     async def _insert_messages(cur, episode: Episode) -> None:

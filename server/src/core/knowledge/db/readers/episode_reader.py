@@ -117,6 +117,73 @@ class EpisodeReader:
         )
         return [await self._hydrate_episode_card(row) for row in rows]
 
+    async def list_project_events(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        limit: int,
+        offset: int = 0,
+        visible_project_ids: Optional[List[str]] = None,
+        after: Optional[datetime] = None,
+        before: Optional[datetime] = None,
+        kind: Optional[str] = None,
+        query: Optional[str] = None,
+    ) -> List[Dict]:
+        """List event mentions by when they happened.
+
+        With a date range, an event whose range only partly overlaps it is
+        returned as "overlaps"; undated events are left out. A kind filter
+        also returns events labeled other.
+        """
+
+        if limit <= 0:
+            return []
+        user_name, visible_project_ids = self._project_scope(
+            user_name, project_id, visible_project_ids, "list_project_events"
+        )
+        start = after.date() if after is not None else None
+        end = before.date() if before is not None else None
+        where, params = "", []
+        if start is not None:
+            where += " AND ev.end_date >= %s"
+            params.append(start)
+        if end is not None:
+            where += " AND ev.start_date <= %s"
+            params.append(end)
+        if kind:
+            # A kind is the model's guess; events it labeled other may still fit.
+            where += " AND ev.kind IN (%s, 'other')"
+            params.append(kind.strip().lower())
+        if query and query.strip():
+            # Any important word may match, as in Episode keyword search.
+            where += (
+                " AND to_tsvector('english', ev.what || ' ' || coalesce(ev.date_text, ''))"
+                " @@ replace(plainto_tsquery('english', %s)::text, '&', '|')::tsquery"
+            )
+            params.append(query)
+        rows = await self.client.fetch_all(
+            f"""
+            SELECT ev.episode_id, ev.what, ev.kind, ev.start_date, ev.end_date,
+                   ev.precision, ev.date_text, ev.source_message_ids,
+                   CASE WHEN (%s::date IS NULL OR ev.start_date >= %s::date)
+                         AND (%s::date IS NULL OR ev.end_date <= %s::date)
+                        THEN 'inside' ELSE 'overlaps' END AS in_range
+            FROM episode_events ev
+            JOIN episodes e ON e.episode_id = ev.episode_id
+            JOIN projects p ON p.project_id = e.project_id
+            WHERE e.project_id = ANY(%s) AND p.user_name = %s {where}
+            ORDER BY ev.start_date NULLS LAST, e.first_message_at NULLS LAST,
+                     ev.episode_id, ev.ordinal
+            LIMIT %s OFFSET %s
+            """,
+            (start, start, end, end, visible_project_ids, user_name, *params, limit, offset),
+        )
+        return [
+            {**row, "source_message_ids": [int(i) for i in row["source_message_ids"]]}
+            for row in rows
+        ]
+
     async def search_project_episodes_by_embedding(
         self,
         embedding: List[float],

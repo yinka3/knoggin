@@ -17,6 +17,7 @@ from common.schema.episode.generation import (
 )
 from common.schema.episode.models import (
     Episode,
+    EpisodeEvent,
     EpisodeNarrativeLimitError,
     MessageEpisode,
 )
@@ -106,13 +107,15 @@ class ProjectEpisodeBuild:
             # One invalid proposal must not discard the valid ones or fail the
             # whole window; its messages simply get no Episode this time.
             try:
+                influences = [
+                    int(resolve_local_id(item, self.message_ids_by_local))
+                    for item in proposal.message_influences
+                ]
                 decision = EpisodeDecision.model_validate(
                     {
-                        **proposal.model_dump(),
-                        "message_influences": [
-                            int(resolve_local_id(item, self.message_ids_by_local))
-                            for item in proposal.message_influences
-                        ],
+                        **proposal.model_dump(exclude={"events"}),
+                        "message_influences": influences,
+                        "events": self._resolve_events(index, proposal.events, influences),
                     }
                 )
                 # Narrative overflow is repaired by the generator, not dropped.
@@ -139,6 +142,31 @@ class ProjectEpisodeBuild:
             decisions.append(decision)
         self.decisions = decisions
         return decisions
+
+    def _resolve_events(
+        self, index: int, events: list, influences: list[int]
+    ) -> list[EpisodeEvent]:
+        """Keep events whose sources are this Episode's own messages."""
+
+        kept = []
+        for number, event in enumerate(events, start=1):
+            try:
+                sources = [
+                    int(resolve_local_id(item, self.message_ids_by_local))
+                    for item in event.sources
+                ]
+                if not set(sources).issubset(influences):
+                    raise ValueError("cites a message outside its Episode")
+                kept.append(
+                    EpisodeEvent.model_validate(
+                        {**event.model_dump(exclude={"sources"}), "source_message_ids": sources}
+                    )
+                )
+            except ValueError as exc:
+                self.rejected_proposals.append(
+                    f"proposal {index + 1} event {number}: {exc}"
+                )
+        return kept
 
     def _validate_source_limits(self, source_messages: list[dict[str, Any]]) -> None:
         if not source_messages:
@@ -233,6 +261,7 @@ class ProjectEpisodeBuild:
                     updates=decision.updates,
                     unresolved=decision.unresolved,
                     messages=current,
+                    events=decision.events,
                     generator_metadata={"episode_policy": self.policy.metadata()},
                 )
             )
