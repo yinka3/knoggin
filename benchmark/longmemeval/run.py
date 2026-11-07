@@ -80,6 +80,10 @@ def _args() -> argparse.Namespace:
                              "Episode's own source messages stay readable")
     parser.add_argument("--maintain-every-episodes", type=int,
                         help="run the Context maintainer this often (default: the setting)")
+    parser.add_argument("--notebook-episodes", type=int, default=16,
+                        help="Episodes the agent's notebook holds (benchmark only)")
+    parser.add_argument("--context-max-tokens", type=int,
+                        help="size Context is kept under (default: the setting)")
     parser.add_argument("--settle-timeout", type=float, default=900.0,
                         help="seconds to wait for one session's memory")
     parser.add_argument("--sessions-per-settle", type=int, default=1,
@@ -130,6 +134,8 @@ def _write_config(config_dir: Path, args) -> dict:
         context_overrides["maintain_every_episodes"] = args.maintain_every_episodes
     if args.maintenance_model is not None:
         context_overrides["maintenance_model"] = args.maintenance_model
+    if args.context_max_tokens is not None:
+        context_overrides["max_tokens"] = args.context_max_tokens
     ingestion_overrides = {}
     if context_overrides:
         ingestion_overrides["context"] = context_overrides
@@ -144,6 +150,9 @@ def _write_config(config_dir: Path, args) -> dict:
         episode_overrides["max_episode_source_messages"] = args.episode_source_messages
     if episode_overrides:
         config["developer_settings"]["jobs"]["episode"] = episode_overrides
+    config["developer_settings"]["limits"] = {
+        "max_accumulated_episodes": args.notebook_episodes,
+    }
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "knoggin.yml").write_text(yaml.safe_dump(config))
     return config

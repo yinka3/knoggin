@@ -24,7 +24,7 @@ print(make_conninfo(**{**base, 'dbname': name}))
 PY
 )"
 
-env -u OPENROUTER_API_KEY PREFER_GPU=true EMBEDDING_BACKEND=torch DATABASE_URL="$db_url" \
+env -u OPENROUTER_API_KEY CUDA_VISIBLE_DEVICES=-1 PREFER_GPU=false EMBEDDING_BACKEND=torch DATABASE_URL="$db_url" \
   uv run --env-file ../../.env --package server python run.py \
   --data "$subset" --domain domain-r54.json --out "$out" --resume \
   --extraction-model anthropic/claude-haiku-5.5 \
