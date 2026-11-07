@@ -150,3 +150,33 @@ def test_staging_rejects_invalid_outputs(mutation, error):
                 support_message_ids=(99,), entity_a_id=1, entity_b_id=10,
                 relationship_type="owns",
             )])
+
+
+def test_symmetric_relationship_keeps_each_type_with_its_entity():
+    # Sorting the IDs alone made the commit check reject "Person friend of user".
+    write = RelationshipWrite(
+        support_message_ids=(1,),
+        entity_a_id=100,
+        entity_b_id=1,
+        relationship_type="friend_of",
+        source_type="Person",
+        target_type="Identity",
+        symmetric=True,
+    )
+
+    assert (write.entity_a_id, write.source_type) == (1, "Identity")
+    assert (write.entity_b_id, write.target_type) == (100, "Person")
+
+
+def test_one_way_relationship_keeps_its_direction_and_types():
+    write = RelationshipWrite(
+        support_message_ids=(1,),
+        entity_a_id=100,
+        entity_b_id=1,
+        relationship_type="works_with",
+        source_type="Person",
+        target_type="Identity",
+    )
+
+    assert (write.entity_a_id, write.source_type) == (100, "Person")
+    assert (write.entity_b_id, write.target_type) == (1, "Identity")

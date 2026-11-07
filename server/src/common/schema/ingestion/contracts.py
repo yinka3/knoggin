@@ -220,10 +220,12 @@ class RelationshipWrite:
             raise ValueError(
                 "RelationshipWrite requires distinct positive entity IDs"
             )
-        if self.symmetric:
-            entity_a_id, entity_b_id = sorted((self.entity_a_id, self.entity_b_id))
-            object.__setattr__(self, "entity_a_id", entity_a_id)
-            object.__setattr__(self, "entity_b_id", entity_b_id)
+        if self.symmetric and self.entity_a_id > self.entity_b_id:
+            # Each type belongs to its entity, so they swap together.
+            for first, second in (("entity_a_id", "entity_b_id"), ("source_type", "target_type")):
+                swapped = getattr(self, second), getattr(self, first)
+                object.__setattr__(self, first, swapped[0])
+                object.__setattr__(self, second, swapped[1])
         object.__setattr__(
             self,
             "relationship_type",
