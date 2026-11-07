@@ -232,6 +232,8 @@ class RuntimeResources:
             base_url=llm_config.base_url,
             request_timeout_seconds=llm_config.request_timeout_seconds,
             thinking=llm_config.thinking,
+            planning_thinking_tokens=llm_config.planning_thinking_tokens,
+            step_thinking_tokens=llm_config.step_thinking_tokens,
             trace_logger=trace_logger,
             postgres_client=self.postgres,
         )

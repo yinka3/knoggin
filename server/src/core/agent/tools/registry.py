@@ -59,19 +59,33 @@ _PREVIOUS_NOTEBOOK_PAGE_RUNTIME_INSTRUCTION = (
 
 _EPISODE_CHECK_RUNTIME_INSTRUCTION = (
     "[SYSTEM NOTICE: Use search_episodes for remembered history, decisions, or "
-    "developments. It returns compact, evidence-backed summaries; inspect the "
-    "returned provenance when exact or sensitive detail matters. Memories use the "
-    "words of the original chat, which may differ from the question: when the "
-    "question is vague or a search misses, pass alternate_queries in the same call "
-    "instead of searching again one wording at a time.]"
+    "developments. It returns compact, evidence-backed summaries five at a time; "
+    "for a count or complete list, pass next_offset as offset to see more. Read an "
+    "Episode's source messages with read_episode_messages when exact or "
+    "sensitive detail matters. Memories use the words of the original chat, which "
+    "may differ from the question; pass rewordings as alternate_queries in the "
+    "same call. If a search misses, change the angle instead of adding synonyms: "
+    "search the action (bought, visited, started), the person, the date range, or "
+    "a broader topic, and do not repeat a search that returned the same evidence. "
+    "For a named person, place, or thing, use search_knowledge_entities, then "
+    "search_episodes with its entity_id.]"
 )
 _READ_EPISODE_RUNTIME_INSTRUCTION = (
     "[SYSTEM NOTICE: Use read_episode_messages with an episode handle returned in this "
-    "run when exact wording or complete supporting detail matters.]"
+    "run when exact wording or complete supporting detail matters, or when a "
+    "summary leaves the answer uncertain, before saying you cannot confirm it.]"
 )
 _RECENT_EPISODES_RUNTIME_INSTRUCTION = (
     "[SYSTEM NOTICE: Use read_recent_episodes for the latest one or few memories "
     "when the user gives no topic or episode handle.]"
+)
+_LIST_EVENTS_RUNTIME_INSTRUCTION = (
+    "[SYSTEM NOTICE: list_events lists things the user reported doing (trips, "
+    "purchases, events attended, things started or finished) by when they "
+    "happened, one short line each. Use it to order events, to find what happened "
+    "in a time span, and to count. Each line is one mention, so the same event "
+    "mentioned twice appears twice: merge duplicates before counting. A kind "
+    "filter also returns events labeled other; decide whether each one fits. Read the source Episode when wording or details matter.]"
 )
 _ENTITY_RUNTIME_INSTRUCTION = (
     "[SYSTEM NOTICE: Use search_knowledge_entities to discover stable entity IDs and scoped "
@@ -265,6 +279,11 @@ TOOL_DEFINITIONS = {
         "read_recent_episodes",
         default_limit=4,
         runtime_instruction=_RECENT_EPISODES_RUNTIME_INSTRUCTION,
+    ),
+    "list_events": _definition(
+        "list_events",
+        default_limit=4,
+        runtime_instruction=_LIST_EVENTS_RUNTIME_INSTRUCTION,
     ),
     "list_answer_sources": _definition("list_answer_sources", default_limit=3),
     "grep_project_files": _definition("grep_project_files", default_limit=6),
@@ -742,10 +761,12 @@ class Tools(
         after: Optional[str] = None,
         before: Optional[str] = None,
         alternate_queries: Optional[List[str]] = None,
+        offset: int = 0,
     ):
         return await self.knowledge_retrieval.episode_check(
             query,
             alternate_queries=alternate_queries,
+            offset=offset,
             session_id=self.session_id,
             entity_id=entity_id,
             after=after,
@@ -774,6 +795,23 @@ class Tools(
             limit=limit,
             after=after,
             before=before,
+            offset=offset,
+        )
+
+    async def list_events(
+        self,
+        after: Optional[str] = None,
+        before: Optional[str] = None,
+        kind: Optional[str] = None,
+        query: Optional[str] = None,
+        offset: int = 0,
+    ):
+        return await self.knowledge_retrieval.list_events(
+            session_id=self.session_id,
+            after=after,
+            before=before,
+            kind=kind,
+            query=query,
             offset=offset,
         )
 

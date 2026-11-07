@@ -111,6 +111,16 @@ def _notebook_rejection_feedback(
     }
 
 
+def _add_episode_feedback(
+    ctx: AgentRun, tool_name: str, result: Dict, model_result: Dict
+) -> None:
+    """Tell the model how many returned Episodes are new to this run."""
+
+    new = ctx.note_episode_results(tool_name, result)
+    if new is not None and isinstance(model_result, dict):
+        model_result["episode_feedback"] = {"new": new}
+
+
 def _result_has_notebook_rejection(result: Dict) -> bool:
     """Whether an executor result requires an immediate evidence replan."""
 
@@ -743,6 +753,20 @@ class AgentExecutor:
                             },
                         }
                         yield event
+                    elif event["data"].get("finish_reason") == "length":
+                        # The model spent the whole reply cap, usually on thinking.
+                        yield {
+                            "event": "step_error",
+                            "data": {
+                                "kind": "truncated",
+                                "message": (
+                                    "Your reply hit the output limit before it called a "
+                                    "tool or gave an answer. Think briefly, then call "
+                                    "a tool or answer."
+                                ),
+                                "usage": event["data"]["usage"],
+                            },
+                        }
                     else:
                         yield {
                             "event": "step_error",
@@ -1167,6 +1191,7 @@ class AgentExecutor:
                 )
                 summary, _ = summarize_result(call.name, result)
                 model_result = localize_agent_tool_result(self.ctx, call.name, result)
+                _add_episode_feedback(self.ctx, call.name, result, model_result)
                 self.ctx.record_tool_success()
                 results_out.append({"tool": call.name, "result": model_result})
 
@@ -1273,6 +1298,7 @@ class AgentExecutor:
             model_result = localize_agent_tool_result(
                 self.ctx, call.name, outcome
             )
+            _add_episode_feedback(self.ctx, call.name, outcome, model_result)
             self.ctx.record_tool_success()
             results_out.append({"tool": call.name, "result": model_result})
             yield {

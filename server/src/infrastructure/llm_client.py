@@ -172,12 +172,18 @@ class LLMService:
         postgres_client=None,
         request_timeout_seconds: float = 300.0,
         thinking: str = "planning_only",
+        planning_thinking_tokens: int = 4_096,
+        step_thinking_tokens: int = 1_024,
     ):
         self._api_key = (api_key or "").strip()
         self._base_url = base_url or OPENROUTER_BASE_URL
         self._is_openrouter = "openrouter.ai" in self._base_url
         self._request_timeout_seconds = request_timeout_seconds
         self._thinking = thinking
+        self._thinking_tokens = {
+            "high": planning_thinking_tokens,
+            "medium": step_thinking_tokens,
+        }
         self._trace = trace_logger
         self._agent_model = agent_model
         self._extraction_model = extraction_model
@@ -375,6 +381,10 @@ class LLMService:
         self._base_url = base_url
         self._is_openrouter = "openrouter.ai" in self._base_url
         self._request_timeout_seconds = settings.request_timeout_seconds
+        self._thinking_tokens = {
+            "high": settings.planning_thinking_tokens,
+            "medium": settings.step_thinking_tokens,
+        }
         if settings.thinking != self._thinking:
             self._thinking = settings.thinking
             if self.thinking_warning:
@@ -495,8 +505,8 @@ class LLMService:
             return {"reasoning_effort": "none"}
         return None
 
-    @staticmethod
     def _openrouter_extra_body(
+        self,
         reasoning: Optional[str] = "low",
         max_completion_tokens: int | None = None,
     ) -> Dict[str, Any]:
@@ -504,14 +514,11 @@ class LLMService:
         body: Dict[str, Any] = {
             "provider": {"require_parameters": True},
         }
-        if reasoning == "high":
-            budget = 4096
-        elif reasoning == "medium":
-            budget = 1024
-        elif reasoning in (None, "low"):
+        if reasoning in (None, "low"):
             return body
-        else:
+        if reasoning not in self._thinking_tokens:
             raise ValueError(f"Unsupported reasoning level: {reasoning}")
+        budget = self._thinking_tokens[reasoning]
         # Thinking counts against the reply cap; a budget over it is rejected.
         # Leave room for the answer, and skip thinking below the 1024 minimum.
         if max_completion_tokens is not None:
@@ -1195,6 +1202,7 @@ class LLMService:
             tool_calls_detected = False
             emitted_output = False
             usage: Optional[StreamUsage] = None
+            finish_reason: Optional[str] = None
             try:
                 self._check_aac_budget(aac_budget)
                 reservation = await self._reserve_external_attempt(
@@ -1255,6 +1263,7 @@ class LLMService:
                         continue
 
                     delta = chunk.choices[0].delta
+                    finish_reason = getattr(chunk.choices[0], "finish_reason", None) or finish_reason
 
                     if delta.content:
                         content += delta.content
@@ -1366,6 +1375,7 @@ class LLMService:
                     "data": {
                         "content": content,
                         "usage": usage,
+                        "finish_reason": finish_reason,
                     },
                 }
                 return

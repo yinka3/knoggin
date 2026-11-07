@@ -36,7 +36,10 @@ class PromptMemoryBudget(ConfigModel):
     # About 6K tokens are fixed (system prompt and tool schemas) before any
     # memory is added.
     input_tokens: StrictInt = Field(48_000, ge=1_024)
-    response_reserve_tokens: StrictInt = Field(2_000, ge=256)
+    # Reply cap for one agent step. Thinking counts against it, so it must
+    # hold the planning thinking budget plus the answer; models that overrun
+    # their thinking budget need the extra room.
+    response_reserve_tokens: StrictInt = Field(8_000, ge=256)
     # Scaled to a 256K model this is ~41K, just above the 40K Context budget
     # (ingestion.context.max_tokens).
     project_context_tokens: StrictInt = Field(13_000, ge=0)
@@ -93,6 +96,7 @@ class AgentLimitSettings(ConfigModel):
     max_accumulated_graph: StrictInt = Field(40, ge=1)
     max_accumulated_paths: StrictInt = Field(8, ge=1)
     max_accumulated_episodes: StrictInt = Field(8, ge=1)
+    max_accumulated_events: StrictInt = Field(60, ge=1)
     max_accumulated_documents: StrictInt = Field(30, ge=1)
     max_accumulated_web_discoveries: StrictInt = Field(12, ge=1)
     max_accumulated_web_reads: StrictInt = Field(12, ge=1)

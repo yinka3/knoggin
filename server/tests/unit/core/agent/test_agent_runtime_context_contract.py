@@ -519,7 +519,7 @@ def test_build_user_message_includes_absolute_and_elapsed_last_turn_time():
 
 
 @pytest.mark.no_network
-def test_notebook_dedupes_without_blind_tail_trimming():
+def test_notebook_dedupes_and_keeps_displaced_evidence_on_the_previous_page():
     ctx = make_ctx()
 
     ctx.accumulate_tool_result(
@@ -561,11 +561,14 @@ def test_notebook_dedupes_without_blind_tail_trimming():
         },
     )
 
+    # The new result displaces the oldest message, which stays on the previous page.
     messages = ctx.notebook.section_items("messages")
-    assert [msg["id"] for msg in messages] == ["msg_1", "msg_2"]
-    assert messages[0]["score"] == 1.0
-    assert admission.accepted is False
-    assert admission.reason == "capacity"
+    assert [msg["id"] for msg in messages] == ["msg_2", "msg_3"]
+    previous = ctx.notebook.previous_page.section_items("messages")
+    assert [msg["id"] for msg in previous] == ["msg_1", "msg_2"]
+    assert previous[0]["score"] == 1.0
+    assert admission.accepted is True
+    assert admission.reason.startswith("rolled_over:")
 
 
 @pytest.mark.no_network
@@ -844,3 +847,63 @@ def test_every_step_shows_the_frozen_research_plan():
 
     assert "1. When is SQLite better?\n2. When is Postgres better?" in prompt
     assert "exact text" in prompt
+
+
+def _episode_search_result(*episode_ids, has_more=False, next_offset=None):
+    return {
+        "data": {
+            "results": [{"episodes": [{"episode_id": i, "summary": "A memory"} for i in episode_ids]}],
+            "has_more": has_more,
+            "next_offset": next_offset,
+        }
+    }
+
+
+@pytest.mark.no_network
+def test_run_counts_only_episodes_it_has_not_seen_before():
+    ctx = make_ctx()
+
+    assert ctx.note_episode_results("search_episodes", _episode_search_result("a", "b", "c")) == 3
+    assert ctx.note_episode_results("search_episodes", _episode_search_result("b", "c", "d")) == 1
+    assert ctx.note_episode_results("search_knowledge_entities", {"data": [{"id": 1}]}) is None
+
+
+@pytest.mark.no_network
+def test_search_feedback_says_when_nothing_is_new_and_when_more_match():
+    ctx = make_ctx()
+    repeated = _episode_search_result("a", "b", "c", "d", "e", has_more=True, next_offset=5)
+    repeated["episode_feedback"] = {"new": 0}
+
+    message = build_user_message(ctx, last_result=[{"tool": "search_episodes", "result": repeated}])
+
+    assert "Found 5 episode(s), none new" in message
+    assert "offset=5" in message
+
+
+@pytest.mark.no_network
+def test_search_feedback_counts_new_episodes():
+    ctx = make_ctx()
+    partly_new = _episode_search_result("a", "b", "c")
+    partly_new["episode_feedback"] = {"new": 2}
+
+    message = build_user_message(ctx, last_result=[{"tool": "search_episodes", "result": partly_new}])
+
+    assert "Found 3 episode(s), 2 new." in message
+    assert "offset=" not in message
+
+
+@pytest.mark.no_network
+def test_event_listing_feedback_reports_count_and_next_page():
+    ctx = make_ctx()
+    result = {
+        "data": {
+            "results": [{"events": [{"what": "A trip", "when": "2023-03-10"}] * 3}],
+            "has_more": True,
+            "next_offset": 25,
+        }
+    }
+
+    message = build_user_message(ctx, last_result=[{"tool": "list_events", "result": result}])
+
+    assert "`list_events`: Found 3 event(s)." in message
+    assert "offset=25" in message

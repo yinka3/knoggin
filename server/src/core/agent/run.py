@@ -286,6 +286,7 @@ class AgentRunLimits:
     max_accumulated_graph: int = 40
     max_accumulated_paths: int = 8
     max_accumulated_episodes: int = 8
+    max_accumulated_events: int = 60
     max_accumulated_documents: int = 30
     max_accumulated_web_discoveries: int = 12
     max_accumulated_web_reads: int = 12
@@ -329,6 +330,7 @@ class AgentRunLimits:
             max_accumulated_graph=settings.max_accumulated_graph,
             max_accumulated_paths=settings.max_accumulated_paths,
             max_accumulated_episodes=settings.max_accumulated_episodes,
+            max_accumulated_events=settings.max_accumulated_events,
             max_accumulated_documents=settings.max_accumulated_documents,
             max_accumulated_web_discoveries=settings.max_accumulated_web_discoveries,
             max_accumulated_web_reads=settings.max_accumulated_web_reads,
@@ -449,6 +451,8 @@ class AgentRun:
     empty_replans: int = 0
     empty_retrieval_signatures: Set[Tuple[str, str]] = field(default_factory=set)
     previous_calls: Set[Tuple[str, str]] = field(default_factory=set)
+    # Episodes any search or browse has returned in this run.
+    seen_episode_ids: Set[str] = field(default_factory=set)
     last_error: Optional[str] = None
     tool_call_counts: Dict[str, int] = field(default_factory=dict)
     short_uuid_references: Dict[str, str] = field(default_factory=dict)
@@ -968,6 +972,24 @@ class AgentRun:
         apply_result = self.notebook.apply(tool_name, result)
         self.new_evidence_gathered = self.new_evidence_gathered or apply_result.changed
         return apply_result
+
+    def note_episode_results(self, tool_name: str, result: Dict) -> int | None:
+        """Count Episodes this search returned that the run had not seen yet."""
+
+        if tool_name not in ("search_episodes", "read_recent_episodes"):
+            return None
+        data = result.get("data") if isinstance(result, dict) else None
+        groups = data.get("results", []) if isinstance(data, dict) else []
+        found = {
+            str(episode["episode_id"])
+            for group in groups
+            if isinstance(group, dict)
+            for episode in group.get("episodes", [])
+            if isinstance(episode, dict) and episode.get("episode_id") is not None
+        }
+        new = found - self.seen_episode_ids
+        self.seen_episode_ids |= found
+        return len(new)
 
     def record_empty_result(self, calls: List[Tuple[str, Dict]] | None = None) -> bool:
         """Record an empty tool turn and report whether replanning is due."""

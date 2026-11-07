@@ -363,6 +363,7 @@ async def test_stream_with_tools_preserves_ids_and_exact_usage(llm_service):
                 "cost_usd": None,
                 "approximate": False,
             },
+            "finish_reason": None,
         },
     }
 
@@ -798,15 +799,36 @@ def test_local_thinking_switch_maps_to_reasoning_effort():
 @pytest.mark.unit
 @pytest.mark.no_network
 def test_openrouter_thinking_budget_fits_under_the_reply_cap():
+    with (
+        patch("infrastructure.llm_client.instructor.from_openai"),
+        patch("infrastructure.llm_client.AsyncOpenAI"),
+    ):
+        service = LLMService(api_key="key")
     # A budget over max_completion_tokens is rejected by providers.
-    assert LLMService._openrouter_extra_body("high", 2_000)["reasoning"] == {
+    assert service._openrouter_extra_body("high", 2_000)["reasoning"] == {
         "max_tokens": 1_488
     }
-    assert LLMService._openrouter_extra_body("high", None)["reasoning"] == {
+    assert service._openrouter_extra_body("high", None)["reasoning"] == {
         "max_tokens": 4_096
     }
     # Below the 1024 minimum, skip thinking rather than send a bad request.
-    assert "reasoning" not in LLMService._openrouter_extra_body("medium", 1_200)
+    assert "reasoning" not in service._openrouter_extra_body("medium", 1_200)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_openrouter_thinking_budgets_come_from_settings():
+    with (
+        patch("infrastructure.llm_client.instructor.from_openai"),
+        patch("infrastructure.llm_client.AsyncOpenAI"),
+    ):
+        service = LLMService(
+            api_key="key", planning_thinking_tokens=6_000, step_thinking_tokens=0
+        )
+    assert service._openrouter_extra_body("high", 8_000)["reasoning"] == {
+        "max_tokens": 6_000
+    }
+    assert "reasoning" not in service._openrouter_extra_body("medium", 8_000)
 
 
 @pytest.mark.unit

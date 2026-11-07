@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
@@ -22,6 +22,7 @@ _KNOWLEDGE_SECTIONS = (
     "relationships",
     "activities",
     "episodes",
+    "events",
     "paths",
 )
 _EVIDENCE_SECTIONS = (
@@ -66,6 +67,7 @@ class NotebookCapacity:
     max_relationships: int = 40
     max_activities: int = 30
     max_episodes: int = 8
+    max_events: int = 60
     max_paths: int = 8
     max_messages: int = 30
     max_documents: int = 30
@@ -87,6 +89,7 @@ class NotebookCapacity:
             max_relationships=_positive_limit(limits, "max_accumulated_graph", 40),
             max_activities=_positive_limit(limits, "max_accumulated_messages", 30),
             max_episodes=_positive_limit(limits, "max_accumulated_episodes", 8),
+            max_events=_positive_limit(limits, "max_accumulated_events", 60),
             max_paths=_positive_limit(limits, "max_accumulated_paths", 8),
             max_messages=_positive_limit(limits, "max_accumulated_messages", 30),
             max_documents=_positive_limit(limits, "max_accumulated_documents", 30),
@@ -243,6 +246,7 @@ class RunNotebook:
             "relationships": self.capacity.max_relationships,
             "activities": self.capacity.max_activities,
             "episodes": self.capacity.max_episodes,
+            "events": self.capacity.max_events,
             "paths": self.capacity.max_paths,
             "messages": self.capacity.max_messages,
             "documents": self.capacity.max_documents,
@@ -342,6 +346,11 @@ class RunNotebook:
                         "observation_refs",
                     )
                 },
+            )
+        if section == "events":
+            return self._hash_ref(
+                "event",
+                {key: item.get(key) for key in ("episode_id", "what", "when")},
             )
         if section == "episodes":
             identifier = item.get("episode_id", item.get("id"))
@@ -806,6 +815,12 @@ class RunNotebook:
                         references.append(self._add_episode(item))
                     elif item.get("id") is not None or item.get("message") is not None:
                         references.append(self._add_message(item))
+        elif tool_name == "list_events":
+            groups = data.get("results", []) if isinstance(data, dict) else []
+            for group in groups if isinstance(groups, list) else []:
+                for item in group.get("events", []) if isinstance(group, dict) else []:
+                    if isinstance(item, dict) and item.get("what"):
+                        references.append(self._upsert("events", item))
         elif tool_name == "read_episode_messages":
             for item in data if isinstance(data, list) else []:
                 if isinstance(item, dict):
@@ -917,27 +932,24 @@ class RunNotebook:
             self._adopt_from(candidate)
             return applied
 
-        rolled = deepcopy(self)
-        try:
-            rollover = rolled.rollover()
-        except ValueError:
-            self._last_applied_references = ()
-            return NotebookApplyResult(
-                False,
-                (),
-                False,
-                "capacity",
-            )
-        retried = rolled._apply_unchecked(tool_name, result)
-        if retried.references and rolled._fits_capacity():
-            applied = NotebookApplyResult(
-                before != rolled.fingerprint(),
-                retried.references,
-                True,
-                f"rolled_over:{rollover.generation}",
-            )
-            self._adopt_from(rolled)
-            return applied
+        for carried in self._carryover_options():
+            rolled = deepcopy(self)
+            try:
+                rollover = rolled.rollover(
+                    active_references=carried, recent_contributions=0
+                )
+            except ValueError:
+                break
+            retried = rolled._apply_unchecked(tool_name, result)
+            if retried.references and rolled._fits_capacity():
+                applied = NotebookApplyResult(
+                    before != rolled.fingerprint(),
+                    retried.references,
+                    True,
+                    f"rolled_over:{rollover.generation}",
+                )
+                self._adopt_from(rolled)
+                return applied
 
         self._last_applied_references = ()
         return NotebookApplyResult(
@@ -946,6 +958,24 @@ class RunNotebook:
             False,
             "capacity",
         )
+
+    def _carryover_options(self) -> Iterator[list[str]]:
+        """Yield what a new page could keep, giving up the oldest evidence first.
+
+        A result the agent just asked for outranks older evidence, which stays
+        readable on the previous page. Recorded actions are always kept.
+        """
+
+        retained = self._retain_references(None, recent_contributions=3)
+        actions = [ref for ref in retained if self._ref_section(ref) == "action"]
+        evidence = [
+            reference
+            for section in _ALL_SECTIONS
+            for reference in self._orders[section]
+            if reference in retained
+        ]
+        for dropped in range(len(evidence) + 1):
+            yield evidence[dropped:] + actions
 
     @staticmethod
     def _ref_section(reference: str) -> str | None:
@@ -957,6 +987,7 @@ class RunNotebook:
             "relationship": "relationships",
             "activity": "activities",
             "episode": "episodes",
+            "event": "events",
             "path": "paths",
             "message": "messages",
             "document": "documents",
@@ -1055,14 +1086,17 @@ class RunNotebook:
         roots: list[str] = [
             ref for ref in (active_references or ()) if self._known_reference(ref)
         ]
-        roots.extend(
-            ref for ref in self._last_applied_references if self._known_reference(ref)
-        )
-        for _, references in self._contribution_history[-recent_contributions:]:
-            roots.extend(references)
-        roots.extend(
-            ref for ref in self.summary.references if self._known_reference(ref)
-        )
+        if recent_contributions:
+            roots.extend(
+                ref
+                for ref in self._last_applied_references
+                if self._known_reference(ref)
+            )
+            for _, references in self._contribution_history[-recent_contributions:]:
+                roots.extend(references)
+            roots.extend(
+                ref for ref in self.summary.references if self._known_reference(ref)
+            )
 
         retained = {ref for ref in roots if self._known_reference(ref)}
         for hint in self.possible_next_steps:
@@ -1125,8 +1159,8 @@ class RunNotebook:
         evidence and entity dependencies those objects require.
         """
 
-        if recent_contributions < 1:
-            raise ValueError("recent_contributions must be positive")
+        if recent_contributions < 0:
+            raise ValueError("recent_contributions must not be negative")
         previous_page = deepcopy(self)
         previous_page._previous_page = None
         previous_page.show_previous_page = False

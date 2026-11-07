@@ -421,6 +421,15 @@ TOOL_SCHEMAS = [
                         "type": "string",
                         "description": "Optional latest date, inclusive, such as 2023-05-27.",
                     },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "default": 0,
+                        "description": (
+                            "Matches to skip, for the next page of a count or complete list; "
+                            "use next_offset from the last result with the same query."
+                        ),
+                    },
                 },
                 "required": ["query"],
             },
@@ -433,7 +442,8 @@ TOOL_SCHEMAS = [
             "name": "read_episode_messages",
             "description": (
                 "Expand a retrieved episode into all of its original source messages. "
-                "Use this to verify, quote, or reconcile an episode's details."
+                "Use this to verify, quote, or reconcile an episode's details, and "
+                "before saying a summary cannot confirm something."
             ),
             "parameters": {
                 "type": "object",
@@ -499,6 +509,52 @@ TOOL_SCHEMAS = [
                 "required": [],
             },
             "tags": ["core"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_events",
+            "description": (
+                "List things the user reported doing, by when they happened: trips, "
+                "purchases, things received, events attended, things started or "
+                "finished, moves, meetings. Each line is one mention with a date or "
+                "date range and its Episode. Use for 'what did I do last month', "
+                "'which came first', and 'how many X in a time span'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "after": {
+                        "type": "string",
+                        "description": "Optional earliest date, such as 2023-03-01.",
+                    },
+                    "before": {
+                        "type": "string",
+                        "description": "Optional latest date, inclusive, such as 2023-03-31.",
+                    },
+                    "kind": {
+                        "type": "string",
+                        "enum": [
+                            "trip", "purchase", "received", "attended", "started",
+                            "finished", "moved", "met", "other",
+                        ],
+                        "description": "Optional kind; also returns events labeled other. Leave out to see every kind.",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Optional words to match in the event description.",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "default": 0,
+                        "description": "Events to skip; use next_offset from the last result.",
+                    },
+                },
+                "required": [],
+            },
+            "tags": ["graph:read", "core"],
         },
     },
     {

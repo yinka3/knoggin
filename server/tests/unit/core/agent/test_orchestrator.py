@@ -51,6 +51,7 @@ class FakeLimits:
     max_accumulated_graph = 16
     max_accumulated_paths = 4
     max_accumulated_episodes = 6
+    max_accumulated_events = 60
     max_accumulated_documents = 10
     max_accumulated_web_discoveries = 5
     max_accumulated_web_reads = 5

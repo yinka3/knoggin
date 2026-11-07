@@ -486,11 +486,14 @@ _USAGE = {
 }
 
 
-async def _plain_reply_events(content: str) -> list[dict]:
+async def _plain_reply_events(content: str, finish_reason: str = "stop") -> list[dict]:
     llm = StreamingLLM(
         [
             {"event": "token", "data": {"content": content}},
-            {"event": "step_completed", "data": {"content": content, "usage": _USAGE}},
+            {
+                "event": "step_completed",
+                "data": {"content": content, "usage": _USAGE, "finish_reason": finish_reason},
+            },
         ]
     )
     executor = make_executor(llm)
@@ -605,3 +608,20 @@ async def test_final_response_carries_validated_structured_artifact():
 
     assert event["data"]["artifact"]["kind"] == "research_brief"
     assert event["data"]["artifact"]["blocks"][0]["content"] == "Finding"
+
+
+@pytest.mark.no_network
+async def test_reply_cut_off_by_the_output_limit_is_reported_as_cut_off():
+    events = await _plain_reply_events("", finish_reason="length")
+
+    error = next(e for e in events if e["event"] == "step_error")["data"]
+    assert error["kind"] == "truncated"
+    assert "output limit" in error["message"]
+
+
+@pytest.mark.no_network
+async def test_empty_reply_that_finished_normally_is_still_a_formatting_error():
+    events = await _plain_reply_events("", finish_reason="stop")
+
+    error = next(e for e in events if e["event"] == "step_error")["data"]
+    assert error["kind"] == "formatting"

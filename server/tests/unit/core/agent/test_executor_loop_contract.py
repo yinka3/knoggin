@@ -2417,7 +2417,11 @@ async def test_parallel_read_reports_notebook_capacity_rejection(monkeypatch):
     executor = AgentExecutor(run, ScriptedLLM([]), SimpleNamespace(document_service=None))
 
     async def result_for_query(_tools, name, args):
-        return {"data": [{"id": args["query"], "message": name}]}
+        return {
+            "data": [
+                {"id": query, "message": name} for query in args["query"].split(",")
+            ]
+        }
 
     monkeypatch.setattr("core.agent.executor.execute_tool", result_for_query)
     results = []
@@ -2426,7 +2430,11 @@ async def test_parallel_read_reports_notebook_capacity_rejection(monkeypatch):
         async for event in executor._execute_tools(
             [
                 ToolCall("search_knowledge_messages", {"query": "first"}, call_id="first"),
-                ToolCall("search_knowledge_messages", {"query": "second"}, call_id="second"),
+                ToolCall(
+                    "search_knowledge_messages",
+                    {"query": "second,third"},
+                    call_id="second",
+                ),
             ],
             results,
         )

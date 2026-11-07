@@ -101,6 +101,25 @@ def build_user_message(
                         "request before trying again."
                     )
                 msg += f"- `{tool}`: {message}\n"
+            elif tool == "list_events":
+                groups = data.get("results", []) if isinstance(data, dict) else []
+                count = sum(
+                    len(group.get("events", []))
+                    for group in groups
+                    if isinstance(group, dict)
+                )
+                if count > 0:
+                    more = (
+                        f" More match: repeat with offset={data['next_offset']}."
+                        if data.get("has_more") and data.get("next_offset") is not None
+                        else ""
+                    )
+                    msg += (
+                        f"- `{tool}`: Found {count} event(s).{more} "
+                        "(See accumulated notebook below)\n"
+                    )
+                else:
+                    msg += _empty_retrieval_guidance(tool, _enabled_tools(ctx))
             elif tool in ("search_episodes", "read_recent_episodes"):
                 result_groups = (
                     data.get("results", []) if isinstance(data, dict) else []
@@ -111,10 +130,7 @@ def build_user_message(
                     if isinstance(group, dict)
                 )
                 if count > 0:
-                    msg += (
-                        f"- `{tool}`: Found {count} episode(s). "
-                        "(See accumulated notebook below)\n"
-                    )
+                    msg += f"- `{tool}`: {_episode_result_feedback(count, data, model_result)}\n"
                 else:
                     msg += _empty_retrieval_guidance(tool, _enabled_tools(ctx))
             elif tool in (
@@ -199,6 +215,10 @@ _EMPTY_RESULT_ALTERNATIVES = {
         ("entities", "search_knowledge_entities"),
         ("documents", "search_project_documents"),
     ),
+    "list_events": (
+        ("Episodes", "search_episodes"),
+        ("Episodes by date", "read_recent_episodes"),
+    ),
     "read_recent_episodes": (
         ("messages", "search_knowledge_messages"),
         ("recent activity", "get_entity_recent_activity"),
@@ -273,6 +293,26 @@ def _format_last_turn_context(last_turn_at: object) -> str:
         else f"{minutes}m"
     )
     return f"{last_turn_at.isoformat()} ({elapsed} ago)"
+
+
+def _episode_result_feedback(count: int, data: Dict, model_result: Dict) -> str:
+    """Say what an Episode search added, and whether more matches exist."""
+
+    text = f"Found {count} episode(s)"
+    feedback = model_result.get("episode_feedback")
+    new = feedback.get("new") if isinstance(feedback, dict) else None
+    if new == 0:
+        text += (
+            ", none new: this returned only Episodes you already have. Change the "
+            "search angle or answer from what you have."
+        )
+    elif isinstance(new, int) and new < count:
+        text += f", {new} new."
+    else:
+        text += "."
+    if data.get("has_more") and data.get("next_offset") is not None:
+        text += f" More match: repeat this search with offset={data['next_offset']}."
+    return text + " (See accumulated notebook below)"
 
 
 def build_evidence_context(evidence: AgentRun) -> str:

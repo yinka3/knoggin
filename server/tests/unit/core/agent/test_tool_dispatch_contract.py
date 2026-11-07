@@ -623,3 +623,18 @@ def test_every_tool_schema_is_accepted_by_strict_providers():
         parameters = schema["function"]["parameters"]
         assert parameters.get("type") == "object", schema["function"]["name"]
         assert not rejected & set(parameters), schema["function"]["name"]
+
+
+@pytest.mark.no_network
+async def test_execute_tool_rejects_misspelled_argument_names():
+    # A dropped misspelling would run the tool unfiltered and look like success.
+    with pytest.raises(ToolExecutionError) as failure:
+        await execute_tool(
+            DispatchTools(),
+            "search_knowledge_messages",
+            {"query": "trip", "limt": 3},
+        )
+
+    assert "unknown argument name" in failure.value.message
+    assert "limit" in failure.value.message
+    assert "limt" not in failure.value.message

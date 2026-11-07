@@ -200,8 +200,11 @@ class KnowledgeRetrieval:
         before: Optional[str] = None,
         raw_fallback: bool = True,
         alternate_queries: Optional[List[str]] = None,
+        offset: int = 0,
     ) -> Dict:
         """Retrieve episodes, then optionally fall back to raw durable messages."""
+        if offset < 0:
+            raise ValueError("offset must not be negative")
         session_id = require_scope_value(
             session_id, "session_id", "KnowledgeRetrieval.episode_check"
         )
@@ -249,7 +252,7 @@ class KnowledgeRetrieval:
 
         # Both channels contribute: a weak semantic hit must not suppress an
         # exact keyword match. Retrieve a bounded pool before rank fusion.
-        candidate_limit = DEFAULT_EPISODE_RETRIEVAL_LIMIT * 3
+        candidate_limit = offset + DEFAULT_EPISODE_RETRIEVAL_LIMIT * 3
         # A date range has already narrowed the Episodes, and a broad question
         # about that day should still see them, so only the range filters then.
         score_threshold = (
@@ -305,9 +308,10 @@ class KnowledgeRetrieval:
                 scores[key] = scores.get(key, 0.0) + 1.0 / (60 + rank)
         # Stable ties preserve lexical candidates first, without imposing a
         # blanket recency penalty on legitimate historical questions.
-        episodes = [by_id[key] for key in sorted(scores, key=lambda key: -scores[key])][
-            :DEFAULT_EPISODE_RETRIEVAL_LIMIT
-        ]
+        ranked = [by_id[key] for key in sorted(scores, key=lambda key: -scores[key])]
+        page_end = offset + DEFAULT_EPISODE_RETRIEVAL_LIMIT
+        episodes = ranked[offset:page_end]
+        has_more = len(ranked) > page_end
         if episodes:
             metrics: Dict[str, int | float] = {}
             serialized = await self._serialize_episodes(
@@ -333,8 +337,18 @@ class KnowledgeRetrieval:
             return {
                 "resolution": strategy,
                 "results": [{"query": query, "episodes": serialized}],
+                "has_more": has_more,
+                "next_offset": page_end if has_more else None,
             }
 
+        if offset:
+            # Paging past the last match is not a miss worth a fallback.
+            return {
+                "resolution": "no_more_episodes",
+                "results": [],
+                "has_more": False,
+                "next_offset": None,
+            }
         if date_range:
             # Raw message search cannot honor the range.
             return {"resolution": "no_episodes_in_range", "results": []}
@@ -486,6 +500,62 @@ class KnowledgeRetrieval:
                 }
             ],
         }
+
+    async def list_events(
+        self,
+        *,
+        session_id: str,
+        after: Optional[str] = None,
+        before: Optional[str] = None,
+        kind: Optional[str] = None,
+        query: Optional[str] = None,
+        offset: int = 0,
+    ) -> Dict:
+        """List event mentions by when they happened, one page at a time."""
+
+        require_scope_value(session_id, "session_id", "KnowledgeRetrieval.list_events")
+        if offset < 0:
+            raise ValueError("offset must not be negative")
+        page = self._search_settings.event_page_size
+        # One extra row says whether another page exists.
+        rows = await self.knowledge_store.list_project_events(
+            user_name=self.user_name,
+            project_id=self.project_id,
+            visible_project_ids=self.readable_project_ids,
+            limit=page + 1,
+            offset=offset,
+            kind=kind,
+            query=query,
+            **self._episode_date_range(after, before),
+        )
+        has_more = len(rows) > page
+        dated = bool(after or before)
+        events = [
+            {
+                "episode_id": row["episode_id"],
+                "what": row["what"],
+                "kind": row["kind"],
+                "when": self._event_when(row["start_date"], row["end_date"]),
+                "precision": row["precision"],
+                "date_text": row["date_text"],
+                **({"in_range": row["in_range"]} if dated else {}),
+            }
+            for row in rows[:page]
+        ]
+        return {
+            "resolution": "events",
+            "has_more": has_more,
+            "next_offset": offset + page if has_more else None,
+            "results": [{"events": events}],
+        }
+
+    @staticmethod
+    def _event_when(start, end) -> str:
+        if start is None:
+            return "date unknown"
+        if end is None or end == start:
+            return start.isoformat()
+        return f"{start.isoformat()} to {end.isoformat()}"
 
     async def find_relationship_path(
         self, entity_a_id: int, entity_b_id: int, *, session_id: str

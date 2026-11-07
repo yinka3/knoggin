@@ -177,6 +177,8 @@ class SearchSettings(ConfigModel):
     episode_similarity_threshold: float = Field(0.5, ge=0.0, le=1.0)
     # The query plus rewordings one Episode search may run.
     episode_max_queries: int = Field(4, ge=1, le=10)
+    # Events one list_events page returns; each is one short line.
+    event_page_size: int = Field(25, ge=1, le=100)
 
 
 class EntityResolutionSettings(ConfigModel):
@@ -219,8 +221,15 @@ class LLMSettings(ConfigModel):
     # only switch it on or off. planning_only (fast default) thinks on the
     # planning and final answer steps; off disables it everywhere;
     # provider_default lets the server think on every step, which is much
-    # slower. OpenRouter keeps its own reasoning budgets.
+    # slower. OpenRouter uses the thinking-token budgets below instead.
     thinking: Literal["provider_default", "planning_only", "off"] = "planning_only"
+    # OpenRouter thinking-token caps for agent steps. Planning, replanning and
+    # the final answer use planning_thinking_tokens; tool steps use
+    # step_thinking_tokens. Each is cut to fit the agent's reply cap
+    # (prompt_memory response_reserve_tokens) with room for the answer, and a
+    # value under 1024 turns thinking off for those steps.
+    planning_thinking_tokens: int = Field(4_096, ge=0)
+    step_thinking_tokens: int = Field(1_024, ge=0)
     spending_budget: LLMSpendingBudgetSettings = Field(
         default_factory=LLMSpendingBudgetSettings
     )

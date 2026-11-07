@@ -35,6 +35,7 @@ _REFERENCE_PREFIXES = {
     "relationships": "R",
     "activities": "ACT",
     "episodes": "EP",
+    "events": "EV",
     "paths": "P",
     "messages": "M",
     "documents": "D",
@@ -43,6 +44,7 @@ _REFERENCE_PREFIXES = {
     "relationship": "R",
     "activity": "ACT",
     "episode": "EP",
+    "event": "EV",
     "path": "P",
     "message": "M",
     "document": "D",
@@ -90,6 +92,9 @@ Episodes:
 {% endif %}{% if item.support %}  historical support:
 {% for source in item.support %}  - {{ source.label }}{% if source.locator %} [{{ source.locator }}]{% endif %}{% if source.url %}: {{ source.url }}{% endif %}{% if source.excerpt %} — {{ source.excerpt }}{% endif %}{{ '\n' }}
 {% endfor %}{% endif %}{{ '\n' }}
+{% endfor %}{% endif %}{% if events %}
+Events (one line per mention; merge duplicates before counting):
+{% for item in events %}- {{ item.reference }} {{ item.when }} [{{ item.kind }}] {{ item.what }}{% if item.episode or item.date_text %} ({% if item.episode %}from {{ item.episode }}{% endif %}{% if item.episode and item.date_text %}; {% endif %}{% if item.date_text %}said "{{ item.date_text }}"{% endif %}){% endif %}{% if item.in_range == 'overlaps' %} — may overlap the asked dates{% endif %}{{ '\n' }}
 {% endfor %}{% endif %}{% if paths %}
 Paths:
 {% for item in paths %}- {{ item.reference }}{% if item.description %}: {{ item.description }}{% endif %}{% if item.evidence %} (evidence: {{ item.evidence|join(', ') }}){% endif %}{% if item.observation_supports %} (support: {{ item.observation_supports|join(', ') }}){% endif %}{{ '\n' }}
@@ -143,6 +148,11 @@ class _ReferenceLocalizer:
         local_uuid_references: Mapping[str, str] | None = None,
     ) -> None:
         self._handles: dict[str, str] = {}
+        self._episode_short_handles = {
+            str(actual_id): str(handle)
+            for handle, actual_id in (local_uuid_references or {}).items()
+            if isinstance(handle, str) and handle.startswith("ep_")
+        }
         counters: dict[str, int] = {}
         episode_handles = self._episode_handles(snapshot, local_uuid_references)
         for section, records in self._record_sections(snapshot):
@@ -174,6 +184,7 @@ class _ReferenceLocalizer:
                 "relationships",
                 "activities",
                 "episodes",
+                "events",
                 "paths",
             )
         )
@@ -221,6 +232,15 @@ class _ReferenceLocalizer:
 
     def known_reference(self, value: str) -> str | None:
         return self._handles.get(value)
+
+    def episode_handle(self, episode_id: object) -> str:
+        """The handle read_episode_messages accepts, when one exists."""
+
+        if episode_id is None:
+            return ""
+        return self._handles.get(
+            f"episode:{episode_id}", self._episode_short_handles.get(str(episode_id), "")
+        )
 
 
 def _safe_text(value: object, *, limit: int = _SHORT_TEXT_LIMIT) -> str:
@@ -558,6 +578,13 @@ def _record_list(
                 or ""
             )
             item["context"] = _safe_text(item.get("context") or "")
+        elif section == "events":
+            item["episode"] = localizer.episode_handle(item.get("episode_id"))
+            for field in ("what", "date_text"):
+                item[field] = _safe_text(item.get(field) or "")
+            item["when"] = _safe_text(item.get("when") or "date unknown", limit=40)
+            item["kind"] = _safe_text(item.get("kind") or "other", limit=20)
+            item["in_range"] = item.get("in_range") or ""
         elif section == "activities":
             entity_id = item.get("entity_id")
             entity_name = _safe_text(item.get("entity") or "")
@@ -710,6 +737,7 @@ def _render_context(
             knowledge["activities"], localizer, section="activities"
         ),
         "episodes": _record_list(knowledge["episodes"], localizer, section="episodes"),
+        "events": _record_list(knowledge["events"], localizer, section="events"),
         "paths": _record_list(knowledge["paths"], localizer, section="paths"),
         "messages": _record_list(
             evidence["messages"], localizer, section="messages",

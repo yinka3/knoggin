@@ -1,4 +1,5 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -580,4 +581,74 @@ async def test_browsing_episodes_by_date_reports_the_next_page():
     assert calls[0]["limit"] == 3 and calls[0]["offset"] == 4
     assert calls[0]["after"] == datetime(2023, 5, 20, tzinfo=timezone.utc)
     assert [item["episode_id"] for item in result["results"][0]["episodes"]] == ["a", "b"]
+    assert result["has_more"] is True and result["next_offset"] == 6
+
+
+async def test_episode_search_pages_through_ranked_matches():
+    tool = EpisodeTool()
+    tool.embedding_service = None
+    tool.knowledge_store = _ExpansionStore({"art": ["a", "b", "c", "d", "e", "f", "g"]})
+
+    first = await tool.episode_check("art", session_id="session-1")
+    second = await tool.episode_check("art", session_id="session-1", offset=5)
+
+    assert [e["episode_id"] for e in first["results"][0]["episodes"]] == ["a", "b", "c", "d", "e"]
+    assert first["has_more"] is True and first["next_offset"] == 5
+    assert [e["episode_id"] for e in second["results"][0]["episodes"]] == ["f", "g"]
+    assert second["has_more"] is False and second["next_offset"] is None
+
+
+async def test_a_page_past_the_last_match_does_not_fall_back_to_raw_messages():
+    tool = EpisodeTool()
+    tool.embedding_service = None
+    tool.knowledge_store = _ExpansionStore({"art": ["a"]})
+
+    result = await tool.episode_check("art", session_id="session-1", offset=5)
+
+    assert result == {"resolution": "no_more_episodes", "results": [], "has_more": False, "next_offset": None}
+    assert tool.fallback_calls == []
+
+
+async def test_listing_events_pages_by_date_and_hides_internal_ids():
+    calls = []
+
+    class Store:
+        async def list_project_events(self, **scope):
+            calls.append(scope)
+            return [
+                {
+                    "episode_id": f"ep-{i}",
+                    "what": f"Event {i}",
+                    "kind": "trip",
+                    "start_date": date(2023, 3, i),
+                    "end_date": date(2023, 3, i),
+                    "precision": "day",
+                    "date_text": "last weekend",
+                    "source_message_ids": [i],
+                    "in_range": "inside",
+                }
+                for i in (1, 2, 3)
+            ]
+
+    tool = EpisodeTool()
+    tool.knowledge_store = Store()
+    tool._search_settings = SimpleNamespace(event_page_size=2)
+
+    result = await tool.list_events(
+        session_id="session-1", after="2023-03-01", before="2023-03-31", kind="Trip", offset=4
+    )
+
+    assert calls[0]["limit"] == 3 and calls[0]["offset"] == 4 and calls[0]["kind"] == "Trip"
+    assert calls[0]["before"] == datetime(2023, 3, 31, 23, 59, 59, 999999, tzinfo=timezone.utc)
+    events = result["results"][0]["events"]
+    assert [e["what"] for e in events] == ["Event 1", "Event 2"]
+    assert events[0] == {
+        "episode_id": "ep-1",
+        "what": "Event 1",
+        "kind": "trip",
+        "when": "2023-03-01",
+        "precision": "day",
+        "date_text": "last weekend",
+        "in_range": "inside",
+    }
     assert result["has_more"] is True and result["next_offset"] == 6
