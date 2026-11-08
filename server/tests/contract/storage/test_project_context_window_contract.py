@@ -972,7 +972,7 @@ async def test_window_local_episodes_reach_notebook_synthesis_with_reversal_hist
     assert "Deployment policy reversed: deploy through CI." in rendered_notebook
     assert "chronology:" in rendered_notebook
     assert "CURRENT_CONTEXT: deployment through CI is current." in synthesis_prompt
-    assert "When multiple retrieved Episodes describe a change or reversal" in synthesis_prompt
+    assert "Interpret changes using event chronology and explicit corrections" in synthesis_prompt
 
 
 @pytest.mark.storage

@@ -852,11 +852,11 @@ async def test_final_synthesis_receives_episode_reversal_chronology(monkeypatch)
     assert "chronology: 2026-01-01T10:00:00+00:00" in final_prompt
     assert "chronology: 2026-02-01T10:00:00+00:00" in final_prompt
     assert (
-        "When multiple retrieved Episodes describe a change or reversal"
+        "Interpret changes using event chronology and explicit corrections"
         in llm.calls[-1]["system"]
     )
     assert (
-        "A later, supported state is the best available current state"
+        "A newer statement replaces an earlier state only\nwhen it establishes a change to the same subject"
         in llm.calls[-1]["system"]
     )
 
