@@ -537,24 +537,23 @@ class ProjectDeletionWriter:
                     project_id=project_id,
                 )
 
-                # Assistant memberships restrict deletion of their exchange's
-                # user message, and an unfinished window's Episode links
-                # restrict deletion of its Episodes. Remove both first so
-                # aggregate deletion can then rely on the project cascades.
-                await cur.execute(
-                    """
-                    DELETE FROM public.project_semantic_window_messages
-                    WHERE project_id = %s
-                    """,
-                    (project_id,),
-                )
-                await cur.execute(
-                    """
-                    DELETE FROM public.project_semantic_window_episodes
-                    WHERE project_id = %s
-                    """,
-                    (project_id,),
-                )
+                # These link rows restrict deletion of what they point to:
+                # window rows hold messages and Episodes, revision rows hold
+                # Context blocks, and observations hold relationships. The
+                # project cascades run in foreign key creation order, which a
+                # restore changes, so remove the links first and let the
+                # cascades handle the rest in any order.
+                for table in (
+                    "project_semantic_window_messages",
+                    "project_semantic_window_episodes",
+                    "project_context_revision_blocks",
+                    "project_context_revision_impact_blocks",
+                    "relationship_observations",
+                ):
+                    await cur.execute(
+                        f"DELETE FROM public.{table} WHERE project_id = %s",
+                        (project_id,),
+                    )
 
                 # This row intentionally has no project foreign key. It is the
                 # durable handoff from the committed database deletion to the

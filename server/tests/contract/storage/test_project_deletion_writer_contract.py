@@ -311,6 +311,89 @@ async def test_project_deletion_removes_a_window_stuck_after_its_episodes(
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
 @pytest.mark.no_network
+async def test_project_deletion_removes_context_revision_history(
+    real_postgres_client,
+):
+    # Revisions and their block lists refuse to let a block or parent revision
+    # go first. Postgres runs the project cascades in foreign key creation
+    # order, and a pg_restore creates them alphabetically, so blocks go before
+    # revisions there. Recreate the revisions key to get that restored order.
+    await real_postgres_client.execute(
+        """
+        ALTER TABLE public.project_context_revisions
+        DROP CONSTRAINT project_context_revisions_project_id_fkey,
+        ADD CONSTRAINT project_context_revisions_project_id_fkey
+            FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
+            ON DELETE CASCADE
+        """
+    )
+    old_block = "44444444-4444-4444-8444-444444444444"
+    new_block = "55555555-5555-4555-8555-555555555555"
+    first = "66666666-6666-4666-8666-666666666666"
+    second = "77777777-7777-4777-8777-777777777777"
+    hash_ = "a" * 64
+    for block_id, supersedes in ((old_block, None), (new_block, old_block)):
+        await real_postgres_client.execute(
+            """
+            INSERT INTO public.project_context_blocks (
+                block_id, project_id, section_key, markdown, content_hash,
+                assertion_kind, supersedes_block_id
+            ) VALUES (%s, 'project-1', 'current_state', 'Ada deploys.', %s,
+                'source_grounded', %s)
+            """,
+            (block_id, hash_, supersedes),
+        )
+    for number, revision_id, parent, block_id in (
+        (1, first, None, old_block),
+        (2, second, first, new_block),
+    ):
+        await real_postgres_client.execute(
+            """
+            INSERT INTO public.project_context_revisions (
+                revision_id, project_id, revision_number, parent_revision_id,
+                origin, domain_version, content_hash
+            ) VALUES (%s, 'project-1', %s, %s, 'conversation', 1, %s)
+            """,
+            (revision_id, number, parent, hash_),
+        )
+        await real_postgres_client.execute(
+            """
+            INSERT INTO public.project_context_revision_blocks (
+                revision_id, project_id, block_id, ordinal
+            ) VALUES (%s, 'project-1', %s, 0)
+            """,
+            (revision_id, block_id),
+        )
+        await real_postgres_client.execute(
+            """
+            INSERT INTO public.project_context_revision_impact_blocks (
+                revision_id, project_id, block_id
+            ) VALUES (%s, 'project-1', %s)
+            """,
+            (revision_id, block_id),
+        )
+
+    deleted = await ProjectDeletionWriter(real_postgres_client).delete_project(
+        user_name="ada", project_id="project-1"
+    )
+
+    assert deleted is not None
+    for table in (
+        "projects",
+        "project_context_blocks",
+        "project_context_revisions",
+        "project_context_revision_blocks",
+        "project_context_revision_impact_blocks",
+    ):
+        assert await real_postgres_client.fetch_one(
+            f"SELECT count(*) AS count FROM public.{table} WHERE project_id = 'project-1'"
+        ) == {"count": 0}
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.requires_pgvector
+@pytest.mark.no_network
 async def test_project_manager_retries_file_cleanup_after_committed_deletion(
     real_postgres_client,
     tmp_path,
