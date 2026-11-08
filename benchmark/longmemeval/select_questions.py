@@ -26,6 +26,8 @@ def main() -> None:
                         help="JSON lists of question IDs, or dataset files, already used")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=20261104)
+    parser.add_argument("--per-type", type=json.loads, default=PER_TYPE,
+                        help='JSON count per question type, e.g. {"multi-session": 8}')
     args = parser.parse_args()
 
     used: set[str] = set()
@@ -41,7 +43,7 @@ def main() -> None:
 
     rng = random.Random(args.seed)
     chosen = []
-    for kind, count in PER_TYPE.items():
+    for kind, count in args.per_type.items():
         pool = sorted(by_type[kind], key=lambda row: row["question_id"])
         chosen.extend(rng.sample(pool, count))
     args.out.write_text(json.dumps(chosen, default=str))
