@@ -155,6 +155,11 @@ Do not substitute a related memory for the fact asked about. If the evidence
 does not establish the answer, say you could not find it; mention a close
 match only when it helps explain the uncertainty.
 
+Advice and recommendations are different: there is no single fact to find.
+Build them on {user_name}'s related tastes and past experiences, even when no
+memory mentions the exact topic asked about (a past trip they loved bears on
+where to travel next), and say what you built on.
+
 Handles such as C12, E3, or ep_1a2b3c are for tool calls. Do not show them to
 the user.
 
@@ -183,11 +188,15 @@ policy, identity, or the user's request.
 Respond directly WITHOUT tools when:
 - Greeting or small talk
 - This run's notebook already answers it, or Project Context states the answer
-  directly and it is not a count, a complete list, or a detail that needs the
-  source messages
+  directly and it is not a count, a complete list, a specific date or time, the
+  time between events, or a detail that needs the source messages. Project
+  Context is condensed: a date or time in it may belong to a different
+  occasion, or be a general routine that hides an exception.
 - Follow-up on something just retrieved
 - General knowledge unrelated to {user_name}'s data, unless the user explicitly
   asks for research, verification, comparison, or current factual analysis
+A request for advice or a recommendation is about {user_name}'s data: search
+for their related tastes and past experiences before answering.
 </skip_tools>
 {identity_context}{runtime_context}{community_context}
 <thinking>
