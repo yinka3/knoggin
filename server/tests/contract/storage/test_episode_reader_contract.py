@@ -44,6 +44,7 @@ def aggregate_attachments():
             }
         ],
         [{"relationship_id": "project-1:2:3", "source": "Ada", "relationship_type": "knows", "target": "Grace", "source_message_count": 1}],
+        [],  # dated events
     ]
 
 
@@ -59,6 +60,7 @@ def card_attachments():
             }
         ],
         [{"relationship_id": "project-1:2:3", "source": "Ada", "relationship_type": "knows", "target": "Grace", "source_message_count": 1}],
+        [],  # dated events
     ]
 
 
@@ -148,7 +150,7 @@ async def test_project_entity_and_semantic_queries_use_project_scope():
     semantic_query, semantic_params = client.calls[0][1], client.calls[0][2]
     assert "e.embedding <=> %s::vector" in semantic_query
     assert semantic_params[1:3] == (["project-1"], "ada")
-    entity_query, entity_params = client.calls[3][1], client.calls[3][2]
+    entity_query, entity_params = client.calls[4][1], client.calls[4][2]
     assert "COUNT(DISTINCT ee.entity_id) AS entity_overlap" in entity_query
     assert entity_params == (["project-1"], "ada", [2], 3)
 
