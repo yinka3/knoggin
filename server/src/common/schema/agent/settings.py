@@ -95,7 +95,7 @@ class AgentLimitSettings(ConfigModel):
     max_accumulated_profiles: StrictInt = Field(20, ge=1)
     max_accumulated_graph: StrictInt = Field(40, ge=1)
     max_accumulated_paths: StrictInt = Field(8, ge=1)
-    max_accumulated_episodes: StrictInt = Field(8, ge=1)
+    max_accumulated_episodes: StrictInt = Field(16, ge=1)
     max_accumulated_events: StrictInt = Field(60, ge=1)
     max_accumulated_documents: StrictInt = Field(30, ge=1)
     max_accumulated_web_discoveries: StrictInt = Field(12, ge=1)

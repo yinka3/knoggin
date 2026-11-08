@@ -13,15 +13,14 @@ from datetime import datetime, timedelta, timezone
 from time import perf_counter
 from typing import Any, Dict, List, Optional, Tuple
 
+from itertools import zip_longest
+
 from loguru import logger
 
 from common.schema.evidence import EvidenceTraversalLimits
 from common.schema.settings import SearchSettings
 from common.scoping import require_scope_value, require_visible_project_ids
 from common.utils.events import emit
-
-DEFAULT_EPISODE_RETRIEVAL_LIMIT = 5
-
 
 class KnowledgeRetrieval:
     """One project-scoped policy boundary for internal knowledge reads.
@@ -201,10 +200,15 @@ class KnowledgeRetrieval:
         raw_fallback: bool = True,
         alternate_queries: Optional[List[str]] = None,
         offset: int = 0,
+        limit: Optional[int] = None,
     ) -> Dict:
         """Retrieve episodes, then optionally fall back to raw durable messages."""
         if offset < 0:
             raise ValueError("offset must not be negative")
+        # A caller may ask for a smaller page, never a larger one.
+        page_size = self._search_settings.episode_page_size
+        if limit is not None:
+            page_size = min(self._positive_int(limit, "episode_check limit"), page_size)
         session_id = require_scope_value(
             session_id, "session_id", "KnowledgeRetrieval.episode_check"
         )
@@ -220,7 +224,7 @@ class KnowledgeRetrieval:
                 [entity_id],
                 user_name=self.user_name,
                 project_id=self.project_id,
-                limit=DEFAULT_EPISODE_RETRIEVAL_LIMIT,
+                limit=page_size,
                 visible_project_ids=self.readable_project_ids,
                 **date_range,
             )
@@ -252,7 +256,10 @@ class KnowledgeRetrieval:
 
         # Both channels contribute: a weak semantic hit must not suppress an
         # exact keyword match. Retrieve a bounded pool before rank fusion.
-        candidate_limit = offset + DEFAULT_EPISODE_RETRIEVAL_LIMIT * 3
+        candidate_limit = offset + (
+            self._search_settings.episode_page_size
+            * self._search_settings.episode_candidate_pages
+        )
         # A date range has already narrowed the Episodes, and a broad question
         # about that day should still see them, so only the range filters then.
         score_threshold = (
@@ -271,8 +278,20 @@ class KnowledgeRetrieval:
                 visible_project_ids=self.readable_project_ids,
                 **date_range,
             )
-            lexical_found = lexical_found or bool(lexical)
-            channels.append(lexical)
+            # Events keep passing mentions that an Episode's summary buries.
+            by_events = await self.knowledge_store.search_project_episodes_by_events(
+                variant,
+                user_name=self.user_name,
+                project_id=self.project_id,
+                limit=candidate_limit,
+                visible_project_ids=self.readable_project_ids,
+                **date_range,
+            )
+            # One keyword vote per Episode: matching its summary and its events
+            # is the same evidence, so alternate the two lists instead of adding.
+            keyword = self._interleave(lexical, by_events)
+            lexical_found = lexical_found or bool(keyword)
+            channels.append(keyword)
             if self.embedding_service is None:
                 continue
             try:
@@ -295,6 +314,7 @@ class KnowledgeRetrieval:
             semantic_matches.extend(matches)
             channels.append([episode for episode, _ in matches])
 
+        fusion_k = self._search_settings.episode_rank_fusion_k
         scores = {}
         by_id = {}
         for channel in channels:
@@ -305,11 +325,11 @@ class KnowledgeRetrieval:
                     continue
                 seen.add(key)
                 by_id[key] = episode
-                scores[key] = scores.get(key, 0.0) + 1.0 / (60 + rank)
+                scores[key] = scores.get(key, 0.0) + 1.0 / (fusion_k + rank)
         # Stable ties preserve lexical candidates first, without imposing a
         # blanket recency penalty on legitimate historical questions.
         ranked = [by_id[key] for key in sorted(scores, key=lambda key: -scores[key])]
-        page_end = offset + DEFAULT_EPISODE_RETRIEVAL_LIMIT
+        page_end = offset + page_size
         episodes = ranked[offset:page_end]
         has_more = len(ranked) > page_end
         if episodes:
@@ -365,6 +385,16 @@ class KnowledgeRetrieval:
             metrics={"used_raw_message_fallback": 1},
         )
         return {"resolution": "fallback", "results": fallback}
+
+    @staticmethod
+    def _interleave(first: List, second: List) -> List:
+        merged, seen = [], set()
+        for pair in zip_longest(first, second):
+            for episode in pair:
+                if episode is not None and episode.episode_id not in seen:
+                    seen.add(episode.episode_id)
+                    merged.append(episode)
+        return merged
 
     def _episode_queries(
         self, query: str, alternate_queries: Optional[List[str]]
@@ -463,7 +493,7 @@ class KnowledgeRetrieval:
             session_id, "session_id", "KnowledgeRetrieval.read_recent_episodes"
         )
         limit = self._positive_int(limit, "read_recent_episodes limit")
-        effective_limit = min(limit, DEFAULT_EPISODE_RETRIEVAL_LIMIT)
+        effective_limit = min(limit, self._search_settings.episode_page_size)
         if offset < 0:
             raise ValueError("offset must not be negative")
         date_range = self._episode_date_range(after, before)
@@ -1057,6 +1087,15 @@ class KnowledgeRetrieval:
                         "source_message_count": relationship.source_message_count,
                     }
                     for relationship in episode.relationships
+                ],
+                "events": [
+                    {
+                        "what": event.what,
+                        "kind": event.kind,
+                        "when": self._event_when(event.start_date, event.end_date),
+                        "date_text": event.date_text,
+                    }
+                    for event in episode.events
                 ],
                 # Source messages are intentionally omitted from discovery;
                 # read_episode is the explicit hydration follow-up.

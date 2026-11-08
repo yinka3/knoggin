@@ -555,7 +555,7 @@ async def test_exact_entity_episode_lookup_uses_the_store_contract_without_sessi
             "entity_ids": [2],
             "user_name": "ada",
             "project_id": "project-1",
-            "limit": 5,
+            "limit": 10,
             "visible_project_ids": ["project-1"],
         }
     ]

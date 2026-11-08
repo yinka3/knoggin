@@ -175,6 +175,12 @@ class SearchSettings(ConfigModel):
     default_activity_hours: int = Field(24, ge=1)
     # Below this an Episode is only vaguely related, and it crowds out real hits.
     episode_similarity_threshold: float = Field(0.5, ge=0.0, le=1.0)
+    # Episodes one search_episodes or read_recent_episodes page returns.
+    episode_page_size: int = Field(10, ge=1, le=50)
+    # Each search channel fetches this many pages of candidates before ranking.
+    episode_candidate_pages: int = Field(3, ge=1, le=10)
+    # Rank fusion damping: higher lets lower-ranked matches count for more.
+    episode_rank_fusion_k: int = Field(60, ge=1, le=1000)
     # The query plus rewordings one Episode search may run.
     episode_max_queries: int = Field(4, ge=1, le=10)
     # Events one list_events page returns; each is one short line.

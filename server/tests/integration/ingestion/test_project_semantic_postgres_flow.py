@@ -715,6 +715,23 @@ async def test_project_semantic_processor_uses_real_storage_for_agent_derived_co
         user_name=user_name, project_id=project_id, kind="trip", limit=25
     )
     assert [e["what"] for e in by_kind] == ["The user hiked a nearby trail"]
+    # With words to match, the better-matching mention comes first, not the earlier one.
+    by_words = await store.list_project_events(
+        user_name=user_name, project_id=project_id, query="hiked trail project", limit=25
+    )
+    assert [e["what"] for e in by_words] == [
+        "The user hiked a nearby trail",
+        "The user started the project Context",
+    ]
+    # Episode search can reach an Episode through its events, and the card carries them.
+    found = await store.search_project_episodes_by_events(
+        "trail", user_name=user_name, project_id=project_id, limit=5
+    )
+    assert len(found) == 1
+    assert [event.what for event in found[0].events] == [
+        "The user started the project Context",
+        "The user hiked a nearby trail",
+    ]
 
     revision = await ProjectContextReader(postgres).get_current_revision(
         user_name=user_name,

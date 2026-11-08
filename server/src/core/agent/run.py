@@ -285,7 +285,7 @@ class AgentRunLimits:
     max_accumulated_profiles: int = 20
     max_accumulated_graph: int = 40
     max_accumulated_paths: int = 8
-    max_accumulated_episodes: int = 8
+    max_accumulated_episodes: int = 16
     max_accumulated_events: int = 60
     max_accumulated_documents: int = 30
     max_accumulated_web_discoveries: int = 12

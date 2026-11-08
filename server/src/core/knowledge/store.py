@@ -1076,6 +1076,9 @@ class KnowledgeStore:
             before=before,
         )
 
+    async def search_project_episodes_by_events(self, query: str, **kwargs) -> List[EpisodeCard]:
+        return await self._episode_reader.search_project_episodes_by_events(query, **kwargs)
+
     async def list_project_events(self, **kwargs) -> List[Dict]:
         return await self._episode_reader.list_project_events(**kwargs)
 

@@ -81,10 +81,11 @@ Activities:
 {% for item in activities %}- {{ item.reference }}{% if item.entity %} {{ item.entity }}{% endif %}{% if item.time %} at {{ item.time }}{% endif %}{% if item.evidence %} (evidence: {{ item.evidence|join(', ') }}){% endif %}{{ '\n' }}
 {% endfor %}{% endif %}{% if episodes %}
 Episodes:
-{% for item in episodes %}- {{ item.reference }}{% if item.summary %}: {{ item.summary }}{% endif %}
-{% if item.chronology %}  chronology: {{ item.chronology }}
+{% for item in episodes %}- {{ item.reference }}{% if item.summary %}: {{ item.summary }}{% endif %}{{ '\n' }}
+{%- if item.chronology %}  chronology: {{ item.chronology }}
 {% endif %}{% if item.entity_names %}  entities: {{ item.entity_names|join(', ') }}
 {% endif %}{% if item.relationship_lines %}  relationships: {{ item.relationship_lines|join('; ') }}
+{% endif %}{% if item.event_lines %}  events: {{ item.event_lines|join('; ') }}
 {% endif %}{% if item.developments %}  developments: {{ item.developments|join('; ') }}
 {% endif %}{% if item.updates %}  updates: {{ item.updates|join('; ') }}
 {% endif %}{% if item.unresolved %}  unresolved: {{ item.unresolved|join('; ') }}
@@ -430,6 +431,21 @@ def _episode_entity_names(item: dict[str, Any]) -> list[str]:
     ]
 
 
+def _episode_event_lines(item: dict[str, Any]) -> list[str]:
+    events = item.get("events")
+    lines = []
+    for event in events if isinstance(events, list) else []:
+        if not isinstance(event, dict) or not event.get("what"):
+            continue
+        when = _safe_text(event.get("when") or "date unknown", limit=40)
+        line = f"{when} [{_safe_text(event.get('kind') or 'other', limit=20)}] "
+        line += _safe_text(event["what"], limit=200)
+        if event.get("date_text"):
+            line += f' (said "{_safe_text(event["date_text"], limit=60)}")'
+        lines.append(line)
+    return lines
+
+
 def _episode_relationship_lines(item: dict[str, Any]) -> list[str]:
     relationships = item.get("relationships")
     return [
@@ -610,6 +626,7 @@ def _record_list(
                 )
             item["entity_names"] = _episode_entity_names(item)
             item["relationship_lines"] = _episode_relationship_lines(item)
+            item["event_lines"] = _episode_event_lines(item)
             item["support"] = _historical_episode_support(item)
         elif section == "paths":
             item["description"] = _path_description(item, localizer)

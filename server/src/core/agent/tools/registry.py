@@ -59,8 +59,10 @@ _PREVIOUS_NOTEBOOK_PAGE_RUNTIME_INSTRUCTION = (
 
 _EPISODE_CHECK_RUNTIME_INSTRUCTION = (
     "[SYSTEM NOTICE: Use search_episodes for remembered history, decisions, or "
-    "developments. It returns compact, evidence-backed summaries five at a time; "
-    "for a count or complete list, pass next_offset as offset to see more. Read an "
+    "developments. It returns compact, evidence-backed summaries a page at a time, "
+    "each with its dated events; it also matches the words of those events, so a "
+    "passing mention can surface an Episode about another topic. For a count or "
+    "complete list, pass next_offset as offset to see more. Read an "
     "Episode's source messages with read_episode_messages when exact or "
     "sensitive detail matters. Memories use the words of the original chat, which "
     "may differ from the question; pass rewordings as alternate_queries in the "
@@ -82,7 +84,8 @@ _RECENT_EPISODES_RUNTIME_INSTRUCTION = (
 _LIST_EVENTS_RUNTIME_INSTRUCTION = (
     "[SYSTEM NOTICE: list_events lists things the user reported doing (trips, "
     "purchases, events attended, things started or finished) by when they "
-    "happened, one short line each. Use it to order events, to find what happened "
+    "happened, one short line each; with query, the best-matching lines come "
+    "first. Use it to order events, to find what happened "
     "in a time span, and to count. Each line is one mention, so the same event "
     "mentioned twice appears twice: merge duplicates before counting. A kind "
     "filter also returns events labeled other; decide whether each one fits. Read the source Episode when wording or details matter.]"
@@ -762,11 +765,13 @@ class Tools(
         before: Optional[str] = None,
         alternate_queries: Optional[List[str]] = None,
         offset: int = 0,
+        limit: Optional[int] = None,
     ):
         return await self.knowledge_retrieval.episode_check(
             query,
             alternate_queries=alternate_queries,
             offset=offset,
+            limit=limit,
             session_id=self.session_id,
             entity_id=entity_id,
             after=after,

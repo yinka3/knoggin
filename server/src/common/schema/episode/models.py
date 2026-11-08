@@ -232,6 +232,7 @@ class EpisodeCard(EpisodeNarrative):
     last_message_at: Optional[datetime] = None
     entities: List[EntityEpisode] = Field(default_factory=list)
     relationships: List[RelationshipEpisode] = Field(default_factory=list)
+    events: List[EpisodeEvent] = Field(default_factory=list)
     user_modified: bool = False
     created_at: datetime = Field(default_factory=get_now)
     updated_at: datetime = Field(default_factory=get_now)

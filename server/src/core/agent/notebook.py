@@ -66,7 +66,7 @@ class NotebookCapacity:
     max_entities: int = 20
     max_relationships: int = 40
     max_activities: int = 30
-    max_episodes: int = 8
+    max_episodes: int = 16
     max_events: int = 60
     max_paths: int = 8
     max_messages: int = 30
@@ -88,7 +88,7 @@ class NotebookCapacity:
             max_entities=_positive_limit(limits, "max_accumulated_profiles", 20),
             max_relationships=_positive_limit(limits, "max_accumulated_graph", 40),
             max_activities=_positive_limit(limits, "max_accumulated_messages", 30),
-            max_episodes=_positive_limit(limits, "max_accumulated_episodes", 8),
+            max_episodes=_positive_limit(limits, "max_accumulated_episodes", 16),
             max_events=_positive_limit(limits, "max_accumulated_events", 60),
             max_paths=_positive_limit(limits, "max_accumulated_paths", 8),
             max_messages=_positive_limit(limits, "max_accumulated_messages", 30),

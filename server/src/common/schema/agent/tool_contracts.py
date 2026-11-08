@@ -380,7 +380,8 @@ TOOL_SCHEMAS = [
             "name": "search_episodes",
             "description": (
                 "Search episodic memory by topic, optionally narrowed to one entity. Returns "
-                "compact summaries with their dates, entities and relationships. Summaries "
+                "compact summaries with their dates, entities, relationships and events; "
+                "the words of those events are searched too. Summaries "
                 "can omit details: use read_episode_messages to read an Episode's original "
                 "source messages. Results are contextual memory, not atomic claims."
             ),
@@ -429,6 +430,11 @@ TOOL_SCHEMAS = [
                             "Matches to skip, for the next page of a count or complete list; "
                             "use next_offset from the last result with the same query."
                         ),
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Optional smaller page; the page size setting is the most.",
                     },
                 },
                 "required": ["query"],
@@ -543,7 +549,7 @@ TOOL_SCHEMAS = [
                     },
                     "query": {
                         "type": "string",
-                        "description": "Optional words to match in the event description.",
+                        "description": "Optional words to match in the event description; the best matches come first.",
                     },
                     "offset": {
                         "type": "integer",

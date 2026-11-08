@@ -8,6 +8,7 @@ from common.schema.episode.models import (
     EntityEpisode,
     Episode,
     EpisodeCard,
+    EpisodeEvent,
     MessageEpisode,
 )
 from core.knowledge.entity.profile import EntityProfile
@@ -130,7 +131,7 @@ async def test_episode_check_exact_entity_returns_scoped_episode_card():
             {
                 "user_name": "ada",
                 "project_id": "project-1",
-                "limit": 5,
+                "limit": 10,
                 "visible_project_ids": ["project-1"],
             },
         )
@@ -291,6 +292,9 @@ async def test_read_recent_episodes_returns_latest_summaries_without_search():
 @pytest.mark.no_network
 async def test_episode_check_searches_episodes_before_raw_message_fallback():
     class FakeKnowledgeStore(EpisodeStore):
+        async def search_project_episodes_by_events(self, _query, **_scope):
+            return []
+
         async def search_project_episodes(self, query, **scope):
             assert query == "What changed in the memory design?"
             return [episode_card("episode-question")]
@@ -322,6 +326,9 @@ async def test_episode_check_combines_semantic_and_lexical_matches():
             assert embedding == [0.1] * 768
             return [(episode_card("episode-semantic"), 0.91)]
 
+        async def search_project_episodes_by_events(self, _query, **_scope):
+            return []
+
         async def search_project_episodes(self, query, **scope):
             return [episode_card("episode-lexical")]
 
@@ -349,12 +356,59 @@ async def test_episode_check_combines_semantic_and_lexical_matches():
 
 
 @pytest.mark.no_network
+async def test_episode_check_finds_an_episode_through_its_events():
+    """A passing mention lives in an event even when the summary buries it."""
+
+    buried = episode_card("episode-europe").model_copy(
+        update={
+            "events": [
+                EpisodeEvent(
+                    what="Ada has tried three of Emma's recipes",
+                    start_date=date(2023, 5, 29),
+                    end_date=date(2023, 5, 29),
+                    precision="day",
+                    source_message_ids=[7],
+                )
+            ]
+        }
+    )
+
+    class FakeKnowledgeStore(EpisodeStore):
+        async def search_project_episodes(self, _query, **_scope):
+            return [episode_card("episode-older")]
+
+        async def search_project_episodes_by_events(self, query, **_scope):
+            assert query == "Emma recipes tried"
+            return [buried]
+
+    tool = EpisodeTool()
+    tool.embedding_service = None
+    tool.knowledge_store = FakeKnowledgeStore()
+
+    result = await tool.episode_check("Emma recipes tried", session_id="session-1")
+
+    episodes = {e["episode_id"]: e for e in result["results"][0]["episodes"]}
+    assert set(episodes) == {"episode-older", "episode-europe"}
+    assert episodes["episode-europe"]["events"] == [
+        {
+            "what": "Ada has tried three of Emma's recipes",
+            "kind": "other",
+            "when": "2023-05-29",
+            "date_text": None,
+        }
+    ]
+
+
+@pytest.mark.no_network
 async def test_episode_check_keeps_lexical_results_when_semantic_search_fails():
     class FailingEmbeddingService:
         async def encode_query(self, _query):
             raise RuntimeError("model unavailable")
 
     class FakeKnowledgeStore(EpisodeStore):
+        async def search_project_episodes_by_events(self, _query, **_scope):
+            return []
+
         async def search_project_episodes(self, _query, **_scope):
             return [episode_card("episode-lexical")]
 
@@ -440,6 +494,9 @@ async def _dated_search(*, after=None, before=None, episodes=()):
     calls = []
 
     class Store:
+        async def search_project_episodes_by_events(self, _query, **_scope):
+            return []
+
         async def search_project_episodes(self, query, **scope):
             calls.append(("lexical", scope))
             return list(episodes)
@@ -499,6 +556,9 @@ async def test_bad_date_ranges_are_rejected(after, before):
 
 async def test_episode_search_can_refuse_the_raw_message_fallback():
     class Store:
+        async def search_project_episodes_by_events(self, _query, **_scope):
+            return []
+
         async def search_project_episodes(self, query, **scope):
             return []
 
@@ -519,6 +579,9 @@ class _ExpansionStore:
     def __init__(self, hits):
         self.hits = hits
         self.searched = []
+
+    async def search_project_episodes_by_events(self, _query, **_scope):
+        return []
 
     async def search_project_episodes(self, query, **scope):
         self.searched.append(query)
@@ -584,17 +647,32 @@ async def test_browsing_episodes_by_date_reports_the_next_page():
     assert result["has_more"] is True and result["next_offset"] == 6
 
 
+async def test_episode_search_limit_shrinks_the_page_but_never_grows_it():
+    ranked = list("abcdefghijkl")
+    tool = EpisodeTool()
+    tool.embedding_service = None
+    tool.knowledge_store = _ExpansionStore({"art": ranked})
+
+    small = await tool.episode_check("art", session_id="session-1", limit=3)
+    large = await tool.episode_check("art", session_id="session-1", limit=50)
+
+    assert [e["episode_id"] for e in small["results"][0]["episodes"]] == ranked[:3]
+    assert small["next_offset"] == 3
+    assert [e["episode_id"] for e in large["results"][0]["episodes"]] == ranked[:10]
+
+
 async def test_episode_search_pages_through_ranked_matches():
     tool = EpisodeTool()
     tool.embedding_service = None
-    tool.knowledge_store = _ExpansionStore({"art": ["a", "b", "c", "d", "e", "f", "g"]})
+    ranked = list("abcdefghijkl")
+    tool.knowledge_store = _ExpansionStore({"art": ranked})
 
     first = await tool.episode_check("art", session_id="session-1")
-    second = await tool.episode_check("art", session_id="session-1", offset=5)
+    second = await tool.episode_check("art", session_id="session-1", offset=10)
 
-    assert [e["episode_id"] for e in first["results"][0]["episodes"]] == ["a", "b", "c", "d", "e"]
-    assert first["has_more"] is True and first["next_offset"] == 5
-    assert [e["episode_id"] for e in second["results"][0]["episodes"]] == ["f", "g"]
+    assert [e["episode_id"] for e in first["results"][0]["episodes"]] == ranked[:10]
+    assert first["has_more"] is True and first["next_offset"] == 10
+    assert [e["episode_id"] for e in second["results"][0]["episodes"]] == ["k", "l"]
     assert second["has_more"] is False and second["next_offset"] is None
 
 

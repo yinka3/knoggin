@@ -8,11 +8,16 @@ from common.schema.episode.models import (
     EntityEpisode,
     Episode,
     EpisodeCard,
+    EpisodeEvent,
     MessageEpisode,
     RelationshipEpisode,
 )
 from common.scoping import require_scope_value, require_visible_project_ids
 from infrastructure.postgres_client import PostgresClient
+
+
+# Event text as searched: what happened plus the wording about when.
+_EVENT_TSVECTOR = "to_tsvector('english', ev.what || ' ' || coalesce(ev.date_text, ''))"
 
 
 class EpisodeReader:
@@ -117,6 +122,51 @@ class EpisodeReader:
         )
         return [await self._hydrate_episode_card(row) for row in rows]
 
+    async def search_project_episodes_by_events(
+        self,
+        query: str,
+        *,
+        user_name: str,
+        project_id: str,
+        limit: int,
+        visible_project_ids: Optional[List[str]] = None,
+        after: Optional[datetime] = None,
+        before: Optional[datetime] = None,
+    ) -> List[EpisodeCard]:
+        """Episodes whose event lines match, best-matching event first.
+
+        An event keeps a passing mention the Episode summary may bury.
+        """
+
+        query = query.strip()
+        if not query or limit <= 0:
+            return []
+        user_name, visible_project_ids = self._project_scope(
+            user_name, project_id, visible_project_ids, "search_project_episodes_by_events"
+        )
+        date_sql, date_params = self._date_range(after, before)
+        rows = await self.client.fetch_all(
+            f"""
+            WITH terms AS (
+                SELECT replace(plainto_tsquery('english', %s)::text, '&', '|')::tsquery AS query
+            ),
+            hits AS (
+                SELECT ev.episode_id, max(ts_rank_cd({_EVENT_TSVECTOR}, terms.query)) AS rank
+                FROM episode_events ev
+                JOIN episodes e ON e.episode_id = ev.episode_id
+                JOIN projects p ON p.project_id = e.project_id CROSS JOIN terms
+                WHERE e.project_id = ANY(%s) AND p.user_name = %s
+                  AND {_EVENT_TSVECTOR} @@ terms.query {date_sql}
+                GROUP BY ev.episode_id
+            )
+            SELECT e.* FROM hits JOIN episodes e ON e.episode_id = hits.episode_id
+            ORDER BY hits.rank DESC, e.last_message_at DESC NULLS LAST, e.episode_id DESC
+            LIMIT %s
+            """,
+            (query, visible_project_ids, user_name, *date_params, limit),
+        )
+        return [await self._hydrate_episode_card(row) for row in rows]
+
     async def list_project_events(
         self,
         *,
@@ -145,6 +195,9 @@ class EpisodeReader:
         start = after.date() if after is not None else None
         end = before.date() if before is not None else None
         where, params = "", []
+        # With a query, the best-matching mentions come first; otherwise by date.
+        order = "ev.start_date NULLS LAST, e.first_message_at NULLS LAST"
+        order_params: list = []
         if start is not None:
             where += " AND ev.end_date >= %s"
             params.append(start)
@@ -158,10 +211,16 @@ class EpisodeReader:
         if query and query.strip():
             # Any important word may match, as in Episode keyword search.
             where += (
-                " AND to_tsvector('english', ev.what || ' ' || coalesce(ev.date_text, ''))"
+                f" AND {_EVENT_TSVECTOR}"
                 " @@ replace(plainto_tsquery('english', %s)::text, '&', '|')::tsquery"
             )
             params.append(query)
+            order = (
+                f"ts_rank_cd({_EVENT_TSVECTOR},"
+                " replace(plainto_tsquery('english', %s)::text, '&', '|')::tsquery) DESC, "
+                + order
+            )
+            order_params.append(query)
         rows = await self.client.fetch_all(
             f"""
             SELECT ev.episode_id, ev.what, ev.kind, ev.start_date, ev.end_date,
@@ -173,11 +232,13 @@ class EpisodeReader:
             JOIN episodes e ON e.episode_id = ev.episode_id
             JOIN projects p ON p.project_id = e.project_id
             WHERE e.project_id = ANY(%s) AND p.user_name = %s {where}
-            ORDER BY ev.start_date NULLS LAST, e.first_message_at NULLS LAST,
-                     ev.episode_id, ev.ordinal
+            ORDER BY {order}, ev.episode_id, ev.ordinal
             LIMIT %s OFFSET %s
             """,
-            (start, start, end, end, visible_project_ids, user_name, *params, limit, offset),
+            (
+                start, start, end, end, visible_project_ids, user_name, *params,
+                *order_params, limit, offset,
+            ),
         )
         return [
             {**row, "source_message_ids": [int(i) for i in row["source_message_ids"]]}
@@ -372,6 +433,7 @@ class EpisodeReader:
             last_message_at=row.get("last_message_at"),
             entities=await self._load_entities(episode_id),
             relationships=await self._load_relationships(episode_id),
+            events=await self._load_events(episode_id),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             generator_metadata=self._json_dict(row.get("generator_metadata")),
@@ -425,6 +487,22 @@ class EpisodeReader:
                 source_message_count=int(row["source_message_count"]),
                 first_seen_at=row.get("first_seen_at"),
                 last_seen_at=row.get("last_seen_at"),
+            )
+            for row in rows
+        ]
+
+    async def _load_events(self, episode_id: str) -> List[EpisodeEvent]:
+        rows = await self.client.fetch_all(
+            """
+            SELECT what, kind, start_date, end_date, precision, date_text,
+                   source_message_ids
+            FROM episode_events WHERE episode_id = %s ORDER BY ordinal
+            """,
+            (episode_id,),
+        )
+        return [
+            EpisodeEvent(
+                **{**row, "source_message_ids": [int(i) for i in row["source_message_ids"]]}
             )
             for row in rows
         ]
