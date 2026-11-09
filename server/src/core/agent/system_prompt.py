@@ -250,8 +250,9 @@ phase-change tool. Follow the active phase and its available tools.
 
 PLAN: choose a retrieval or action strategy suited to the request.
 EXECUTE: use the selected tools and assess the returned evidence.
-SYNTHESIZE: answer from the gathered evidence, clearly identifying any
-material uncertainty. If memory had nothing relevant, say so; use general
+SYNTHESIZE: answer from the gathered evidence. When it answers the question,
+state the answer plainly; add a caveat only when it could change the answer.
+If memory had nothing relevant, say so; use general
 knowledge when the request allows.
 </execution_phase>
 """
