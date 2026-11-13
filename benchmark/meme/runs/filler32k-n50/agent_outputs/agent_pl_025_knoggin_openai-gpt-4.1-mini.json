@@ -1,0 +1,202 @@
+{
+  "episode_id": 25,
+  "domain": "personal_life",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What is my job title?",
+      "task_type": "Cas",
+      "entity": [
+        "job_title"
+      ],
+      "entity_values": {
+        "job_title": "marketing lead"
+      },
+      "expected_answer": "marketing lead",
+      "hop": 1,
+      "agent_answer": "marketing lead"
+    },
+    {
+      "question": "How do I get to work?",
+      "task_type": "Cas",
+      "entity": [
+        "commute_method"
+      ],
+      "entity_values": {
+        "commute_method": "walking"
+      },
+      "expected_answer": "walking",
+      "hop": 2,
+      "agent_answer": "By walking."
+    },
+    {
+      "question": "What's my work schedule?",
+      "task_type": "Abs",
+      "entity": [
+        "work_schedule"
+      ],
+      "entity_values": {
+        "work_schedule": "hybrid (3 office + 2 remote)"
+      },
+      "expected_answer": "hybrid (3 office + 2 remote)",
+      "hop": 1,
+      "agent_answer": "Hybrid: 3 office days + 2 remote days."
+    },
+    {
+      "question": "What's my favorite restaurant?",
+      "task_type": "Abs",
+      "entity": [
+        "favorite_restaurant"
+      ],
+      "entity_values": {
+        "favorite_restaurant": "Velmara Taqueria"
+      },
+      "expected_answer": "Velmara Taqueria",
+      "hop": 2,
+      "agent_answer": "Velmara Taqueria"
+    },
+    {
+      "question": "What's my relationship status?",
+      "task_type": "Del",
+      "entity": [
+        "relationship_status"
+      ],
+      "entity_values": {
+        "relationship_status": "in a relationship"
+      },
+      "expected_answer": "in a relationship",
+      "hop": null,
+      "agent_answer": "You are currently in a relationship."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you."
+      },
+      "expected_answer": "Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you.",
+      "hop": null,
+      "agent_answer": "\"Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all subscription services I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "subscription_service"
+      ],
+      "entity_values": {
+        "subscription_service": [
+          "Xelvoria",
+          "meal kit (Kelvimeal)",
+          "Pyrethon Plus"
+        ]
+      },
+      "expected_answer": "Xelvoria, meal kit (Kelvimeal), Pyrethon Plus",
+      "hop": null,
+      "agent_answer": "1. Pyrethon Plus  \n2. Kelvimeal"
+    },
+    {
+      "question": "What is my job title?",
+      "task_type": "Cas",
+      "entity": [
+        "job_title"
+      ],
+      "entity_values": {
+        "job_title": "staff engineer"
+      },
+      "expected_answer": "staff engineer",
+      "hop": 1,
+      "agent_answer": "marketing lead"
+    },
+    {
+      "question": "How do I get to work?",
+      "task_type": "Cas",
+      "entity": [
+        "commute_method"
+      ],
+      "entity_values": {
+        "commute_method": "bus"
+      },
+      "expected_answer": "bus",
+      "hop": 2,
+      "agent_answer": "By walking, since your office is currently located in Zaravel Heights."
+    },
+    {
+      "question": "What's my work schedule?",
+      "task_type": "Abs",
+      "entity": [
+        "work_schedule"
+      ],
+      "entity_values": {
+        "work_schedule": "hybrid (3 office + 2 remote)"
+      },
+      "expected_answer": "Uncertain — previously 'hybrid (3 office + 2 remote)', but employer changed",
+      "hop": 1,
+      "agent_answer": "Hybrid: 3 office days + 2 remote days."
+    },
+    {
+      "question": "What's my favorite restaurant?",
+      "task_type": "Abs",
+      "entity": [
+        "favorite_restaurant"
+      ],
+      "entity_values": {
+        "favorite_restaurant": "Velmara Taqueria"
+      },
+      "expected_answer": "Uncertain — previously 'Velmara Taqueria', but work_location changed",
+      "hop": 2,
+      "agent_answer": "Velmara Taqueria"
+    },
+    {
+      "question": "What's my relationship status?",
+      "task_type": "Del",
+      "entity": [
+        "relationship_status"
+      ],
+      "entity_values": {
+        "relationship_status": "in a relationship"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "no longer \"in a relationship\""
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "woodworking",
+        "sports": "soccer",
+        "club_membership": "book club"
+      },
+      "expected_answer": "The user's hobby is woodworking, plays soccer, and is part of book club.",
+      "hop": null,
+      "agent_answer": "- Listen to Tameca Jones and Lo-Fi hip hop beats  \n- Collect vinyl records and listen to Fleetwood Mac's \"Rumours\" reissue  \n- Spend time with partner Jessica on projects or relaxing (though relationship status is no longer \"in a relationship\")  \n- Play soccer and practice improving passing skills  \n- Subscribe to and use meal kit service Kelvimeal, exploring vegetarian and meat-based meal options  \n- Organize shoe closet using stackable shelf baskets  \n- Explore strategies to reduce food waste and promote sustainability, including backyard composting and regrowing vegetables from scraps  \n- Engage in a theater binge, sparked by watching the Hamilton film adaptation on Disney+, exploring musicals like Spring Awakening, Dear Evan Hansen, and The Band's Visit  \n- Organize writing projects including poetry collection and novel idea, journaling daily since January 15th  \n- Watch the TV show \"The Veldrakon Spiral\"  \n- Attend Zorathel Peak Gym and participate in various classes  \n- Participate in a book club discussing diverse genres and use Pyrethon Plus subscription for enhanced reading experience"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you."
+      },
+      "expected_answer": "Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you.",
+      "hop": null,
+      "agent_answer": "\"Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you.\""
+    }
+  ]
+}

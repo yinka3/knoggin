@@ -1,0 +1,250 @@
+{
+  "episode_id": 27,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What's the database connection string?",
+      "task_type": "Cas",
+      "entity": [
+        "connection_string"
+      ],
+      "entity_values": {
+        "connection_string": "pyravar://data-primary:3306/aurora"
+      },
+      "expected_answer": "pyravar://data-primary:3306/aurora",
+      "hop": 1,
+      "agent_answer": "pyravar://data-primary:3306/aurora",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically, providing the same database connection string."
+    },
+    {
+      "question": "What's the model syntax?",
+      "task_type": "Cas",
+      "entity": [
+        "model_syntax"
+      ],
+      "entity_values": {
+        "model_syntax": "Thalnex.graph('Model', edges)"
+      },
+      "expected_answer": "Thalnex.graph('Model', edges)",
+      "hop": 2,
+      "agent_answer": "Zyndra.struct('Model', types)",
+      "u_pass": false,
+      "u_reason": "The agent's answer does not semantically match the gold answer as it uses different syntax and terms."
+    },
+    {
+      "question": "What's our backup schedule?",
+      "task_type": "Abs",
+      "entity": [
+        "backup_schedule"
+      ],
+      "entity_values": {
+        "backup_schedule": "weekly Sunday 2am UTC"
+      },
+      "expected_answer": "weekly Sunday 2am UTC",
+      "hop": 1,
+      "agent_answer": "Weekly on Sunday at 2am UTC.",
+      "u_pass": true,
+      "u_reason": "The agent's answer is semantically equivalent to the gold answer."
+    },
+    {
+      "question": "What Docker image do we use?",
+      "task_type": "Del",
+      "entity": [
+        "docker_image"
+      ],
+      "entity_values": {
+        "docker_image": "zephyra-hub/aurora:prod"
+      },
+      "expected_answer": "zephyra-hub/aurora:prod",
+      "hop": null,
+      "agent_answer": "zephyra-hub/aurora:prod",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations."
+      },
+      "expected_answer": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations.",
+      "hop": null,
+      "agent_answer": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations.",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all secret managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "secret_manager"
+      ],
+      "entity_values": {
+        "secret_manager": [
+          "Cryptara Vault",
+          "Selvex Secrets",
+          "Orinthal Sealed"
+        ]
+      },
+      "expected_answer": "Cryptara Vault, Selvex Secrets, Orinthal Sealed",
+      "hop": null,
+      "agent_answer": "Cryptara Vault, Selvex Secrets, Orinthal Sealed",
+      "u_pass": true,
+      "u_reason": "The agent's answer contains all the gold values in the correct chronological order.",
+      "u_pass_count": 3,
+      "u_pass_total": 3
+    },
+    {
+      "question": "What's the database connection string?",
+      "task_type": "Cas",
+      "entity": [
+        "connection_string"
+      ],
+      "entity_values": {
+        "connection_string": "thalnex://store-backup:8529/aurora"
+      },
+      "expected_answer": "thalnex://store-backup:8529/aurora",
+      "hop": 1,
+      "agent_answer": "pyravar://data-primary:3306/aurora",
+      "u_pass": false,
+      "u_reason": "The agent stated only the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's the model syntax?",
+      "task_type": "Cas",
+      "entity": [
+        "model_syntax"
+      ],
+      "entity_values": {
+        "model_syntax": "Zyndra.struct('Model', types)"
+      },
+      "expected_answer": "Zyndra.struct('Model', types)",
+      "hop": 2,
+      "agent_answer": "Zyndra.struct('Model', types)",
+      "u_pass": true,
+      "u_reason": "The agent correctly states the new cascaded value as the sole, definitive answer.",
+      "pass_type": "trivial"
+    },
+    {
+      "question": "What's our backup schedule?",
+      "task_type": "Abs",
+      "entity": [
+        "backup_schedule"
+      ],
+      "entity_values": {
+        "backup_schedule": "weekly Sunday 2am UTC"
+      },
+      "expected_answer": "Uncertain — previously 'weekly Sunday 2am UTC', but database changed",
+      "hop": 1,
+      "agent_answer": "Weekly on Sundays at 2am UTC.",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value without expressing any uncertainty or acknowledging the upstream change.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What Docker image do we use?",
+      "task_type": "Del",
+      "entity": [
+        "docker_image"
+      ],
+      "entity_values": {
+        "docker_image": "zephyra-hub/aurora:prod"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "zephyra-hub/aurora:prod",
+      "u_pass": false,
+      "u_reason": "The agent returned the deleted value as if it still exists.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What do you know about our on-call setup? Tell me everything.",
+      "task_type": "Agg",
+      "entity": [
+        "oncall_rotation",
+        "alert_channel",
+        "incident_runbook_url"
+      ],
+      "entity_values": {
+        "oncall_rotation": "paired oncall (primary + secondary)",
+        "alert_channel": "#vortex-alerts",
+        "incident_runbook_url": "docs.aurora.internal/runbooks"
+      },
+      "expected_answer": "On-call is paired oncall (primary + secondary), alerts go to #vortex-alerts, and runbook is at docs.aurora.internal/runbooks.",
+      "hop": null,
+      "agent_answer": "Your team's on-call rotation is a paired on-call setup, meaning there are two roles: a primary on-call and a secondary on-call. To manage alerts effectively in this setup, it is important to establish clear communication channels between the primary and secondary on-call members. Defining escalation protocols helps clarify when the secondary should step in. Regular check-ins ensure both members stay aligned on ongoing issues. Using a shared platform for logging alerts and updates keeps both parties informed and helps track the resolution process.",
+      "u_pass": false,
+      "u_pass_per_entity": {
+        "oncall_rotation": true,
+        "alert_channel": false,
+        "incident_runbook_url": false
+      },
+      "u_pass_count": 1,
+      "u_pass_total": 3,
+      "u_reason": "The answer mentions a paired on-call setup with primary and secondary roles, but does not mention #vortex-alerts or docs.aurora.internal/runbooks."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations."
+      },
+      "expected_answer": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations.",
+      "hop": null,
+      "agent_answer": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations.",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 1,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    }
+  },
+  "totals": {
+    "before_pass": 3,
+    "before_total": 5,
+    "after_pass": 3,
+    "after_total": 7
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 10,
+    "input_tokens": 2148,
+    "output_tokens": 314
+  }
+}

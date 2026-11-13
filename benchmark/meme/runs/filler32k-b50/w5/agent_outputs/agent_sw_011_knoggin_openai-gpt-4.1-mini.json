@@ -1,0 +1,202 @@
+{
+  "episode_id": 11,
+  "domain": "software_project",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "How do I run the dev server?",
+      "task_type": "Cas",
+      "entity": [
+        "dev_server_command"
+      ],
+      "entity_values": {
+        "dev_server_command": "korvel dev --open"
+      },
+      "expected_answer": "korvel dev --open",
+      "hop": 1,
+      "agent_answer": "korvel dev --open"
+    },
+    {
+      "question": "What's the test command?",
+      "task_type": "Cas",
+      "entity": [
+        "test_command"
+      ],
+      "entity_values": {
+        "test_command": "karnex test --watch"
+      },
+      "expected_answer": "karnex test --watch",
+      "hop": 2,
+      "agent_answer": "karnex test --watch"
+    },
+    {
+      "question": "What's our build tool?",
+      "task_type": "Abs",
+      "entity": [
+        "build_tool"
+      ],
+      "entity_values": {
+        "build_tool": "Karnex Bundler"
+      },
+      "expected_answer": "Karnex Bundler",
+      "hop": 1,
+      "agent_answer": "Karnex Bundler"
+    },
+    {
+      "question": "What's the build command?",
+      "task_type": "Abs",
+      "entity": [
+        "build_command"
+      ],
+      "entity_values": {
+        "build_command": "karnex build --analyze"
+      },
+      "expected_answer": "karnex build --analyze",
+      "hop": 2,
+      "agent_answer": "karnex build --analyze"
+    },
+    {
+      "question": "What authentication method do we use?",
+      "task_type": "Del",
+      "entity": [
+        "auth_method"
+      ],
+      "entity_values": {
+        "auth_method": "Session Cookie + CSRF"
+      },
+      "expected_answer": "Session Cookie + CSRF",
+      "hop": null,
+      "agent_answer": "Session Cookie combined with CSRF protection"
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover."
+      },
+      "expected_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover.",
+      "hop": null,
+      "agent_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover."
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all package managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "package_manager"
+      ],
+      "entity_values": {
+        "package_manager": [
+          "Karnex Pack",
+          "Dranith Stack",
+          "Synthari Modules"
+        ]
+      },
+      "expected_answer": "Karnex Pack, Dranith Stack, Synthari Modules",
+      "hop": null,
+      "agent_answer": "Karnex Pack, Dranith Stack, Synthari Modules"
+    },
+    {
+      "question": "How do I run the dev server?",
+      "task_type": "Cas",
+      "entity": [
+        "dev_server_command"
+      ],
+      "entity_values": {
+        "dev_server_command": "moxira serve --hot"
+      },
+      "expected_answer": "moxira serve --hot",
+      "hop": 1,
+      "agent_answer": "korvel dev --open"
+    },
+    {
+      "question": "What's the test command?",
+      "task_type": "Cas",
+      "entity": [
+        "test_command"
+      ],
+      "entity_values": {
+        "test_command": "quorix spec --run smoke"
+      },
+      "expected_answer": "quorix spec --run smoke",
+      "hop": 2,
+      "agent_answer": "karnex test --watch"
+    },
+    {
+      "question": "What's our build tool?",
+      "task_type": "Abs",
+      "entity": [
+        "build_tool"
+      ],
+      "entity_values": {
+        "build_tool": "Karnex Bundler"
+      },
+      "expected_answer": "Uncertain — previously 'Karnex Bundler', but framework changed",
+      "hop": 1,
+      "agent_answer": "Karnex Bundler"
+    },
+    {
+      "question": "What's the build command?",
+      "task_type": "Abs",
+      "entity": [
+        "build_command"
+      ],
+      "entity_values": {
+        "build_command": "karnex build --analyze"
+      },
+      "expected_answer": "Uncertain — previously 'karnex build --analyze', but build_tool changed",
+      "hop": 2,
+      "agent_answer": "karnex build --analyze"
+    },
+    {
+      "question": "What authentication method do we use?",
+      "task_type": "Del",
+      "entity": [
+        "auth_method"
+      ],
+      "entity_values": {
+        "auth_method": "Session Cookie + CSRF"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "Session Cookie combined with CSRF protection"
+    },
+    {
+      "question": "What are our code quality standards? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "design_system",
+        "test_coverage_target",
+        "code_review_policy"
+      ],
+      "entity_values": {
+        "design_system": "Quenthar Design v1",
+        "test_coverage_target": "no strict target, PR-reviewed",
+        "code_review_policy": "lead approval for core/"
+      },
+      "expected_answer": "We use Quenthar Design v1, target no strict target, PR-reviewed test coverage, and require lead approval for core/ for reviews.",
+      "hop": null,
+      "agent_answer": "- Code review policy requires lead approval for changes in the core/ directory to maintain quality.\n- Test coverage does not enforce a strict percentage target; instead, each pull request (PR) is reviewed for testing adequacy.\n- Quality is maintained through focused code reviews emphasizing critical paths and edge cases.\n- Testing strategies and quality are regularly discussed in team meetings to keep alignment and accountability."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover."
+      },
+      "expected_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover.",
+      "hop": null,
+      "agent_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover."
+    }
+  ]
+}

@@ -1,0 +1,176 @@
+{
+  "episode_id": 42,
+  "domain": "personal_life",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What's my exercise routine?",
+      "task_type": "Cas",
+      "entity": [
+        "exercise_routine"
+      ],
+      "entity_values": {
+        "exercise_routine": "walking daily"
+      },
+      "expected_answer": "walking daily",
+      "hop": 1,
+      "agent_answer": "walking daily"
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Velthari Studio"
+      },
+      "expected_answer": "Velthari Studio",
+      "hop": 2,
+      "agent_answer": "Velthari Studio"
+    },
+    {
+      "question": "What medication am I taking?",
+      "task_type": "Abs",
+      "entity": [
+        "medication"
+      ],
+      "entity_values": {
+        "medication": "Velnorath"
+      },
+      "expected_answer": "Velnorath",
+      "hop": 1,
+      "agent_answer": "Velnorath"
+    },
+    {
+      "question": "What trip am I planning?",
+      "task_type": "Del",
+      "entity": [
+        "travel_plan"
+      ],
+      "entity_values": {
+        "travel_plan": "Zynthera Bay beach trip (1 week)"
+      },
+      "expected_answer": "Zynthera Bay beach trip (1 week)",
+      "hop": null,
+      "agent_answer": "A one-week beach trip to Zynthera Bay."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover."
+      },
+      "expected_answer": "Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover.",
+      "hop": null,
+      "agent_answer": "\"Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all vehicles I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "vehicle"
+      ],
+      "entity_values": {
+        "vehicle": [
+          "Zyvanta Sedan",
+          "Therwyn Compact",
+          "Xylorim Scooter"
+        ]
+      },
+      "expected_answer": "Zyvanta Sedan, Therwyn Compact, Xylorim Scooter",
+      "hop": null,
+      "agent_answer": "Zyvanta Sedan, Therwyn Compact, Xylorim Scooter"
+    },
+    {
+      "question": "What's my exercise routine?",
+      "task_type": "Cas",
+      "entity": [
+        "exercise_routine"
+      ],
+      "entity_values": {
+        "exercise_routine": "swimming 2x/week"
+      },
+      "expected_answer": "swimming 2x/week",
+      "hop": 1,
+      "agent_answer": "Walking daily"
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "none"
+      },
+      "expected_answer": "none",
+      "hop": 2,
+      "agent_answer": "You work out with your running club, where you usually meet a couple of times a week to train together."
+    },
+    {
+      "question": "What medication am I taking?",
+      "task_type": "Abs",
+      "entity": [
+        "medication"
+      ],
+      "entity_values": {
+        "medication": "Velnorath"
+      },
+      "expected_answer": "Uncertain — previously 'Velnorath', but health_condition changed",
+      "hop": 1,
+      "agent_answer": "Velnorath"
+    },
+    {
+      "question": "What trip am I planning?",
+      "task_type": "Del",
+      "entity": [
+        "travel_plan"
+      ],
+      "entity_values": {
+        "travel_plan": "Zynthera Bay beach trip (1 week)"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "I don't have that information."
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "guitar",
+        "sports": "volleyball",
+        "club_membership": "running club"
+      },
+      "expected_answer": "The user's hobby is guitar, plays volleyball, and is part of running club.",
+      "hop": null,
+      "agent_answer": "- Playing guitar, mostly rock and blues genres, inspired by artists like Jimi Hendrix, Eric Clapton, and Stevie Ray Vaughan.  \n- Collecting unique travel souvenirs made from unusual materials like alpaca wool, supporting local artisans and cultural significance.  \n- Experimenting with new ingredients and recipes in cooking, including spicy dishes with hot peppers like jalapeños, serrano peppers, and Korean chili flakes.  \n- Exploring family-friendly nature walks and tours in Tonbridge, especially those suitable for young children with interactive animal experiences and picnic spots.  \n- Playing volleyball primarily as a setter, practicing drills to improve setting skills, hand-eye coordination, footwork, and agility."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover."
+      },
+      "expected_answer": "Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover.",
+      "hop": null,
+      "agent_answer": "\"Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover.\""
+    }
+  ]
+}

@@ -1,0 +1,150 @@
+{
+  "episode_id": 21,
+  "domain": "software_project",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "Who's the escalation contact?",
+      "task_type": "Cas",
+      "entity": [
+        "escalation_contact"
+      ],
+      "entity_values": {
+        "escalation_contact": "Rachel Yoo"
+      },
+      "expected_answer": "Rachel Yoo",
+      "hop": 1,
+      "agent_answer": "Rachel Yoo"
+    },
+    {
+      "question": "Who receives the weekly report?",
+      "task_type": "Abs",
+      "entity": [
+        "weekly_report_recipient"
+      ],
+      "entity_values": {
+        "weekly_report_recipient": "Taehyun Kim"
+      },
+      "expected_answer": "Taehyun Kim",
+      "hop": 1,
+      "agent_answer": "Taehyun Kim"
+    },
+    {
+      "question": "Where's the incident runbook?",
+      "task_type": "Del",
+      "entity": [
+        "incident_runbook_url"
+      ],
+      "entity_values": {
+        "incident_runbook_url": "runbooks.aurora.internal/playbooks"
+      },
+      "expected_answer": "runbooks.aurora.internal/playbooks",
+      "hop": null,
+      "agent_answer": "runbooks.aurora.internal/playbooks"
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z."
+      },
+      "expected_answer": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z.",
+      "hop": null,
+      "agent_answer": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z."
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all package managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "package_manager"
+      ],
+      "entity_values": {
+        "package_manager": [
+          "Quorix Hub",
+          "Dranith Stack",
+          "Synthari Modules"
+        ]
+      },
+      "expected_answer": "Quorix Hub, Dranith Stack, Synthari Modules",
+      "hop": null,
+      "agent_answer": "1. Quorix Hub  \n2. Dranith Stack  \n3. Synthari Modules"
+    },
+    {
+      "question": "Who's the escalation contact?",
+      "task_type": "Cas",
+      "entity": [
+        "escalation_contact"
+      ],
+      "entity_values": {
+        "escalation_contact": "Seungmin Oh"
+      },
+      "expected_answer": "Seungmin Oh",
+      "hop": 1,
+      "agent_answer": "Rachel Yoo"
+    },
+    {
+      "question": "Who receives the weekly report?",
+      "task_type": "Abs",
+      "entity": [
+        "weekly_report_recipient"
+      ],
+      "entity_values": {
+        "weekly_report_recipient": "Taehyun Kim"
+      },
+      "expected_answer": "Uncertain — previously 'Taehyun Kim', but team_lead changed",
+      "hop": 1,
+      "agent_answer": "Taehyun Kim"
+    },
+    {
+      "question": "Where's the incident runbook?",
+      "task_type": "Del",
+      "entity": [
+        "incident_runbook_url"
+      ],
+      "entity_values": {
+        "incident_runbook_url": "runbooks.aurora.internal/playbooks"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "runbooks.aurora.internal/playbooks"
+    },
+    {
+      "question": "Where can I find project documentation? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "documentation_url",
+        "onboarding_guide",
+        "changelog_location"
+      ],
+      "entity_values": {
+        "documentation_url": "confluence.aurora.dev/aurora",
+        "onboarding_guide": "github.com/aurora-team/onboarding",
+        "changelog_location": "docs.aurora.internal/changelog"
+      },
+      "expected_answer": "Docs are at confluence.aurora.dev/aurora, onboarding guide at github.com/aurora-team/onboarding, and changelog at docs.aurora.internal/changelog.",
+      "hop": null,
+      "agent_answer": "- Onboarding guide: github.com/aurora-team/onboarding  \n- Incident runbook: runbooks.aurora.internal/playbooks  \n- Project changelog: docs.aurora.internal/changelog  \n- DhiWise documentation: https://docs.dhiwise.com/"
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z."
+      },
+      "expected_answer": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z.",
+      "hop": null,
+      "agent_answer": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z."
+    }
+  ]
+}

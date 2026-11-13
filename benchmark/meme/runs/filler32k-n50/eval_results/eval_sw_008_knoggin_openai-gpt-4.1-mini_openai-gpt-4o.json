@@ -1,0 +1,250 @@
+{
+  "episode_id": 8,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What token format do we use?",
+      "task_type": "Cas",
+      "entity": [
+        "token_format"
+      ],
+      "entity_values": {
+        "token_format": "Verithos-JWT-v2"
+      },
+      "expected_answer": "Verithos-JWT-v2",
+      "hop": 1,
+      "agent_answer": "Verithos-JWT-v2",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What's the auth middleware config?",
+      "task_type": "Cas",
+      "entity": [
+        "middleware_config"
+      ],
+      "entity_values": {
+        "middleware_config": "verithos-oauth-middleware v2.1"
+      },
+      "expected_answer": "verithos-oauth-middleware v2.1",
+      "hop": 2,
+      "agent_answer": "verithos-oauth-middleware v2.1",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What's the login endpoint?",
+      "task_type": "Abs",
+      "entity": [
+        "login_endpoint"
+      ],
+      "entity_values": {
+        "login_endpoint": "/auth/kryptal/signin"
+      },
+      "expected_answer": "/auth/kryptal/signin",
+      "hop": 1,
+      "agent_answer": "/auth/kryptal/signin",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What's our monitoring URL?",
+      "task_type": "Del",
+      "entity": [
+        "monitoring_url"
+      ],
+      "entity_values": {
+        "monitoring_url": "watch.korinth.dev/aurora"
+      },
+      "expected_answer": "watch.korinth.dev/aurora",
+      "hop": null,
+      "agent_answer": "watch.korinth.dev/aurora",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer exactly, indicating semantic equivalence."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded."
+      },
+      "expected_answer": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded.",
+      "hop": null,
+      "agent_answer": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded.",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all sprint deadlines we've had, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "sprint_deadline"
+      ],
+      "entity_values": {
+        "sprint_deadline": [
+          "2025 April 25",
+          "2025 May 9",
+          "2025 June 20"
+        ]
+      },
+      "expected_answer": "2025 April 25, 2025 May 9, 2025 June 20",
+      "hop": null,
+      "agent_answer": "1. 2025 April 25  \n2. 2025 May 9  \n3. 2025 June 20",
+      "u_pass": true,
+      "u_reason": "The agent's answer contains all the gold values in the exact order specified.",
+      "u_pass_count": 3,
+      "u_pass_total": 3
+    },
+    {
+      "question": "What token format do we use?",
+      "task_type": "Cas",
+      "entity": [
+        "token_format"
+      ],
+      "entity_values": {
+        "token_format": "Oathkeeper-mTLS-cert"
+      },
+      "expected_answer": "Oathkeeper-mTLS-cert",
+      "hop": 1,
+      "agent_answer": "Verithos-JWT-v2",
+      "u_pass": false,
+      "u_reason": "The agent reported the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's the auth middleware config?",
+      "task_type": "Cas",
+      "entity": [
+        "middleware_config"
+      ],
+      "entity_values": {
+        "middleware_config": "phalanx-key-guard v1.3"
+      },
+      "expected_answer": "phalanx-key-guard v1.3",
+      "hop": 2,
+      "agent_answer": "verithos-oauth-middleware v2.1",
+      "u_pass": false,
+      "u_reason": "The agent reported the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's the login endpoint?",
+      "task_type": "Abs",
+      "entity": [
+        "login_endpoint"
+      ],
+      "entity_values": {
+        "login_endpoint": "/auth/kryptal/signin"
+      },
+      "expected_answer": "Uncertain — previously '/auth/kryptal/signin', but auth_provider changed",
+      "hop": 1,
+      "agent_answer": "/auth/kryptal/signin",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value without expressing any uncertainty or acknowledging the upstream change.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's our monitoring URL?",
+      "task_type": "Del",
+      "entity": [
+        "monitoring_url"
+      ],
+      "entity_values": {
+        "monitoring_url": "watch.korinth.dev/aurora"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "runbooks.aurora.internal/playbooks",
+      "u_pass": false,
+      "u_reason": "The agent returned a URL that was not the deleted information, but it did not indicate that the information was unavailable.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What do you know about our release process? Tell me everything.",
+      "task_type": "Agg",
+      "entity": [
+        "branch_strategy",
+        "default_branch",
+        "release_cadence"
+      ],
+      "entity_values": {
+        "branch_strategy": "GitFlow with release branches",
+        "default_branch": "release",
+        "release_cadence": "sprint-end release every 2 weeks"
+      },
+      "expected_answer": "We use GitFlow with release branches branching on release, releasing sprint-end release every 2 weeks.",
+      "hop": null,
+      "agent_answer": "- Your team uses GitFlow with release branches branching to manage features and fixes systematically.\n- The default branch for stable code before production deployment is the \"release\" branch.\n- Feature branches are used to isolate development work, and best practices include keeping them short-lived, regularly syncing with the main branch, and incorporating code reviews before merging.\n- The sprint deadline is set for May 9, 2025, with another mention of a sprint deadline on April 25, 2025, and June 20, 2025, indicating multiple sprint cycles or milestones.\n- You maintain a sprint-end release every two weeks to keep momentum and track progress.\n- Sprint planning involves breaking down tasks into manageable chunks, prioritizing based on urgency and dependencies, and using tools like Kanban boards, JIRA, or Trello for tracking progress.\n- Regular stand-ups and check-ins are held to assess progress, address blockers, and adjust priorities as needed.\n- The incident runbook is maintained at runbooks.aurora.internal/playbooks, documenting response procedures for various incidents with clear troubleshooting and escalation steps, and is regularly reviewed and drilled.\n- The changelog is auto-generated from commit messages, with recommendations to write clear, concise, imperative-style commit messages including issue references to maintain a consistent and informative changelog.\n- Communication within the team is organized through channels like #aurora-core, with emphasis on clear, regular updates and engagement.\n- Authentication is managed via Phalanx Gate, with considerations for multi-factor authentication, role management, and regular configuration reviews to maintain security.",
+      "u_pass": true,
+      "u_pass_per_entity": {
+        "branch_strategy": true,
+        "default_branch": true,
+        "release_cadence": true
+      },
+      "u_pass_count": 3,
+      "u_pass_total": 3,
+      "u_reason": "All target values are present in the agent's answer, either exactly or paraphrased."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded."
+      },
+      "expected_answer": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded.",
+      "hop": null,
+      "agent_answer": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded.",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 2,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    }
+  },
+  "totals": {
+    "before_pass": 4,
+    "before_total": 5,
+    "after_pass": 3,
+    "after_total": 7
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 10,
+    "input_tokens": 2361,
+    "output_tokens": 290
+  }
+}

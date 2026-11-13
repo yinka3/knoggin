@@ -1,0 +1,281 @@
+{
+  "episode_id": 10,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What's our CI configuration?",
+      "task_type": "Cas",
+      "entity": [
+        "ci_config"
+      ],
+      "entity_values": {
+        "ci_config": "zephyra-pipeline.json"
+      },
+      "expected_answer": "zephyra-pipeline.json",
+      "hop": 1,
+      "agent_answer": "zephyra-pipeline.json",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What's the deploy command?",
+      "task_type": "Cas",
+      "entity": [
+        "deploy_command"
+      ],
+      "entity_values": {
+        "deploy_command": "zephyra push --target preview"
+      },
+      "expected_answer": "zephyra push --target preview",
+      "hop": 2,
+      "agent_answer": "zephyra push --target preview",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What Docker image do we use?",
+      "task_type": "Abs",
+      "entity": [
+        "docker_image"
+      ],
+      "entity_values": {
+        "docker_image": "zephyra-hub/aurora:prod"
+      },
+      "expected_answer": "zephyra-hub/aurora:prod",
+      "hop": 1,
+      "agent_answer": "zephyra-hub/aurora:prod",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "Where's the Dockerfile?",
+      "task_type": "Abs",
+      "entity": [
+        "dockerfile_path"
+      ],
+      "entity_values": {
+        "dockerfile_path": "deploy/Dockerfile.zephyra"
+      },
+      "expected_answer": "deploy/Dockerfile.zephyra",
+      "hop": 2,
+      "agent_answer": "deploy/Dockerfile.zephyra",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What's our log drain endpoint?",
+      "task_type": "Del",
+      "entity": [
+        "log_drain_endpoint"
+      ],
+      "entity_values": {
+        "log_drain_endpoint": "logs.narvex.io/aurora/drain"
+      },
+      "expected_answer": "logs.narvex.io/aurora/drain",
+      "hop": null,
+      "agent_answer": "logs.narvex.io/aurora/drain",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer exactly, indicating semantic equivalence."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review."
+      },
+      "expected_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.",
+      "hop": null,
+      "agent_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all secret managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "secret_manager"
+      ],
+      "entity_values": {
+        "secret_manager": [
+          "Verisigil Lock",
+          "Kerberos Trove",
+          "Orinthal Sealed"
+        ]
+      },
+      "expected_answer": "Verisigil Lock, Kerberos Trove, Orinthal Sealed",
+      "hop": null,
+      "agent_answer": "Verisigil Lock, Kerberos Trove, Orinthal Sealed",
+      "u_pass": true,
+      "u_reason": "The agent's answer contains all the gold values in the exact chronological order specified.",
+      "u_pass_count": 3,
+      "u_pass_total": 3
+    },
+    {
+      "question": "What's our CI configuration?",
+      "task_type": "Cas",
+      "entity": [
+        "ci_config"
+      ],
+      "entity_values": {
+        "ci_config": "thandrel-flow.toml"
+      },
+      "expected_answer": "thandrel-flow.toml",
+      "hop": 1,
+      "agent_answer": "zephyra-pipeline.json",
+      "u_pass": false,
+      "u_reason": "The agent reported the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's the deploy command?",
+      "task_type": "Cas",
+      "entity": [
+        "deploy_command"
+      ],
+      "entity_values": {
+        "deploy_command": "thandrel ship --channel beta"
+      },
+      "expected_answer": "thandrel ship --channel beta",
+      "hop": 2,
+      "agent_answer": "zephyra push --target preview",
+      "u_pass": false,
+      "u_reason": "The agent provided an incorrect value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What Docker image do we use?",
+      "task_type": "Abs",
+      "entity": [
+        "docker_image"
+      ],
+      "entity_values": {
+        "docker_image": "zephyra-hub/aurora:prod"
+      },
+      "expected_answer": "Uncertain — previously 'zephyra-hub/aurora:prod', but deploy_target changed",
+      "hop": 1,
+      "agent_answer": "zephyra-hub/aurora:prod",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value without expressing any uncertainty or acknowledging the upstream change.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "Where's the Dockerfile?",
+      "task_type": "Abs",
+      "entity": [
+        "dockerfile_path"
+      ],
+      "entity_values": {
+        "dockerfile_path": "deploy/Dockerfile.zephyra"
+      },
+      "expected_answer": "Uncertain — previously 'deploy/Dockerfile.zephyra', but docker_image changed",
+      "hop": 2,
+      "agent_answer": "deploy/Dockerfile.zephyra",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value without expressing any uncertainty or acknowledging the upstream change.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's our log drain endpoint?",
+      "task_type": "Del",
+      "entity": [
+        "log_drain_endpoint"
+      ],
+      "entity_values": {
+        "log_drain_endpoint": "logs.narvex.io/aurora/drain"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "You don't have that information.",
+      "u_pass": true,
+      "u_reason": "The agent correctly stated that the information is no longer available without revealing the deleted value.",
+      "pass_type": "real"
+    },
+    {
+      "question": "What do you know about our release process? Tell me everything.",
+      "task_type": "Agg",
+      "entity": [
+        "branch_strategy",
+        "default_branch",
+        "release_cadence"
+      ],
+      "entity_values": {
+        "branch_strategy": "GitHub Flow with PR reviews",
+        "default_branch": "main",
+        "release_cadence": "monthly first Monday"
+      },
+      "expected_answer": "We use GitHub Flow with PR reviews branching on main, releasing monthly first Monday.",
+      "hop": null,
+      "agent_answer": "The team follows a structured monthly release cycle, releasing on the first Monday of each month. This schedule helps keep things organized and balances quality with iteration time. The monthly cadence allows the team to gather feedback, iterate, and ensure features and fixes are polished before the next release. The best release cadence depends on project complexity and user needs, with more frequent releases considered if urgent issues or many new ideas arise.",
+      "u_pass": false,
+      "u_pass_per_entity": {
+        "branch_strategy": false,
+        "default_branch": false,
+        "release_cadence": true
+      },
+      "u_pass_count": 1,
+      "u_pass_total": 3,
+      "u_reason": "Only 'monthly first Monday' is mentioned in the agent's answer."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review."
+      },
+      "expected_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.",
+      "hop": null,
+      "agent_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 2,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 2,
+      "never_knew": 0
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 1,
+      "trivial_pass": 0,
+      "knew_but_failed": 0,
+      "never_knew": 0
+    }
+  },
+  "totals": {
+    "before_pass": 5,
+    "before_total": 6,
+    "after_pass": 3,
+    "after_total": 8
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 12,
+    "input_tokens": 2502,
+    "output_tokens": 324
+  }
+}

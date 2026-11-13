@@ -1,0 +1,219 @@
+{
+  "episode_id": 18,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "How do I get to work?",
+      "task_type": "Cas",
+      "entity": [
+        "commute_method"
+      ],
+      "entity_values": {
+        "commute_method": "walking"
+      },
+      "expected_answer": "walking",
+      "hop": 1,
+      "agent_answer": "By walking.",
+      "u_pass": true,
+      "u_reason": "The agent's answer 'By walking.' is semantically equivalent to the gold answer 'walking.'"
+    },
+    {
+      "question": "What am I currently learning?",
+      "task_type": "Abs",
+      "entity": [
+        "skill_acquisition"
+      ],
+      "entity_values": {
+        "skill_acquisition": "Spanish"
+      },
+      "expected_answer": "Spanish",
+      "hop": 1,
+      "agent_answer": "Spanish as part of your MBA program.",
+      "u_pass": true,
+      "u_reason": "The agent's answer includes 'Spanish', which matches the gold answer semantically."
+    },
+    {
+      "question": "What big purchase am I planning?",
+      "task_type": "Del",
+      "entity": [
+        "planned_purchase"
+      ],
+      "entity_values": {
+        "planned_purchase": "stand-up desk"
+      },
+      "expected_answer": "stand-up desk",
+      "hop": null,
+      "agent_answer": "A stand-up desk.",
+      "u_pass": true,
+      "u_reason": "The agent's answer 'A stand-up desk' semantically matches the gold answer 'stand-up desk'."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover."
+      },
+      "expected_answer": "Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover.",
+      "hop": null,
+      "agent_answer": "\"Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover.\"",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all vehicles I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "vehicle"
+      ],
+      "entity_values": {
+        "vehicle": [
+          "Zyvanta Sedan",
+          "Therwyn Compact",
+          "Dranthis Pickup"
+        ]
+      },
+      "expected_answer": "Zyvanta Sedan, Therwyn Compact, Dranthis Pickup",
+      "hop": null,
+      "agent_answer": "Therwyn Compact, Dranthis Pickup",
+      "u_pass": false,
+      "u_reason": "The agent's answer is missing the earliest vehicle, 'Zyvanta Sedan', and does not list all vehicles in the correct order.",
+      "u_pass_count": 2,
+      "u_pass_total": 3
+    },
+    {
+      "question": "How do I get to work?",
+      "task_type": "Cas",
+      "entity": [
+        "commute_method"
+      ],
+      "entity_values": {
+        "commute_method": "commuter rail"
+      },
+      "expected_answer": "commuter rail",
+      "hop": 1,
+      "agent_answer": "By walking, as long as you are studying at Vorenthal Business School.",
+      "u_pass": false,
+      "u_reason": "The agent incorrectly reports the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What am I currently learning?",
+      "task_type": "Abs",
+      "entity": [
+        "skill_acquisition"
+      ],
+      "entity_values": {
+        "skill_acquisition": "Spanish"
+      },
+      "expected_answer": "Uncertain — previously 'Spanish', but school changed",
+      "hop": 1,
+      "agent_answer": "Spanish as part of your MBA program.",
+      "u_pass": false,
+      "u_reason": "The agent confidently states the old value without expressing uncertainty.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What big purchase am I planning?",
+      "task_type": "Del",
+      "entity": [
+        "planned_purchase"
+      ],
+      "entity_values": {
+        "planned_purchase": "stand-up desk"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "A birthday party for your mom.",
+      "u_pass": false,
+      "u_reason": "The agent incorrectly provided a specific answer instead of indicating the information was unavailable.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "pottery",
+        "sports": "volleyball",
+        "club_membership": "running club"
+      },
+      "expected_answer": "The user's hobby is pottery, plays volleyball, and is part of running club.",
+      "hop": null,
+      "agent_answer": "- Playing basketball  \n- Watching movies  \n- Trying out new recipes in the kitchen  \n- Playing video games  \n- Reading  \n- Painting  \n- Hanging out with friends  \n- Hiking",
+      "u_pass": false,
+      "u_pass_per_entity": {
+        "hobby": false,
+        "sports": false,
+        "club_membership": false
+      },
+      "u_pass_count": 0,
+      "u_pass_total": 3,
+      "u_reason": "None of the target values appear in the agent's answer."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover."
+      },
+      "expected_answer": "Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover.",
+      "hop": null,
+      "agent_answer": "\"Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover.\"",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    }
+  },
+  "totals": {
+    "before_pass": 3,
+    "before_total": 4,
+    "after_pass": 1,
+    "after_total": 6
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 8,
+    "input_tokens": 1588,
+    "output_tokens": 251
+  }
+}

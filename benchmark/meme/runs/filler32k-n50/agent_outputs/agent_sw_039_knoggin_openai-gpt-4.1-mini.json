@@ -1,0 +1,202 @@
+{
+  "episode_id": 39,
+  "domain": "software_project",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What's our monitoring URL?",
+      "task_type": "Cas",
+      "entity": [
+        "monitoring_url"
+      ],
+      "entity_values": {
+        "monitoring_url": "status.orinthal.dev/aurora"
+      },
+      "expected_answer": "status.orinthal.dev/aurora",
+      "hop": 1,
+      "agent_answer": "status.orinthal.dev/aurora"
+    },
+    {
+      "question": "What's the deploy command?",
+      "task_type": "Cas",
+      "entity": [
+        "deploy_command"
+      ],
+      "entity_values": {
+        "deploy_command": "orinthal publish --tier sandbox"
+      },
+      "expected_answer": "orinthal publish --tier sandbox",
+      "hop": 2,
+      "agent_answer": "orinthal publish --tier sandbox"
+    },
+    {
+      "question": "What's our log drain endpoint?",
+      "task_type": "Abs",
+      "entity": [
+        "log_drain_endpoint"
+      ],
+      "entity_values": {
+        "log_drain_endpoint": "logs.korinth.dev/aurora"
+      },
+      "expected_answer": "logs.korinth.dev/aurora",
+      "hop": 1,
+      "agent_answer": "logs.korinth.dev/aurora"
+    },
+    {
+      "question": "Where's the Dockerfile?",
+      "task_type": "Abs",
+      "entity": [
+        "dockerfile_path"
+      ],
+      "entity_values": {
+        "dockerfile_path": "infra/orinthal/Dockerfile"
+      },
+      "expected_answer": "infra/orinthal/Dockerfile",
+      "hop": 2,
+      "agent_answer": "infra/orinthal/Dockerfile"
+    },
+    {
+      "question": "What authentication method do we use?",
+      "task_type": "Del",
+      "entity": [
+        "auth_method"
+      ],
+      "entity_values": {
+        "auth_method": "JWT Bearer"
+      },
+      "expected_answer": "JWT Bearer",
+      "hop": null,
+      "agent_answer": "JWT Bearer"
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z."
+      },
+      "expected_answer": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z.",
+      "hop": null,
+      "agent_answer": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z."
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all sprint deadlines we've had, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "sprint_deadline"
+      ],
+      "entity_values": {
+        "sprint_deadline": [
+          "2025 May 9",
+          "2025 June 6",
+          "2025 June 20"
+        ]
+      },
+      "expected_answer": "2025 May 9, 2025 June 6, 2025 June 20",
+      "hop": null,
+      "agent_answer": "May 9, 2025; June 6, 2025; June 20, 2025"
+    },
+    {
+      "question": "What's our monitoring URL?",
+      "task_type": "Cas",
+      "entity": [
+        "monitoring_url"
+      ],
+      "entity_values": {
+        "monitoring_url": "metrics.thandrel.io/aurora-prod"
+      },
+      "expected_answer": "metrics.thandrel.io/aurora-prod",
+      "hop": 1,
+      "agent_answer": "metrics.thandrel.io/aurora-prod"
+    },
+    {
+      "question": "What's the deploy command?",
+      "task_type": "Cas",
+      "entity": [
+        "deploy_command"
+      ],
+      "entity_values": {
+        "deploy_command": "velturis deploy --region us-east"
+      },
+      "expected_answer": "velturis deploy --region us-east",
+      "hop": 2,
+      "agent_answer": "velturis deploy --region us-east"
+    },
+    {
+      "question": "What's our log drain endpoint?",
+      "task_type": "Abs",
+      "entity": [
+        "log_drain_endpoint"
+      ],
+      "entity_values": {
+        "log_drain_endpoint": "logs.korinth.dev/aurora"
+      },
+      "expected_answer": "Uncertain — previously 'logs.korinth.dev/aurora', but deploy_target changed",
+      "hop": 1,
+      "agent_answer": "You don't have that information."
+    },
+    {
+      "question": "Where's the Dockerfile?",
+      "task_type": "Abs",
+      "entity": [
+        "dockerfile_path"
+      ],
+      "entity_values": {
+        "dockerfile_path": "infra/orinthal/Dockerfile"
+      },
+      "expected_answer": "Uncertain — previously 'infra/orinthal/Dockerfile', but docker_image changed",
+      "hop": 2,
+      "agent_answer": "The Dockerfile is located in the repository root."
+    },
+    {
+      "question": "What authentication method do we use?",
+      "task_type": "Del",
+      "entity": [
+        "auth_method"
+      ],
+      "entity_values": {
+        "auth_method": "JWT Bearer"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "JWT Bearer tokens"
+    },
+    {
+      "question": "What are our code quality standards? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "design_system",
+        "test_coverage_target",
+        "code_review_policy"
+      ],
+      "entity_values": {
+        "design_system": "Moxira Components v3",
+        "test_coverage_target": "90% for core modules",
+        "code_review_policy": "1 approval + CI green"
+      },
+      "expected_answer": "We use Moxira Components v3, target 90% for core modules test coverage, and require 1 approval + CI green for reviews.",
+      "hop": null,
+      "agent_answer": "- Test coverage target is 90% for core modules to catch bugs early.\n- Implement automated testing to consistently run tests and maintain coverage.\n- Integrate code coverage tools to identify untested areas and focus efforts strategically.\n- Regularly review and refactor tests alongside code to keep them relevant and effective.\n- Involve the team in code reviews to enhance test quality and encourage shared responsibility.\n- Code review policy requires one approval plus CI green status before merging.\n- Encourage constructive feedback in code reviews focusing on issues and positives.\n- Use checklists in code reviews for consistency, covering readability, maintainability, and coding standards.\n- Set time limits for code reviews to keep the process efficient and avoid bottlenecks.\n- Conduct quick sync meetings after reviews to clarify significant changes and align the team."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z."
+      },
+      "expected_answer": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z.",
+      "hop": null,
+      "agent_answer": "```\n2024-04-02T14:18:33Z ERROR panic occurred: index out of bounds: the len is 0 but the index is 0 at auth.rs handler\n```"
+    }
+  ]
+}

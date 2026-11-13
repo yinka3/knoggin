@@ -1,0 +1,150 @@
+{
+  "episode_id": 18,
+  "domain": "personal_life",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "How do I get to work?",
+      "task_type": "Cas",
+      "entity": [
+        "commute_method"
+      ],
+      "entity_values": {
+        "commute_method": "walking"
+      },
+      "expected_answer": "walking",
+      "hop": 1,
+      "agent_answer": "By walking."
+    },
+    {
+      "question": "What am I currently learning?",
+      "task_type": "Abs",
+      "entity": [
+        "skill_acquisition"
+      ],
+      "entity_values": {
+        "skill_acquisition": "Spanish"
+      },
+      "expected_answer": "Spanish",
+      "hop": 1,
+      "agent_answer": "Spanish as part of your MBA program."
+    },
+    {
+      "question": "What big purchase am I planning?",
+      "task_type": "Del",
+      "entity": [
+        "planned_purchase"
+      ],
+      "entity_values": {
+        "planned_purchase": "stand-up desk"
+      },
+      "expected_answer": "stand-up desk",
+      "hop": null,
+      "agent_answer": "A stand-up desk."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover."
+      },
+      "expected_answer": "Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover.",
+      "hop": null,
+      "agent_answer": "\"Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all vehicles I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "vehicle"
+      ],
+      "entity_values": {
+        "vehicle": [
+          "Zyvanta Sedan",
+          "Therwyn Compact",
+          "Dranthis Pickup"
+        ]
+      },
+      "expected_answer": "Zyvanta Sedan, Therwyn Compact, Dranthis Pickup",
+      "hop": null,
+      "agent_answer": "Therwyn Compact, Dranthis Pickup"
+    },
+    {
+      "question": "How do I get to work?",
+      "task_type": "Cas",
+      "entity": [
+        "commute_method"
+      ],
+      "entity_values": {
+        "commute_method": "commuter rail"
+      },
+      "expected_answer": "commuter rail",
+      "hop": 1,
+      "agent_answer": "By walking, as long as you are studying at Vorenthal Business School."
+    },
+    {
+      "question": "What am I currently learning?",
+      "task_type": "Abs",
+      "entity": [
+        "skill_acquisition"
+      ],
+      "entity_values": {
+        "skill_acquisition": "Spanish"
+      },
+      "expected_answer": "Uncertain — previously 'Spanish', but school changed",
+      "hop": 1,
+      "agent_answer": "Spanish as part of your MBA program."
+    },
+    {
+      "question": "What big purchase am I planning?",
+      "task_type": "Del",
+      "entity": [
+        "planned_purchase"
+      ],
+      "entity_values": {
+        "planned_purchase": "stand-up desk"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "A birthday party for your mom."
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "pottery",
+        "sports": "volleyball",
+        "club_membership": "running club"
+      },
+      "expected_answer": "The user's hobby is pottery, plays volleyball, and is part of running club.",
+      "hop": null,
+      "agent_answer": "- Playing basketball  \n- Watching movies  \n- Trying out new recipes in the kitchen  \n- Playing video games  \n- Reading  \n- Painting  \n- Hanging out with friends  \n- Hiking"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover."
+      },
+      "expected_answer": "Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover.",
+      "hop": null,
+      "agent_answer": "\"Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover.\""
+    }
+  ]
+}

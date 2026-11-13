@@ -1,0 +1,176 @@
+{
+  "episode_id": 31,
+  "domain": "personal_life",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What regular appointments do I have?",
+      "task_type": "Cas",
+      "entity": [
+        "regular_appointment"
+      ],
+      "entity_values": {
+        "regular_appointment": "tutoring session (weekly)"
+      },
+      "expected_answer": "tutoring session (weekly)",
+      "hop": 1,
+      "agent_answer": "Weekly tutoring sessions"
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Pyravar CrossFit"
+      },
+      "expected_answer": "Pyravar CrossFit",
+      "hop": 2,
+      "agent_answer": "Pyravar CrossFit"
+    },
+    {
+      "question": "What's my sleep schedule?",
+      "task_type": "Abs",
+      "entity": [
+        "sleep_pattern"
+      ],
+      "entity_values": {
+        "sleep_pattern": "midnight-8am"
+      },
+      "expected_answer": "midnight-8am",
+      "hop": 1,
+      "agent_answer": "Midnight to 8am"
+    },
+    {
+      "question": "How long is my commute?",
+      "task_type": "Del",
+      "entity": [
+        "commute_duration"
+      ],
+      "entity_values": {
+        "commute_duration": "1.5 hours"
+      },
+      "expected_answer": "1.5 hours",
+      "hop": null,
+      "agent_answer": "1.5 hours"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you."
+      },
+      "expected_answer": "Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you.",
+      "hop": null,
+      "agent_answer": "\"Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all media I've consumed over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "media_consumption"
+      ],
+      "entity_values": {
+        "media_consumption": [
+          "a true crime podcast",
+          "The Quorath Codex (book)",
+          "Xelvari Dawn (book)"
+        ]
+      },
+      "expected_answer": "a true crime podcast, The Quorath Codex (book), Xelvari Dawn (book)",
+      "hop": null,
+      "agent_answer": "1. Museum tour on ancient civilizations (recently before Museum Day event)  \n2. Museum Day event at the Local Art Museum focusing on ancient Sumerian city-states  \n3. Documentary \"Riverdance\" (1994)  \n4. Film \"The Wind That Shakes the Barley\" (2006)  \n5. Documentary series \"La Danza Italiana\" (Italian Dance)  \n6. Book \"The Companion to Irish Traditional Music\" by Fintan Vallely  \n7. Book \"The Oxford Handbook of Italian Folklore\" by Luisa Del Giudice  \n8. Book \"Italian Folk Music: A Brief Introduction\" by Alessandro Portelli  \n9. Book \"The Oxford Handbook of German Folklore\" by James R. Dow  \n10. Book \"Polka: A Cultural History\" by Victor Greene  \n11. Book \"Waltz: A Short History\" by Eric Wen  \n12. Book \"The Oxford Handbook of French Folklore\" by Jean-Pierre Dupuy  \n13. Book \"Musette: A Cultural History\" by Denis Péan  \n14. Documentary film \"Bourrée: A Traditional French Dance\" by Yann Dour"
+    },
+    {
+      "question": "What regular appointments do I have?",
+      "task_type": "Cas",
+      "entity": [
+        "regular_appointment"
+      ],
+      "entity_values": {
+        "regular_appointment": "dentist (every 6 months)"
+      },
+      "expected_answer": "dentist (every 6 months)",
+      "hop": 1,
+      "agent_answer": "Weekly tutoring sessions"
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "home gym"
+      },
+      "expected_answer": "home gym",
+      "hop": 2,
+      "agent_answer": "Pyravar CrossFit"
+    },
+    {
+      "question": "What's my sleep schedule?",
+      "task_type": "Abs",
+      "entity": [
+        "sleep_pattern"
+      ],
+      "entity_values": {
+        "sleep_pattern": "midnight-8am"
+      },
+      "expected_answer": "Uncertain — previously 'midnight-8am', but health_condition changed",
+      "hop": 1,
+      "agent_answer": "Midnight to 8am"
+    },
+    {
+      "question": "How long is my commute?",
+      "task_type": "Del",
+      "entity": [
+        "commute_duration"
+      ],
+      "entity_values": {
+        "commute_duration": "1.5 hours"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "1.5 hours"
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "cooking",
+        "sports": "cycling",
+        "club_membership": "volunteer group"
+      },
+      "expected_answer": "The user's hobby is cooking, plays cycling, and is part of volunteer group.",
+      "hop": null,
+      "agent_answer": "Cycling on weekends"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you."
+      },
+      "expected_answer": "Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you.",
+      "hop": null,
+      "agent_answer": "\"Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you.\""
+    }
+  ]
+}

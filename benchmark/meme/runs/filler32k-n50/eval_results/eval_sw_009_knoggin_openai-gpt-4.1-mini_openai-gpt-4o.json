@@ -1,0 +1,281 @@
+{
+  "episode_id": 9,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What's our CI configuration?",
+      "task_type": "Cas",
+      "entity": [
+        "ci_config"
+      ],
+      "entity_values": {
+        "ci_config": "korinth-deploy.yaml"
+      },
+      "expected_answer": "korinth-deploy.yaml",
+      "hop": 1,
+      "agent_answer": "korinth-deploy.yaml",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What's the deploy command?",
+      "task_type": "Cas",
+      "entity": [
+        "deploy_command"
+      ],
+      "entity_values": {
+        "deploy_command": "korinth release --canary"
+      },
+      "expected_answer": "korinth release --canary",
+      "hop": 2,
+      "agent_answer": "korinth release --canary",
+      "u_pass": true,
+      "u_reason": "The agent's answer is semantically equivalent to the gold answer."
+    },
+    {
+      "question": "What Docker image do we use?",
+      "task_type": "Abs",
+      "entity": [
+        "docker_image"
+      ],
+      "entity_values": {
+        "docker_image": "velturis-cr/aurora:main"
+      },
+      "expected_answer": "velturis-cr/aurora:main",
+      "hop": 1,
+      "agent_answer": "velturis-cr/aurora:main",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "Where's the Dockerfile?",
+      "task_type": "Abs",
+      "entity": [
+        "dockerfile_path"
+      ],
+      "entity_values": {
+        "dockerfile_path": "deploy/Dockerfile.velturis"
+      },
+      "expected_answer": "deploy/Dockerfile.velturis",
+      "hop": 2,
+      "agent_answer": "deploy/Dockerfile.velturis",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "Where's the changelog?",
+      "task_type": "Del",
+      "entity": [
+        "changelog_location"
+      ],
+      "entity_values": {
+        "changelog_location": "CHANGELOG.md in repo root"
+      },
+      "expected_answer": "CHANGELOG.md in repo root",
+      "hop": null,
+      "agent_answer": "At CHANGELOG.md in the repository root.",
+      "u_pass": true,
+      "u_reason": "The agent's answer is semantically equivalent to the gold answer."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded."
+      },
+      "expected_answer": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded.",
+      "hop": null,
+      "agent_answer": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded.",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all package managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "package_manager"
+      ],
+      "entity_values": {
+        "package_manager": [
+          "Karnex Pack",
+          "Pyronis Bundle",
+          "Quorix Hub"
+        ]
+      },
+      "expected_answer": "Karnex Pack, Pyronis Bundle, Quorix Hub",
+      "hop": null,
+      "agent_answer": "1. Karnex Pack  \n2. Pyronis Bundle  \n3. Quorix Hub",
+      "u_pass": true,
+      "u_reason": "The agent's answer contains all the gold values in the correct chronological order.",
+      "u_pass_count": 3,
+      "u_pass_total": 3
+    },
+    {
+      "question": "What's our CI configuration?",
+      "task_type": "Cas",
+      "entity": [
+        "ci_config"
+      ],
+      "entity_values": {
+        "ci_config": "zephyra-pipeline.json"
+      },
+      "expected_answer": "zephyra-pipeline.json",
+      "hop": 1,
+      "agent_answer": "korinth-deploy.yaml",
+      "u_pass": false,
+      "u_reason": "The agent reported the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's the deploy command?",
+      "task_type": "Cas",
+      "entity": [
+        "deploy_command"
+      ],
+      "entity_values": {
+        "deploy_command": "zephyra push --target preview"
+      },
+      "expected_answer": "zephyra push --target preview",
+      "hop": 2,
+      "agent_answer": "korinth release --canary",
+      "u_pass": false,
+      "u_reason": "The agent stated only the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What Docker image do we use?",
+      "task_type": "Abs",
+      "entity": [
+        "docker_image"
+      ],
+      "entity_values": {
+        "docker_image": "velturis-cr/aurora:main"
+      },
+      "expected_answer": "Uncertain — previously 'velturis-cr/aurora:main', but deploy_target changed",
+      "hop": 1,
+      "agent_answer": "velturis-cr/aurora:main",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value without expressing any uncertainty.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "Where's the Dockerfile?",
+      "task_type": "Abs",
+      "entity": [
+        "dockerfile_path"
+      ],
+      "entity_values": {
+        "dockerfile_path": "deploy/Dockerfile.velturis"
+      },
+      "expected_answer": "Uncertain — previously 'deploy/Dockerfile.velturis', but docker_image changed",
+      "hop": 2,
+      "agent_answer": "deploy/Dockerfile.velturis",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value without expressing any uncertainty or acknowledging the upstream change.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "Where's the changelog?",
+      "task_type": "Del",
+      "entity": [
+        "changelog_location"
+      ],
+      "entity_values": {
+        "changelog_location": "CHANGELOG.md in repo root"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "I don't have that information.",
+      "u_pass": true,
+      "u_reason": "The agent correctly stated it does not have the information without revealing the deleted value.",
+      "pass_type": "real"
+    },
+    {
+      "question": "What are our code quality standards? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "design_system",
+        "test_coverage_target",
+        "code_review_policy"
+      ],
+      "entity_values": {
+        "design_system": "Quenthar Design v1",
+        "test_coverage_target": "no strict target, PR-reviewed",
+        "code_review_policy": "2 approvals + security review for auth/"
+      },
+      "expected_answer": "We use Quenthar Design v1, target no strict target, PR-reviewed test coverage, and require 2 approvals + security review for auth/ for reviews.",
+      "hop": null,
+      "agent_answer": "- The team enforces a strict code review policy requiring 2 approvals plus a security review specifically for the auth/ directory.  \n- Security reviews benefit from using checklists covering common vulnerabilities and best practices such as input validation, proper authentication mechanisms, and secure data handling.  \n- Automated static analysis tools are recommended to catch potential security issues early in the development process.  \n- Peer reviews are encouraged to bring fresh perspectives and enhance overall security posture.  \n- Dependency management involves maintaining a centralized dependency record and scheduling regular updates to avoid security vulnerabilities and compatibility issues.  \n- Use of lock files is advised to maintain consistency across environments.  \n- Documenting resolutions to common dependency issues is recommended for team reference.  \n- Logging best practices include choosing a logging framework that fits the stack, structuring logs consistently in JSON format with timestamps, log levels, and contextual data, and setting alerts for critical logs.  \n- Project documentation is kept current by integrating documentation updates into the development workflow, requiring updates during pull requests, using version-controlled documentation tools, and conducting regular documentation reviews during sprint retrospectives.",
+      "u_pass": false,
+      "u_pass_per_entity": {
+        "design_system": false,
+        "test_coverage_target": false,
+        "code_review_policy": true
+      },
+      "u_pass_count": 1,
+      "u_pass_total": 3,
+      "u_reason": "Only the requirement for '2 approvals + security review for auth/' is mentioned in the agent's answer."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded."
+      },
+      "expected_answer": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded.",
+      "hop": null,
+      "agent_answer": "ConnectionRefusedError: [Errno 111] Connection refused. Service crysthene-db-primary on port 5432 is not accepting connections. Last successful heartbeat was at 2024-03-15T08:23:41Z. Check firewall rules and verify that max_connections has not been exceeded.",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 2,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 2,
+      "never_knew": 0
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 1,
+      "trivial_pass": 0,
+      "knew_but_failed": 0,
+      "never_knew": 0
+    }
+  },
+  "totals": {
+    "before_pass": 5,
+    "before_total": 6,
+    "after_pass": 3,
+    "after_total": 8
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 12,
+    "input_tokens": 2622,
+    "output_tokens": 334
+  }
+}

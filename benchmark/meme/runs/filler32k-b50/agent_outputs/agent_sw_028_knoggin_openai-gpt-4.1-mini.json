@@ -1,0 +1,202 @@
+{
+  "episode_id": 28,
+  "domain": "software_project",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What Docker image do we use?",
+      "task_type": "Cas",
+      "entity": [
+        "docker_image"
+      ],
+      "entity_values": {
+        "docker_image": "korinth-repo/aurora:stable"
+      },
+      "expected_answer": "korinth-repo/aurora:stable",
+      "hop": 1,
+      "agent_answer": "korinth-repo/aurora:stable"
+    },
+    {
+      "question": "What's the deploy command?",
+      "task_type": "Cas",
+      "entity": [
+        "deploy_command"
+      ],
+      "entity_values": {
+        "deploy_command": "korinth release --prod"
+      },
+      "expected_answer": "korinth release --prod",
+      "hop": 2,
+      "agent_answer": "korinth release --prod"
+    },
+    {
+      "question": "What's our log drain endpoint?",
+      "task_type": "Abs",
+      "entity": [
+        "log_drain_endpoint"
+      ],
+      "entity_values": {
+        "log_drain_endpoint": "drain.zephyra.io/proj-42"
+      },
+      "expected_answer": "drain.zephyra.io/proj-42",
+      "hop": 1,
+      "agent_answer": "drain.zephyra.io/proj-42"
+    },
+    {
+      "question": "Where's the Dockerfile?",
+      "task_type": "Abs",
+      "entity": [
+        "dockerfile_path"
+      ],
+      "entity_values": {
+        "dockerfile_path": "infra/korinth/Dockerfile"
+      },
+      "expected_answer": "infra/korinth/Dockerfile",
+      "hop": 2,
+      "agent_answer": "infra/korinth/Dockerfile"
+    },
+    {
+      "question": "What's our on-call rotation?",
+      "task_type": "Del",
+      "entity": [
+        "oncall_rotation"
+      ],
+      "entity_values": {
+        "oncall_rotation": "volunteer-based with weekly signup"
+      },
+      "expected_answer": "volunteer-based with weekly signup",
+      "hop": null,
+      "agent_answer": "Volunteer-based with weekly signup allowing team members to choose their on-call weeks."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover."
+      },
+      "expected_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover.",
+      "hop": null,
+      "agent_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover."
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all package managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "package_manager"
+      ],
+      "entity_values": {
+        "package_manager": [
+          "Tarvex Mod",
+          "Quorix Hub",
+          "Veltrion Pkg"
+        ]
+      },
+      "expected_answer": "Tarvex Mod, Quorix Hub, Veltrion Pkg",
+      "hop": null,
+      "agent_answer": "Tarvex Mod, Quorix Hub, Veltrion Pkg"
+    },
+    {
+      "question": "What Docker image do we use?",
+      "task_type": "Cas",
+      "entity": [
+        "docker_image"
+      ],
+      "entity_values": {
+        "docker_image": "thandrel-images/aurora:release"
+      },
+      "expected_answer": "thandrel-images/aurora:release",
+      "hop": 1,
+      "agent_answer": "korinth-repo/aurora:stable"
+    },
+    {
+      "question": "What's the deploy command?",
+      "task_type": "Cas",
+      "entity": [
+        "deploy_command"
+      ],
+      "entity_values": {
+        "deploy_command": "zephyra push --target prod"
+      },
+      "expected_answer": "zephyra push --target prod",
+      "hop": 2,
+      "agent_answer": "korinth release --prod"
+    },
+    {
+      "question": "What's our log drain endpoint?",
+      "task_type": "Abs",
+      "entity": [
+        "log_drain_endpoint"
+      ],
+      "entity_values": {
+        "log_drain_endpoint": "drain.zephyra.io/proj-42"
+      },
+      "expected_answer": "Uncertain — previously 'drain.zephyra.io/proj-42', but deploy_target changed",
+      "hop": 1,
+      "agent_answer": "drain.zephyra.io/proj-42"
+    },
+    {
+      "question": "Where's the Dockerfile?",
+      "task_type": "Abs",
+      "entity": [
+        "dockerfile_path"
+      ],
+      "entity_values": {
+        "dockerfile_path": "infra/korinth/Dockerfile"
+      },
+      "expected_answer": "Uncertain — previously 'infra/korinth/Dockerfile', but docker_image changed",
+      "hop": 2,
+      "agent_answer": "infra/korinth/Dockerfile"
+    },
+    {
+      "question": "What's our on-call rotation?",
+      "task_type": "Del",
+      "entity": [
+        "oncall_rotation"
+      ],
+      "entity_values": {
+        "oncall_rotation": "volunteer-based with weekly signup"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "Volunteer-based with weekly signup allowing team members to choose their on-call weeks."
+    },
+    {
+      "question": "What do you know about our release process? Tell me everything.",
+      "task_type": "Agg",
+      "entity": [
+        "branch_strategy",
+        "default_branch",
+        "release_cadence"
+      ],
+      "entity_values": {
+        "branch_strategy": "GitHub Flow with PR reviews",
+        "default_branch": "release",
+        "release_cadence": "monthly first Monday"
+      },
+      "expected_answer": "We use GitHub Flow with PR reviews branching on release, releasing monthly first Monday.",
+      "hop": null,
+      "agent_answer": "Your team follows a monthly release schedule on the first Monday, which helps keep everything organized and the workflow streamlined."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover."
+      },
+      "expected_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover.",
+      "hop": null,
+      "agent_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover."
+    }
+  ]
+}

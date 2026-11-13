@@ -1,0 +1,250 @@
+{
+  "episode_id": 7,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What ORM do we use?",
+      "task_type": "Cas",
+      "entity": [
+        "orm_library"
+      ],
+      "entity_values": {
+        "orm_library": "Crysthene ORM"
+      },
+      "expected_answer": "Crysthene ORM",
+      "hop": 1,
+      "agent_answer": "Crysthene ORM",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What's the model syntax?",
+      "task_type": "Cas",
+      "entity": [
+        "model_syntax"
+      ],
+      "entity_values": {
+        "model_syntax": "Crysthene.define('Model', {fields})"
+      },
+      "expected_answer": "Crysthene.define('Model', {fields})",
+      "hop": 2,
+      "agent_answer": "Crysthene.define('Model', {fields})",
+      "u_pass": true,
+      "u_reason": "The agent's answer is semantically equivalent to the gold answer."
+    },
+    {
+      "question": "What's the database connection string?",
+      "task_type": "Abs",
+      "entity": [
+        "connection_string"
+      ],
+      "entity_values": {
+        "connection_string": "zyndra://base-main:9042/aurora"
+      },
+      "expected_answer": "zyndra://base-main:9042/aurora",
+      "hop": 1,
+      "agent_answer": "zyndra://base-main:9042/aurora",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer exactly, indicating semantic equivalence."
+    },
+    {
+      "question": "What's our log drain endpoint?",
+      "task_type": "Del",
+      "entity": [
+        "log_drain_endpoint"
+      ],
+      "entity_values": {
+        "log_drain_endpoint": "stream.velturis.io/aurora"
+      },
+      "expected_answer": "stream.velturis.io/aurora",
+      "hop": null,
+      "agent_answer": "stream.velturis.io/aurora",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover."
+      },
+      "expected_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover.",
+      "hop": null,
+      "agent_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover.",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all secret managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "secret_manager"
+      ],
+      "entity_values": {
+        "secret_manager": [
+          "Cryptara Vault",
+          "Verisigil Lock",
+          "Sigilix Manager"
+        ]
+      },
+      "expected_answer": "Cryptara Vault, Verisigil Lock, Sigilix Manager",
+      "hop": null,
+      "agent_answer": "Cryptara Vault, Verisigil Lock, Sigilix Manager",
+      "u_pass": true,
+      "u_reason": "The agent's answer contains all the gold values in the correct chronological order.",
+      "u_pass_count": 3,
+      "u_pass_total": 3
+    },
+    {
+      "question": "What ORM do we use?",
+      "task_type": "Cas",
+      "entity": [
+        "orm_library"
+      ],
+      "entity_values": {
+        "orm_library": "Thalnex Query"
+      },
+      "expected_answer": "Thalnex Query",
+      "hop": 1,
+      "agent_answer": "Crysthene ORM",
+      "u_pass": false,
+      "u_reason": "The agent stated the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's the model syntax?",
+      "task_type": "Cas",
+      "entity": [
+        "model_syntax"
+      ],
+      "entity_values": {
+        "model_syntax": "Thalnex.document('Model', {fields})"
+      },
+      "expected_answer": "Thalnex.document('Model', {fields})",
+      "hop": 2,
+      "agent_answer": "Crysthene.define('Model', {fields})",
+      "u_pass": false,
+      "u_reason": "The agent stated the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's the database connection string?",
+      "task_type": "Abs",
+      "entity": [
+        "connection_string"
+      ],
+      "entity_values": {
+        "connection_string": "zyndra://base-main:9042/aurora"
+      },
+      "expected_answer": "Uncertain — previously 'zyndra://base-main:9042/aurora', but database changed",
+      "hop": 1,
+      "agent_answer": "zyndra://base-main:9042/aurora",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value without expressing any uncertainty or acknowledging the upstream change.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's our log drain endpoint?",
+      "task_type": "Del",
+      "entity": [
+        "log_drain_endpoint"
+      ],
+      "entity_values": {
+        "log_drain_endpoint": "stream.velturis.io/aurora"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "I don't have that information.",
+      "u_pass": true,
+      "u_reason": "The agent correctly stated it does not have the information without revealing the deleted value.",
+      "pass_type": "real"
+    },
+    {
+      "question": "What do you know about our on-call setup? Tell me everything.",
+      "task_type": "Agg",
+      "entity": [
+        "oncall_rotation",
+        "alert_channel",
+        "incident_runbook_url"
+      ],
+      "entity_values": {
+        "oncall_rotation": "weekly Mon-Sun rotation",
+        "alert_channel": "#aurora-oncall-alerts",
+        "incident_runbook_url": "runbooks.aurora.internal/playbooks"
+      },
+      "expected_answer": "On-call is weekly Mon-Sun rotation, alerts go to #aurora-oncall-alerts, and runbook is at runbooks.aurora.internal/playbooks.",
+      "hop": null,
+      "agent_answer": "The team operates on a weekly on-call rotation running from Monday to Sunday to balance workload. Production alerts are routed to the Slack channel #aurora-oncall-alerts to keep everyone informed about incidents.",
+      "u_pass": false,
+      "u_pass_per_entity": {
+        "oncall_rotation": true,
+        "alert_channel": true,
+        "incident_runbook_url": false
+      },
+      "u_pass_count": 2,
+      "u_pass_total": 3,
+      "u_reason": "The agent's answer includes the first two target values but does not mention the third."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover."
+      },
+      "expected_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover.",
+      "hop": null,
+      "agent_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover.",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 2,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 1,
+      "trivial_pass": 0,
+      "knew_but_failed": 0,
+      "never_knew": 0
+    }
+  },
+  "totals": {
+    "before_pass": 4,
+    "before_total": 5,
+    "after_pass": 3,
+    "after_total": 7
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 10,
+    "input_tokens": 2080,
+    "output_tokens": 289
+  }
+}

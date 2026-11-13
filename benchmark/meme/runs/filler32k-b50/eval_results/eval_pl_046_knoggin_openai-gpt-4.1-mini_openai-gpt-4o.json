@@ -1,0 +1,250 @@
+{
+  "episode_id": 46,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What dietary restrictions do I have?",
+      "task_type": "Cas",
+      "entity": [
+        "dietary_restriction"
+      ],
+      "entity_values": {
+        "dietary_restriction": "dairy-free"
+      },
+      "expected_answer": "dairy-free",
+      "hop": 1,
+      "agent_answer": "Dairy-free",
+      "u_pass": true,
+      "u_reason": "The agent's answer 'Dairy-free' is semantically equivalent to the gold answer 'dairy-free'."
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Pyravar CrossFit"
+      },
+      "expected_answer": "Pyravar CrossFit",
+      "hop": 2,
+      "agent_answer": "Pyravar CrossFit",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What's my sleep schedule?",
+      "task_type": "Abs",
+      "entity": [
+        "sleep_pattern"
+      ],
+      "entity_values": {
+        "sleep_pattern": "11pm-5:30am (early riser)"
+      },
+      "expected_answer": "11pm-5:30am (early riser)",
+      "hop": 1,
+      "agent_answer": "11pm to 5:30am",
+      "u_pass": true,
+      "u_reason": "The agent's answer contains the correct sleep schedule matching the gold answer."
+    },
+    {
+      "question": "Where am I studying?",
+      "task_type": "Del",
+      "entity": [
+        "school"
+      ],
+      "entity_values": {
+        "school": "Quivira Springs Community College"
+      },
+      "expected_answer": "Quivira Springs Community College",
+      "hop": null,
+      "agent_answer": "Quivira Springs Community College",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it."
+      },
+      "expected_answer": "The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it.",
+      "hop": null,
+      "agent_answer": "\"The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it.\"",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all subscription services I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "subscription_service"
+      ],
+      "entity_values": {
+        "subscription_service": [
+          "Xelvoria",
+          "meal kit (Kelvimeal)",
+          "Dranthazon"
+        ]
+      },
+      "expected_answer": "Xelvoria, meal kit (Kelvimeal), Dranthazon",
+      "hop": null,
+      "agent_answer": "Kelvimeal, Dranthazon",
+      "u_pass": false,
+      "u_reason": "The agent's answer is missing the earliest subscription service, Xelvoria, and does not match the full ordered history.",
+      "u_pass_count": 1,
+      "u_pass_total": 3
+    },
+    {
+      "question": "What dietary restrictions do I have?",
+      "task_type": "Cas",
+      "entity": [
+        "dietary_restriction"
+      ],
+      "entity_values": {
+        "dietary_restriction": "nut-free"
+      },
+      "expected_answer": "nut-free",
+      "hop": 1,
+      "agent_answer": "Dairy-free, with a potential change to nut-free if health condition changes.",
+      "u_pass": false,
+      "u_reason": "The agent lists multiple options and uses future tense instead of confirming the new value as current.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Crysthene Pool"
+      },
+      "expected_answer": "Crysthene Pool",
+      "hop": 2,
+      "agent_answer": "Pyravar CrossFit",
+      "u_pass": false,
+      "u_reason": "The agent stated the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's my sleep schedule?",
+      "task_type": "Abs",
+      "entity": [
+        "sleep_pattern"
+      ],
+      "entity_values": {
+        "sleep_pattern": "11pm-5:30am (early riser)"
+      },
+      "expected_answer": "Uncertain — previously '11pm-5:30am (early riser)', but health_condition changed",
+      "hop": 1,
+      "agent_answer": "11pm to 5:30am",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value without expressing uncertainty or acknowledging the upstream change.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "Where am I studying?",
+      "task_type": "Del",
+      "entity": [
+        "school"
+      ],
+      "entity_values": {
+        "school": "Quivira Springs Community College"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "You don't have that information.",
+      "u_pass": true,
+      "u_reason": "The agent correctly stated that the information is not available without revealing the deleted value.",
+      "pass_type": "real"
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "pottery",
+        "sports": "pickleball",
+        "club_membership": "book club"
+      },
+      "expected_answer": "The user's hobby is pottery, plays pickleball, and is part of book club.",
+      "hop": null,
+      "agent_answer": "- Pottery (learning basic techniques such as hand-building and wheel throwing, experimenting with different types of clay and glazes)\n- Participating in a social potluck dinner group to connect with friends and share dishes\n- Playing pickleball and practicing serves and volleys\n- Attending a book club that meets monthly to discuss different books\n- Reading fantasy media such as \"Xelvari Dawn\" and exploring similar series like \"The Name of the Wind\" and \"Mistborn\"\n- Exploring healthy, plant-based meal ideas for children and cooking at home (e.g., making sushi, experimenting with spicy tuna rolls)\n- Following content on Xelvoria for tutorials and tips on art forms including pottery",
+      "u_pass": true,
+      "u_pass_per_entity": {
+        "hobby": true,
+        "sports": true,
+        "club_membership": true
+      },
+      "u_pass_count": 3,
+      "u_pass_total": 3,
+      "u_reason": "All target values are explicitly mentioned in the agent's answer."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it."
+      },
+      "expected_answer": "The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it.",
+      "hop": null,
+      "agent_answer": "\"The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it.\"",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 2,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 1,
+      "trivial_pass": 0,
+      "knew_but_failed": 0,
+      "never_knew": 0
+    }
+  },
+  "totals": {
+    "before_pass": 4,
+    "before_total": 5,
+    "after_pass": 3,
+    "after_total": 7
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 10,
+    "input_tokens": 2132,
+    "output_tokens": 293
+  }
+}

@@ -1,0 +1,250 @@
+{
+  "episode_id": 40,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What dietary restrictions do I have?",
+      "task_type": "Cas",
+      "entity": [
+        "dietary_restriction"
+      ],
+      "entity_values": {
+        "dietary_restriction": "dairy-free"
+      },
+      "expected_answer": "dairy-free",
+      "hop": 1,
+      "agent_answer": "Dairy-free",
+      "u_pass": true,
+      "u_reason": "The agent's answer 'Dairy-free' is semantically equivalent to the gold answer 'dairy-free'."
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "none"
+      },
+      "expected_answer": "none",
+      "hop": 2,
+      "agent_answer": "Pyravar CrossFit",
+      "u_pass": false,
+      "u_reason": "The agent's answer does not match the gold answer, which is 'none'."
+    },
+    {
+      "question": "What medication am I taking?",
+      "task_type": "Abs",
+      "entity": [
+        "medication"
+      ],
+      "entity_values": {
+        "medication": "Velnorath"
+      },
+      "expected_answer": "Velnorath",
+      "hop": 1,
+      "agent_answer": "Velnorath",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "How do I get to work?",
+      "task_type": "Del",
+      "entity": [
+        "commute_method"
+      ],
+      "entity_values": {
+        "commute_method": "bus"
+      },
+      "expected_answer": "bus",
+      "hop": null,
+      "agent_answer": "By taking the bus.",
+      "u_pass": true,
+      "u_reason": "The agent's answer includes the gold value 'bus', indicating semantic equivalence."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover."
+      },
+      "expected_answer": "Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover.",
+      "hop": null,
+      "agent_answer": "\"Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover.\"",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all vehicles I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "vehicle"
+      ],
+      "entity_values": {
+        "vehicle": [
+          "Zyvanta Sedan",
+          "Quorvel EV",
+          "Vorantel SUV"
+        ]
+      },
+      "expected_answer": "Zyvanta Sedan, Quorvel EV, Vorantel SUV",
+      "hop": null,
+      "agent_answer": "Quorvel EV, Zyvanta Sedan, Vorantel SUV",
+      "u_pass": false,
+      "u_reason": "The agent's answer lists the vehicles in the wrong order compared to the gold sequence.",
+      "u_pass_count": 2,
+      "u_pass_total": 3
+    },
+    {
+      "question": "What dietary restrictions do I have?",
+      "task_type": "Cas",
+      "entity": [
+        "dietary_restriction"
+      ],
+      "entity_values": {
+        "dietary_restriction": "nut-free"
+      },
+      "expected_answer": "nut-free",
+      "hop": 1,
+      "agent_answer": "Dairy-free",
+      "u_pass": false,
+      "u_reason": "The agent stated the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Pyravar CrossFit"
+      },
+      "expected_answer": "Pyravar CrossFit",
+      "hop": 2,
+      "agent_answer": "Pyravar CrossFit",
+      "u_pass": true,
+      "u_reason": "The agent states the new value as the sole, definitive answer.",
+      "pass_type": "trivial"
+    },
+    {
+      "question": "What medication am I taking?",
+      "task_type": "Abs",
+      "entity": [
+        "medication"
+      ],
+      "entity_values": {
+        "medication": "Velnorath"
+      },
+      "expected_answer": "Uncertain — previously 'Velnorath', but health_condition changed",
+      "hop": 1,
+      "agent_answer": "Velnorath",
+      "u_pass": false,
+      "u_reason": "The agent confidently stated the old value 'Velnorath' without expressing any uncertainty.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "How do I get to work?",
+      "task_type": "Del",
+      "entity": [
+        "commute_method"
+      ],
+      "entity_values": {
+        "commute_method": "bus"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "You drive a Zyvanta Sedan, which you find reliable for daily commutes.",
+      "u_pass": false,
+      "u_reason": "The agent incorrectly revealed the deleted information by mentioning the Zyvanta Sedan.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "woodworking",
+        "sports": "volleyball",
+        "club_membership": "cycling club"
+      },
+      "expected_answer": "The user's hobby is woodworking, plays volleyball, and is part of cycling club.",
+      "hop": null,
+      "agent_answer": "- Play volleyball  \n- Attend monthly dermatologist appointments  \n- Participate in a regular social meetup which is a game night with neighbors  \n- Watch TV shows, including \"Whispers of Zarinthea,\" \"Servant,\" \"The Crown,\" and \"When We Left Earth: The NASA Missions\"  \n- Engage in woodworking as a hobby, working on furniture projects  \n- Explore virtual reality (VR) gaming, including playing games like Beat Saber, Superhot VR, Half-Life: Alyx, Job Simulator, and Vader Immortal  \n- Enjoy movie marathons and watch historical dramas and emotionally resonant films  \n- Practice swimming twice a week as exercise  \n- Consider Pilates or CrossFit workouts depending on health condition changes",
+      "u_pass": false,
+      "u_pass_per_entity": {
+        "hobby": true,
+        "sports": true,
+        "club_membership": false
+      },
+      "u_pass_count": 2,
+      "u_pass_total": 3,
+      "u_reason": "Woodworking and volleyball are mentioned, but cycling club is not."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover."
+      },
+      "expected_answer": "Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover.",
+      "hop": null,
+      "agent_answer": "\"Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover.\"",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 1,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    }
+  },
+  "totals": {
+    "before_pass": 3,
+    "before_total": 5,
+    "after_pass": 2,
+    "after_total": 7
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 10,
+    "input_tokens": 2097,
+    "output_tokens": 291
+  }
+}

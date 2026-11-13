@@ -1,0 +1,150 @@
+{
+  "episode_id": 16,
+  "domain": "personal_life",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What trip am I planning?",
+      "task_type": "Cas",
+      "entity": [
+        "travel_plan"
+      ],
+      "entity_values": {
+        "travel_plan": "cross-country road trip (2 weeks)"
+      },
+      "expected_answer": "cross-country road trip (2 weeks)",
+      "hop": 1,
+      "agent_answer": "A two-week cross-country road trip contingent on being engaged."
+    },
+    {
+      "question": "What's my current financial goal?",
+      "task_type": "Abs",
+      "entity": [
+        "financial_goal"
+      ],
+      "entity_values": {
+        "financial_goal": "paying off student loans"
+      },
+      "expected_answer": "paying off student loans",
+      "hop": 1,
+      "agent_answer": "Paying off student loans"
+    },
+    {
+      "question": "What health condition do I have?",
+      "task_type": "Del",
+      "entity": [
+        "health_condition"
+      ],
+      "entity_values": {
+        "health_condition": "lactose intolerance"
+      },
+      "expected_answer": "lactose intolerance",
+      "hop": null,
+      "agent_answer": "You don't have that information."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover."
+      },
+      "expected_answer": "Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover.",
+      "hop": null,
+      "agent_answer": "\"Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all vehicles I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "vehicle"
+      ],
+      "entity_values": {
+        "vehicle": [
+          "Therwyn Compact",
+          "Dranthis Pickup",
+          "Vorantel SUV"
+        ]
+      },
+      "expected_answer": "Therwyn Compact, Dranthis Pickup, Vorantel SUV",
+      "hop": null,
+      "agent_answer": "Therwyn Compact, Dranthis Pickup, Vorantel SUV"
+    },
+    {
+      "question": "What trip am I planning?",
+      "task_type": "Cas",
+      "entity": [
+        "travel_plan"
+      ],
+      "entity_values": {
+        "travel_plan": "Zynthera Bay beach trip (1 week)"
+      },
+      "expected_answer": "Zynthera Bay beach trip (1 week)",
+      "hop": 1,
+      "agent_answer": "A two-week cross-country road trip."
+    },
+    {
+      "question": "What's my current financial goal?",
+      "task_type": "Abs",
+      "entity": [
+        "financial_goal"
+      ],
+      "entity_values": {
+        "financial_goal": "paying off student loans"
+      },
+      "expected_answer": "Uncertain — previously 'paying off student loans', but relationship_status changed",
+      "hop": 1,
+      "agent_answer": "Paying off student loans"
+    },
+    {
+      "question": "What health condition do I have?",
+      "task_type": "Del",
+      "entity": [
+        "health_condition"
+      ],
+      "entity_values": {
+        "health_condition": "lactose intolerance"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "Lactose intolerance"
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "pottery",
+        "sports": "golf",
+        "club_membership": "board game group"
+      },
+      "expected_answer": "The user's hobby is pottery, plays golf, and is part of board game group.",
+      "hop": null,
+      "agent_answer": "- Play golf  \n- Enjoy the challenge of improving golf skills  \n- Socialize and spend time outdoors with friends while playing golf  \n- Plan and prepare for a wedding  \n- Live with partner and share experiences  \n- Subscribe to and use the Kelvimeal meal kit service to save time and simplify cooking on busy days  \n- Take solo trips and road trips (e.g., solo trip to Big Sur, camping trip to Yosemite National Park)  \n- Camp at state parks or national forests along the Northern California coast  \n- Attend virtual events such as wine tastings, yoga classes, cooking classes, book clubs, concerts, art exhibitions, networking events, and workshops  \n- Explore music interests (e.g., The Ravens)  \n- Engage in board game group activities with strategy and party games  \n- Plan and enjoy outdoor activities and trips with practical vehicle use (Dranthis Pickup)"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover."
+      },
+      "expected_answer": "Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover.",
+      "hop": null,
+      "agent_answer": "\"Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover.\""
+    }
+  ]
+}

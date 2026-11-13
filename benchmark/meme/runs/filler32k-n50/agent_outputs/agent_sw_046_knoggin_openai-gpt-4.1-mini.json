@@ -1,0 +1,202 @@
+{
+  "episode_id": 46,
+  "domain": "software_project",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What's our build tool?",
+      "task_type": "Cas",
+      "entity": [
+        "build_tool"
+      ],
+      "entity_values": {
+        "build_tool": "Tarvex CLI"
+      },
+      "expected_answer": "Tarvex CLI",
+      "hop": 1,
+      "agent_answer": "Tarvex CLI"
+    },
+    {
+      "question": "What's the test command?",
+      "task_type": "Cas",
+      "entity": [
+        "test_command"
+      ],
+      "entity_values": {
+        "test_command": "dranith probe --mode fast"
+      },
+      "expected_answer": "dranith probe --mode fast",
+      "hop": 2,
+      "agent_answer": "dranith probe --mode fast"
+    },
+    {
+      "question": "What's our project structure?",
+      "task_type": "Abs",
+      "entity": [
+        "project_structure"
+      ],
+      "entity_values": {
+        "project_structure": "workspace with /services and /common"
+      },
+      "expected_answer": "workspace with /services and /common",
+      "hop": 1,
+      "agent_answer": "```\n├── application\n│   ├── use_cases\n│   │   ├── create_order.js\n│   │   ├── get_order.js\n│   │   └── update_order.js\n│   └── services\n│       ├── email_service.js\n│       └── payment_service.js\n├── domain\n│   ├── entities\n│   │   ├── order.js\n│   │   └── product.js\n│   ├── repositories\n│   │   └── order_repository.js\n│   └── services\n│       └── order_service.js\n├── infrastructure\n│   ├── data_access\n│   │   └── order_data_access.js\n│   ├── email\n│   │   └── email_client.js\n│   └── payment\n│       └── payment_gateway.js\n└── interface\n    ├── controllers\n    │   ├── create_order_controller.js\n    │   ├── get_order_controller.js\n    │   └── update_order_controller.js\n    └── presenters\n        ├── order_presenter.js\n        └── product_presenter.js\n```"
+    },
+    {
+      "question": "What's the build command?",
+      "task_type": "Abs",
+      "entity": [
+        "build_command"
+      ],
+      "entity_values": {
+        "build_command": "tarvex compile --debug"
+      },
+      "expected_answer": "tarvex compile --debug",
+      "hop": 2,
+      "agent_answer": "tarvex compile --debug"
+    },
+    {
+      "question": "What's our backup schedule?",
+      "task_type": "Del",
+      "entity": [
+        "backup_schedule"
+      ],
+      "entity_values": {
+        "backup_schedule": "daily at 3am UTC"
+      },
+      "expected_answer": "daily at 3am UTC",
+      "hop": null,
+      "agent_answer": "Daily at 3am UTC"
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review."
+      },
+      "expected_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.",
+      "hop": null,
+      "agent_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review."
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all secret managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "secret_manager"
+      ],
+      "entity_values": {
+        "secret_manager": [
+          "Verisigil Lock",
+          "Pyronos Crypt",
+          "Orinthal Sealed"
+        ]
+      },
+      "expected_answer": "Verisigil Lock, Pyronos Crypt, Orinthal Sealed",
+      "hop": null,
+      "agent_answer": "1. Verisigil Lock  \n2. Pyronos Crypt  \n3. Orinthal Sealed"
+    },
+    {
+      "question": "What's our build tool?",
+      "task_type": "Cas",
+      "entity": [
+        "build_tool"
+      ],
+      "entity_values": {
+        "build_tool": "Karnex Bundler"
+      },
+      "expected_answer": "Karnex Bundler",
+      "hop": 1,
+      "agent_answer": "Tarvex CLI"
+    },
+    {
+      "question": "What's the test command?",
+      "task_type": "Cas",
+      "entity": [
+        "test_command"
+      ],
+      "entity_values": {
+        "test_command": "zelthra assert --suite all"
+      },
+      "expected_answer": "zelthra assert --suite all",
+      "hop": 2,
+      "agent_answer": "dranith probe --mode fast"
+    },
+    {
+      "question": "What's our project structure?",
+      "task_type": "Abs",
+      "entity": [
+        "project_structure"
+      ],
+      "entity_values": {
+        "project_structure": "workspace with /services and /common"
+      },
+      "expected_answer": "Uncertain — previously 'workspace with /services and /common', but framework changed",
+      "hop": 1,
+      "agent_answer": "The project follows a workspace structure with the directories `/services` and `/common`."
+    },
+    {
+      "question": "What's the build command?",
+      "task_type": "Abs",
+      "entity": [
+        "build_command"
+      ],
+      "entity_values": {
+        "build_command": "tarvex compile --debug"
+      },
+      "expected_answer": "Uncertain — previously 'tarvex compile --debug', but build_tool changed",
+      "hop": 2,
+      "agent_answer": "tarvex compile --debug"
+    },
+    {
+      "question": "What's our backup schedule?",
+      "task_type": "Del",
+      "entity": [
+        "backup_schedule"
+      ],
+      "entity_values": {
+        "backup_schedule": "daily at 3am UTC"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "Daily at 3am UTC."
+    },
+    {
+      "question": "How does our team coordinate? Tell me everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "meeting_day",
+        "slack_channel",
+        "standup_format"
+      ],
+      "entity_values": {
+        "meeting_day": "every Wednesday 10am",
+        "slack_channel": "#vortex-team",
+        "standup_format": "weekly sync + daily async"
+      },
+      "expected_answer": "Team meets every Wednesday 10am, uses #vortex-team for chat, and standups are weekly sync + daily async.",
+      "hop": null,
+      "agent_answer": "Your team coordinates through several structured practices and tools:\n\n- You have a dedicated team channel called **#vortex-team** where project-related discussions happen. There is consideration about organizing conversations into specific threads for different topics to keep discussions organized while maintaining room for casual chats.\n\n- Your team holds a **weekly meeting every Wednesday at 10am** to sync up and discuss blockers.\n\n- For standups, your team uses a **hybrid format** with a **weekly synchronous meeting plus daily asynchronous updates**. This approach keeps everyone informed without taking too much time daily. Efficiency is maintained by focusing on key updates, sticking to time limits, encouraging relevant sharing, and possibly using a clear update format.\n\n- Your team uses **Pyronos Crypt** initially as a secret manager for handling sensitive information securely, later switching to **Orinthal Sealed** for secret management. Best practices followed include avoiding hard-coded secrets, secure runtime retrieval, role-based access control, regular secret rotation, and auditing access.\n\n- Development is done using the **Quenthar framework**, with tips to optimize performance by profiling, leveraging built-in features, keeping dependencies updated, using consistent versioning, and modularizing components.\n\n- For package management, your team uses **Pyronis Bundle**, with recommendations to manage packages by scheduling regular updates, using version ranges to avoid breaking changes, employing automated tools for update notifications, and running tests after updates to ensure stability.\n\n- Your default development branch is **trunk**, which centralizes development efforts. Best practices for managing merges and pull requests include encouraging frequent small updates, clear pull request guidelines, required reviews, and automated testing to maintain code quality and ease merges.\n\n- The development server is run with the command `synthari launch --hmr` enabling hot module replacement (HMR) to speed up development by allowing live updates without full reloads.\n\n- Your team maintains a **changelog on the GitHub Releases page**, with a recommendation to adopt a consistent process for updating it regularly rather than ad-hoc after major releases.\n\n- You recently migrated to the **Dravex framework**, with advice to monitor compatibility and performance benchmarks during the transition.\n\n- Your team operates a **follow-the-sun on-call rotation across timezones**, with attention to managing communication gaps and ensuring smooth handovers.\n\n- Test coverage targets are set at **70% overall and 95% for authentication**, focusing on critical paths and edge cases to ensure security.\n\n- For meeting notes, collaborative tools"
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review."
+      },
+      "expected_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.",
+      "hop": null,
+      "agent_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review."
+    }
+  ]
+}

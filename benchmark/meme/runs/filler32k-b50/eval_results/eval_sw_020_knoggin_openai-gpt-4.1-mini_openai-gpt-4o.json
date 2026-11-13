@@ -1,0 +1,281 @@
+{
+  "episode_id": 20,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What's our monitoring URL?",
+      "task_type": "Cas",
+      "entity": [
+        "monitoring_url"
+      ],
+      "entity_values": {
+        "monitoring_url": "watch.korinth.dev/aurora"
+      },
+      "expected_answer": "watch.korinth.dev/aurora",
+      "hop": 1,
+      "agent_answer": "watch.korinth.dev/aurora",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer exactly, indicating semantic equivalence."
+    },
+    {
+      "question": "Where's the Dockerfile?",
+      "task_type": "Cas",
+      "entity": [
+        "dockerfile_path"
+      ],
+      "entity_values": {
+        "dockerfile_path": "deploy/Dockerfile.thandrel"
+      },
+      "expected_answer": "deploy/Dockerfile.thandrel",
+      "hop": 2,
+      "agent_answer": "deploy/Dockerfile.thandrel",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What Docker image do we use?",
+      "task_type": "Abs",
+      "entity": [
+        "docker_image"
+      ],
+      "entity_values": {
+        "docker_image": "zephyra-hub/aurora:prod"
+      },
+      "expected_answer": "zephyra-hub/aurora:prod",
+      "hop": 1,
+      "agent_answer": "zephyra-hub/aurora:prod",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What's the deploy command?",
+      "task_type": "Abs",
+      "entity": [
+        "deploy_command"
+      ],
+      "entity_values": {
+        "deploy_command": "thandrel ship --channel stable"
+      },
+      "expected_answer": "thandrel ship --channel stable",
+      "hop": 2,
+      "agent_answer": "thandrel ship --channel stable",
+      "u_pass": true,
+      "u_reason": "The agent's answer is semantically equivalent to the gold answer."
+    },
+    {
+      "question": "What's the model syntax?",
+      "task_type": "Del",
+      "entity": [
+        "model_syntax"
+      ],
+      "entity_values": {
+        "model_syntax": "Thalnex.document('Model', {fields})"
+      },
+      "expected_answer": "Thalnex.document('Model', {fields})",
+      "hop": null,
+      "agent_answer": "```python\nmodel = nn.Sequential(\n    nn.Linear(n_inputs, n_hidden),\n    nn.ReLU(),\n    nn.Linear(n_hidden, n_outputs)\n)\n```",
+      "u_pass": false,
+      "u_reason": "The agent's answer does not match the gold answer semantically; it provides a Python code snippet instead of the Thalnex syntax."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review."
+      },
+      "expected_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.",
+      "hop": null,
+      "agent_answer": "\"DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.\"",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all sprint deadlines we've had, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "sprint_deadline"
+      ],
+      "entity_values": {
+        "sprint_deadline": [
+          "2025 April 11",
+          "2025 June 20",
+          "2025 July 4"
+        ]
+      },
+      "expected_answer": "2025 April 11, 2025 June 20, 2025 July 4",
+      "hop": null,
+      "agent_answer": "April 11, 2025  \nJuly 4, 2025",
+      "u_pass": false,
+      "u_reason": "The agent's answer is missing the value '2025 June 20' and does not list all values in the correct order.",
+      "u_pass_count": 0,
+      "u_pass_total": 3
+    },
+    {
+      "question": "What's our monitoring URL?",
+      "task_type": "Cas",
+      "entity": [
+        "monitoring_url"
+      ],
+      "entity_values": {
+        "monitoring_url": "observe.velturis.io/aurora"
+      },
+      "expected_answer": "observe.velturis.io/aurora",
+      "hop": 1,
+      "agent_answer": "watch.korinth.dev/aurora",
+      "u_pass": false,
+      "u_reason": "The agent reported an incorrect URL instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "Where's the Dockerfile?",
+      "task_type": "Cas",
+      "entity": [
+        "dockerfile_path"
+      ],
+      "entity_values": {
+        "dockerfile_path": "deploy/Dockerfile.korinth"
+      },
+      "expected_answer": "deploy/Dockerfile.korinth",
+      "hop": 2,
+      "agent_answer": "deploy/Dockerfile.thandrel",
+      "u_pass": false,
+      "u_reason": "The agent reported the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What Docker image do we use?",
+      "task_type": "Abs",
+      "entity": [
+        "docker_image"
+      ],
+      "entity_values": {
+        "docker_image": "zephyra-hub/aurora:prod"
+      },
+      "expected_answer": "Uncertain — previously 'zephyra-hub/aurora:prod', but deploy_target changed",
+      "hop": 1,
+      "agent_answer": "zephyra-hub/aurora:prod",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value without expressing any uncertainty or acknowledging the upstream change.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's the deploy command?",
+      "task_type": "Abs",
+      "entity": [
+        "deploy_command"
+      ],
+      "entity_values": {
+        "deploy_command": "thandrel ship --channel stable"
+      },
+      "expected_answer": "Uncertain — previously 'thandrel ship --channel stable', but ci_config changed",
+      "hop": 2,
+      "agent_answer": "thandrel ship --channel stable",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value without expressing uncertainty or acknowledging the upstream change.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's the model syntax?",
+      "task_type": "Del",
+      "entity": [
+        "model_syntax"
+      ],
+      "entity_values": {
+        "model_syntax": "Thalnex.document('Model', {fields})"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "```python\nimport torch\nimport torch.nn as nn\n\n# define the number of inputs, hidden units, and outputs\nn_inputs = 28 * 28\nn_hidden = 256\nn_outputs = 10\n\n# define the model\nmodel = nn.Sequential(\n    nn.Linear(n_inputs, n_hidden),\n    nn.ReLU(),\n    nn.Linear(n_hidden, n_outputs)\n)\n```",
+      "u_pass": false,
+      "u_reason": "The agent returned a Python code snippet instead of indicating the information was deleted.",
+      "pass_type": "never_knew"
+    },
+    {
+      "question": "Where can I find project documentation? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "documentation_url",
+        "onboarding_guide",
+        "changelog_location"
+      ],
+      "entity_values": {
+        "documentation_url": "notion.so/aurora-team/docs",
+        "onboarding_guide": "ONBOARDING.md in repo root",
+        "changelog_location": "CHANGELOG.md in repo root"
+      },
+      "expected_answer": "Docs are at notion.so/aurora-team/docs, onboarding guide at ONBOARDING.md in repo root, and changelog at CHANGELOG.md in repo root.",
+      "hop": null,
+      "agent_answer": "- The project documentation is maintained in Notion.\n- It covers architecture and API specifications.\n- The onboarding guide is located at ONBOARDING.md in the repository root.",
+      "u_pass": false,
+      "u_pass_per_entity": {
+        "documentation_url": false,
+        "onboarding_guide": true,
+        "changelog_location": false
+      },
+      "u_pass_count": 1,
+      "u_pass_total": 3,
+      "u_reason": "The agent mentioned ONBOARDING.md in the repository root but did not mention the other target values."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review."
+      },
+      "expected_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.",
+      "hop": null,
+      "agent_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 2,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 2,
+      "never_knew": 0
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 0,
+      "never_knew": 1
+    }
+  },
+  "totals": {
+    "before_pass": 4,
+    "before_total": 6,
+    "after_pass": 1,
+    "after_total": 8
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 12,
+    "input_tokens": 2566,
+    "output_tokens": 367
+  }
+}

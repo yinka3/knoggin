@@ -1,0 +1,250 @@
+{
+  "episode_id": 14,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What regular appointments do I have?",
+      "task_type": "Cas",
+      "entity": [
+        "regular_appointment"
+      ],
+      "entity_values": {
+        "regular_appointment": "dentist (every 6 months)"
+      },
+      "expected_answer": "dentist (every 6 months)",
+      "hop": 1,
+      "agent_answer": "Dentist every 6 months; potentially dermatologist monthly if health condition changes.",
+      "u_pass": true,
+      "u_reason": "The agent's answer includes the gold information about the dentist appointment every 6 months."
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Pyravar CrossFit"
+      },
+      "expected_answer": "Pyravar CrossFit",
+      "hop": 2,
+      "agent_answer": "Pyravar CrossFit",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What medication am I taking?",
+      "task_type": "Abs",
+      "entity": [
+        "medication"
+      ],
+      "entity_values": {
+        "medication": "Velnorath"
+      },
+      "expected_answer": "Velnorath",
+      "hop": 1,
+      "agent_answer": "Velnorath",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What insurance do I have?",
+      "task_type": "Del",
+      "entity": [
+        "insurance"
+      ],
+      "entity_values": {
+        "insurance": "dental + vision bundle"
+      },
+      "expected_answer": "dental + vision bundle",
+      "hop": null,
+      "agent_answer": "Dental and vision insurance bundle",
+      "u_pass": true,
+      "u_reason": "The agent's answer semantically matches the gold answer as both indicate a dental and vision insurance bundle."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world."
+      },
+      "expected_answer": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.",
+      "hop": null,
+      "agent_answer": "\"We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.\"",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all subscription services I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "subscription_service"
+      ],
+      "entity_values": {
+        "subscription_service": [
+          "Daily Journal subscription",
+          "Dranthazon",
+          "Pyrethon Plus"
+        ]
+      },
+      "expected_answer": "Daily Journal subscription, Dranthazon, Pyrethon Plus",
+      "hop": null,
+      "agent_answer": "The context does not provide information about all the subscription services you have had over time.",
+      "u_pass": false,
+      "u_reason": "The agent did not provide any of the historical subscription services, missing all gold values.",
+      "u_pass_count": 0,
+      "u_pass_total": 3
+    },
+    {
+      "question": "What regular appointments do I have?",
+      "task_type": "Cas",
+      "entity": [
+        "regular_appointment"
+      ],
+      "entity_values": {
+        "regular_appointment": "dermatologist (monthly)"
+      },
+      "expected_answer": "dermatologist (monthly)",
+      "hop": 1,
+      "agent_answer": "Dentist every 6 months; potentially dermatologist monthly if health condition changes.",
+      "u_pass": false,
+      "u_reason": "The agent lists multiple options and hedges, failing to state the new value as the sole, definitive answer.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Kaelstrom Fitness"
+      },
+      "expected_answer": "Kaelstrom Fitness",
+      "hop": 2,
+      "agent_answer": "Pyravar CrossFit",
+      "u_pass": false,
+      "u_reason": "The agent reported the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What medication am I taking?",
+      "task_type": "Abs",
+      "entity": [
+        "medication"
+      ],
+      "entity_values": {
+        "medication": "Velnorath"
+      },
+      "expected_answer": "Uncertain — previously 'Velnorath', but health_condition changed",
+      "hop": 1,
+      "agent_answer": "Velnorath",
+      "u_pass": false,
+      "u_reason": "The agent confidently stated the old value without expressing uncertainty or acknowledging the upstream change.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What insurance do I have?",
+      "task_type": "Del",
+      "entity": [
+        "insurance"
+      ],
+      "entity_values": {
+        "insurance": "dental + vision bundle"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "I don't have that information.",
+      "u_pass": true,
+      "u_reason": "The agent correctly stated that it does not have the information without revealing the deleted value.",
+      "pass_type": "real"
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "guitar",
+        "sports": "basketball",
+        "club_membership": "running club"
+      },
+      "expected_answer": "The user's hobby is guitar, plays basketball, and is part of running club.",
+      "hop": null,
+      "agent_answer": "- Play basketball mostly for fun with friends, appreciating the social and relaxing aspects without competitive pressure  \n- Subscribe to Dranthazon for diverse content that keeps you engaged  \n- Explore gluten-free recipes and alternatives such as stir-fries, salads, and gluten-free pasta due to your gluten-free dietary restriction  \n- Participate regularly in social game nights with neighbors, favoring interactive and strategic games like Codenames and cooperative games like Pandemic that encourage teamwork and discussion",
+      "u_pass": false,
+      "u_pass_per_entity": {
+        "hobby": false,
+        "sports": true,
+        "club_membership": false
+      },
+      "u_pass_count": 1,
+      "u_pass_total": 3,
+      "u_reason": "Only 'basketball' is mentioned in the agent's answer."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world."
+      },
+      "expected_answer": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.",
+      "hop": null,
+      "agent_answer": "\"We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.\"",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 2,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 1,
+      "trivial_pass": 0,
+      "knew_but_failed": 0,
+      "never_knew": 0
+    }
+  },
+  "totals": {
+    "before_pass": 4,
+    "before_total": 5,
+    "after_pass": 2,
+    "after_total": 7
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 10,
+    "input_tokens": 2072,
+    "output_tokens": 292
+  }
+}

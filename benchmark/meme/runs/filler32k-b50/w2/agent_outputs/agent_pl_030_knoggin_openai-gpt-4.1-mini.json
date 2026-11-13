@@ -1,0 +1,202 @@
+{
+  "episode_id": 30,
+  "domain": "personal_life",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What's my work schedule?",
+      "task_type": "Cas",
+      "entity": [
+        "work_schedule"
+      ],
+      "entity_values": {
+        "work_schedule": "shift work (day)"
+      },
+      "expected_answer": "shift work (day)",
+      "hop": 1,
+      "agent_answer": "Shift work (day)"
+    },
+    {
+      "question": "How long is my commute?",
+      "task_type": "Cas",
+      "entity": [
+        "commute_duration"
+      ],
+      "entity_values": {
+        "commute_duration": "10 min"
+      },
+      "expected_answer": "10 min",
+      "hop": 2,
+      "agent_answer": "10 minutes"
+    },
+    {
+      "question": "What insurance do I have?",
+      "task_type": "Abs",
+      "entity": [
+        "insurance"
+      ],
+      "entity_values": {
+        "insurance": "employer + supplemental"
+      },
+      "expected_answer": "employer + supplemental",
+      "hop": 1,
+      "agent_answer": "Employer-provided insurance and supplemental insurance through Elyndra Health."
+    },
+    {
+      "question": "How do I get to work?",
+      "task_type": "Abs",
+      "entity": [
+        "commute_method"
+      ],
+      "entity_values": {
+        "commute_method": "remote (no commute)"
+      },
+      "expected_answer": "remote (no commute)",
+      "hop": 2,
+      "agent_answer": "You currently work with a 10-minute commute. If your employer changes, your commute would likely remain around 10 minutes, depending on the new office location, which would be in Quivira Springs."
+    },
+    {
+      "question": "What's my current financial goal?",
+      "task_type": "Del",
+      "entity": [
+        "financial_goal"
+      ],
+      "entity_values": {
+        "financial_goal": "paying off student loans"
+      },
+      "expected_answer": "paying off student loans",
+      "hop": null,
+      "agent_answer": "Paying off student loans."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it."
+      },
+      "expected_answer": "The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it.",
+      "hop": null,
+      "agent_answer": "\"The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all media I've consumed over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "media_consumption"
+      ],
+      "entity_values": {
+        "media_consumption": [
+          "The Quorath Codex (book)",
+          "Thyrelion (anime)",
+          "Xelvari Dawn (book)"
+        ]
+      },
+      "expected_answer": "The Quorath Codex (book), Thyrelion (anime), Xelvari Dawn (book)",
+      "hop": null,
+      "agent_answer": "- Malayalam language content (history, script, preservation efforts)  \n- Environmental activism information about Jane Fonda and other celebrities  \n- Osteoporosis prevention tips and strength training alternatives  \n- Jewelry appraisal process and organization tips  \n- Robotic systems in construction and future trends  \n- Advertisement performance analysis table example  \n- Media mix proposal for advertising campaigns  \n- Performance commercial campaign proposal  \n- Sleep schedule consistency and morning motivation tips"
+    },
+    {
+      "question": "What's my work schedule?",
+      "task_type": "Cas",
+      "entity": [
+        "work_schedule"
+      ],
+      "entity_values": {
+        "work_schedule": "9-to-5 fixed"
+      },
+      "expected_answer": "9-to-5 fixed",
+      "hop": 1,
+      "agent_answer": "Shift work (day)"
+    },
+    {
+      "question": "How long is my commute?",
+      "task_type": "Cas",
+      "entity": [
+        "commute_duration"
+      ],
+      "entity_values": {
+        "commute_duration": "10 min"
+      },
+      "expected_answer": "10 min",
+      "hop": 2,
+      "agent_answer": "10 minutes"
+    },
+    {
+      "question": "What insurance do I have?",
+      "task_type": "Abs",
+      "entity": [
+        "insurance"
+      ],
+      "entity_values": {
+        "insurance": "employer + supplemental"
+      },
+      "expected_answer": "Uncertain — previously 'employer + supplemental', but employer changed",
+      "hop": 1,
+      "agent_answer": "Employer-provided insurance and supplemental insurance through Elyndra Health."
+    },
+    {
+      "question": "How do I get to work?",
+      "task_type": "Abs",
+      "entity": [
+        "commute_method"
+      ],
+      "entity_values": {
+        "commute_method": "remote (no commute)"
+      },
+      "expected_answer": "Uncertain — previously 'remote (no commute)', but work_location changed",
+      "hop": 2,
+      "agent_answer": "You currently work at Elyndra Health with a remote office location and have a 10-minute commute. If your employer changes, your office would be at Quivira Springs, and your commute would remain around 10 minutes."
+    },
+    {
+      "question": "What's my current financial goal?",
+      "task_type": "Del",
+      "entity": [
+        "financial_goal"
+      ],
+      "entity_values": {
+        "financial_goal": "paying off student loans"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "To pay off student loans."
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "video games",
+        "sports": "pickleball",
+        "club_membership": "cycling club"
+      },
+      "expected_answer": "The user's hobby is video games, plays pickleball, and is part of cycling club.",
+      "hop": null,
+      "agent_answer": "- Enjoy social pickleball with varied partners  \n- Watch anime like \"Thyrelion,\" appreciating story and character growth  \n- Explore creative leftover noodle dishes, such as muffin tin noodle cups with peanut sauce  \n- Experiment with different coffee brewing methods and beans  \n- Cook more meals at home and eat healthier, including trying quick and easy healthy breakfast recipes  \n- Prepare nostalgic displays combining vintage cameras, postcards, and vinyl records  \n- Engage in marketing campaigns and performance advertising work  \n- Work on establishing a consistent sleep schedule and improving morning motivation and focus"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it."
+      },
+      "expected_answer": "The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it.",
+      "hop": null,
+      "agent_answer": "\"The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it.\""
+    }
+  ]
+}

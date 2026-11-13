@@ -1,0 +1,317 @@
+{
+  "git_sha": "15d7cd5aa3ede34cfb44db38310642ac1e590499",
+  "dataset": "/home/yinka/dev/knoggin-longmemeval/benchmark/meme/data/meme_filler32k.json",
+  "dataset_sha256": "a88d28374a002b3e5b1683fb7201d06a1ce739d2ebf94c971c37bb65cf6ebdd3",
+  "episode_ids": [
+    "pl_010",
+    "pl_030",
+    "pl_035",
+    "pl_040",
+    "pl_045",
+    "pl_050",
+    "sw_013",
+    "sw_018",
+    "sw_023",
+    "sw_028"
+  ],
+  "answer_models": "openai/gpt-4.1-mini",
+  "answer_prompt": "meme",
+  "config": {
+    "llm": {
+      "agent_model": "openai/gpt-4.1-mini",
+      "extraction_model": "openai/gpt-4.1-mini",
+      "merge_model": "openai/gpt-4.1-mini",
+      "spending_budget": {
+        "limit_usd": 5.0
+      }
+    },
+    "developer_settings": {
+      "jobs": {
+        "conflict_discovery": {
+          "enabled": false
+        },
+        "duplicate_review": {
+          "enabled": false
+        }
+      },
+      "community": {
+        "enabled": false
+      },
+      "chat_compaction": {
+        "enabled": false
+      },
+      "ingestion": {
+        "context": {
+          "update_model": "openai/gpt-4.1-mini",
+          "maintenance_model": "openai/gpt-4.1-mini"
+        }
+      }
+    }
+  },
+  "domain": {
+    "version": 0,
+    "extraction_guidance": "Remember useful facts from conversations about a person's life and work, including people, organizations, projects, places, products, technical tools, plans, preferences, decisions, and changes over time. Keep who or what each fact is about clear, preserve important wording and dates when given, and do not assume a fact remains current after it changes.",
+    "topics": {
+      "Identity": {
+        "description": "The user and people connected to them"
+      },
+      "Personal": {
+        "description": "Personal life, preferences, plans, belongings, and places"
+      },
+      "Work": {
+        "description": "Organizations, jobs, studies, and software projects"
+      },
+      "Interests": {
+        "description": "Activities, media, and preferences"
+      },
+      "General": {
+        "description": "Other useful facts and concepts"
+      }
+    },
+    "entity_types": {
+      "Identity": {
+        "topic": "Identity",
+        "labels": [
+          "person",
+          "user",
+          "partner",
+          "friend",
+          "coworker",
+          "teammate"
+        ]
+      },
+      "Organization": {
+        "topic": "Work",
+        "labels": [
+          "company",
+          "organization",
+          "employer",
+          "school",
+          "team",
+          "community"
+        ]
+      },
+      "Project": {
+        "topic": "Work",
+        "labels": [
+          "project",
+          "software project",
+          "codebase",
+          "repository",
+          "application",
+          "service"
+        ]
+      },
+      "Place": {
+        "topic": "Personal",
+        "allowed_topics": [
+          "Personal",
+          "Work"
+        ],
+        "labels": [
+          "city",
+          "country",
+          "location",
+          "venue",
+          "office"
+        ]
+      },
+      "Artifact": {
+        "topic": "Work",
+        "allowed_topics": [
+          "Work",
+          "Personal"
+        ],
+        "labels": [
+          "product",
+          "device",
+          "tool",
+          "library",
+          "framework",
+          "database",
+          "document",
+          "file",
+          "vehicle"
+        ]
+      },
+      "Event": {
+        "topic": "Personal",
+        "allowed_topics": [
+          "Personal",
+          "Work"
+        ],
+        "labels": [
+          "event",
+          "meeting",
+          "trip",
+          "release",
+          "deadline"
+        ]
+      },
+      "Activity": {
+        "topic": "Interests",
+        "allowed_topics": [
+          "Interests",
+          "Work",
+          "Personal"
+        ],
+        "labels": [
+          "hobby",
+          "sport",
+          "activity",
+          "workflow",
+          "practice"
+        ]
+      },
+      "Concept": {
+        "topic": "General",
+        "labels": [
+          "concept",
+          "decision",
+          "preference",
+          "goal",
+          "plan",
+          "requirement",
+          "issue"
+        ]
+      }
+    },
+    "relationships": {
+      "KNOWS": {
+        "source_types": [
+          "Identity"
+        ],
+        "target_types": [
+          "Identity"
+        ],
+        "symmetric": true,
+        "labels": [
+          "knows",
+          "friend of",
+          "partner of",
+          "coworker of",
+          "teammate of"
+        ]
+      },
+      "WORKS_AT": {
+        "source_types": [
+          "Identity"
+        ],
+        "target_types": [
+          "Organization"
+        ],
+        "labels": [
+          "works at",
+          "works for",
+          "employed by"
+        ]
+      },
+      "MEMBER_OF": {
+        "source_types": [
+          "Identity"
+        ],
+        "target_types": [
+          "Organization"
+        ],
+        "labels": [
+          "member of",
+          "belongs to",
+          "studies at"
+        ]
+      },
+      "LIVES_IN": {
+        "source_types": [
+          "Identity"
+        ],
+        "target_types": [
+          "Place"
+        ],
+        "labels": [
+          "lives in",
+          "resides in",
+          "moved to"
+        ]
+      },
+      "LOCATED_IN": {
+        "source_types": [
+          "Organization",
+          "Project",
+          "Artifact"
+        ],
+        "target_types": [
+          "Place",
+          "Organization"
+        ],
+        "labels": [
+          "located in",
+          "hosted by",
+          "owned by"
+        ]
+      },
+      "WORKS_ON": {
+        "source_types": [
+          "Identity",
+          "Organization"
+        ],
+        "target_types": [
+          "Project",
+          "Artifact"
+        ],
+        "labels": [
+          "works on",
+          "maintains",
+          "develops",
+          "contributes to"
+        ]
+      },
+      "PART_OF": {
+        "source_types": [
+          "Project",
+          "Artifact",
+          "Activity"
+        ],
+        "target_types": [
+          "Organization",
+          "Project",
+          "Activity"
+        ],
+        "labels": [
+          "part of",
+          "component of",
+          "depends on"
+        ]
+      },
+      "LIKES": {
+        "source_types": [
+          "Identity"
+        ],
+        "target_types": [
+          "Activity",
+          "Artifact",
+          "Place",
+          "Concept"
+        ],
+        "labels": [
+          "likes",
+          "enjoys",
+          "prefers"
+        ]
+      },
+      "ATTENDED": {
+        "source_types": [
+          "Identity"
+        ],
+        "target_types": [
+          "Event",
+          "Place"
+        ],
+        "labels": [
+          "attended",
+          "visited",
+          "went to"
+        ]
+      }
+    }
+  },
+  "started_at": "2026-11-12T09:36:30.485946+00:00"
+}

@@ -1,0 +1,281 @@
+{
+  "episode_id": 46,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What's our build tool?",
+      "task_type": "Cas",
+      "entity": [
+        "build_tool"
+      ],
+      "entity_values": {
+        "build_tool": "Tarvex CLI"
+      },
+      "expected_answer": "Tarvex CLI",
+      "hop": 1,
+      "agent_answer": "Tarvex CLI",
+      "u_pass": true,
+      "u_reason": "The agent's answer 'Tarvex CLI' matches the gold answer semantically."
+    },
+    {
+      "question": "What's the test command?",
+      "task_type": "Cas",
+      "entity": [
+        "test_command"
+      ],
+      "entity_values": {
+        "test_command": "dranith probe --mode fast"
+      },
+      "expected_answer": "dranith probe --mode fast",
+      "hop": 2,
+      "agent_answer": "dranith probe --mode fast",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What's our project structure?",
+      "task_type": "Abs",
+      "entity": [
+        "project_structure"
+      ],
+      "entity_values": {
+        "project_structure": "workspace with /services and /common"
+      },
+      "expected_answer": "workspace with /services and /common",
+      "hop": 1,
+      "agent_answer": "```\n├── application\n│   ├── use_cases\n│   │   ├── create_order.js\n│   │   ├── get_order.js\n│   │   └── update_order.js\n│   └── services\n│       ├── email_service.js\n│       └── payment_service.js\n├── domain\n│   ├── entities\n│   │   ├── order.js\n│   │   └── product.js\n│   ├── repositories\n│   │   └── order_repository.js\n│   └── services\n│       └── order_service.js\n├── infrastructure\n│   ├── data_access\n│   │   └── order_data_access.js\n│   ├── email\n│   │   └── email_client.js\n│   └── payment\n│       └── payment_gateway.js\n└── interface\n    ├── controllers\n    │   ├── create_order_controller.js\n    │   ├── get_order_controller.js\n    │   └── update_order_controller.js\n    └── presenters\n        ├── order_presenter.js\n        └── product_presenter.js\n```",
+      "u_pass": false,
+      "u_reason": "The agent's answer does not mention a workspace with /services and /common, which is the core structure in the gold answer."
+    },
+    {
+      "question": "What's the build command?",
+      "task_type": "Abs",
+      "entity": [
+        "build_command"
+      ],
+      "entity_values": {
+        "build_command": "tarvex compile --debug"
+      },
+      "expected_answer": "tarvex compile --debug",
+      "hop": 2,
+      "agent_answer": "tarvex compile --debug",
+      "u_pass": true,
+      "u_reason": "The agent's answer is semantically equivalent to the gold answer."
+    },
+    {
+      "question": "What's our backup schedule?",
+      "task_type": "Del",
+      "entity": [
+        "backup_schedule"
+      ],
+      "entity_values": {
+        "backup_schedule": "daily at 3am UTC"
+      },
+      "expected_answer": "daily at 3am UTC",
+      "hop": null,
+      "agent_answer": "Daily at 3am UTC",
+      "u_pass": true,
+      "u_reason": "The agent's answer is semantically equivalent to the gold answer."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review."
+      },
+      "expected_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.",
+      "hop": null,
+      "agent_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all secret managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "secret_manager"
+      ],
+      "entity_values": {
+        "secret_manager": [
+          "Verisigil Lock",
+          "Pyronos Crypt",
+          "Orinthal Sealed"
+        ]
+      },
+      "expected_answer": "Verisigil Lock, Pyronos Crypt, Orinthal Sealed",
+      "hop": null,
+      "agent_answer": "1. Verisigil Lock  \n2. Pyronos Crypt  \n3. Orinthal Sealed",
+      "u_pass": true,
+      "u_reason": "The agent's answer contains all the gold values in the correct chronological order.",
+      "u_pass_count": 3,
+      "u_pass_total": 3
+    },
+    {
+      "question": "What's our build tool?",
+      "task_type": "Cas",
+      "entity": [
+        "build_tool"
+      ],
+      "entity_values": {
+        "build_tool": "Karnex Bundler"
+      },
+      "expected_answer": "Karnex Bundler",
+      "hop": 1,
+      "agent_answer": "Tarvex CLI",
+      "u_pass": false,
+      "u_reason": "The agent stated the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's the test command?",
+      "task_type": "Cas",
+      "entity": [
+        "test_command"
+      ],
+      "entity_values": {
+        "test_command": "zelthra assert --suite all"
+      },
+      "expected_answer": "zelthra assert --suite all",
+      "hop": 2,
+      "agent_answer": "dranith probe --mode fast",
+      "u_pass": false,
+      "u_reason": "The agent did not report the new cascaded value as the sole, definitive answer.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's our project structure?",
+      "task_type": "Abs",
+      "entity": [
+        "project_structure"
+      ],
+      "entity_values": {
+        "project_structure": "workspace with /services and /common"
+      },
+      "expected_answer": "Uncertain — previously 'workspace with /services and /common', but framework changed",
+      "hop": 1,
+      "agent_answer": "The project follows a workspace structure with the directories `/services` and `/common`.",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value without expressing any uncertainty or acknowledging the upstream change.",
+      "pass_type": "never_knew"
+    },
+    {
+      "question": "What's the build command?",
+      "task_type": "Abs",
+      "entity": [
+        "build_command"
+      ],
+      "entity_values": {
+        "build_command": "tarvex compile --debug"
+      },
+      "expected_answer": "Uncertain — previously 'tarvex compile --debug', but build_tool changed",
+      "hop": 2,
+      "agent_answer": "tarvex compile --debug",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value without expressing any uncertainty or acknowledging the upstream change.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's our backup schedule?",
+      "task_type": "Del",
+      "entity": [
+        "backup_schedule"
+      ],
+      "entity_values": {
+        "backup_schedule": "daily at 3am UTC"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "Daily at 3am UTC.",
+      "u_pass": false,
+      "u_reason": "The agent returned the deleted value as if it still exists.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "How does our team coordinate? Tell me everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "meeting_day",
+        "slack_channel",
+        "standup_format"
+      ],
+      "entity_values": {
+        "meeting_day": "every Wednesday 10am",
+        "slack_channel": "#vortex-team",
+        "standup_format": "weekly sync + daily async"
+      },
+      "expected_answer": "Team meets every Wednesday 10am, uses #vortex-team for chat, and standups are weekly sync + daily async.",
+      "hop": null,
+      "agent_answer": "Your team coordinates through several structured practices and tools:\n\n- You have a dedicated team channel called **#vortex-team** where project-related discussions happen. There is consideration about organizing conversations into specific threads for different topics to keep discussions organized while maintaining room for casual chats.\n\n- Your team holds a **weekly meeting every Wednesday at 10am** to sync up and discuss blockers.\n\n- For standups, your team uses a **hybrid format** with a **weekly synchronous meeting plus daily asynchronous updates**. This approach keeps everyone informed without taking too much time daily. Efficiency is maintained by focusing on key updates, sticking to time limits, encouraging relevant sharing, and possibly using a clear update format.\n\n- Your team uses **Pyronos Crypt** initially as a secret manager for handling sensitive information securely, later switching to **Orinthal Sealed** for secret management. Best practices followed include avoiding hard-coded secrets, secure runtime retrieval, role-based access control, regular secret rotation, and auditing access.\n\n- Development is done using the **Quenthar framework**, with tips to optimize performance by profiling, leveraging built-in features, keeping dependencies updated, using consistent versioning, and modularizing components.\n\n- For package management, your team uses **Pyronis Bundle**, with recommendations to manage packages by scheduling regular updates, using version ranges to avoid breaking changes, employing automated tools for update notifications, and running tests after updates to ensure stability.\n\n- Your default development branch is **trunk**, which centralizes development efforts. Best practices for managing merges and pull requests include encouraging frequent small updates, clear pull request guidelines, required reviews, and automated testing to maintain code quality and ease merges.\n\n- The development server is run with the command `synthari launch --hmr` enabling hot module replacement (HMR) to speed up development by allowing live updates without full reloads.\n\n- Your team maintains a **changelog on the GitHub Releases page**, with a recommendation to adopt a consistent process for updating it regularly rather than ad-hoc after major releases.\n\n- You recently migrated to the **Dravex framework**, with advice to monitor compatibility and performance benchmarks during the transition.\n\n- Your team operates a **follow-the-sun on-call rotation across timezones**, with attention to managing communication gaps and ensuring smooth handovers.\n\n- Test coverage targets are set at **70% overall and 95% for authentication**, focusing on critical paths and edge cases to ensure security.\n\n- For meeting notes, collaborative tools",
+      "u_pass": true,
+      "u_pass_per_entity": {
+        "meeting_day": true,
+        "slack_channel": true,
+        "standup_format": true
+      },
+      "u_pass_count": 3,
+      "u_pass_total": 3,
+      "u_reason": "All target values are present in the agent's answer, either exactly or paraphrased."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review."
+      },
+      "expected_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.",
+      "hop": null,
+      "agent_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 2,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 1
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    }
+  },
+  "totals": {
+    "before_pass": 4,
+    "before_total": 6,
+    "after_pass": 3,
+    "after_total": 8
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 12,
+    "input_tokens": 3138,
+    "output_tokens": 349
+  }
+}

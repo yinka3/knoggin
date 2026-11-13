@@ -1,0 +1,176 @@
+{
+  "episode_id": 40,
+  "domain": "personal_life",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What dietary restrictions do I have?",
+      "task_type": "Cas",
+      "entity": [
+        "dietary_restriction"
+      ],
+      "entity_values": {
+        "dietary_restriction": "dairy-free"
+      },
+      "expected_answer": "dairy-free",
+      "hop": 1,
+      "agent_answer": "Dairy-free"
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "none"
+      },
+      "expected_answer": "none",
+      "hop": 2,
+      "agent_answer": "Pyravar CrossFit"
+    },
+    {
+      "question": "What medication am I taking?",
+      "task_type": "Abs",
+      "entity": [
+        "medication"
+      ],
+      "entity_values": {
+        "medication": "Velnorath"
+      },
+      "expected_answer": "Velnorath",
+      "hop": 1,
+      "agent_answer": "Velnorath"
+    },
+    {
+      "question": "How do I get to work?",
+      "task_type": "Del",
+      "entity": [
+        "commute_method"
+      ],
+      "entity_values": {
+        "commute_method": "bus"
+      },
+      "expected_answer": "bus",
+      "hop": null,
+      "agent_answer": "By taking the bus."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover."
+      },
+      "expected_answer": "Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover.",
+      "hop": null,
+      "agent_answer": "\"Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all vehicles I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "vehicle"
+      ],
+      "entity_values": {
+        "vehicle": [
+          "Zyvanta Sedan",
+          "Quorvel EV",
+          "Vorantel SUV"
+        ]
+      },
+      "expected_answer": "Zyvanta Sedan, Quorvel EV, Vorantel SUV",
+      "hop": null,
+      "agent_answer": "Quorvel EV, Zyvanta Sedan, Vorantel SUV"
+    },
+    {
+      "question": "What dietary restrictions do I have?",
+      "task_type": "Cas",
+      "entity": [
+        "dietary_restriction"
+      ],
+      "entity_values": {
+        "dietary_restriction": "nut-free"
+      },
+      "expected_answer": "nut-free",
+      "hop": 1,
+      "agent_answer": "Dairy-free"
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Pyravar CrossFit"
+      },
+      "expected_answer": "Pyravar CrossFit",
+      "hop": 2,
+      "agent_answer": "Pyravar CrossFit"
+    },
+    {
+      "question": "What medication am I taking?",
+      "task_type": "Abs",
+      "entity": [
+        "medication"
+      ],
+      "entity_values": {
+        "medication": "Velnorath"
+      },
+      "expected_answer": "Uncertain — previously 'Velnorath', but health_condition changed",
+      "hop": 1,
+      "agent_answer": "Velnorath"
+    },
+    {
+      "question": "How do I get to work?",
+      "task_type": "Del",
+      "entity": [
+        "commute_method"
+      ],
+      "entity_values": {
+        "commute_method": "bus"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "You drive a Zyvanta Sedan, which you find reliable for daily commutes."
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "woodworking",
+        "sports": "volleyball",
+        "club_membership": "cycling club"
+      },
+      "expected_answer": "The user's hobby is woodworking, plays volleyball, and is part of cycling club.",
+      "hop": null,
+      "agent_answer": "- Play volleyball  \n- Attend monthly dermatologist appointments  \n- Participate in a regular social meetup which is a game night with neighbors  \n- Watch TV shows, including \"Whispers of Zarinthea,\" \"Servant,\" \"The Crown,\" and \"When We Left Earth: The NASA Missions\"  \n- Engage in woodworking as a hobby, working on furniture projects  \n- Explore virtual reality (VR) gaming, including playing games like Beat Saber, Superhot VR, Half-Life: Alyx, Job Simulator, and Vader Immortal  \n- Enjoy movie marathons and watch historical dramas and emotionally resonant films  \n- Practice swimming twice a week as exercise  \n- Consider Pilates or CrossFit workouts depending on health condition changes"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover."
+      },
+      "expected_answer": "Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover.",
+      "hop": null,
+      "agent_answer": "\"Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover.\""
+    }
+  ]
+}

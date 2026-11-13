@@ -1,0 +1,176 @@
+{
+  "episode_id": 9,
+  "domain": "personal_life",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What dietary restrictions do I have?",
+      "task_type": "Cas",
+      "entity": [
+        "dietary_restriction"
+      ],
+      "entity_values": {
+        "dietary_restriction": "low-sodium"
+      },
+      "expected_answer": "low-sodium",
+      "hop": 1,
+      "agent_answer": "Low-sodium"
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Zorathel Peak Gym"
+      },
+      "expected_answer": "Zorathel Peak Gym",
+      "hop": 2,
+      "agent_answer": "Zorathel Peak Gym"
+    },
+    {
+      "question": "What's my exercise routine?",
+      "task_type": "Abs",
+      "entity": [
+        "exercise_routine"
+      ],
+      "entity_values": {
+        "exercise_routine": "pilates 3x/week"
+      },
+      "expected_answer": "pilates 3x/week",
+      "hop": 1,
+      "agent_answer": "Pilates 3 times per week."
+    },
+    {
+      "question": "What regular appointments do I have?",
+      "task_type": "Del",
+      "entity": [
+        "regular_appointment"
+      ],
+      "entity_values": {
+        "regular_appointment": "tutoring session (weekly)"
+      },
+      "expected_answer": "tutoring session (weekly)",
+      "hop": null,
+      "agent_answer": "Weekly tutoring session and monthly social meetup brunch with college friends."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world."
+      },
+      "expected_answer": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.",
+      "hop": null,
+      "agent_answer": "\"We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all vehicles I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "vehicle"
+      ],
+      "entity_values": {
+        "vehicle": [
+          "Zyvanta Sedan",
+          "Quorvel EV",
+          "Vorantel SUV"
+        ]
+      },
+      "expected_answer": "Zyvanta Sedan, Quorvel EV, Vorantel SUV",
+      "hop": null,
+      "agent_answer": "Zyvanta Sedan, Quorvel EV, Vorantel SUV"
+    },
+    {
+      "question": "What dietary restrictions do I have?",
+      "task_type": "Cas",
+      "entity": [
+        "dietary_restriction"
+      ],
+      "entity_values": {
+        "dietary_restriction": "no alcohol"
+      },
+      "expected_answer": "no alcohol",
+      "hop": 1,
+      "agent_answer": "Low-sodium and no alcohol (if health condition changes)."
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Crysthene Pool"
+      },
+      "expected_answer": "Crysthene Pool",
+      "hop": 2,
+      "agent_answer": "Zorathel Peak Gym"
+    },
+    {
+      "question": "What's my exercise routine?",
+      "task_type": "Abs",
+      "entity": [
+        "exercise_routine"
+      ],
+      "entity_values": {
+        "exercise_routine": "pilates 3x/week"
+      },
+      "expected_answer": "Uncertain — previously 'pilates 3x/week', but health_condition changed",
+      "hop": 1,
+      "agent_answer": "Pilates 3 times per week."
+    },
+    {
+      "question": "What regular appointments do I have?",
+      "task_type": "Del",
+      "entity": [
+        "regular_appointment"
+      ],
+      "entity_values": {
+        "regular_appointment": "tutoring session (weekly)"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "You have a monthly social meetup brunch with college friends."
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "cooking",
+        "sports": "running club",
+        "club_membership": "book club"
+      },
+      "expected_answer": "The user's hobby is cooking, plays running club, and is part of book club.",
+      "hop": null,
+      "agent_answer": "- Participate in a book club that reads a different book each month, preferring a mix of genres with a leaning towards contemporary fiction and thrillers, appreciating books with complex characters and moral dilemmas that spark intense discussions.  \n- Attend a monthly social meetup brunch with college friends to maintain and strengthen friendships over time."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world."
+      },
+      "expected_answer": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.",
+      "hop": null,
+      "agent_answer": "\"We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.\""
+    }
+  ]
+}

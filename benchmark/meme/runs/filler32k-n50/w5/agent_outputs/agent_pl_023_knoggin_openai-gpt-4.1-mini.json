@@ -1,0 +1,176 @@
+{
+  "episode_id": 23,
+  "domain": "personal_life",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What's my sleep schedule?",
+      "task_type": "Cas",
+      "entity": [
+        "sleep_pattern"
+      ],
+      "entity_values": {
+        "sleep_pattern": "midnight-8am"
+      },
+      "expected_answer": "midnight-8am",
+      "hop": 1,
+      "agent_answer": "midnight to 8 am"
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Kaelstrom Fitness"
+      },
+      "expected_answer": "Kaelstrom Fitness",
+      "hop": 2,
+      "agent_answer": "Kaelstrom Fitness"
+    },
+    {
+      "question": "What regular appointments do I have?",
+      "task_type": "Abs",
+      "entity": [
+        "regular_appointment"
+      ],
+      "entity_values": {
+        "regular_appointment": "dentist (every 6 months)"
+      },
+      "expected_answer": "dentist (every 6 months)",
+      "hop": 1,
+      "agent_answer": "Dentist appointment every 6 months."
+    },
+    {
+      "question": "Where do I work?",
+      "task_type": "Del",
+      "entity": [
+        "employer"
+      ],
+      "entity_values": {
+        "employer": "Caeltura Systems"
+      },
+      "expected_answer": "Caeltura Systems",
+      "hop": null,
+      "agent_answer": "Caeltura Systems"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives."
+      },
+      "expected_answer": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.",
+      "hop": null,
+      "agent_answer": "\"Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all vehicles I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "vehicle"
+      ],
+      "entity_values": {
+        "vehicle": [
+          "Zyvanta Sedan",
+          "Quorvel EV",
+          "Xylorim Scooter"
+        ]
+      },
+      "expected_answer": "Zyvanta Sedan, Quorvel EV, Xylorim Scooter",
+      "hop": null,
+      "agent_answer": "1. Previous vehicle (unspecified, before Quorvel EV)  \n2. Quorvel EV  \n3. Xylorim Scooter  \n4. Zyvanta Sedan"
+    },
+    {
+      "question": "What's my sleep schedule?",
+      "task_type": "Cas",
+      "entity": [
+        "sleep_pattern"
+      ],
+      "entity_values": {
+        "sleep_pattern": "irregular"
+      },
+      "expected_answer": "irregular",
+      "hop": 1,
+      "agent_answer": "Midnight to 8 am"
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "home gym"
+      },
+      "expected_answer": "home gym",
+      "hop": 2,
+      "agent_answer": "Kaelstrom Fitness"
+    },
+    {
+      "question": "What regular appointments do I have?",
+      "task_type": "Abs",
+      "entity": [
+        "regular_appointment"
+      ],
+      "entity_values": {
+        "regular_appointment": "dentist (every 6 months)"
+      },
+      "expected_answer": "Uncertain — previously 'dentist (every 6 months)', but health_condition changed",
+      "hop": 1,
+      "agent_answer": "Dentist appointment every six months."
+    },
+    {
+      "question": "Where do I work?",
+      "task_type": "Del",
+      "entity": [
+        "employer"
+      ],
+      "entity_values": {
+        "employer": "Caeltura Systems"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "I don't have that information."
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "video games",
+        "sports": "basketball",
+        "club_membership": "book club"
+      },
+      "expected_answer": "The user's hobby is video games, plays basketball, and is part of book club.",
+      "hop": null,
+      "agent_answer": "- Play basketball regularly, participating in pickup games on Saturdays to stay active and socialize.  \n- Enjoy group activities for motivation and appreciate the social and competitive aspects of basketball."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives."
+      },
+      "expected_answer": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.",
+      "hop": null,
+      "agent_answer": "\"Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.\""
+    }
+  ]
+}

@@ -75,7 +75,7 @@ Document search is a separate path. It combines text and embedding matches over 
 - `server/` contains the Python engine, runtime, storage, and tests. See [server/README.md](server/README.md).
 - `api/` contains the local HTTP service. See [api/README.md](api/README.md).
 - `app/` contains the Next.js configuration; its frontend source and API integration are in progress.
-- `benchmark/` contains memory benchmarks that run the engine in-process, starting with [LongMemEval](benchmark/longmemeval/README.md).
+- `benchmark/` contains memory benchmarks: archived [MEME results](benchmark/meme/meme-results.md) and [LongMemEval results](benchmark/longmemeval/longmemeval-results.md).
 - `Dockerfile` builds the API image; `docker-compose.yml` runs it with Postgres.
 
 The engine runs inside an application and does not start an HTTP service on its own. The `api/` package hosts the HTTP service.

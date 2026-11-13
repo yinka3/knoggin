@@ -1,0 +1,281 @@
+{
+  "episode_id": 49,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What insurance do I have?",
+      "task_type": "Cas",
+      "entity": [
+        "insurance"
+      ],
+      "entity_values": {
+        "insurance": "employer + supplemental"
+      },
+      "expected_answer": "employer + supplemental",
+      "hop": 1,
+      "agent_answer": "Employer + supplemental",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Velthari Studio"
+      },
+      "expected_answer": "Velthari Studio",
+      "hop": 2,
+      "agent_answer": "Velthari Studio",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What project am I working on?",
+      "task_type": "Abs",
+      "entity": [
+        "work_project"
+      ],
+      "entity_values": {
+        "work_project": "mobile app development"
+      },
+      "expected_answer": "mobile app development",
+      "hop": 1,
+      "agent_answer": "Mobile app development at Elyndra Health.",
+      "u_pass": true,
+      "u_reason": "The agent's answer includes 'mobile app development,' which matches the gold answer semantically."
+    },
+    {
+      "question": "What's my favorite restaurant?",
+      "task_type": "Abs",
+      "entity": [
+        "favorite_restaurant"
+      ],
+      "entity_values": {
+        "favorite_restaurant": "Zefiro's Kitchen"
+      },
+      "expected_answer": "Zefiro's Kitchen",
+      "hop": 2,
+      "agent_answer": "Zefiro's Kitchen",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What family event do I have coming up?",
+      "task_type": "Del",
+      "entity": [
+        "family_event"
+      ],
+      "entity_values": {
+        "family_event": "anniversary dinner"
+      },
+      "expected_answer": "anniversary dinner",
+      "hop": null,
+      "agent_answer": "You have an anniversary dinner coming up.",
+      "u_pass": true,
+      "u_reason": "The agent's answer semantically matches the gold answer by stating the event is an anniversary dinner."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it."
+      },
+      "expected_answer": "The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it.",
+      "hop": null,
+      "agent_answer": "\"The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it.\"",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all subscription services I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "subscription_service"
+      ],
+      "entity_values": {
+        "subscription_service": [
+          "Xelvoria",
+          "Dranthazon",
+          "Pyrethon Plus"
+        ]
+      },
+      "expected_answer": "Xelvoria, Dranthazon, Pyrethon Plus",
+      "hop": null,
+      "agent_answer": "1. Dranthazon  \n2. Pyrethon Plus",
+      "u_pass": false,
+      "u_reason": "The agent's answer is missing the earliest subscription service, Xelvoria.",
+      "u_pass_count": 2,
+      "u_pass_total": 3
+    },
+    {
+      "question": "What insurance do I have?",
+      "task_type": "Cas",
+      "entity": [
+        "insurance"
+      ],
+      "entity_values": {
+        "insurance": "dental + vision bundle"
+      },
+      "expected_answer": "dental + vision bundle",
+      "hop": 1,
+      "agent_answer": "Employer + supplemental",
+      "u_pass": false,
+      "u_reason": "The agent incorrectly lists both the old and new values together.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Kaelstrom Fitness"
+      },
+      "expected_answer": "Kaelstrom Fitness",
+      "hop": 2,
+      "agent_answer": "Velthari Studio",
+      "u_pass": false,
+      "u_reason": "The agent reported the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What project am I working on?",
+      "task_type": "Abs",
+      "entity": [
+        "work_project"
+      ],
+      "entity_values": {
+        "work_project": "mobile app development"
+      },
+      "expected_answer": "Uncertain — previously 'mobile app development', but employer changed",
+      "hop": 1,
+      "agent_answer": "Mobile app development at Elyndra Health.",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value without expressing any uncertainty.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's my favorite restaurant?",
+      "task_type": "Abs",
+      "entity": [
+        "favorite_restaurant"
+      ],
+      "entity_values": {
+        "favorite_restaurant": "Zefiro's Kitchen"
+      },
+      "expected_answer": "Uncertain — previously 'Zefiro's Kitchen', but work_location changed",
+      "hop": 2,
+      "agent_answer": "Zefiro's Kitchen",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value without expressing any uncertainty.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What family event do I have coming up?",
+      "task_type": "Del",
+      "entity": [
+        "family_event"
+      ],
+      "entity_values": {
+        "family_event": "anniversary dinner"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "You don't have that information.",
+      "u_pass": true,
+      "u_reason": "The agent correctly stated that the information is no longer available without revealing the deleted value.",
+      "pass_type": "real"
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "guitar",
+        "sports": "golf",
+        "club_membership": "book club"
+      },
+      "expected_answer": "The user's hobby is guitar, plays golf, and is part of book club.",
+      "hop": null,
+      "agent_answer": "- Attend virtual events hosted by The Combination, such as virtual wine tastings, yoga and meditation classes, cooking classes, book club discussions, concerts, art exhibitions, networking events, and workshops.  \n- Participate in charity runs and walks, including events like Relay For Life.  \n- Engage in social media activities, including creating and analyzing content across platforms like Facebook, Instagram, Twitter, and TikTok.  \n- Explore and appreciate architectural styles, specifically Moorish and Gothic architecture.  \n- Visit unique museums, such as those in Berlin including the Currywurst Museum, Jewish Museum Berlin, Museum Island, DDR Museum, Berlin Wall Museum, Stasi Museum, Computerspielemuseum, and others.  \n- Plan and take trips, such as a 4-day trip to Rome or a visit to the Natural Park of the Moncayo mountain in Aragón, including hiking and exploring cultural sites.  \n- Organize and manage marketing campaigns focused on social media and content creation.  \n- Use packing cubes and practice efficient packing techniques for travel.",
+      "u_pass": false,
+      "u_pass_per_entity": {
+        "hobby": false,
+        "sports": false,
+        "club_membership": true
+      },
+      "u_pass_count": 1,
+      "u_pass_total": 3,
+      "u_reason": "Only 'book club' is mentioned in the agent's answer."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it."
+      },
+      "expected_answer": "The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it.",
+      "hop": null,
+      "agent_answer": "\"The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it.\"",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 2,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 2,
+      "never_knew": 0
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 1,
+      "trivial_pass": 0,
+      "knew_but_failed": 0,
+      "never_knew": 0
+    }
+  },
+  "totals": {
+    "before_pass": 5,
+    "before_total": 6,
+    "after_pass": 2,
+    "after_total": 8
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 12,
+    "input_tokens": 2555,
+    "output_tokens": 318
+  }
+}

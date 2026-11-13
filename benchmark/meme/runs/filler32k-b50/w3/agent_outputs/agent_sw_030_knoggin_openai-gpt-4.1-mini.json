@@ -1,0 +1,176 @@
+{
+  "episode_id": 30,
+  "domain": "software_project",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What ORM do we use?",
+      "task_type": "Cas",
+      "entity": [
+        "orm_library"
+      ],
+      "entity_values": {
+        "orm_library": "Keldaris Link"
+      },
+      "expected_answer": "Keldaris Link",
+      "hop": 1,
+      "agent_answer": "Keldaris Link"
+    },
+    {
+      "question": "What's the model syntax?",
+      "task_type": "Cas",
+      "entity": [
+        "model_syntax"
+      ],
+      "entity_values": {
+        "model_syntax": "Keldaris.node('Model', shape)"
+      },
+      "expected_answer": "Keldaris.node('Model', shape)",
+      "hop": 2,
+      "agent_answer": "Keldaris.node('Model', shape)"
+    },
+    {
+      "question": "What's the database connection string?",
+      "task_type": "Abs",
+      "entity": [
+        "connection_string"
+      ],
+      "entity_values": {
+        "connection_string": "pyravar://data-primary:3306/aurora"
+      },
+      "expected_answer": "pyravar://data-primary:3306/aurora",
+      "hop": 1,
+      "agent_answer": "pyravar://data-primary:3306/aurora"
+    },
+    {
+      "question": "What's our default branch?",
+      "task_type": "Del",
+      "entity": [
+        "default_branch"
+      ],
+      "entity_values": {
+        "default_branch": "trunk"
+      },
+      "expected_answer": "trunk",
+      "hop": null,
+      "agent_answer": "trunk"
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z."
+      },
+      "expected_answer": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z.",
+      "hop": null,
+      "agent_answer": "\"PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23. Stack trace shows recursive call in middleware_chain to request_validator to token_parser. Restart triggered automatic failover at 2024-04-02T14:18:33Z.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all package managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "package_manager"
+      ],
+      "entity_values": {
+        "package_manager": [
+          "Tarvex Mod",
+          "Zelthra Lib",
+          "Veltrion Pkg"
+        ]
+      },
+      "expected_answer": "Tarvex Mod, Zelthra Lib, Veltrion Pkg",
+      "hop": null,
+      "agent_answer": "Tarvex Mod, Veltrion Pkg, Zelthra Lib"
+    },
+    {
+      "question": "What ORM do we use?",
+      "task_type": "Cas",
+      "entity": [
+        "orm_library"
+      ],
+      "entity_values": {
+        "orm_library": "Thalnex Query"
+      },
+      "expected_answer": "Thalnex Query",
+      "hop": 1,
+      "agent_answer": "Keldaris Link"
+    },
+    {
+      "question": "What's the model syntax?",
+      "task_type": "Cas",
+      "entity": [
+        "model_syntax"
+      ],
+      "entity_values": {
+        "model_syntax": "Thalnex.document('Model', {fields})"
+      },
+      "expected_answer": "Thalnex.document('Model', {fields})",
+      "hop": 2,
+      "agent_answer": "Keldaris.node('Model', shape)"
+    },
+    {
+      "question": "What's the database connection string?",
+      "task_type": "Abs",
+      "entity": [
+        "connection_string"
+      ],
+      "entity_values": {
+        "connection_string": "pyravar://data-primary:3306/aurora"
+      },
+      "expected_answer": "Uncertain — previously 'pyravar://data-primary:3306/aurora', but database changed",
+      "hop": 1,
+      "agent_answer": "pyravar://data-primary:3306/aurora"
+    },
+    {
+      "question": "What's our default branch?",
+      "task_type": "Del",
+      "entity": [
+        "default_branch"
+      ],
+      "entity_values": {
+        "default_branch": "trunk"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "trunk"
+    },
+    {
+      "question": "What are our code quality standards? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "design_system",
+        "test_coverage_target",
+        "code_review_policy"
+      ],
+      "entity_values": {
+        "design_system": "Veltrion UI Kit v2",
+        "test_coverage_target": "90% for core modules",
+        "code_review_policy": "2 approvals + security review for auth/"
+      },
+      "expected_answer": "We use Veltrion UI Kit v2, target 90% for core modules test coverage, and require 2 approvals + security review for auth/ for reviews.",
+      "hop": null,
+      "agent_answer": "- Test coverage target is 90% for core modules, emphasizing stability.  \n- The team follows a strict code review policy requiring 2 approvals plus a security review specifically for the `auth/` directory.  \n- The team uses Zelthra Lib as their package manager for dependency management.  \n- Database migrations are managed using Thalnex Schema to keep changes organized.  \n- The team maintains a biweekly release schedule on Friday afternoons to ensure a steady workflow."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z."
+      },
+      "expected_answer": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z.",
+      "hop": null,
+      "agent_answer": "\"PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23. Stack trace shows recursive call in middleware_chain to request_validator to token_parser. Restart triggered automatic failover at 2024-04-02T14:18:33Z.\""
+    }
+  ]
+}

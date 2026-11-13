@@ -1,0 +1,202 @@
+{
+  "episode_id": 2,
+  "domain": "software_project",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What's our CI configuration?",
+      "task_type": "Cas",
+      "entity": [
+        "ci_config"
+      ],
+      "entity_values": {
+        "ci_config": "orinthal-build.yml"
+      },
+      "expected_answer": "orinthal-build.yml",
+      "hop": 1,
+      "agent_answer": "orinthal-build.yml"
+    },
+    {
+      "question": "Where's the Dockerfile?",
+      "task_type": "Cas",
+      "entity": [
+        "dockerfile_path"
+      ],
+      "entity_values": {
+        "dockerfile_path": "deploy/Dockerfile.korinth"
+      },
+      "expected_answer": "deploy/Dockerfile.korinth",
+      "hop": 2,
+      "agent_answer": "deploy/Dockerfile.korinth"
+    },
+    {
+      "question": "What's our log drain endpoint?",
+      "task_type": "Abs",
+      "entity": [
+        "log_drain_endpoint"
+      ],
+      "entity_values": {
+        "log_drain_endpoint": "stream.velturis.io/aurora"
+      },
+      "expected_answer": "stream.velturis.io/aurora",
+      "hop": 1,
+      "agent_answer": "stream.velturis.io/aurora"
+    },
+    {
+      "question": "What's the deploy command?",
+      "task_type": "Abs",
+      "entity": [
+        "deploy_command"
+      ],
+      "entity_values": {
+        "deploy_command": "orinthal publish --tier production"
+      },
+      "expected_answer": "orinthal publish --tier production",
+      "hop": 2,
+      "agent_answer": "orinthal publish --tier production"
+    },
+    {
+      "question": "What's our default branch?",
+      "task_type": "Del",
+      "entity": [
+        "default_branch"
+      ],
+      "entity_values": {
+        "default_branch": "develop"
+      },
+      "expected_answer": "develop",
+      "hop": null,
+      "agent_answer": "develop"
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations."
+      },
+      "expected_answer": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations.",
+      "hop": null,
+      "agent_answer": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations."
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all sprint deadlines we've had, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "sprint_deadline"
+      ],
+      "entity_values": {
+        "sprint_deadline": [
+          "2025 April 25",
+          "2025 June 6",
+          "2025 June 20"
+        ]
+      },
+      "expected_answer": "2025 April 25, 2025 June 6, 2025 June 20",
+      "hop": null,
+      "agent_answer": "1. 2025-04-25  \n2. 2025-06-06  \n3. 2025-06-20"
+    },
+    {
+      "question": "What's our CI configuration?",
+      "task_type": "Cas",
+      "entity": [
+        "ci_config"
+      ],
+      "entity_values": {
+        "ci_config": "korinth-deploy.yaml"
+      },
+      "expected_answer": "korinth-deploy.yaml",
+      "hop": 1,
+      "agent_answer": "orinthal-build.yml"
+    },
+    {
+      "question": "Where's the Dockerfile?",
+      "task_type": "Cas",
+      "entity": [
+        "dockerfile_path"
+      ],
+      "entity_values": {
+        "dockerfile_path": "deploy/Dockerfile.zephyra"
+      },
+      "expected_answer": "deploy/Dockerfile.zephyra",
+      "hop": 2,
+      "agent_answer": "deploy/Dockerfile.korinth"
+    },
+    {
+      "question": "What's our log drain endpoint?",
+      "task_type": "Abs",
+      "entity": [
+        "log_drain_endpoint"
+      ],
+      "entity_values": {
+        "log_drain_endpoint": "stream.velturis.io/aurora"
+      },
+      "expected_answer": "Uncertain — previously 'stream.velturis.io/aurora', but deploy_target changed",
+      "hop": 1,
+      "agent_answer": "stream.velturis.io/aurora"
+    },
+    {
+      "question": "What's the deploy command?",
+      "task_type": "Abs",
+      "entity": [
+        "deploy_command"
+      ],
+      "entity_values": {
+        "deploy_command": "orinthal publish --tier production"
+      },
+      "expected_answer": "Uncertain — previously 'orinthal publish --tier production', but ci_config changed",
+      "hop": 2,
+      "agent_answer": "orinthal publish --tier production"
+    },
+    {
+      "question": "What's our default branch?",
+      "task_type": "Del",
+      "entity": [
+        "default_branch"
+      ],
+      "entity_values": {
+        "default_branch": "develop"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "develop"
+    },
+    {
+      "question": "What are our code quality standards? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "design_system",
+        "test_coverage_target",
+        "code_review_policy"
+      ],
+      "entity_values": {
+        "design_system": "Synthari Elements v1.2",
+        "test_coverage_target": "90% for core modules",
+        "code_review_policy": "lead approval for core/"
+      },
+      "expected_answer": "We use Synthari Elements v1.2, target 90% for core modules test coverage, and require lead approval for core/ for reviews.",
+      "hop": null,
+      "agent_answer": "- Code review policy requires lead approval for changes in the core/ directory.\n- Code reviews include discussions and are conducted via pull requests.\n- Automated testing is performed on the develop branch to catch regressions early.\n- Regular syncing of feature branches is done to minimize merge conflicts.\n- Use of a package manager (Dranith Stack) for dependency management.\n- Best practices include regularly reviewing and updating dependencies.\n- Use of a lock file for dependency consistency.\n- Scheduled dependency audits to address vulnerabilities proactively.\n- Test coverage target is 90% for core modules.\n- Testing strategy includes unit tests, integration tests, and automated testing.\n- Code reviews are combined with automated testing to ensure stability.\n- Merging strategy involves pull requests with code reviews and automated testing on the develop branch.\n- Monitoring of test coverage and running regular coverage reports.\n- Pairing developers for test reviews to identify edge cases.\n- Automated tests planned for staging environment, prioritizing end-to-end, integration, and unit tests.\n- Communication about testing and deployment is managed via the #aurora-dev channel.\n- Monitoring dashboard is at watch.korinth.dev/aurora.\n- Staging environment is at dev.orinthal.dev/aurora."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations."
+      },
+      "expected_answer": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations.",
+      "hop": null,
+      "agent_answer": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations."
+    }
+  ]
+}

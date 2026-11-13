@@ -1,0 +1,176 @@
+{
+  "episode_id": 49,
+  "domain": "software_project",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What authentication method do we use?",
+      "task_type": "Cas",
+      "entity": [
+        "auth_method"
+      ],
+      "entity_values": {
+        "auth_method": "SAML 2.0 SSO"
+      },
+      "expected_answer": "SAML 2.0 SSO",
+      "hop": 1,
+      "agent_answer": "SAML 2.0 SSO"
+    },
+    {
+      "question": "What's the auth middleware config?",
+      "task_type": "Cas",
+      "entity": [
+        "middleware_config"
+      ],
+      "entity_values": {
+        "middleware_config": "cerberix-sso-bridge v1.9"
+      },
+      "expected_answer": "cerberix-sso-bridge v1.9",
+      "hop": 2,
+      "agent_answer": "cerberix-sso-bridge v1.9"
+    },
+    {
+      "question": "What's the session TTL?",
+      "task_type": "Abs",
+      "entity": [
+        "user_session_ttl"
+      ],
+      "entity_values": {
+        "user_session_ttl": "30 minutes"
+      },
+      "expected_answer": "30 minutes",
+      "hop": 1,
+      "agent_answer": "30 minutes"
+    },
+    {
+      "question": "Where's the incident runbook?",
+      "task_type": "Del",
+      "entity": [
+        "incident_runbook_url"
+      ],
+      "entity_values": {
+        "incident_runbook_url": "docs.aurora.internal/runbooks"
+      },
+      "expected_answer": "docs.aurora.internal/runbooks",
+      "hop": null,
+      "agent_answer": "docs.aurora.internal/runbooks"
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover."
+      },
+      "expected_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover.",
+      "hop": null,
+      "agent_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover."
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all secret managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "secret_manager"
+      ],
+      "entity_values": {
+        "secret_manager": [
+          "Selvex Secrets",
+          "Verisigil Lock",
+          "Orinthal Sealed"
+        ]
+      },
+      "expected_answer": "Selvex Secrets, Verisigil Lock, Orinthal Sealed",
+      "hop": null,
+      "agent_answer": "Selvex Secrets, Verisigil Lock, Orinthal Sealed"
+    },
+    {
+      "question": "What authentication method do we use?",
+      "task_type": "Cas",
+      "entity": [
+        "auth_method"
+      ],
+      "entity_values": {
+        "auth_method": "Session Cookie + CSRF"
+      },
+      "expected_answer": "Session Cookie + CSRF",
+      "hop": 1,
+      "agent_answer": "SAML 2.0 SSO"
+    },
+    {
+      "question": "What's the auth middleware config?",
+      "task_type": "Cas",
+      "entity": [
+        "middleware_config"
+      ],
+      "entity_values": {
+        "middleware_config": "zenthos-csrf-guard v1.1"
+      },
+      "expected_answer": "zenthos-csrf-guard v1.1",
+      "hop": 2,
+      "agent_answer": "cerberix-sso-bridge v1.9"
+    },
+    {
+      "question": "What's the session TTL?",
+      "task_type": "Abs",
+      "entity": [
+        "user_session_ttl"
+      ],
+      "entity_values": {
+        "user_session_ttl": "30 minutes"
+      },
+      "expected_answer": "Uncertain — previously '30 minutes', but auth_provider changed",
+      "hop": 1,
+      "agent_answer": "30 minutes"
+    },
+    {
+      "question": "Where's the incident runbook?",
+      "task_type": "Del",
+      "entity": [
+        "incident_runbook_url"
+      ],
+      "entity_values": {
+        "incident_runbook_url": "docs.aurora.internal/runbooks"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "docs.aurora.internal/runbooks"
+    },
+    {
+      "question": "Where can I find project documentation? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "documentation_url",
+        "onboarding_guide",
+        "changelog_location"
+      ],
+      "entity_values": {
+        "documentation_url": "github.com/aurora-team/docs",
+        "onboarding_guide": "docs.aurora.internal/onboarding",
+        "changelog_location": "notion.so/aurora-team/releases"
+      },
+      "expected_answer": "Docs are at github.com/aurora-team/docs, onboarding guide at docs.aurora.internal/onboarding, and changelog at notion.so/aurora-team/releases.",
+      "hop": null,
+      "agent_answer": "- Onboarding guide: docs.aurora.internal/onboarding  \n- Incident runbook: docs.aurora.internal/runbooks  \n- Changelog: notion.so/aurora-team/releases"
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover."
+      },
+      "expected_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover.",
+      "hop": null,
+      "agent_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover."
+    }
+  ]
+}

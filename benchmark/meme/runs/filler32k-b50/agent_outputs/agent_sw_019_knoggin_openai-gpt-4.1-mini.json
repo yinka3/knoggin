@@ -1,0 +1,202 @@
+{
+  "episode_id": 19,
+  "domain": "software_project",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What's our log drain endpoint?",
+      "task_type": "Cas",
+      "entity": [
+        "log_drain_endpoint"
+      ],
+      "entity_values": {
+        "log_drain_endpoint": "drain.zephyra.io/proj-42"
+      },
+      "expected_answer": "drain.zephyra.io/proj-42",
+      "hop": 1,
+      "agent_answer": "drain.zephyra.io/proj-42"
+    },
+    {
+      "question": "What's the deploy command?",
+      "task_type": "Cas",
+      "entity": [
+        "deploy_command"
+      ],
+      "entity_values": {
+        "deploy_command": "korinth release --prod"
+      },
+      "expected_answer": "korinth release --prod",
+      "hop": 2,
+      "agent_answer": "korinth release --prod"
+    },
+    {
+      "question": "What's our monitoring URL?",
+      "task_type": "Abs",
+      "entity": [
+        "monitoring_url"
+      ],
+      "entity_values": {
+        "monitoring_url": "observe.velturis.io/aurora"
+      },
+      "expected_answer": "observe.velturis.io/aurora",
+      "hop": 1,
+      "agent_answer": "observe.velturis.io/aurora"
+    },
+    {
+      "question": "Where's the Dockerfile?",
+      "task_type": "Abs",
+      "entity": [
+        "dockerfile_path"
+      ],
+      "entity_values": {
+        "dockerfile_path": "infra/korinth/Dockerfile"
+      },
+      "expected_answer": "infra/korinth/Dockerfile",
+      "hop": 2,
+      "agent_answer": "infra/korinth/Dockerfile"
+    },
+    {
+      "question": "What's our CI configuration?",
+      "task_type": "Del",
+      "entity": [
+        "ci_config"
+      ],
+      "entity_values": {
+        "ci_config": "orinthal-build.yml"
+      },
+      "expected_answer": "orinthal-build.yml",
+      "hop": null,
+      "agent_answer": "orinthal-build.yml"
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z."
+      },
+      "expected_answer": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z.",
+      "hop": null,
+      "agent_answer": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.  \nStack trace shows recursive call in middleware_chain to request_validator to token_parser.  \nRestart triggered automatic failover at 2024-04-02T14:18:33Z."
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all package managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "package_manager"
+      ],
+      "entity_values": {
+        "package_manager": [
+          "Karnex Pack",
+          "Veltrion Pkg",
+          "Synthari Modules"
+        ]
+      },
+      "expected_answer": "Karnex Pack, Veltrion Pkg, Synthari Modules",
+      "hop": null,
+      "agent_answer": "Veltrion Pkg, Karnex Pack, Synthari Modules"
+    },
+    {
+      "question": "What's our log drain endpoint?",
+      "task_type": "Cas",
+      "entity": [
+        "log_drain_endpoint"
+      ],
+      "entity_values": {
+        "log_drain_endpoint": "logs.korinth.dev/aurora"
+      },
+      "expected_answer": "logs.korinth.dev/aurora",
+      "hop": 1,
+      "agent_answer": "logs.zephyra.io/proj-42"
+    },
+    {
+      "question": "What's the deploy command?",
+      "task_type": "Cas",
+      "entity": [
+        "deploy_command"
+      ],
+      "entity_values": {
+        "deploy_command": "zephyra push --target prod"
+      },
+      "expected_answer": "zephyra push --target prod",
+      "hop": 2,
+      "agent_answer": "korinth release --prod"
+    },
+    {
+      "question": "What's our monitoring URL?",
+      "task_type": "Abs",
+      "entity": [
+        "monitoring_url"
+      ],
+      "entity_values": {
+        "monitoring_url": "observe.velturis.io/aurora"
+      },
+      "expected_answer": "Uncertain — previously 'observe.velturis.io/aurora', but deploy_target changed",
+      "hop": 1,
+      "agent_answer": "observe.velturis.io/aurora"
+    },
+    {
+      "question": "Where's the Dockerfile?",
+      "task_type": "Abs",
+      "entity": [
+        "dockerfile_path"
+      ],
+      "entity_values": {
+        "dockerfile_path": "infra/korinth/Dockerfile"
+      },
+      "expected_answer": "Uncertain — previously 'infra/korinth/Dockerfile', but docker_image changed",
+      "hop": 2,
+      "agent_answer": "infra/korinth/Dockerfile"
+    },
+    {
+      "question": "What's our CI configuration?",
+      "task_type": "Del",
+      "entity": [
+        "ci_config"
+      ],
+      "entity_values": {
+        "ci_config": "orinthal-build.yml"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "orinthal-build.yml"
+    },
+    {
+      "question": "What do you know about our on-call setup? Tell me everything.",
+      "task_type": "Agg",
+      "entity": [
+        "oncall_rotation",
+        "alert_channel",
+        "incident_runbook_url"
+      ],
+      "entity_values": {
+        "oncall_rotation": "volunteer-based with weekly signup",
+        "alert_channel": "#aurora-pager",
+        "incident_runbook_url": "wiki.aurora.dev/incident-response"
+      },
+      "expected_answer": "On-call is volunteer-based with weekly signup, alerts go to #aurora-pager, and runbook is at wiki.aurora.dev/incident-response.",
+      "hop": null,
+      "agent_answer": "The team uses a volunteer-based weekly signup system for on-call rotation, allowing members to choose their own weeks. This approach is flexible and informal, enabling volunteers to pick the weeks they prefer. Regular meetings are held every Wednesday at 10am for progress synchronization and blocker discussion."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z."
+      },
+      "expected_answer": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z.",
+      "hop": null,
+      "agent_answer": "PanicException at src/handlers/auth.rs:142:23 indicating an index out of bounds issue."
+    }
+  ]
+}

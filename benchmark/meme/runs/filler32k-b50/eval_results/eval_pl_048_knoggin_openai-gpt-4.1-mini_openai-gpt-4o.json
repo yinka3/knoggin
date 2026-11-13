@@ -1,0 +1,250 @@
+{
+  "episode_id": 48,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What dietary restrictions do I have?",
+      "task_type": "Cas",
+      "entity": [
+        "dietary_restriction"
+      ],
+      "entity_values": {
+        "dietary_restriction": "low-sugar"
+      },
+      "expected_answer": "low-sugar",
+      "hop": 1,
+      "agent_answer": "Low-sugar",
+      "u_pass": true,
+      "u_reason": "The agent's answer 'Low-sugar' is semantically equivalent to the gold answer 'low-sugar'."
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Velthari Studio"
+      },
+      "expected_answer": "Velthari Studio",
+      "hop": 2,
+      "agent_answer": "Velthari Studio",
+      "u_pass": true,
+      "u_reason": "The agent's answer 'Velthari Studio' matches the gold answer semantically."
+    },
+    {
+      "question": "What's my sleep schedule?",
+      "task_type": "Abs",
+      "entity": [
+        "sleep_pattern"
+      ],
+      "entity_values": {
+        "sleep_pattern": "midnight-8am"
+      },
+      "expected_answer": "midnight-8am",
+      "hop": 1,
+      "agent_answer": "Midnight to 8am",
+      "u_pass": true,
+      "u_reason": "The agent's answer 'Midnight to 8am' is semantically equivalent to the gold answer 'midnight-8am'."
+    },
+    {
+      "question": "What regular appointments do I have?",
+      "task_type": "Del",
+      "entity": [
+        "regular_appointment"
+      ],
+      "entity_values": {
+        "regular_appointment": "physical therapy (2x/week)"
+      },
+      "expected_answer": "physical therapy (2x/week)",
+      "hop": null,
+      "agent_answer": "Physical therapy twice a week.",
+      "u_pass": true,
+      "u_reason": "The agent's answer semantically matches the gold answer by stating 'physical therapy twice a week'."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives."
+      },
+      "expected_answer": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.",
+      "hop": null,
+      "agent_answer": "\"Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.\"",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all partners I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "partner"
+      ],
+      "entity_values": {
+        "partner": [
+          "Jessica",
+          "Alex",
+          "Chris"
+        ]
+      },
+      "expected_answer": "Jessica, Alex, Chris",
+      "hop": null,
+      "agent_answer": "Jessica, Alex, Chris",
+      "u_pass": true,
+      "u_reason": "The agent's answer contains all the gold values in the correct chronological order.",
+      "u_pass_count": 3,
+      "u_pass_total": 3
+    },
+    {
+      "question": "What dietary restrictions do I have?",
+      "task_type": "Cas",
+      "entity": [
+        "dietary_restriction"
+      ],
+      "entity_values": {
+        "dietary_restriction": "no processed food"
+      },
+      "expected_answer": "no processed food",
+      "hop": 1,
+      "agent_answer": "Low-sugar",
+      "u_pass": false,
+      "u_reason": "The agent stated only the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Kaelstrom Fitness"
+      },
+      "expected_answer": "Kaelstrom Fitness",
+      "hop": 2,
+      "agent_answer": "Velthari Studio",
+      "u_pass": false,
+      "u_reason": "The agent reported the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's my sleep schedule?",
+      "task_type": "Abs",
+      "entity": [
+        "sleep_pattern"
+      ],
+      "entity_values": {
+        "sleep_pattern": "midnight-8am"
+      },
+      "expected_answer": "Uncertain — previously 'midnight-8am', but health_condition changed",
+      "hop": 1,
+      "agent_answer": "midnight to 8am",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value without expressing any uncertainty.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What regular appointments do I have?",
+      "task_type": "Del",
+      "entity": [
+        "regular_appointment"
+      ],
+      "entity_values": {
+        "regular_appointment": "physical therapy (2x/week)"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "You don't have any regular appointments mentioned in the provided context.",
+      "u_pass": true,
+      "u_reason": "The agent correctly stated that there are no regular appointments mentioned without revealing the deleted information.",
+      "pass_type": "real"
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "woodworking",
+        "sports": "cycling",
+        "club_membership": "cycling club"
+      },
+      "expected_answer": "The user's hobby is woodworking, plays cycling, and is part of cycling club.",
+      "hop": null,
+      "agent_answer": "- Exploring progressive rock music, specifically The Tangent and other classic prog rock bands such as Yes, Genesis, King Crimson, Gentle Giant, and Pink Floyd.\n- Woodworking, focusing on small furniture pieces like side tables and benches.\n- Collaborating on woodworking projects with partner Jessica, creating decorative and functional items such as shelves.\n- Managing a 20-gallon freshwater aquarium named Serenity with corydoras catfish Mr. Whiskers, treating fin rot, researching fish compatibility, and planning aquarium maintenance.\n- Watching the TV show \"Whispers of Zarinthea,\" a fantasy and drama series.\n- Attending trivia night social meetups on Wednesdays.\n- Watching NBA, EPL, and college football games with friends at sports bars near the Staples Center in Los Angeles.\n- Cycling activities with partner Chris.",
+      "u_pass": false,
+      "u_pass_per_entity": {
+        "hobby": true,
+        "sports": true,
+        "club_membership": false
+      },
+      "u_pass_count": 2,
+      "u_pass_total": 3,
+      "u_reason": "Woodworking and cycling are mentioned, but there is no mention of a cycling club."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives."
+      },
+      "expected_answer": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.",
+      "hop": null,
+      "agent_answer": "\"Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.\"",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 2,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 1,
+      "trivial_pass": 0,
+      "knew_but_failed": 0,
+      "never_knew": 0
+    }
+  },
+  "totals": {
+    "before_pass": 4,
+    "before_total": 5,
+    "after_pass": 3,
+    "after_total": 7
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 10,
+    "input_tokens": 2113,
+    "output_tokens": 310
+  }
+}

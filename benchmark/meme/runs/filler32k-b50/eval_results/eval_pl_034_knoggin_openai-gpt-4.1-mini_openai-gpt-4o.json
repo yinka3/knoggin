@@ -1,0 +1,250 @@
+{
+  "episode_id": 34,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What's my exercise routine?",
+      "task_type": "Cas",
+      "entity": [
+        "exercise_routine"
+      ],
+      "entity_values": {
+        "exercise_routine": "running 3x/week"
+      },
+      "expected_answer": "running 3x/week",
+      "hop": 1,
+      "agent_answer": "Running 3 times per week.",
+      "u_pass": true,
+      "u_reason": "The agent's answer is semantically equivalent to the gold answer."
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Kaelstrom Fitness"
+      },
+      "expected_answer": "Kaelstrom Fitness",
+      "hop": 2,
+      "agent_answer": "Kaelstrom Fitness",
+      "u_pass": true,
+      "u_reason": "The agent's answer 'Kaelstrom Fitness' matches the gold answer semantically."
+    },
+    {
+      "question": "What medication am I taking?",
+      "task_type": "Abs",
+      "entity": [
+        "medication"
+      ],
+      "entity_values": {
+        "medication": "Korathril"
+      },
+      "expected_answer": "Korathril",
+      "hop": 1,
+      "agent_answer": "Korathril",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "Where is my office?",
+      "task_type": "Del",
+      "entity": [
+        "work_location"
+      ],
+      "entity_values": {
+        "work_location": "remote"
+      },
+      "expected_answer": "remote",
+      "hop": null,
+      "agent_answer": "Your office is remote.",
+      "u_pass": true,
+      "u_reason": "The agent's answer semantically matches the gold answer by stating the office is remote."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives."
+      },
+      "expected_answer": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.",
+      "hop": null,
+      "agent_answer": "\"Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.\"",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all subscription services I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "subscription_service"
+      ],
+      "entity_values": {
+        "subscription_service": [
+          "Xelvoria",
+          "Thyranote",
+          "Zorvista Premium"
+        ]
+      },
+      "expected_answer": "Xelvoria, Thyranote, Zorvista Premium",
+      "hop": null,
+      "agent_answer": "1. Zorvista Premium  \n2. Xelvoria  \n3. Thyranote",
+      "u_pass": false,
+      "u_reason": "The agent's answer lists the subscriptions in the wrong order.",
+      "u_pass_count": 2,
+      "u_pass_total": 3
+    },
+    {
+      "question": "What's my exercise routine?",
+      "task_type": "Cas",
+      "entity": [
+        "exercise_routine"
+      ],
+      "entity_values": {
+        "exercise_routine": "weight training 4x/week"
+      },
+      "expected_answer": "weight training 4x/week",
+      "hop": 1,
+      "agent_answer": "Running 3 times per week.",
+      "u_pass": false,
+      "u_reason": "The agent stated only the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Pyravar CrossFit"
+      },
+      "expected_answer": "Pyravar CrossFit",
+      "hop": 2,
+      "agent_answer": "Kaelstrom Fitness",
+      "u_pass": false,
+      "u_reason": "The agent stated the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What medication am I taking?",
+      "task_type": "Abs",
+      "entity": [
+        "medication"
+      ],
+      "entity_values": {
+        "medication": "Korathril"
+      },
+      "expected_answer": "Uncertain — previously 'Korathril', but health_condition changed",
+      "hop": 1,
+      "agent_answer": "Korathril",
+      "u_pass": false,
+      "u_reason": "The agent confidently stated the old value 'Korathril' without expressing uncertainty or acknowledging the upstream change.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "Where is my office?",
+      "task_type": "Del",
+      "entity": [
+        "work_location"
+      ],
+      "entity_values": {
+        "work_location": "remote"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "Your office is remote.",
+      "u_pass": false,
+      "u_reason": "The agent incorrectly revealed the deleted value by stating 'Your office is remote.'",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "woodworking",
+        "sports": "cycling",
+        "club_membership": "wine tasting club"
+      },
+      "expected_answer": "The user's hobby is woodworking, plays cycling, and is part of wine tasting club.",
+      "hop": null,
+      "agent_answer": "- Play cycling several times a week  \n- Participate in a regular social meetup playing pickup basketball on Saturdays  \n- Enjoy woodworking as a hobby, currently working on projects like building a small bookshelf and potentially a coffee table  \n- Attend weekly therapy appointments  \n- Listen to indie-rock and indie-folk music, exploring new artists similar to The 1975 and indie-folk acts  \n- Attend music festivals and explore new music experiences  \n- Explore caffeine-free beverage alternatives due to a no-caffeine dietary restriction",
+      "u_pass": false,
+      "u_pass_per_entity": {
+        "hobby": true,
+        "sports": true,
+        "club_membership": false
+      },
+      "u_pass_count": 2,
+      "u_pass_total": 3,
+      "u_reason": "Woodworking and cycling are mentioned, but wine tasting club is not."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives."
+      },
+      "expected_answer": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.",
+      "hop": null,
+      "agent_answer": "\"Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.\"",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 2,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    }
+  },
+  "totals": {
+    "before_pass": 4,
+    "before_total": 5,
+    "after_pass": 1,
+    "after_total": 7
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 10,
+    "input_tokens": 2058,
+    "output_tokens": 283
+  }
+}

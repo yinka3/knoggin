@@ -1,0 +1,281 @@
+{
+  "episode_id": 47,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What is my job title?",
+      "task_type": "Cas",
+      "entity": [
+        "job_title"
+      ],
+      "entity_values": {
+        "job_title": "designer"
+      },
+      "expected_answer": "designer",
+      "hop": 1,
+      "agent_answer": "designer",
+      "u_pass": true,
+      "u_reason": "The agent's answer 'designer' matches the gold answer semantically."
+    },
+    {
+      "question": "How long is my commute?",
+      "task_type": "Cas",
+      "entity": [
+        "commute_duration"
+      ],
+      "entity_values": {
+        "commute_duration": "1 hour"
+      },
+      "expected_answer": "1 hour",
+      "hop": 2,
+      "agent_answer": "About 1 hour.",
+      "u_pass": true,
+      "u_reason": "The agent's answer 'About 1 hour' semantically matches the gold answer '1 hour'."
+    },
+    {
+      "question": "Where is my office?",
+      "task_type": "Abs",
+      "entity": [
+        "work_location"
+      ],
+      "entity_values": {
+        "work_location": "Tesswick Bay"
+      },
+      "expected_answer": "Tesswick Bay",
+      "hop": 1,
+      "agent_answer": "Tesswick Bay",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "How do I get to work?",
+      "task_type": "Abs",
+      "entity": [
+        "commute_method"
+      ],
+      "entity_values": {
+        "commute_method": "bike"
+      },
+      "expected_answer": "bike",
+      "hop": 2,
+      "agent_answer": "By biking.",
+      "u_pass": true,
+      "u_reason": "The agent's answer 'By biking.' semantically matches the gold answer 'bike'."
+    },
+    {
+      "question": "What's my regular social meetup?",
+      "task_type": "Del",
+      "entity": [
+        "social_gathering"
+      ],
+      "entity_values": {
+        "social_gathering": "pickup basketball Saturdays"
+      },
+      "expected_answer": "pickup basketball Saturdays",
+      "hop": null,
+      "agent_answer": "Pickup basketball on Saturdays",
+      "u_pass": true,
+      "u_reason": "The agent's answer is semantically equivalent to the gold answer."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world."
+      },
+      "expected_answer": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.",
+      "hop": null,
+      "agent_answer": "\"We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.\"",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all vehicles I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "vehicle"
+      ],
+      "entity_values": {
+        "vehicle": [
+          "Therwyn Compact",
+          "Vorantel SUV",
+          "Xylorim Scooter"
+        ]
+      },
+      "expected_answer": "Therwyn Compact, Vorantel SUV, Xylorim Scooter",
+      "hop": null,
+      "agent_answer": "Therwyn Compact car, Vorantel SUV, Xylorim Scooter",
+      "u_pass": true,
+      "u_reason": "The agent's answer contains all the gold values in the correct order.",
+      "u_pass_count": 3,
+      "u_pass_total": 3
+    },
+    {
+      "question": "What is my job title?",
+      "task_type": "Cas",
+      "entity": [
+        "job_title"
+      ],
+      "entity_values": {
+        "job_title": "product manager"
+      },
+      "expected_answer": "product manager",
+      "hop": 1,
+      "agent_answer": "Designer",
+      "u_pass": false,
+      "u_reason": "The agent incorrectly reported 'Designer' instead of the new value 'product manager'.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "How long is my commute?",
+      "task_type": "Cas",
+      "entity": [
+        "commute_duration"
+      ],
+      "entity_values": {
+        "commute_duration": "1.5 hours"
+      },
+      "expected_answer": "1.5 hours",
+      "hop": 2,
+      "agent_answer": "About 1 hour.",
+      "u_pass": false,
+      "u_reason": "The agent stated the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "Where is my office?",
+      "task_type": "Abs",
+      "entity": [
+        "work_location"
+      ],
+      "entity_values": {
+        "work_location": "Tesswick Bay"
+      },
+      "expected_answer": "Uncertain — previously 'Tesswick Bay', but employer changed",
+      "hop": 1,
+      "agent_answer": "Tesswick Bay",
+      "u_pass": false,
+      "u_reason": "The agent confidently stated the old value without expressing uncertainty.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "How do I get to work?",
+      "task_type": "Abs",
+      "entity": [
+        "commute_method"
+      ],
+      "entity_values": {
+        "commute_method": "bike"
+      },
+      "expected_answer": "Uncertain — previously 'bike', but work_location changed",
+      "hop": 2,
+      "agent_answer": "By bike.",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value without expressing any uncertainty or acknowledging the upstream change.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's my regular social meetup?",
+      "task_type": "Del",
+      "entity": [
+        "social_gathering"
+      ],
+      "entity_values": {
+        "social_gathering": "pickup basketball Saturdays"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "Pickup basketball on Saturdays",
+      "u_pass": false,
+      "u_reason": "The agent incorrectly returned the deleted value as if it still exists.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "gardening",
+        "sports": "basketball",
+        "club_membership": "book club"
+      },
+      "expected_answer": "The user's hobby is gardening, plays basketball, and is part of book club.",
+      "hop": null,
+      "agent_answer": "- Gardening vegetables  \n- Driving a Therwyn Compact car (previously)  \n- Playing pickup basketball on Saturdays (no longer participates)  \n- Working in UX research at Zypherix Labs (office in Tesswick Bay)  \n- Preparing for a half-marathon  \n- Organizing a collection of vintage video game cartridges  \n- Seeking to acquire a rare holographic Charizard Pokémon card  \n- Considering trading collectibles with a friend named Michael  \n- Growing Sakura (cherry blossom) species suitable for small gardens or balcony gardens  \n- Dining at The Ondreth Pot restaurant  \n- Working out at Velthari Studio  \n- Subscribed to Xelvoria for tailored content and learning  \n- Driving a Vorantel SUV (current vehicle)  \n- Using a Xylorim Scooter as a mode of transportation  \n- Practicing mindfulness, including non-judgmental mindfulness and using mindfulness apps  \n- Exploring electronic music influences, specifically Daphni's album \"Jiaolong\"  \n- Exploring historical and political contexts such as the 1952 Summer Olympics and Cold War impacts  \n- Engaging in podcast development titled \"After the Wire\"  \n- Learning Terraform basics and modules  \n- Exploring home maintenance risks and preventive measures  \n- Exploring Korean cuisine and bibimbap recipes  \n- Managing flexible work hours",
+      "u_pass": false,
+      "u_pass_per_entity": {
+        "hobby": true,
+        "sports": true,
+        "club_membership": false
+      },
+      "u_pass_count": 2,
+      "u_pass_total": 3,
+      "u_reason": "Gardening and basketball are mentioned, but book club is not."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world."
+      },
+      "expected_answer": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.",
+      "hop": null,
+      "agent_answer": "\"We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.\"",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 2,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 2,
+      "never_knew": 0
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    }
+  },
+  "totals": {
+    "before_pass": 5,
+    "before_total": 6,
+    "after_pass": 2,
+    "after_total": 8
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 12,
+    "input_tokens": 2568,
+    "output_tokens": 329
+  }
+}

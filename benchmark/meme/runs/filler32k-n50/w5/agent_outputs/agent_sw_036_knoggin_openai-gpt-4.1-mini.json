@@ -1,0 +1,202 @@
+{
+  "episode_id": 36,
+  "domain": "software_project",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What Docker image do we use?",
+      "task_type": "Cas",
+      "entity": [
+        "docker_image"
+      ],
+      "entity_values": {
+        "docker_image": "narvex-registry/aurora:latest"
+      },
+      "expected_answer": "narvex-registry/aurora:latest",
+      "hop": 1,
+      "agent_answer": "narvex-registry/aurora:latest"
+    },
+    {
+      "question": "What's the deploy command?",
+      "task_type": "Cas",
+      "entity": [
+        "deploy_command"
+      ],
+      "entity_values": {
+        "deploy_command": "thandrel ship --channel stable"
+      },
+      "expected_answer": "thandrel ship --channel stable",
+      "hop": 2,
+      "agent_answer": "thandrel ship --channel stable"
+    },
+    {
+      "question": "What's our staging URL?",
+      "task_type": "Abs",
+      "entity": [
+        "staging_url"
+      ],
+      "entity_values": {
+        "staging_url": "dev.orinthal.dev/aurora"
+      },
+      "expected_answer": "dev.orinthal.dev/aurora",
+      "hop": 1,
+      "agent_answer": "dev.orinthal.dev/aurora"
+    },
+    {
+      "question": "Where's the Dockerfile?",
+      "task_type": "Abs",
+      "entity": [
+        "dockerfile_path"
+      ],
+      "entity_values": {
+        "dockerfile_path": "infra/narvex/Dockerfile"
+      },
+      "expected_answer": "infra/narvex/Dockerfile",
+      "hop": 2,
+      "agent_answer": "infra/narvex/Dockerfile"
+    },
+    {
+      "question": "What design system do we use?",
+      "task_type": "Del",
+      "entity": [
+        "design_system"
+      ],
+      "entity_values": {
+        "design_system": "Veltrion UI Kit v2"
+      },
+      "expected_answer": "Veltrion UI Kit v2",
+      "hop": null,
+      "agent_answer": "Veltrion UI Kit v2"
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations."
+      },
+      "expected_answer": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations.",
+      "hop": null,
+      "agent_answer": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations."
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all secret managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "secret_manager"
+      ],
+      "entity_values": {
+        "secret_manager": [
+          "Selvex Secrets",
+          "Kerberos Trove",
+          "Orinthal Sealed"
+        ]
+      },
+      "expected_answer": "Selvex Secrets, Kerberos Trove, Orinthal Sealed",
+      "hop": null,
+      "agent_answer": "Selvex Secrets, Orinthal Sealed"
+    },
+    {
+      "question": "What Docker image do we use?",
+      "task_type": "Cas",
+      "entity": [
+        "docker_image"
+      ],
+      "entity_values": {
+        "docker_image": "korinth-repo/aurora:stable"
+      },
+      "expected_answer": "korinth-repo/aurora:stable",
+      "hop": 1,
+      "agent_answer": "narvex-registry/aurora:latest"
+    },
+    {
+      "question": "What's the deploy command?",
+      "task_type": "Cas",
+      "entity": [
+        "deploy_command"
+      ],
+      "entity_values": {
+        "deploy_command": "orinthal publish --tier sandbox"
+      },
+      "expected_answer": "orinthal publish --tier sandbox",
+      "hop": 2,
+      "agent_answer": "thandrel ship --channel stable"
+    },
+    {
+      "question": "What's our staging URL?",
+      "task_type": "Abs",
+      "entity": [
+        "staging_url"
+      ],
+      "entity_values": {
+        "staging_url": "dev.orinthal.dev/aurora"
+      },
+      "expected_answer": "Uncertain — previously 'dev.orinthal.dev/aurora', but deploy_target changed",
+      "hop": 1,
+      "agent_answer": "dev.orinthal.dev/aurora"
+    },
+    {
+      "question": "Where's the Dockerfile?",
+      "task_type": "Abs",
+      "entity": [
+        "dockerfile_path"
+      ],
+      "entity_values": {
+        "dockerfile_path": "infra/narvex/Dockerfile"
+      },
+      "expected_answer": "Uncertain — previously 'infra/narvex/Dockerfile', but docker_image changed",
+      "hop": 2,
+      "agent_answer": "infra/narvex/Dockerfile"
+    },
+    {
+      "question": "What design system do we use?",
+      "task_type": "Del",
+      "entity": [
+        "design_system"
+      ],
+      "entity_values": {
+        "design_system": "Veltrion UI Kit v2"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "Veltrion UI Kit v2"
+    },
+    {
+      "question": "What do you know about our on-call setup? Tell me everything.",
+      "task_type": "Agg",
+      "entity": [
+        "oncall_rotation",
+        "alert_channel",
+        "incident_runbook_url"
+      ],
+      "entity_values": {
+        "oncall_rotation": "volunteer-based with weekly signup",
+        "alert_channel": "#zenith-incidents",
+        "incident_runbook_url": "github.com/aurora-team/runbooks"
+      },
+      "expected_answer": "On-call is volunteer-based with weekly signup, alerts go to #zenith-incidents, and runbook is at github.com/aurora-team/runbooks.",
+      "hop": null,
+      "agent_answer": "Your team’s on-call rotation is volunteer-based with weekly signup. It is described as pretty flexible."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations."
+      },
+      "expected_answer": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations.",
+      "hop": null,
+      "agent_answer": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations."
+    }
+  ]
+}

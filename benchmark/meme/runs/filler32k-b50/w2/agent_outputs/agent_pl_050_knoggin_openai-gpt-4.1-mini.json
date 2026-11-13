@@ -1,0 +1,150 @@
+{
+  "episode_id": 50,
+  "domain": "personal_life",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Pyravar CrossFit"
+      },
+      "expected_answer": "Pyravar CrossFit",
+      "hop": 1,
+      "agent_answer": "Pyravar CrossFit"
+    },
+    {
+      "question": "How long is my commute?",
+      "task_type": "Abs",
+      "entity": [
+        "commute_duration"
+      ],
+      "entity_values": {
+        "commute_duration": "50 min"
+      },
+      "expected_answer": "50 min",
+      "hop": 1,
+      "agent_answer": "About 50 minutes."
+    },
+    {
+      "question": "What type of home do I live in?",
+      "task_type": "Del",
+      "entity": [
+        "housing_type"
+      ],
+      "entity_values": {
+        "housing_type": "single-family house"
+      },
+      "expected_answer": "single-family house",
+      "hop": null,
+      "agent_answer": "Single-family house"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives."
+      },
+      "expected_answer": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.",
+      "hop": null,
+      "agent_answer": "\"Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all subscription services I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "subscription_service"
+      ],
+      "entity_values": {
+        "subscription_service": [
+          "Thyranote",
+          "meal kit (Kelvimeal)",
+          "Dranthazon"
+        ]
+      },
+      "expected_answer": "Thyranote, meal kit (Kelvimeal), Dranthazon",
+      "hop": null,
+      "agent_answer": "Kelvimeal, Dranthazon"
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Zorathel Peak Gym"
+      },
+      "expected_answer": "Zorathel Peak Gym",
+      "hop": 1,
+      "agent_answer": "Pyravar CrossFit"
+    },
+    {
+      "question": "How long is my commute?",
+      "task_type": "Abs",
+      "entity": [
+        "commute_duration"
+      ],
+      "entity_values": {
+        "commute_duration": "50 min"
+      },
+      "expected_answer": "Uncertain — previously '50 min', but residence_location changed",
+      "hop": 1,
+      "agent_answer": "About 50 minutes."
+    },
+    {
+      "question": "What type of home do I live in?",
+      "task_type": "Del",
+      "entity": [
+        "housing_type"
+      ],
+      "entity_values": {
+        "housing_type": "single-family house"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "I don't have that information."
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "woodworking",
+        "sports": "basketball",
+        "club_membership": "volunteer group"
+      },
+      "expected_answer": "The user's hobby is woodworking, plays basketball, and is part of volunteer group.",
+      "hop": null,
+      "agent_answer": "- Organize a large collection of beach trip photos and videos into albums and collages using a hybrid approach with broad categories and sub-albums.  \n- Categorize phone cases and screen protectors by type, store them, keep track of favorites, and rotate cases every few months.  \n- Explore and consider phone wallets with card slots.  \n- Explore new recipes, including Indian-Style Lentil Soup and blueberry muffins, and experiment with different muffin types like banana walnut and oatmeal raisin.  \n- Experiment with storing fresh herbs like thyme and rosemary to extend their freshness.  \n- Explore and prepare healthy snacks such as roasted chickpeas seasoned with garlic powder and paprika and energy balls.  \n- Maintain healthy snacking habits during the week, including meal prepping on Sundays and seeking additional strategies to stay on track.  \n- Consider visiting or making spring rolls with peanut sauce from a new Vietnamese restaurant downtown.  \n- Learn about Henry James's background and how it influenced his writing style and themes.  \n- Read recommended Henry James novels, specifically \"The Portrait of a Lady\" and \"The Turn of the Screw.\"  \n- Explore classic literature with psychological and supernatural themes.  \n- Explore the impact of social media on the fashion industry and notable examples.  \n- Participate in volunteer group activities organizing community events and local projects like food drives and park clean-ups.  \n- Subscribe to and explore documentaries and original series on Dranthazon.  \n- Plan a big purchase of a camera to pursue photography more seriously, exploring photography styles and subjects.  \n- Follow developments and innovations in mobile devices, especially AR and VR features and sustainability.  \n- Work out at Pyravar CrossFit or plan to work out at Zorathel Peak Gym if moving residence.  \n- Watch the TV show \"Whispers of Zarinthea.\"  \n- Write an expert-level article on Deed of Novation focused on Australian construction law.  \n- Explore third-party apps and plugins to enhance VoiceOver compatibility with additional languages, including iTranslate.  \n- Take steps to protect personal and financial information online, including using two-factor authentication and exploring antivirus software options.  \n- Improve basketball shooting technique and practice drills to enhance shooting skills and consistency under pressure.  \n- Plan and prepare for a dinner party with a classic American-style menu, including grocery shopping and dining area setup.  \n- Invent a newly updated Tarot system with a major arcana of 64 cards.  \n- Explore natural hair care enhancements using coconut oil, argan oil,"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives."
+      },
+      "expected_answer": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.",
+      "hop": null,
+      "agent_answer": "\"Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.\""
+    }
+  ]
+}

@@ -1,0 +1,176 @@
+{
+  "episode_id": 13,
+  "domain": "software_project",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What's the session TTL?",
+      "task_type": "Cas",
+      "entity": [
+        "user_session_ttl"
+      ],
+      "entity_values": {
+        "user_session_ttl": "15 minutes"
+      },
+      "expected_answer": "15 minutes",
+      "hop": 1,
+      "agent_answer": "15 minutes"
+    },
+    {
+      "question": "What's the auth middleware config?",
+      "task_type": "Cas",
+      "entity": [
+        "middleware_config"
+      ],
+      "entity_values": {
+        "middleware_config": "verithos-oauth-middleware v2.1"
+      },
+      "expected_answer": "verithos-oauth-middleware v2.1",
+      "hop": 2,
+      "agent_answer": "verithos-oauth-middleware v2.1 (current); changes to oathkeeper-cert-check v3.2 if auth method changes to mTLS Client Cert"
+    },
+    {
+      "question": "What authentication method do we use?",
+      "task_type": "Abs",
+      "entity": [
+        "auth_method"
+      ],
+      "entity_values": {
+        "auth_method": "SAML 2.0 SSO"
+      },
+      "expected_answer": "SAML 2.0 SSO",
+      "hop": 1,
+      "agent_answer": "SAML 2.0 SSO"
+    },
+    {
+      "question": "What package manager do we use?",
+      "task_type": "Del",
+      "entity": [
+        "package_manager"
+      ],
+      "entity_values": {
+        "package_manager": "Dranith Stack"
+      },
+      "expected_answer": "Dranith Stack",
+      "hop": null,
+      "agent_answer": "Dranith Stack"
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations."
+      },
+      "expected_answer": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations.",
+      "hop": null,
+      "agent_answer": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations."
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all sprint deadlines we've had, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "sprint_deadline"
+      ],
+      "entity_values": {
+        "sprint_deadline": [
+          "2025 May 23",
+          "2025 June 20",
+          "2025 July 4"
+        ]
+      },
+      "expected_answer": "2025 May 23, 2025 June 20, 2025 July 4",
+      "hop": null,
+      "agent_answer": "May 23, 2025; June 20, 2025; July 4, 2025"
+    },
+    {
+      "question": "What's the session TTL?",
+      "task_type": "Cas",
+      "entity": [
+        "user_session_ttl"
+      ],
+      "entity_values": {
+        "user_session_ttl": "4 hours"
+      },
+      "expected_answer": "4 hours",
+      "hop": 1,
+      "agent_answer": "15 minutes"
+    },
+    {
+      "question": "What's the auth middleware config?",
+      "task_type": "Cas",
+      "entity": [
+        "middleware_config"
+      ],
+      "entity_values": {
+        "middleware_config": "oathkeeper-cert-check v3.2"
+      },
+      "expected_answer": "oathkeeper-cert-check v3.2",
+      "hop": 2,
+      "agent_answer": "verithos-oauth-middleware v2.1"
+    },
+    {
+      "question": "What authentication method do we use?",
+      "task_type": "Abs",
+      "entity": [
+        "auth_method"
+      ],
+      "entity_values": {
+        "auth_method": "SAML 2.0 SSO"
+      },
+      "expected_answer": "Uncertain — previously 'SAML 2.0 SSO', but auth_provider changed",
+      "hop": 1,
+      "agent_answer": "SAML 2.0 SSO"
+    },
+    {
+      "question": "What package manager do we use?",
+      "task_type": "Del",
+      "entity": [
+        "package_manager"
+      ],
+      "entity_values": {
+        "package_manager": "Dranith Stack"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "Pinia"
+    },
+    {
+      "question": "What do you know about our on-call setup? Tell me everything.",
+      "task_type": "Agg",
+      "entity": [
+        "oncall_rotation",
+        "alert_channel",
+        "incident_runbook_url"
+      ],
+      "entity_values": {
+        "oncall_rotation": "paired oncall (primary + secondary)",
+        "alert_channel": "#aurora-oncall-alerts",
+        "incident_runbook_url": "wiki.aurora.dev/incident-response"
+      },
+      "expected_answer": "On-call is paired oncall (primary + secondary), alerts go to #aurora-oncall-alerts, and runbook is at wiki.aurora.dev/incident-response.",
+      "hop": null,
+      "agent_answer": "The team's on-call rotation is a paired on-call setup with primary and secondary roles. This ensures that there is always someone available to tackle issues. For escalation paths, it is recommended to define a clear hierarchy of who gets contacted next if the primary on-call isn't reachable, typically involving the secondary on-call first, followed by other team members or leads based on availability. Establishing a time frame for how long to wait before escalating is also advised, along with having a documented process that team members can refer to during incidents to streamline communication and ensure everyone is aligned."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations."
+      },
+      "expected_answer": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations.",
+      "hop": null,
+      "agent_answer": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations."
+    }
+  ]
+}

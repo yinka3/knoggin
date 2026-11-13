@@ -1,0 +1,202 @@
+{
+  "episode_id": 38,
+  "domain": "software_project",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What's our project structure?",
+      "task_type": "Cas",
+      "entity": [
+        "project_structure"
+      ],
+      "entity_values": {
+        "project_structure": "modular with /modules and /shared"
+      },
+      "expected_answer": "modular with /modules and /shared",
+      "hop": 1,
+      "agent_answer": "Our project follows a modular structure with /modules and /shared directories, as determined by the Synthari framework we use."
+    },
+    {
+      "question": "What's the test command?",
+      "task_type": "Cas",
+      "entity": [
+        "test_command"
+      ],
+      "entity_values": {
+        "test_command": "karnex test --ci"
+      },
+      "expected_answer": "karnex test --ci",
+      "hop": 2,
+      "agent_answer": "karnex test --ci"
+    },
+    {
+      "question": "What's our build tool?",
+      "task_type": "Abs",
+      "entity": [
+        "build_tool"
+      ],
+      "entity_values": {
+        "build_tool": "Karnex Bundler"
+      },
+      "expected_answer": "Karnex Bundler",
+      "hop": 1,
+      "agent_answer": "Karnex Bundler"
+    },
+    {
+      "question": "What's the build command?",
+      "task_type": "Abs",
+      "entity": [
+        "build_command"
+      ],
+      "entity_values": {
+        "build_command": "karnex build --prod"
+      },
+      "expected_answer": "karnex build --prod",
+      "hop": 2,
+      "agent_answer": "karnex build --prod"
+    },
+    {
+      "question": "What secret manager do we use?",
+      "task_type": "Del",
+      "entity": [
+        "secret_manager"
+      ],
+      "entity_values": {
+        "secret_manager": "Orinthal Sealed"
+      },
+      "expected_answer": "Orinthal Sealed",
+      "hop": null,
+      "agent_answer": "Orinthal Sealed"
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations."
+      },
+      "expected_answer": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations.",
+      "hop": null,
+      "agent_answer": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations."
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all package managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "package_manager"
+      ],
+      "entity_values": {
+        "package_manager": [
+          "Pyronis Bundle",
+          "Veltrion Pkg",
+          "Synthari Modules"
+        ]
+      },
+      "expected_answer": "Pyronis Bundle, Veltrion Pkg, Synthari Modules",
+      "hop": null,
+      "agent_answer": "Pyronis Bundle, Veltrion Pkg, Synthari Modules"
+    },
+    {
+      "question": "What's our project structure?",
+      "task_type": "Cas",
+      "entity": [
+        "project_structure"
+      ],
+      "entity_values": {
+        "project_structure": "monorepo with /apps and /packages"
+      },
+      "expected_answer": "monorepo with /apps and /packages",
+      "hop": 1,
+      "agent_answer": "/modular with /modules and /shared directories (determined by using the Synthari framework)"
+    },
+    {
+      "question": "What's the test command?",
+      "task_type": "Cas",
+      "entity": [
+        "test_command"
+      ],
+      "entity_values": {
+        "test_command": "zelthra assert --suite all"
+      },
+      "expected_answer": "zelthra assert --suite all",
+      "hop": 2,
+      "agent_answer": "karnex test --ci"
+    },
+    {
+      "question": "What's our build tool?",
+      "task_type": "Abs",
+      "entity": [
+        "build_tool"
+      ],
+      "entity_values": {
+        "build_tool": "Karnex Bundler"
+      },
+      "expected_answer": "Uncertain — previously 'Karnex Bundler', but framework changed",
+      "hop": 1,
+      "agent_answer": "Karnex Bundler"
+    },
+    {
+      "question": "What's the build command?",
+      "task_type": "Abs",
+      "entity": [
+        "build_command"
+      ],
+      "entity_values": {
+        "build_command": "karnex build --prod"
+      },
+      "expected_answer": "Uncertain — previously 'karnex build --prod', but build_tool changed",
+      "hop": 2,
+      "agent_answer": "karnex build --prod"
+    },
+    {
+      "question": "What secret manager do we use?",
+      "task_type": "Del",
+      "entity": [
+        "secret_manager"
+      ],
+      "entity_values": {
+        "secret_manager": "Orinthal Sealed"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "You don't have that information."
+    },
+    {
+      "question": "Where can I find project documentation? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "documentation_url",
+        "onboarding_guide",
+        "changelog_location"
+      ],
+      "entity_values": {
+        "documentation_url": "aurora-docs.readthedocs.io",
+        "onboarding_guide": "wiki.aurora.dev/getting-started",
+        "changelog_location": "docs.aurora.internal/changelog"
+      },
+      "expected_answer": "Docs are at aurora-docs.readthedocs.io, onboarding guide at wiki.aurora.dev/getting-started, and changelog at docs.aurora.internal/changelog.",
+      "hop": null,
+      "agent_answer": "aurora-docs.readthedocs.io  \nwiki.aurora.dev/getting-started  \ndocs.aurora.internal/changelog  \ndocs.aurora.internal/runbooks"
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations."
+      },
+      "expected_answer": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations.",
+      "hop": null,
+      "agent_answer": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations."
+    }
+  ]
+}

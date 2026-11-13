@@ -1,0 +1,219 @@
+{
+  "episode_id": 37,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What family event do I have coming up?",
+      "task_type": "Cas",
+      "entity": [
+        "family_event"
+      ],
+      "entity_values": {
+        "family_event": "child's school event"
+      },
+      "expected_answer": "child's school event",
+      "hop": 1,
+      "agent_answer": "child's school event",
+      "u_pass": true,
+      "u_reason": "The agent's answer 'child's school event' is semantically equivalent to the gold answer."
+    },
+    {
+      "question": "What type of home do I live in?",
+      "task_type": "Abs",
+      "entity": [
+        "housing_type"
+      ],
+      "entity_values": {
+        "housing_type": "shared house"
+      },
+      "expected_answer": "shared house",
+      "hop": 1,
+      "agent_answer": "A shared house.",
+      "u_pass": true,
+      "u_reason": "The agent's answer 'A shared house' is semantically equivalent to the gold answer 'shared house'."
+    },
+    {
+      "question": "Where do I work?",
+      "task_type": "Del",
+      "entity": [
+        "employer"
+      ],
+      "entity_values": {
+        "employer": "Korvath & Co."
+      },
+      "expected_answer": "Korvath & Co.",
+      "hop": null,
+      "agent_answer": "Korvath & Co.",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it."
+      },
+      "expected_answer": "The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it.",
+      "hop": null,
+      "agent_answer": "\"The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it.\"",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all media I've consumed over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "media_consumption"
+      ],
+      "entity_values": {
+        "media_consumption": [
+          "a daily news podcast",
+          "Thyrelion (anime)",
+          "a history documentary series"
+        ]
+      },
+      "expected_answer": "a daily news podcast, Thyrelion (anime), a history documentary series",
+      "hop": null,
+      "agent_answer": "1. Scented candles for mom's anniversary (around $40)  \n2. Silver necklace for sister's 30th birthday  \n3. Sephora gift card for sister's 30th birthday  \n4. Customized photo album for sister's 30th birthday (planned using Shutterfly)  \n5. Concert tickets for sister's 30th birthday (planned)  \n6. Daily news podcasts (current media)  \n7. History documentary series (current media)",
+      "u_pass": false,
+      "u_reason": "The agent's response does not contain all the gold values in the correct order.",
+      "u_pass_count": 0,
+      "u_pass_total": 3
+    },
+    {
+      "question": "What family event do I have coming up?",
+      "task_type": "Cas",
+      "entity": [
+        "family_event"
+      ],
+      "entity_values": {
+        "family_event": "none currently"
+      },
+      "expected_answer": "none currently",
+      "hop": 1,
+      "agent_answer": "child's school event",
+      "u_pass": false,
+      "u_reason": "The agent stated the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What type of home do I live in?",
+      "task_type": "Abs",
+      "entity": [
+        "housing_type"
+      ],
+      "entity_values": {
+        "housing_type": "shared house"
+      },
+      "expected_answer": "Uncertain — previously 'shared house', but relationship_status changed",
+      "hop": 1,
+      "agent_answer": "A shared house.",
+      "u_pass": false,
+      "u_reason": "The agent confidently states the old value without expressing uncertainty.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "Where do I work?",
+      "task_type": "Del",
+      "entity": [
+        "employer"
+      ],
+      "entity_values": {
+        "employer": "Korvath & Co."
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "You don't have that information.",
+      "u_pass": true,
+      "u_reason": "The agent correctly stated that the information is not available without revealing the deleted value.",
+      "pass_type": "real"
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "gardening",
+        "sports": "volleyball",
+        "club_membership": "wine tasting club"
+      },
+      "expected_answer": "The user's hobby is gardening, plays volleyball, and is part of wine tasting club.",
+      "hop": null,
+      "agent_answer": "- Participate in a wine tasting club, seeking tips on hosting events and exploring wine varietals and regions.  \n- Watch history documentary series and reflect on how living alone affects viewing habits, especially regarding documentaries.  \n- Explore historical figures who made significant impacts in wars and humanitarian efforts, such as Joan of Arc, William Wallace, T.E. Lawrence, Raoul Wallenberg, Harriet Tubman, Nelson Mandela, Florence Nightingale, Anne Frank, and Malala Yousafzai.  \n- Engage in role-play scenarios assuming the role of an ancient Israelite with comprehensive knowledge of scripture, focusing on authoritative, conversational explanations about the origins of Christianity.",
+      "u_pass": false,
+      "u_pass_per_entity": {
+        "hobby": false,
+        "sports": false,
+        "club_membership": true
+      },
+      "u_pass_count": 1,
+      "u_pass_total": 3,
+      "u_reason": "Only 'wine tasting club' is mentioned in the agent's answer."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it."
+      },
+      "expected_answer": "The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it.",
+      "hop": null,
+      "agent_answer": "\"The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it.\"",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 1,
+      "trivial_pass": 0,
+      "knew_but_failed": 0,
+      "never_knew": 0
+    }
+  },
+  "totals": {
+    "before_pass": 3,
+    "before_total": 4,
+    "after_pass": 2,
+    "after_total": 6
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 8,
+    "input_tokens": 1769,
+    "output_tokens": 238
+  }
+}

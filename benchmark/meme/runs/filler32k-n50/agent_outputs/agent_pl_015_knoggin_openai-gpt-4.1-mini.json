@@ -1,0 +1,150 @@
+{
+  "episode_id": 15,
+  "domain": "personal_life",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "Who do I live with?",
+      "task_type": "Cas",
+      "entity": [
+        "living_arrangement"
+      ],
+      "entity_values": {
+        "living_arrangement": "with parents"
+      },
+      "expected_answer": "with parents",
+      "hop": 1,
+      "agent_answer": "Your parents"
+    },
+    {
+      "question": "What family event do I have coming up?",
+      "task_type": "Abs",
+      "entity": [
+        "family_event"
+      ],
+      "entity_values": {
+        "family_event": "sibling's wedding"
+      },
+      "expected_answer": "sibling's wedding",
+      "hop": 1,
+      "agent_answer": "Sibling's wedding"
+    },
+    {
+      "question": "What dietary restrictions do I have?",
+      "task_type": "Del",
+      "entity": [
+        "dietary_restriction"
+      ],
+      "entity_values": {
+        "dietary_restriction": "dairy-free"
+      },
+      "expected_answer": "dairy-free",
+      "hop": null,
+      "agent_answer": "Dairy-free"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you."
+      },
+      "expected_answer": "Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you.",
+      "hop": null,
+      "agent_answer": "\"Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all partners I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "partner"
+      ],
+      "entity_values": {
+        "partner": [
+          "Jessica",
+          "Mike",
+          "James"
+        ]
+      },
+      "expected_answer": "Jessica, Mike, James",
+      "hop": null,
+      "agent_answer": "You don't have that information."
+    },
+    {
+      "question": "Who do I live with?",
+      "task_type": "Cas",
+      "entity": [
+        "living_arrangement"
+      ],
+      "entity_values": {
+        "living_arrangement": "with sibling"
+      },
+      "expected_answer": "with sibling",
+      "hop": 1,
+      "agent_answer": "Your parents"
+    },
+    {
+      "question": "What family event do I have coming up?",
+      "task_type": "Abs",
+      "entity": [
+        "family_event"
+      ],
+      "entity_values": {
+        "family_event": "sibling's wedding"
+      },
+      "expected_answer": "Uncertain — previously 'sibling's wedding', but relationship_status changed",
+      "hop": 1,
+      "agent_answer": "Sibling's wedding"
+    },
+    {
+      "question": "What dietary restrictions do I have?",
+      "task_type": "Del",
+      "entity": [
+        "dietary_restriction"
+      ],
+      "entity_values": {
+        "dietary_restriction": "dairy-free"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "You previously had a dairy-free dietary restriction but have requested to remove this from memory."
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "photography",
+        "sports": "running club",
+        "club_membership": "hiking club"
+      },
+      "expected_answer": "The user's hobby is photography, plays running club, and is part of hiking club.",
+      "hop": null,
+      "agent_answer": "- Enjoy photography as a hobby, focusing on capturing moments and exploring different styles, with a particular interest in landscape photography and experimenting with lighting and composition.  \n- Regularly engage in pickup basketball with friends on Saturdays for physical activity and social interaction.  \n- Member of a running club, working on gradually increasing running distance and interested in safe mileage build-up strategies.  \n- Exploring painting with acrylic paints, starting with simple landscapes and then moving on to animals.  \n- Actively managing financial health by focusing on paying off credit card debt using budgeting and debt reduction strategies."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you."
+      },
+      "expected_answer": "Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you.",
+      "hop": null,
+      "agent_answer": "\"Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you.\""
+    }
+  ]
+}

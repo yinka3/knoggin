@@ -1,0 +1,202 @@
+{
+  "episode_id": 47,
+  "domain": "personal_life",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What is my job title?",
+      "task_type": "Cas",
+      "entity": [
+        "job_title"
+      ],
+      "entity_values": {
+        "job_title": "designer"
+      },
+      "expected_answer": "designer",
+      "hop": 1,
+      "agent_answer": "designer"
+    },
+    {
+      "question": "How long is my commute?",
+      "task_type": "Cas",
+      "entity": [
+        "commute_duration"
+      ],
+      "entity_values": {
+        "commute_duration": "1 hour"
+      },
+      "expected_answer": "1 hour",
+      "hop": 2,
+      "agent_answer": "About 1 hour."
+    },
+    {
+      "question": "Where is my office?",
+      "task_type": "Abs",
+      "entity": [
+        "work_location"
+      ],
+      "entity_values": {
+        "work_location": "Tesswick Bay"
+      },
+      "expected_answer": "Tesswick Bay",
+      "hop": 1,
+      "agent_answer": "Tesswick Bay"
+    },
+    {
+      "question": "How do I get to work?",
+      "task_type": "Abs",
+      "entity": [
+        "commute_method"
+      ],
+      "entity_values": {
+        "commute_method": "bike"
+      },
+      "expected_answer": "bike",
+      "hop": 2,
+      "agent_answer": "By biking."
+    },
+    {
+      "question": "What's my regular social meetup?",
+      "task_type": "Del",
+      "entity": [
+        "social_gathering"
+      ],
+      "entity_values": {
+        "social_gathering": "pickup basketball Saturdays"
+      },
+      "expected_answer": "pickup basketball Saturdays",
+      "hop": null,
+      "agent_answer": "Pickup basketball on Saturdays"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world."
+      },
+      "expected_answer": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.",
+      "hop": null,
+      "agent_answer": "\"We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all vehicles I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "vehicle"
+      ],
+      "entity_values": {
+        "vehicle": [
+          "Therwyn Compact",
+          "Vorantel SUV",
+          "Xylorim Scooter"
+        ]
+      },
+      "expected_answer": "Therwyn Compact, Vorantel SUV, Xylorim Scooter",
+      "hop": null,
+      "agent_answer": "Therwyn Compact car, Vorantel SUV, Xylorim Scooter"
+    },
+    {
+      "question": "What is my job title?",
+      "task_type": "Cas",
+      "entity": [
+        "job_title"
+      ],
+      "entity_values": {
+        "job_title": "product manager"
+      },
+      "expected_answer": "product manager",
+      "hop": 1,
+      "agent_answer": "Designer"
+    },
+    {
+      "question": "How long is my commute?",
+      "task_type": "Cas",
+      "entity": [
+        "commute_duration"
+      ],
+      "entity_values": {
+        "commute_duration": "1.5 hours"
+      },
+      "expected_answer": "1.5 hours",
+      "hop": 2,
+      "agent_answer": "About 1 hour."
+    },
+    {
+      "question": "Where is my office?",
+      "task_type": "Abs",
+      "entity": [
+        "work_location"
+      ],
+      "entity_values": {
+        "work_location": "Tesswick Bay"
+      },
+      "expected_answer": "Uncertain — previously 'Tesswick Bay', but employer changed",
+      "hop": 1,
+      "agent_answer": "Tesswick Bay"
+    },
+    {
+      "question": "How do I get to work?",
+      "task_type": "Abs",
+      "entity": [
+        "commute_method"
+      ],
+      "entity_values": {
+        "commute_method": "bike"
+      },
+      "expected_answer": "Uncertain — previously 'bike', but work_location changed",
+      "hop": 2,
+      "agent_answer": "By bike."
+    },
+    {
+      "question": "What's my regular social meetup?",
+      "task_type": "Del",
+      "entity": [
+        "social_gathering"
+      ],
+      "entity_values": {
+        "social_gathering": "pickup basketball Saturdays"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "Pickup basketball on Saturdays"
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "gardening",
+        "sports": "basketball",
+        "club_membership": "book club"
+      },
+      "expected_answer": "The user's hobby is gardening, plays basketball, and is part of book club.",
+      "hop": null,
+      "agent_answer": "- Gardening vegetables  \n- Driving a Therwyn Compact car (previously)  \n- Playing pickup basketball on Saturdays (no longer participates)  \n- Working in UX research at Zypherix Labs (office in Tesswick Bay)  \n- Preparing for a half-marathon  \n- Organizing a collection of vintage video game cartridges  \n- Seeking to acquire a rare holographic Charizard Pokémon card  \n- Considering trading collectibles with a friend named Michael  \n- Growing Sakura (cherry blossom) species suitable for small gardens or balcony gardens  \n- Dining at The Ondreth Pot restaurant  \n- Working out at Velthari Studio  \n- Subscribed to Xelvoria for tailored content and learning  \n- Driving a Vorantel SUV (current vehicle)  \n- Using a Xylorim Scooter as a mode of transportation  \n- Practicing mindfulness, including non-judgmental mindfulness and using mindfulness apps  \n- Exploring electronic music influences, specifically Daphni's album \"Jiaolong\"  \n- Exploring historical and political contexts such as the 1952 Summer Olympics and Cold War impacts  \n- Engaging in podcast development titled \"After the Wire\"  \n- Learning Terraform basics and modules  \n- Exploring home maintenance risks and preventive measures  \n- Exploring Korean cuisine and bibimbap recipes  \n- Managing flexible work hours"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world."
+      },
+      "expected_answer": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.",
+      "hop": null,
+      "agent_answer": "\"We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.\""
+    }
+  ]
+}

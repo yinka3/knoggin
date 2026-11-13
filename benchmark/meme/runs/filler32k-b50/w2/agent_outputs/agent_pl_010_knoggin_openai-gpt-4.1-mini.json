@@ -1,0 +1,150 @@
+{
+  "episode_id": 10,
+  "domain": "personal_life",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What trip am I planning?",
+      "task_type": "Cas",
+      "entity": [
+        "travel_plan"
+      ],
+      "entity_values": {
+        "travel_plan": "mountain ski trip"
+      },
+      "expected_answer": "mountain ski trip",
+      "hop": 1,
+      "agent_answer": "Mountain ski trip"
+    },
+    {
+      "question": "Who do I live with?",
+      "task_type": "Abs",
+      "entity": [
+        "living_arrangement"
+      ],
+      "entity_values": {
+        "living_arrangement": "with roommate"
+      },
+      "expected_answer": "with roommate",
+      "hop": 1,
+      "agent_answer": "A roommate"
+    },
+    {
+      "question": "What's my regular social meetup?",
+      "task_type": "Del",
+      "entity": [
+        "social_gathering"
+      ],
+      "entity_values": {
+        "social_gathering": "brunch with college friends monthly"
+      },
+      "expected_answer": "brunch with college friends monthly",
+      "hop": null,
+      "agent_answer": "Brunch with college friends monthly"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives."
+      },
+      "expected_answer": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.",
+      "hop": null,
+      "agent_answer": "\"Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all partners I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "partner"
+      ],
+      "entity_values": {
+        "partner": [
+          "Alex",
+          "Jordan",
+          "Taylor"
+        ]
+      },
+      "expected_answer": "Alex, Jordan, Taylor",
+      "hop": null,
+      "agent_answer": "You don't have that information."
+    },
+    {
+      "question": "What trip am I planning?",
+      "task_type": "Cas",
+      "entity": [
+        "travel_plan"
+      ],
+      "entity_values": {
+        "travel_plan": "Zynthera Bay beach trip (1 week)"
+      },
+      "expected_answer": "Zynthera Bay beach trip (1 week)",
+      "hop": 1,
+      "agent_answer": "Mountain ski trip"
+    },
+    {
+      "question": "Who do I live with?",
+      "task_type": "Abs",
+      "entity": [
+        "living_arrangement"
+      ],
+      "entity_values": {
+        "living_arrangement": "with roommate"
+      },
+      "expected_answer": "Uncertain — previously 'with roommate', but relationship_status changed",
+      "hop": 1,
+      "agent_answer": "A roommate"
+    },
+    {
+      "question": "What's my regular social meetup?",
+      "task_type": "Del",
+      "entity": [
+        "social_gathering"
+      ],
+      "entity_values": {
+        "social_gathering": "brunch with college friends monthly"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "You previously enjoyed monthly brunch meetups with college friends, exploring new restaurants and cuisines each time to keep the experience interesting and varied."
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "video games",
+        "sports": "pickleball",
+        "club_membership": "board game group"
+      },
+      "expected_answer": "The user's hobby is video games, plays pickleball, and is part of board game group.",
+      "hop": null,
+      "agent_answer": "- Play pickleball regularly, enjoying its combination of strategy, physical activity, and social aspects.  \n- Explore and listen to indie folk music, including artists like Bon Iver, Sufjan Stevens, and Fleet Foxes.  \n- Create and optimize music playlists, including a focus on energetic and stimulating ambient electronic music inspired by artists like Tim Hecker, William Basinski, Tycho, and Four Tet.  \n- Engage with RPG video games for storytelling and character development, showing interest in discussing favorite titles and recommendations.  \n- Plan and participate in social gatherings such as Thanksgiving get-togethers and Batman-themed scavenger hunt parties.  \n- Manage personal growth activities during singlehood, including travel, education, hobbies, and fitness."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives."
+      },
+      "expected_answer": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.",
+      "hop": null,
+      "agent_answer": "\"Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.\""
+    }
+  ]
+}

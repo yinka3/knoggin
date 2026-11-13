@@ -1,0 +1,150 @@
+{
+  "episode_id": 35,
+  "domain": "personal_life",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What type of home do I live in?",
+      "task_type": "Cas",
+      "entity": [
+        "housing_type"
+      ],
+      "entity_values": {
+        "housing_type": "dormitory"
+      },
+      "expected_answer": "dormitory",
+      "hop": 1,
+      "agent_answer": "Dormitory"
+    },
+    {
+      "question": "What family event do I have coming up?",
+      "task_type": "Abs",
+      "entity": [
+        "family_event"
+      ],
+      "entity_values": {
+        "family_event": "family reunion"
+      },
+      "expected_answer": "family reunion",
+      "hop": 1,
+      "agent_answer": "Family reunion"
+    },
+    {
+      "question": "Where do I work?",
+      "task_type": "Del",
+      "entity": [
+        "employer"
+      ],
+      "entity_values": {
+        "employer": "Zypherix Labs"
+      },
+      "expected_answer": "Zypherix Labs",
+      "hop": null,
+      "agent_answer": "Zypherix Labs"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world."
+      },
+      "expected_answer": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.",
+      "hop": null,
+      "agent_answer": "\"We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all subscription services I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "subscription_service"
+      ],
+      "entity_values": {
+        "subscription_service": [
+          "Zorvista Premium",
+          "meal kit (Kelvimeal)",
+          "Pyrethon Plus"
+        ]
+      },
+      "expected_answer": "Zorvista Premium, meal kit (Kelvimeal), Pyrethon Plus",
+      "hop": null,
+      "agent_answer": "1. Kelvimeal  \n2. Pyrethon Plus"
+    },
+    {
+      "question": "What type of home do I live in?",
+      "task_type": "Cas",
+      "entity": [
+        "housing_type"
+      ],
+      "entity_values": {
+        "housing_type": "two-bedroom apartment"
+      },
+      "expected_answer": "two-bedroom apartment",
+      "hop": 1,
+      "agent_answer": "Dormitory"
+    },
+    {
+      "question": "What family event do I have coming up?",
+      "task_type": "Abs",
+      "entity": [
+        "family_event"
+      ],
+      "entity_values": {
+        "family_event": "family reunion"
+      },
+      "expected_answer": "Uncertain — previously 'family reunion', but relationship_status changed",
+      "hop": 1,
+      "agent_answer": "Family reunion"
+    },
+    {
+      "question": "Where do I work?",
+      "task_type": "Del",
+      "entity": [
+        "employer"
+      ],
+      "entity_values": {
+        "employer": "Zypherix Labs"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "You don't have that information."
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "reading",
+        "sports": "running club",
+        "club_membership": "volunteer group"
+      },
+      "expected_answer": "The user's hobby is reading, plays running club, and is part of volunteer group.",
+      "hop": null,
+      "agent_answer": "- Play in a running club, enjoying the camaraderie and motivation during training sessions.\n- Subscribe to and use a meal kit service called Kelvimeal for meal planning and trying new recipes with pre-measured ingredients.\n- Date and reflect on how technology and social media have changed dating dynamics.\n- Live with a roommate in a dormitory setting, appreciating the practical and social aspects.\n- Plan to move to a two-bedroom apartment if relationship status changes.\n- Research and plan a skincare routine using the Dr. Jart+ Dermaclar Clearing Solution Set and Cetaphil Moisturizing Cream.\n- Explore and consider using facial steamers with multiple settings and timers.\n- Shop for summer clothes, focusing on sundresses and mindful, sustainable fashion.\n- Care for summer clothes like tank tops and shorts following best practices.\n- Use a canvas tote bag from a local brand for daily errands and grocery shopping.\n- Explore traditional Sicilian cuisine and seek authentic Sicilian restaurants outside Italy.\n- Learn about Charlotte's public transportation system and use the CATS Pass app.\n- Study theory of mind in psychiatry, including reading academic sources and research.\n- Explore cultural activities, street art tours, and festivals in major cities.\n- Organize and maintain a closet with tips for maximizing space and keeping clothes tidy.\n- Care for a Fossil leather watch and style it with various outfits.\n- Shop for new clothes and sneakers, including Vans and Converse, valuing comfort and versatility.\n- Explore the impact of the COVID-19 pandemic on the sports industry and follow related developments."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world."
+      },
+      "expected_answer": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.",
+      "hop": null,
+      "agent_answer": "\"We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.\""
+    }
+  ]
+}

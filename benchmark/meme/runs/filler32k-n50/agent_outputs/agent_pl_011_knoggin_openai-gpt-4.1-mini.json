@@ -1,0 +1,176 @@
+{
+  "episode_id": 11,
+  "domain": "personal_life",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What regular appointments do I have?",
+      "task_type": "Cas",
+      "entity": [
+        "regular_appointment"
+      ],
+      "entity_values": {
+        "regular_appointment": "dermatologist (monthly)"
+      },
+      "expected_answer": "dermatologist (monthly)",
+      "hop": 1,
+      "agent_answer": "Monthly dermatologist appointments"
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "none"
+      },
+      "expected_answer": "none",
+      "hop": 2,
+      "agent_answer": "Pyravar CrossFit"
+    },
+    {
+      "question": "What medication am I taking?",
+      "task_type": "Abs",
+      "entity": [
+        "medication"
+      ],
+      "entity_values": {
+        "medication": "Korathril"
+      },
+      "expected_answer": "Korathril",
+      "hop": 1,
+      "agent_answer": "Korathril"
+    },
+    {
+      "question": "What's my favorite restaurant?",
+      "task_type": "Del",
+      "entity": [
+        "favorite_restaurant"
+      ],
+      "entity_values": {
+        "favorite_restaurant": "Zefiro's Kitchen"
+      },
+      "expected_answer": "Zefiro's Kitchen",
+      "hop": null,
+      "agent_answer": "Zefiro's Kitchen"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover."
+      },
+      "expected_answer": "Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover.",
+      "hop": null,
+      "agent_answer": "\"Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all subscription services I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "subscription_service"
+      ],
+      "entity_values": {
+        "subscription_service": [
+          "Xelvoria",
+          "Daily Journal subscription",
+          "Pyrethon Plus"
+        ]
+      },
+      "expected_answer": "Xelvoria, Daily Journal subscription, Pyrethon Plus",
+      "hop": null,
+      "agent_answer": "1. Daily Journal subscription  \n2. Xelvoria  \n3. Pyrethon Plus"
+    },
+    {
+      "question": "What regular appointments do I have?",
+      "task_type": "Cas",
+      "entity": [
+        "regular_appointment"
+      ],
+      "entity_values": {
+        "regular_appointment": "therapy (weekly)"
+      },
+      "expected_answer": "therapy (weekly)",
+      "hop": 1,
+      "agent_answer": "Monthly dermatologist appointments"
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Pyravar CrossFit"
+      },
+      "expected_answer": "Pyravar CrossFit",
+      "hop": 2,
+      "agent_answer": "Pyravar CrossFit"
+    },
+    {
+      "question": "What medication am I taking?",
+      "task_type": "Abs",
+      "entity": [
+        "medication"
+      ],
+      "entity_values": {
+        "medication": "Korathril"
+      },
+      "expected_answer": "Uncertain — previously 'Korathril', but health_condition changed",
+      "hop": 1,
+      "agent_answer": "Korathril"
+    },
+    {
+      "question": "What's my favorite restaurant?",
+      "task_type": "Del",
+      "entity": [
+        "favorite_restaurant"
+      ],
+      "entity_values": {
+        "favorite_restaurant": "Zefiro's Kitchen"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "Zefiro's Kitchen"
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "gardening",
+        "sports": "running club",
+        "club_membership": "wine tasting club"
+      },
+      "expected_answer": "The user's hobby is gardening, plays running club, and is part of wine tasting club.",
+      "hop": null,
+      "agent_answer": "- Gardening, enjoying spending time outdoors and working with plants  \n- Reading, currently engaged with the book \"The Quorath Codex\"  \n- Playing in a running club as a way to stay active and socialize  \n- Wine tasting, exploring different wine selections as part of a wine tasting club"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover."
+      },
+      "expected_answer": "Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover.",
+      "hop": null,
+      "agent_answer": "\"Twenty years from now you will be more disappointed by the things that you didn't do than by the ones you did do. So throw off the bowlines, sail away from safe harbor, catch the trade winds in your sails. Explore, dream, discover.\""
+    }
+  ]
+}

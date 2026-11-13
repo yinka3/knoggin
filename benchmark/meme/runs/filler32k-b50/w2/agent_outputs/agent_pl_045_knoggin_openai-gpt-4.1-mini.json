@@ -1,0 +1,150 @@
+{
+  "episode_id": 45,
+  "domain": "personal_life",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What trip am I planning?",
+      "task_type": "Cas",
+      "entity": [
+        "travel_plan"
+      ],
+      "entity_values": {
+        "travel_plan": "mountain ski trip"
+      },
+      "expected_answer": "mountain ski trip",
+      "hop": 1,
+      "agent_answer": "A mountain ski trip"
+    },
+    {
+      "question": "Who do I live with?",
+      "task_type": "Abs",
+      "entity": [
+        "living_arrangement"
+      ],
+      "entity_values": {
+        "living_arrangement": "with partner and child"
+      },
+      "expected_answer": "with partner and child",
+      "hop": 1,
+      "agent_answer": "Partner and child"
+    },
+    {
+      "question": "What dietary restrictions do I have?",
+      "task_type": "Del",
+      "entity": [
+        "dietary_restriction"
+      ],
+      "entity_values": {
+        "dietary_restriction": "no alcohol"
+      },
+      "expected_answer": "no alcohol",
+      "hop": null,
+      "agent_answer": "No alcohol"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you."
+      },
+      "expected_answer": "Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you.",
+      "hop": null,
+      "agent_answer": "\"Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all subscription services I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "subscription_service"
+      ],
+      "entity_values": {
+        "subscription_service": [
+          "Xelvoria",
+          "Zorvista Premium",
+          "Daily Journal subscription"
+        ]
+      },
+      "expected_answer": "Xelvoria, Zorvista Premium, Daily Journal subscription",
+      "hop": null,
+      "agent_answer": "1. Zorvista Premium"
+    },
+    {
+      "question": "What trip am I planning?",
+      "task_type": "Cas",
+      "entity": [
+        "travel_plan"
+      ],
+      "entity_values": {
+        "travel_plan": "no travel planned"
+      },
+      "expected_answer": "no travel planned",
+      "hop": 1,
+      "agent_answer": "Mountain ski trip"
+    },
+    {
+      "question": "Who do I live with?",
+      "task_type": "Abs",
+      "entity": [
+        "living_arrangement"
+      ],
+      "entity_values": {
+        "living_arrangement": "with partner and child"
+      },
+      "expected_answer": "Uncertain — previously 'with partner and child', but relationship_status changed",
+      "hop": 1,
+      "agent_answer": "Partner and child"
+    },
+    {
+      "question": "What dietary restrictions do I have?",
+      "task_type": "Del",
+      "entity": [
+        "dietary_restriction"
+      ],
+      "entity_values": {
+        "dietary_restriction": "no alcohol"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "No alcohol"
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "cooking",
+        "sports": "volleyball",
+        "club_membership": "wine tasting club"
+      },
+      "expected_answer": "The user's hobby is cooking, plays volleyball, and is part of wine tasting club.",
+      "hop": null,
+      "agent_answer": "- Play volleyball and focus on improving serving skills through target serve drills, toss consistency, serve-and-sprint exercises, and resistance training (C23).\n- Attend social meetups consisting of game nights with neighbors to relax and connect socially (C7).\n- Participate in a wine tasting club, exploring different wine varieties, regions, and flavor profiles, and use journaling to enhance the experience (C29).\n- Play narrative-driven video games such as The Last of Us Part II, Ghost of Tsushima, What Remains of Edith Finch, Firewatch, and Hyper Light Drifter (C18)."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you."
+      },
+      "expected_answer": "Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you.",
+      "hop": null,
+      "agent_answer": "\"Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you.\""
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "knowledge-update": {
+    "accuracy": 0.8666666666666667,
+    "count": 15
+  },
+  "temporal-reasoning": {
+    "accuracy": 0.9615384615384616,
+    "count": 26
+  },
+  "abstention": {
+    "accuracy": 1.0,
+    "count": 5
+  },
+  "multi-session": {
+    "accuracy": 0.7083333333333334,
+    "count": 24
+  },
+  "single-session-assistant": {
+    "accuracy": 0.9,
+    "count": 10
+  },
+  "single-session-preference": {
+    "accuracy": 0.25,
+    "count": 8
+  },
+  "single-session-user": {
+    "accuracy": 0.9166666666666666,
+    "count": 12
+  },
+  "overall": {
+    "accuracy": 0.82,
+    "count": 100
+  }
+}

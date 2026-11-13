@@ -1,0 +1,150 @@
+{
+  "episode_id": 29,
+  "domain": "personal_life",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What's my work schedule?",
+      "task_type": "Cas",
+      "entity": [
+        "work_schedule"
+      ],
+      "entity_values": {
+        "work_schedule": "10-to-7 fixed"
+      },
+      "expected_answer": "10-to-7 fixed",
+      "hop": 1,
+      "agent_answer": "Your work schedule is currently fixed from 10-to-7, which depends on your enrollment at Quivira Springs Community College. If you change schools, your schedule would shift to a hybrid model with 3 days in the office and 2 days remote."
+    },
+    {
+      "question": "What's my current financial goal?",
+      "task_type": "Abs",
+      "entity": [
+        "financial_goal"
+      ],
+      "entity_values": {
+        "financial_goal": "maxing out retirement fund"
+      },
+      "expected_answer": "maxing out retirement fund",
+      "hop": 1,
+      "agent_answer": "Maxing out retirement fund."
+    },
+    {
+      "question": "What's my sleep schedule?",
+      "task_type": "Del",
+      "entity": [
+        "sleep_pattern"
+      ],
+      "entity_values": {
+        "sleep_pattern": "11pm-7am"
+      },
+      "expected_answer": "11pm-7am",
+      "hop": null,
+      "agent_answer": "11 PM to 7 AM"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world."
+      },
+      "expected_answer": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.",
+      "hop": null,
+      "agent_answer": "\"We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all media I've consumed over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "media_consumption"
+      ],
+      "entity_values": {
+        "media_consumption": [
+          "Whispers of Zarinthea (TV)",
+          "Thyrelion (anime)",
+          "Xelvari Dawn (book)"
+        ]
+      },
+      "expected_answer": "Whispers of Zarinthea (TV), Thyrelion (anime), Xelvari Dawn (book)",
+      "hop": null,
+      "agent_answer": "1. Calvin and Hobbes comic strip by Bill Watterson  \n2. Dranthazon subscription content (shows and diverse content)  \n3. Anime \"Thyrelion\"  \n4. Opinion pieces and editorials from The New York Times and The Guardian  \n5. Podcasts, YouTube channels, and shows for Spanish learning  \n6. The Atlantic magazine (print editions, bi-monthly)  \n7. YouTube video about increasing customer loyalty through sustainability (CleanHub video)"
+    },
+    {
+      "question": "What's my work schedule?",
+      "task_type": "Cas",
+      "entity": [
+        "work_schedule"
+      ],
+      "entity_values": {
+        "work_schedule": "hybrid (3 office + 2 remote)"
+      },
+      "expected_answer": "hybrid (3 office + 2 remote)",
+      "hop": 1,
+      "agent_answer": "Your work schedule is currently fixed from 10-to-7. If you change schools from Quivira Springs Community College, your schedule would shift to a hybrid model with 3 office days and 2 remote days."
+    },
+    {
+      "question": "What's my current financial goal?",
+      "task_type": "Abs",
+      "entity": [
+        "financial_goal"
+      ],
+      "entity_values": {
+        "financial_goal": "maxing out retirement fund"
+      },
+      "expected_answer": "Uncertain — previously 'maxing out retirement fund', but school changed",
+      "hop": 1,
+      "agent_answer": "Maxing out retirement fund."
+    },
+    {
+      "question": "What's my sleep schedule?",
+      "task_type": "Del",
+      "entity": [
+        "sleep_pattern"
+      ],
+      "entity_values": {
+        "sleep_pattern": "11pm-7am"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "11 PM to 7 AM"
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "video games",
+        "sports": "volleyball",
+        "club_membership": "wine tasting club"
+      },
+      "expected_answer": "The user's hobby is video games, plays volleyball, and is part of wine tasting club.",
+      "hop": null,
+      "agent_answer": "- Keep a journal and write about vivid dreams (e.g., the dream on February 15th).  \n- Write fiction, especially exploring dream-inspired prompts like \"Dream Within a Dream.\"  \n- Play volleyball and practice serving and teamwork with a team a couple of times a week.  \n- Watch anime, specifically \"Thyrelion,\" and engage with character development and story arcs.  \n- Learn Spanish using language exchange apps, podcasts, YouTube channels, and shows.  \n- Participate in a wine tasting club, exploring different wine varieties and food pairings.  \n- Read literary fiction and opinion pieces/editorials from The New York Times, The Guardian, and magazines like The Atlantic.  \n- Plan outdoor recreational activities such as kayaking or canoeing in Hague, Virginia.  \n- Explore process intelligence and process mining, including coding and machine learning applications.  \n- Engage in sustainable practices and explore innovative ways to reduce plastic waste."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world."
+      },
+      "expected_answer": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.",
+      "hop": null,
+      "agent_answer": "\"We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.\""
+    }
+  ]
+}

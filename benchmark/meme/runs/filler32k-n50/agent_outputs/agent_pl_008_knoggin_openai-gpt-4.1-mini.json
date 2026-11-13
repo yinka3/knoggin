@@ -1,0 +1,202 @@
+{
+  "episode_id": 8,
+  "domain": "personal_life",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What project am I working on?",
+      "task_type": "Cas",
+      "entity": [
+        "work_project"
+      ],
+      "entity_values": {
+        "work_project": "backend migration"
+      },
+      "expected_answer": "backend migration",
+      "hop": 1,
+      "agent_answer": "backend migration"
+    },
+    {
+      "question": "How do I get to work?",
+      "task_type": "Cas",
+      "entity": [
+        "commute_method"
+      ],
+      "entity_values": {
+        "commute_method": "walking"
+      },
+      "expected_answer": "walking",
+      "hop": 2,
+      "agent_answer": "You currently walk to work."
+    },
+    {
+      "question": "What insurance do I have?",
+      "task_type": "Abs",
+      "entity": [
+        "insurance"
+      ],
+      "entity_values": {
+        "insurance": "interim coverage plan"
+      },
+      "expected_answer": "interim coverage plan",
+      "hop": 1,
+      "agent_answer": "Interim insurance coverage plan through your employer, Thalwren Inc."
+    },
+    {
+      "question": "What's my favorite restaurant?",
+      "task_type": "Abs",
+      "entity": [
+        "favorite_restaurant"
+      ],
+      "entity_values": {
+        "favorite_restaurant": "Zefiro's Kitchen"
+      },
+      "expected_answer": "Zefiro's Kitchen",
+      "hop": 2,
+      "agent_answer": "Zefiro's Kitchen"
+    },
+    {
+      "question": "What car do I drive?",
+      "task_type": "Del",
+      "entity": [
+        "vehicle"
+      ],
+      "entity_values": {
+        "vehicle": "Xylorim Scooter"
+      },
+      "expected_answer": "Xylorim Scooter",
+      "hop": null,
+      "agent_answer": "You drive a Xylorim Scooter."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives."
+      },
+      "expected_answer": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.",
+      "hop": null,
+      "agent_answer": "\"Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all subscription services I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "subscription_service"
+      ],
+      "entity_values": {
+        "subscription_service": [
+          "Xelvoria",
+          "meal kit (Kelvimeal)",
+          "Dranthazon"
+        ]
+      },
+      "expected_answer": "Xelvoria, meal kit (Kelvimeal), Dranthazon",
+      "hop": null,
+      "agent_answer": "Xelvoria, Kelvimeal, Dranthazon"
+    },
+    {
+      "question": "What project am I working on?",
+      "task_type": "Cas",
+      "entity": [
+        "work_project"
+      ],
+      "entity_values": {
+        "work_project": "marketing campaign"
+      },
+      "expected_answer": "marketing campaign",
+      "hop": 1,
+      "agent_answer": "An interactive dinosaur encyclopedia prototype for the Naturalis Museum in Leiden, designed as a user-centered, clickable touchscreen interface to enhance visitor learning and engagement, especially for children, aligned with the museum's educational mission and bachelor's thesis standards."
+    },
+    {
+      "question": "How do I get to work?",
+      "task_type": "Cas",
+      "entity": [
+        "commute_method"
+      ],
+      "entity_values": {
+        "commute_method": "bus"
+      },
+      "expected_answer": "bus",
+      "hop": 2,
+      "agent_answer": "You currently walk to work."
+    },
+    {
+      "question": "What insurance do I have?",
+      "task_type": "Abs",
+      "entity": [
+        "insurance"
+      ],
+      "entity_values": {
+        "insurance": "interim coverage plan"
+      },
+      "expected_answer": "Uncertain — previously 'interim coverage plan', but employer changed",
+      "hop": 1,
+      "agent_answer": "Interim insurance coverage plan through your employer, Thalwren Inc."
+    },
+    {
+      "question": "What's my favorite restaurant?",
+      "task_type": "Abs",
+      "entity": [
+        "favorite_restaurant"
+      ],
+      "entity_values": {
+        "favorite_restaurant": "Zefiro's Kitchen"
+      },
+      "expected_answer": "Uncertain — previously 'Zefiro's Kitchen', but work_location changed",
+      "hop": 2,
+      "agent_answer": "Zefiro's Kitchen"
+    },
+    {
+      "question": "What car do I drive?",
+      "task_type": "Del",
+      "entity": [
+        "vehicle"
+      ],
+      "entity_values": {
+        "vehicle": "Xylorim Scooter"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "I don't have that information."
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "cooking",
+        "sports": "cycling",
+        "club_membership": "board game group"
+      },
+      "expected_answer": "The user's hobby is cooking, plays cycling, and is part of board game group.",
+      "hop": null,
+      "agent_answer": "- Cooking, enjoying trying new recipes and experimenting with different cuisines, including making homemade sushi and baking desserts like cakes and pastries.\n- Playing cycling as a way to stay fit and enjoy the outdoors.\n- Participating in a board game group that meets weekly to play a mix of strategy and party games, including cooperative games like \"Pandemic,\" and exploring new board games such as \"Gloomhaven,\" \"Spirit Island,\" and \"The Crew: The Quest for Planet Nine.\"\n- Attending pickup basketball on Saturdays as a regular social meetup.\n- Planning and going on fishing trips, such as a trip to Lake Erie targeting smallmouth bass, and gathering detailed information on fishing gear and conditions.\n- Vintage and thrift shopping in Porto Alegre, seeking unique shopping experiences and treasures.\n- Watching TV shows, with a preference for light-hearted and feel-good shows to lift mood after intense shows.\n- Styling and organizing the bookshelf, including exploring tips to make it more visually appealing.\n- Reading novels and adding new books to the collection.\n- Planning and attending social events like a college reunion to reconnect with old friends.\n- Engaging in workouts at Kaelstrom Fitness gym.\n- Exploring new coffee shops near the office and trying different coffee preparations.\n- Planning and organizing corporate networking receptions and group outings such as brunch spots.\n- Managing time and coordinating plans with partner James, especially while working night shifts.\n- Listening to books, podcasts, educational content, or practicing mindfulness during a 40-minute commute."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives."
+      },
+      "expected_answer": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.",
+      "hop": null,
+      "agent_answer": "\"Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.\""
+    }
+  ]
+}

@@ -1,0 +1,219 @@
+{
+  "episode_id": 12,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "Who do I live with?",
+      "task_type": "Cas",
+      "entity": [
+        "living_arrangement"
+      ],
+      "entity_values": {
+        "living_arrangement": "alone"
+      },
+      "expected_answer": "alone",
+      "hop": 1,
+      "agent_answer": "You live alone.",
+      "u_pass": true,
+      "u_reason": "The agent's answer 'You live alone.' semantically matches the gold answer 'alone.'"
+    },
+    {
+      "question": "What type of home do I live in?",
+      "task_type": "Abs",
+      "entity": [
+        "housing_type"
+      ],
+      "entity_values": {
+        "housing_type": "single-family house"
+      },
+      "expected_answer": "single-family house",
+      "hop": 1,
+      "agent_answer": "Single-family house",
+      "u_pass": true,
+      "u_reason": "The agent's answer is semantically equivalent to the gold answer."
+    },
+    {
+      "question": "What regular appointments do I have?",
+      "task_type": "Del",
+      "entity": [
+        "regular_appointment"
+      ],
+      "entity_values": {
+        "regular_appointment": "physical therapy (2x/week)"
+      },
+      "expected_answer": "physical therapy (2x/week)",
+      "hop": null,
+      "agent_answer": "Physical therapy appointments twice a week.",
+      "u_pass": true,
+      "u_reason": "The agent's answer semantically matches the gold answer by stating physical therapy appointments occur twice a week."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it."
+      },
+      "expected_answer": "The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it.",
+      "hop": null,
+      "agent_answer": "\"The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it.\"",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all vehicles I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "vehicle"
+      ],
+      "entity_values": {
+        "vehicle": [
+          "Zyvanta Sedan",
+          "Dranthis Pickup",
+          "Vorantel SUV"
+        ]
+      },
+      "expected_answer": "Zyvanta Sedan, Dranthis Pickup, Vorantel SUV",
+      "hop": null,
+      "agent_answer": "Dranthis Pickup, Vorantel SUV",
+      "u_pass": false,
+      "u_reason": "The agent's answer is missing the earliest vehicle, 'Zyvanta Sedan', and does not match the full ordered history.",
+      "u_pass_count": 2,
+      "u_pass_total": 3
+    },
+    {
+      "question": "Who do I live with?",
+      "task_type": "Cas",
+      "entity": [
+        "living_arrangement"
+      ],
+      "entity_values": {
+        "living_arrangement": "with partner"
+      },
+      "expected_answer": "with partner",
+      "hop": 1,
+      "agent_answer": "You live alone.",
+      "u_pass": false,
+      "u_reason": "The agent stated only the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What type of home do I live in?",
+      "task_type": "Abs",
+      "entity": [
+        "housing_type"
+      ],
+      "entity_values": {
+        "housing_type": "single-family house"
+      },
+      "expected_answer": "Uncertain — previously 'single-family house', but relationship_status changed",
+      "hop": 1,
+      "agent_answer": "Single-family house",
+      "u_pass": false,
+      "u_reason": "The agent confidently stated the old value without expressing uncertainty.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What regular appointments do I have?",
+      "task_type": "Del",
+      "entity": [
+        "regular_appointment"
+      ],
+      "entity_values": {
+        "regular_appointment": "physical therapy (2x/week)"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "Physical therapy appointments twice a week.",
+      "u_pass": false,
+      "u_reason": "The agent incorrectly returned the deleted value by stating the physical therapy appointments.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "gardening",
+        "sports": "rock climbing",
+        "club_membership": "volunteer group"
+      },
+      "expected_answer": "The user's hobby is gardening, plays rock climbing, and is part of volunteer group.",
+      "hop": null,
+      "agent_answer": "- Organize kitchen and living spaces  \n- Enjoy a new area rug and lamp enhancing the living room and bedside reading  \n- Care for a small kitchen succulent named Sprout  \n- Search for a favorite misplaced coffee mug  \n- Play rock climbing several times a week  \n- Climb at a climbing gym for practice and social interaction  \n- Participate in outdoor climbing adventures with partner Mike  \n- Attend physical therapy twice weekly to maintain strength and flexibility for climbing  \n- Gardening, including maintaining plants with watering, soil quality, pest control, and pruning  \n- Regularly participate in pickup basketball on Saturdays as a social meetup",
+      "u_pass": false,
+      "u_pass_per_entity": {
+        "hobby": true,
+        "sports": true,
+        "club_membership": false
+      },
+      "u_pass_count": 2,
+      "u_pass_total": 3,
+      "u_reason": "Gardening and rock climbing are mentioned, but volunteer group is not."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it."
+      },
+      "expected_answer": "The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it.",
+      "hop": null,
+      "agent_answer": "\"The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it.\"",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    }
+  },
+  "totals": {
+    "before_pass": 3,
+    "before_total": 4,
+    "after_pass": 1,
+    "after_total": 6
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 8,
+    "input_tokens": 1672,
+    "output_tokens": 245
+  }
+}

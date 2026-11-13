@@ -1,0 +1,176 @@
+{
+  "episode_id": 31,
+  "domain": "software_project",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What authentication method do we use?",
+      "task_type": "Cas",
+      "entity": [
+        "auth_method"
+      ],
+      "entity_values": {
+        "auth_method": "mTLS Client Cert"
+      },
+      "expected_answer": "mTLS Client Cert",
+      "hop": 1,
+      "agent_answer": "mTLS Client Certificate via Kryptal Auth"
+    },
+    {
+      "question": "What's the auth middleware config?",
+      "task_type": "Cas",
+      "entity": [
+        "middleware_config"
+      ],
+      "entity_values": {
+        "middleware_config": "oathkeeper-mtls-proxy v4.1"
+      },
+      "expected_answer": "oathkeeper-mtls-proxy v4.1",
+      "hop": 2,
+      "agent_answer": "oathkeeper-mtls-proxy v4.1"
+    },
+    {
+      "question": "What token format do we use?",
+      "task_type": "Abs",
+      "entity": [
+        "token_format"
+      ],
+      "entity_values": {
+        "token_format": "Zenthos-Session-v1"
+      },
+      "expected_answer": "Zenthos-Session-v1",
+      "hop": 1,
+      "agent_answer": "Zenthos-Session-v1"
+    },
+    {
+      "question": "What's the model syntax?",
+      "task_type": "Del",
+      "entity": [
+        "model_syntax"
+      ],
+      "entity_values": {
+        "model_syntax": "Crysthene.define('Model', {fields})"
+      },
+      "expected_answer": "Crysthene.define('Model', {fields})",
+      "hop": null,
+      "agent_answer": "Crysthene.define('Model', {fields})"
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z."
+      },
+      "expected_answer": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z.",
+      "hop": null,
+      "agent_answer": "\"PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all secret managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "secret_manager"
+      ],
+      "entity_values": {
+        "secret_manager": [
+          "Cryptara Vault",
+          "Sigilix Manager",
+          "Velthri Keys"
+        ]
+      },
+      "expected_answer": "Cryptara Vault, Sigilix Manager, Velthri Keys",
+      "hop": null,
+      "agent_answer": "Sigilix Manager, Cryptara Vault, Velthri Keys"
+    },
+    {
+      "question": "What authentication method do we use?",
+      "task_type": "Cas",
+      "entity": [
+        "auth_method"
+      ],
+      "entity_values": {
+        "auth_method": "Session Cookie + CSRF"
+      },
+      "expected_answer": "Session Cookie + CSRF",
+      "hop": 1,
+      "agent_answer": "mTLS Client Certificate via Kryptal Auth"
+    },
+    {
+      "question": "What's the auth middleware config?",
+      "task_type": "Cas",
+      "entity": [
+        "middleware_config"
+      ],
+      "entity_values": {
+        "middleware_config": "zenthos-session-middleware v1.8"
+      },
+      "expected_answer": "zenthos-session-middleware v1.8",
+      "hop": 2,
+      "agent_answer": "oathkeeper-mtls-proxy v4.1"
+    },
+    {
+      "question": "What token format do we use?",
+      "task_type": "Abs",
+      "entity": [
+        "token_format"
+      ],
+      "entity_values": {
+        "token_format": "Zenthos-Session-v1"
+      },
+      "expected_answer": "Uncertain — previously 'Zenthos-Session-v1', but auth_provider changed",
+      "hop": 1,
+      "agent_answer": "Zenthos-Session-v1"
+    },
+    {
+      "question": "What's the model syntax?",
+      "task_type": "Del",
+      "entity": [
+        "model_syntax"
+      ],
+      "entity_values": {
+        "model_syntax": "Crysthene.define('Model', {fields})"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "I don't have that information."
+    },
+    {
+      "question": "Where can I find project documentation? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "documentation_url",
+        "onboarding_guide",
+        "changelog_location"
+      ],
+      "entity_values": {
+        "documentation_url": "docs.aurora.internal/wiki",
+        "onboarding_guide": "wiki.aurora.dev/getting-started",
+        "changelog_location": "docs.aurora.internal/changelog"
+      },
+      "expected_answer": "Docs are at docs.aurora.internal/wiki, onboarding guide at wiki.aurora.dev/getting-started, and changelog at docs.aurora.internal/changelog.",
+      "hop": null,
+      "agent_answer": "docs.aurora.internal/wiki"
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z."
+      },
+      "expected_answer": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z.",
+      "hop": null,
+      "agent_answer": "\"PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z.\""
+    }
+  ]
+}

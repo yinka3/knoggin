@@ -1,0 +1,150 @@
+{
+  "episode_id": 2,
+  "domain": "personal_life",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "How long is my commute?",
+      "task_type": "Cas",
+      "entity": [
+        "commute_duration"
+      ],
+      "entity_values": {
+        "commute_duration": "1.5 hours"
+      },
+      "expected_answer": "1.5 hours",
+      "hop": 1,
+      "agent_answer": "About 1.5 hours."
+    },
+    {
+      "question": "What's my favorite restaurant?",
+      "task_type": "Abs",
+      "entity": [
+        "favorite_restaurant"
+      ],
+      "entity_values": {
+        "favorite_restaurant": "Zefiro's Kitchen"
+      },
+      "expected_answer": "Zefiro's Kitchen",
+      "hop": 1,
+      "agent_answer": "Zefiro's Kitchen"
+    },
+    {
+      "question": "What's my sleep schedule?",
+      "task_type": "Del",
+      "entity": [
+        "sleep_pattern"
+      ],
+      "entity_values": {
+        "sleep_pattern": "varies by shift"
+      },
+      "expected_answer": "varies by shift",
+      "hop": null,
+      "agent_answer": "Your sleep usually varies by shift, and you sometimes have to adjust your sleep routine depending on your schedule."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it."
+      },
+      "expected_answer": "The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it.",
+      "hop": null,
+      "agent_answer": "\"The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all vehicles I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "vehicle"
+      ],
+      "entity_values": {
+        "vehicle": [
+          "Therwyn Compact",
+          "Dranthis Pickup",
+          "Xylorim Scooter"
+        ]
+      },
+      "expected_answer": "Therwyn Compact, Dranthis Pickup, Xylorim Scooter",
+      "hop": null,
+      "agent_answer": "Therwyn Compact, Samsung Galaxy S22"
+    },
+    {
+      "question": "How long is my commute?",
+      "task_type": "Cas",
+      "entity": [
+        "commute_duration"
+      ],
+      "entity_values": {
+        "commute_duration": "10 min"
+      },
+      "expected_answer": "10 min",
+      "hop": 1,
+      "agent_answer": "About 1.5 hours."
+    },
+    {
+      "question": "What's my favorite restaurant?",
+      "task_type": "Abs",
+      "entity": [
+        "favorite_restaurant"
+      ],
+      "entity_values": {
+        "favorite_restaurant": "Zefiro's Kitchen"
+      },
+      "expected_answer": "Uncertain — previously 'Zefiro's Kitchen', but residence_location changed",
+      "hop": 1,
+      "agent_answer": "Zefiro's Kitchen"
+    },
+    {
+      "question": "What's my sleep schedule?",
+      "task_type": "Del",
+      "entity": [
+        "sleep_pattern"
+      ],
+      "entity_values": {
+        "sleep_pattern": "varies by shift"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "Your sleep usually varies by shift, and you sometimes have to adjust your sleep routine depending on your schedule."
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "knitting",
+        "sports": "basketball",
+        "club_membership": "board game group"
+      },
+      "expected_answer": "The user's hobby is knitting, plays basketball, and is part of board game group.",
+      "hop": null,
+      "agent_answer": "- Enjoy surfing lessons in Pacific Beach, San Diego with family  \n- Spend time at beaches and engage in outdoor beach activities  \n- Stay active through basketball and CrossFit workouts (works out regularly at Pyravar CrossFit)  \n- Share activities and interests with partner James  \n- Explore scenic coastal routes and wine country stops  \n- Participate in wine and food pairing experiences at wineries  \n- Book private tours and tastings at wineries (e.g., Fess Parker Winery)  \n- Read books and organize reading lists, engage with book communities like Goodreads  \n- Reduce screen time using analog and low-tech productivity tools such as planners, bullet journaling, and Pomodoro timers  \n- Reduce waste in the kitchen through meal planning, proper storage, using leftovers, composting, and using eco-friendly kitchen products  \n- Explore sustainable fashion and lifestyle through documentaries, YouTube channels, and blogs  \n- Organize photos using photo management apps on Samsung Galaxy S22  \n- Travel and explore new destinations (e.g., road trips along Pacific Coast Highway, wine country trips, Tanzania itinerary)"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it."
+      },
+      "expected_answer": "The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it.",
+      "hop": null,
+      "agent_answer": "\"The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it.\""
+    }
+  ]
+}

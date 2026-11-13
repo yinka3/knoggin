@@ -1,0 +1,176 @@
+{
+  "episode_id": 14,
+  "domain": "personal_life",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What regular appointments do I have?",
+      "task_type": "Cas",
+      "entity": [
+        "regular_appointment"
+      ],
+      "entity_values": {
+        "regular_appointment": "dentist (every 6 months)"
+      },
+      "expected_answer": "dentist (every 6 months)",
+      "hop": 1,
+      "agent_answer": "Dentist every 6 months; potentially dermatologist monthly if health condition changes."
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Pyravar CrossFit"
+      },
+      "expected_answer": "Pyravar CrossFit",
+      "hop": 2,
+      "agent_answer": "Pyravar CrossFit"
+    },
+    {
+      "question": "What medication am I taking?",
+      "task_type": "Abs",
+      "entity": [
+        "medication"
+      ],
+      "entity_values": {
+        "medication": "Velnorath"
+      },
+      "expected_answer": "Velnorath",
+      "hop": 1,
+      "agent_answer": "Velnorath"
+    },
+    {
+      "question": "What insurance do I have?",
+      "task_type": "Del",
+      "entity": [
+        "insurance"
+      ],
+      "entity_values": {
+        "insurance": "dental + vision bundle"
+      },
+      "expected_answer": "dental + vision bundle",
+      "hop": null,
+      "agent_answer": "Dental and vision insurance bundle"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world."
+      },
+      "expected_answer": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.",
+      "hop": null,
+      "agent_answer": "\"We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all subscription services I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "subscription_service"
+      ],
+      "entity_values": {
+        "subscription_service": [
+          "Daily Journal subscription",
+          "Dranthazon",
+          "Pyrethon Plus"
+        ]
+      },
+      "expected_answer": "Daily Journal subscription, Dranthazon, Pyrethon Plus",
+      "hop": null,
+      "agent_answer": "The context does not provide information about all the subscription services you have had over time."
+    },
+    {
+      "question": "What regular appointments do I have?",
+      "task_type": "Cas",
+      "entity": [
+        "regular_appointment"
+      ],
+      "entity_values": {
+        "regular_appointment": "dermatologist (monthly)"
+      },
+      "expected_answer": "dermatologist (monthly)",
+      "hop": 1,
+      "agent_answer": "Dentist every 6 months; potentially dermatologist monthly if health condition changes."
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Kaelstrom Fitness"
+      },
+      "expected_answer": "Kaelstrom Fitness",
+      "hop": 2,
+      "agent_answer": "Pyravar CrossFit"
+    },
+    {
+      "question": "What medication am I taking?",
+      "task_type": "Abs",
+      "entity": [
+        "medication"
+      ],
+      "entity_values": {
+        "medication": "Velnorath"
+      },
+      "expected_answer": "Uncertain — previously 'Velnorath', but health_condition changed",
+      "hop": 1,
+      "agent_answer": "Velnorath"
+    },
+    {
+      "question": "What insurance do I have?",
+      "task_type": "Del",
+      "entity": [
+        "insurance"
+      ],
+      "entity_values": {
+        "insurance": "dental + vision bundle"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "I don't have that information."
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "guitar",
+        "sports": "basketball",
+        "club_membership": "running club"
+      },
+      "expected_answer": "The user's hobby is guitar, plays basketball, and is part of running club.",
+      "hop": null,
+      "agent_answer": "- Play basketball mostly for fun with friends, appreciating the social and relaxing aspects without competitive pressure  \n- Subscribe to Dranthazon for diverse content that keeps you engaged  \n- Explore gluten-free recipes and alternatives such as stir-fries, salads, and gluten-free pasta due to your gluten-free dietary restriction  \n- Participate regularly in social game nights with neighbors, favoring interactive and strategic games like Codenames and cooperative games like Pandemic that encourage teamwork and discussion"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world."
+      },
+      "expected_answer": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.",
+      "hop": null,
+      "agent_answer": "\"We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.\""
+    }
+  ]
+}

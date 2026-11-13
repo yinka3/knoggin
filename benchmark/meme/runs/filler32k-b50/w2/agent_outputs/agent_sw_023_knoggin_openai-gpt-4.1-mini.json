@@ -1,0 +1,150 @@
+{
+  "episode_id": 23,
+  "domain": "software_project",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "Who has approval authority?",
+      "task_type": "Cas",
+      "entity": [
+        "approval_authority"
+      ],
+      "entity_values": {
+        "approval_authority": "VP Helen Chen"
+      },
+      "expected_answer": "VP Helen Chen",
+      "hop": 1,
+      "agent_answer": "VP Helen Chen"
+    },
+    {
+      "question": "Who reviews our code?",
+      "task_type": "Abs",
+      "entity": [
+        "code_reviewer"
+      ],
+      "entity_values": {
+        "code_reviewer": "Seoyun Choi"
+      },
+      "expected_answer": "Seoyun Choi",
+      "hop": 1,
+      "agent_answer": "Seoyun Choi"
+    },
+    {
+      "question": "What database are we using?",
+      "task_type": "Del",
+      "entity": [
+        "database"
+      ],
+      "entity_values": {
+        "database": "Thalnex Store"
+      },
+      "expected_answer": "Thalnex Store",
+      "hop": null,
+      "agent_answer": "Thalnex Store"
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover."
+      },
+      "expected_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover.",
+      "hop": null,
+      "agent_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover."
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all package managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "package_manager"
+      ],
+      "entity_values": {
+        "package_manager": [
+          "Pyronis Bundle",
+          "Zelthra Lib",
+          "Synthari Modules"
+        ]
+      },
+      "expected_answer": "Pyronis Bundle, Zelthra Lib, Synthari Modules",
+      "hop": null,
+      "agent_answer": "Thalnex Store, Zelthra Lib"
+    },
+    {
+      "question": "Who has approval authority?",
+      "task_type": "Cas",
+      "entity": [
+        "approval_authority"
+      ],
+      "entity_values": {
+        "approval_authority": "VP Taehyun Kim"
+      },
+      "expected_answer": "VP Taehyun Kim",
+      "hop": 1,
+      "agent_answer": "VP Helen Chen"
+    },
+    {
+      "question": "Who reviews our code?",
+      "task_type": "Abs",
+      "entity": [
+        "code_reviewer"
+      ],
+      "entity_values": {
+        "code_reviewer": "Seoyun Choi"
+      },
+      "expected_answer": "Uncertain — previously 'Seoyun Choi', but team_lead changed",
+      "hop": 1,
+      "agent_answer": "Seoyun Choi"
+    },
+    {
+      "question": "What database are we using?",
+      "task_type": "Del",
+      "entity": [
+        "database"
+      ],
+      "entity_values": {
+        "database": "Thalnex Store"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "We no longer use Thalnex Store as our database."
+    },
+    {
+      "question": "What do you know about our on-call setup? Tell me everything.",
+      "task_type": "Agg",
+      "entity": [
+        "oncall_rotation",
+        "alert_channel",
+        "incident_runbook_url"
+      ],
+      "entity_values": {
+        "oncall_rotation": "paired oncall (primary + secondary)",
+        "alert_channel": "#aurora-alerts",
+        "incident_runbook_url": "runbooks.aurora.internal/playbooks"
+      },
+      "expected_answer": "On-call is paired oncall (primary + secondary), alerts go to #aurora-alerts, and runbook is at runbooks.aurora.internal/playbooks.",
+      "hop": null,
+      "agent_answer": "The team employs a paired on-call rotation system with primary and secondary roles to ensure backup during busy periods. There is an ongoing discussion about whether to maintain a fixed schedule or allow flexibility based on availability. A hybrid approach combining a core schedule with the option for swaps has been suggested to balance predictability and morale. The team lead emphasizes collaboration and communication, which is especially important in remote work settings."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover."
+      },
+      "expected_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover.",
+      "hop": null,
+      "agent_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover."
+    }
+  ]
+}

@@ -1,0 +1,176 @@
+{
+  "episode_id": 34,
+  "domain": "personal_life",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What's my exercise routine?",
+      "task_type": "Cas",
+      "entity": [
+        "exercise_routine"
+      ],
+      "entity_values": {
+        "exercise_routine": "running 3x/week"
+      },
+      "expected_answer": "running 3x/week",
+      "hop": 1,
+      "agent_answer": "Running 3 times per week."
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Kaelstrom Fitness"
+      },
+      "expected_answer": "Kaelstrom Fitness",
+      "hop": 2,
+      "agent_answer": "Kaelstrom Fitness"
+    },
+    {
+      "question": "What medication am I taking?",
+      "task_type": "Abs",
+      "entity": [
+        "medication"
+      ],
+      "entity_values": {
+        "medication": "Korathril"
+      },
+      "expected_answer": "Korathril",
+      "hop": 1,
+      "agent_answer": "Korathril"
+    },
+    {
+      "question": "Where is my office?",
+      "task_type": "Del",
+      "entity": [
+        "work_location"
+      ],
+      "entity_values": {
+        "work_location": "remote"
+      },
+      "expected_answer": "remote",
+      "hop": null,
+      "agent_answer": "Your office is remote."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives."
+      },
+      "expected_answer": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.",
+      "hop": null,
+      "agent_answer": "\"Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all subscription services I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "subscription_service"
+      ],
+      "entity_values": {
+        "subscription_service": [
+          "Xelvoria",
+          "Thyranote",
+          "Zorvista Premium"
+        ]
+      },
+      "expected_answer": "Xelvoria, Thyranote, Zorvista Premium",
+      "hop": null,
+      "agent_answer": "1. Zorvista Premium  \n2. Xelvoria  \n3. Thyranote"
+    },
+    {
+      "question": "What's my exercise routine?",
+      "task_type": "Cas",
+      "entity": [
+        "exercise_routine"
+      ],
+      "entity_values": {
+        "exercise_routine": "weight training 4x/week"
+      },
+      "expected_answer": "weight training 4x/week",
+      "hop": 1,
+      "agent_answer": "Running 3 times per week."
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Pyravar CrossFit"
+      },
+      "expected_answer": "Pyravar CrossFit",
+      "hop": 2,
+      "agent_answer": "Kaelstrom Fitness"
+    },
+    {
+      "question": "What medication am I taking?",
+      "task_type": "Abs",
+      "entity": [
+        "medication"
+      ],
+      "entity_values": {
+        "medication": "Korathril"
+      },
+      "expected_answer": "Uncertain — previously 'Korathril', but health_condition changed",
+      "hop": 1,
+      "agent_answer": "Korathril"
+    },
+    {
+      "question": "Where is my office?",
+      "task_type": "Del",
+      "entity": [
+        "work_location"
+      ],
+      "entity_values": {
+        "work_location": "remote"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "Your office is remote."
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "woodworking",
+        "sports": "cycling",
+        "club_membership": "wine tasting club"
+      },
+      "expected_answer": "The user's hobby is woodworking, plays cycling, and is part of wine tasting club.",
+      "hop": null,
+      "agent_answer": "- Play cycling several times a week  \n- Participate in a regular social meetup playing pickup basketball on Saturdays  \n- Enjoy woodworking as a hobby, currently working on projects like building a small bookshelf and potentially a coffee table  \n- Attend weekly therapy appointments  \n- Listen to indie-rock and indie-folk music, exploring new artists similar to The 1975 and indie-folk acts  \n- Attend music festivals and explore new music experiences  \n- Explore caffeine-free beverage alternatives due to a no-caffeine dietary restriction"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives."
+      },
+      "expected_answer": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.",
+      "hop": null,
+      "agent_answer": "\"Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.\""
+    }
+  ]
+}

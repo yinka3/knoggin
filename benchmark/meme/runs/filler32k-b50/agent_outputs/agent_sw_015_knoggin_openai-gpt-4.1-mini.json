@@ -1,0 +1,202 @@
+{
+  "episode_id": 15,
+  "domain": "software_project",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What's our monitoring URL?",
+      "task_type": "Cas",
+      "entity": [
+        "monitoring_url"
+      ],
+      "entity_values": {
+        "monitoring_url": "status.orinthal.dev/aurora"
+      },
+      "expected_answer": "status.orinthal.dev/aurora",
+      "hop": 1,
+      "agent_answer": "status.orinthal.dev/aurora"
+    },
+    {
+      "question": "What's the deploy command?",
+      "task_type": "Cas",
+      "entity": [
+        "deploy_command"
+      ],
+      "entity_values": {
+        "deploy_command": "narvex deploy --env prod"
+      },
+      "expected_answer": "narvex deploy --env prod",
+      "hop": 2,
+      "agent_answer": "narvex deploy --env prod"
+    },
+    {
+      "question": "What's our staging URL?",
+      "task_type": "Abs",
+      "entity": [
+        "staging_url"
+      ],
+      "entity_values": {
+        "staging_url": "preview.zephyra.io/aurora"
+      },
+      "expected_answer": "preview.zephyra.io/aurora",
+      "hop": 1,
+      "agent_answer": "preview.zephyra.io/aurora"
+    },
+    {
+      "question": "Where's the Dockerfile?",
+      "task_type": "Abs",
+      "entity": [
+        "dockerfile_path"
+      ],
+      "entity_values": {
+        "dockerfile_path": "deploy/Dockerfile.orinthal"
+      },
+      "expected_answer": "deploy/Dockerfile.orinthal",
+      "hop": 2,
+      "agent_answer": "deploy/Dockerfile.orinthal"
+    },
+    {
+      "question": "What's our build tool?",
+      "task_type": "Del",
+      "entity": [
+        "build_tool"
+      ],
+      "entity_values": {
+        "build_tool": "Pyronis Build"
+      },
+      "expected_answer": "Pyronis Build",
+      "hop": null,
+      "agent_answer": "Pyronis Build"
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations."
+      },
+      "expected_answer": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations.",
+      "hop": null,
+      "agent_answer": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations."
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all package managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "package_manager"
+      ],
+      "entity_values": {
+        "package_manager": [
+          "Tarvex Mod",
+          "Zelthra Lib",
+          "Dranith Stack"
+        ]
+      },
+      "expected_answer": "Tarvex Mod, Zelthra Lib, Dranith Stack",
+      "hop": null,
+      "agent_answer": "Tarvex Mod, Zelthra Lib, Dranith Stack"
+    },
+    {
+      "question": "What's our monitoring URL?",
+      "task_type": "Cas",
+      "entity": [
+        "monitoring_url"
+      ],
+      "entity_values": {
+        "monitoring_url": "metrics.thandrel.io/aurora-prod"
+      },
+      "expected_answer": "metrics.thandrel.io/aurora-prod",
+      "hop": 1,
+      "agent_answer": "status.orinthal.dev/aurora"
+    },
+    {
+      "question": "What's the deploy command?",
+      "task_type": "Cas",
+      "entity": [
+        "deploy_command"
+      ],
+      "entity_values": {
+        "deploy_command": "thandrel ship --channel beta"
+      },
+      "expected_answer": "thandrel ship --channel beta",
+      "hop": 2,
+      "agent_answer": "narvex deploy --env prod"
+    },
+    {
+      "question": "What's our staging URL?",
+      "task_type": "Abs",
+      "entity": [
+        "staging_url"
+      ],
+      "entity_values": {
+        "staging_url": "preview.zephyra.io/aurora"
+      },
+      "expected_answer": "Uncertain — previously 'preview.zephyra.io/aurora', but deploy_target changed",
+      "hop": 1,
+      "agent_answer": "preview.zephyra.io/aurora"
+    },
+    {
+      "question": "Where's the Dockerfile?",
+      "task_type": "Abs",
+      "entity": [
+        "dockerfile_path"
+      ],
+      "entity_values": {
+        "dockerfile_path": "deploy/Dockerfile.orinthal"
+      },
+      "expected_answer": "Uncertain — previously 'deploy/Dockerfile.orinthal', but docker_image changed",
+      "hop": 2,
+      "agent_answer": "deploy/Dockerfile.orinthal"
+    },
+    {
+      "question": "What's our build tool?",
+      "task_type": "Del",
+      "entity": [
+        "build_tool"
+      ],
+      "entity_values": {
+        "build_tool": "Pyronis Build"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "Pyronis Build"
+    },
+    {
+      "question": "What do you know about our on-call setup? Tell me everything.",
+      "task_type": "Agg",
+      "entity": [
+        "oncall_rotation",
+        "alert_channel",
+        "incident_runbook_url"
+      ],
+      "entity_values": {
+        "oncall_rotation": "follow-the-sun across timezones",
+        "alert_channel": "#aurora-pager",
+        "incident_runbook_url": "wiki.aurora.dev/incident-response"
+      },
+      "expected_answer": "On-call is follow-the-sun across timezones, alerts go to #aurora-pager, and runbook is at wiki.aurora.dev/incident-response.",
+      "hop": null,
+      "agent_answer": "- The team uses a follow-the-sun on-call rotation across time zones to provide 24/7 coverage.\n- Best practices for managing handovers during shifts include creating standardized handover documents with key information (ongoing issues, pending tasks, important context).\n- Regular check-ins at the start and end of shifts help clarify outstanding concerns and facilitate smooth transitions.\n- Utilizing shared communication tools keeps everyone in sync and allows for quick updates.\n- The team holds synchronous standup meetings on Monday and Thursday, with asynchronous updates on the other days to accommodate different working styles and keep everyone aligned without overwhelming them."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations."
+      },
+      "expected_answer": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations.",
+      "hop": null,
+      "agent_answer": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations."
+    }
+  ]
+}

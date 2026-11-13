@@ -1,0 +1,250 @@
+{
+  "episode_id": 32,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What token format do we use?",
+      "task_type": "Cas",
+      "entity": [
+        "token_format"
+      ],
+      "entity_values": {
+        "token_format": "Cerberix-SAML-assertion"
+      },
+      "expected_answer": "Cerberix-SAML-assertion",
+      "hop": 1,
+      "agent_answer": "Cerberix-SAML-assertion",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What's the auth middleware config?",
+      "task_type": "Cas",
+      "entity": [
+        "middleware_config"
+      ],
+      "entity_values": {
+        "middleware_config": "kryptal-bearer-check v2.2"
+      },
+      "expected_answer": "kryptal-bearer-check v2.2",
+      "hop": 2,
+      "agent_answer": "kryptal-bearer-check v2.2",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What's the session TTL?",
+      "task_type": "Abs",
+      "entity": [
+        "user_session_ttl"
+      ],
+      "entity_values": {
+        "user_session_ttl": "8 hours"
+      },
+      "expected_answer": "8 hours",
+      "hop": 1,
+      "agent_answer": "8 hours",
+      "u_pass": true,
+      "u_reason": "The agent's answer '8 hours' matches the gold answer semantically."
+    },
+    {
+      "question": "What testing framework do we use?",
+      "task_type": "Del",
+      "entity": [
+        "test_framework"
+      ],
+      "entity_values": {
+        "test_framework": "Quorix Spec"
+      },
+      "expected_answer": "Quorix Spec",
+      "hop": null,
+      "agent_answer": "Quorix Spec",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "OutOfMemoryError: Java heap space.\nGC overhead limit exceeded after 8 consecutive failed collections in pool 'PS Old Gen'.\nHeap dump written to /var/log/aurora/heap-2024-05-08.hprof at 18:42:11Z.\nRecommend increasing -Xmx beyond 4G or investigating memory leak in OrderProcessor."
+      },
+      "expected_answer": "OutOfMemoryError: Java heap space.\nGC overhead limit exceeded after 8 consecutive failed collections in pool 'PS Old Gen'.\nHeap dump written to /var/log/aurora/heap-2024-05-08.hprof at 18:42:11Z.\nRecommend increasing -Xmx beyond 4G or investigating memory leak in OrderProcessor.",
+      "hop": null,
+      "agent_answer": "OutOfMemoryError: Java heap space.\nGC overhead limit exceeded after 8 consecutive failed collections in pool 'PS Old Gen'.\nHeap dump written to /var/log/aurora/heap-2024-05-08.hprof at 18:42:11Z.\nRecommend increasing -Xmx beyond 4G or investigating memory leak in OrderProcessor.",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all secret managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "secret_manager"
+      ],
+      "entity_values": {
+        "secret_manager": [
+          "Sigilix Manager",
+          "Velthri Keys",
+          "Orinthal Sealed"
+        ]
+      },
+      "expected_answer": "Sigilix Manager, Velthri Keys, Orinthal Sealed",
+      "hop": null,
+      "agent_answer": "Sigilix Manager, Velthri Keys, Zenthos ID",
+      "u_pass": false,
+      "u_reason": "The agent's answer is missing 'Orinthal Sealed' and includes 'Zenthos ID' instead.",
+      "u_pass_count": 2,
+      "u_pass_total": 3
+    },
+    {
+      "question": "What token format do we use?",
+      "task_type": "Cas",
+      "entity": [
+        "token_format"
+      ],
+      "entity_values": {
+        "token_format": "Oathkeeper-mTLS-cert"
+      },
+      "expected_answer": "Oathkeeper-mTLS-cert",
+      "hop": 1,
+      "agent_answer": "Cerberix-SAML-assertion",
+      "u_pass": false,
+      "u_reason": "The agent reported the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's the auth middleware config?",
+      "task_type": "Cas",
+      "entity": [
+        "middleware_config"
+      ],
+      "entity_values": {
+        "middleware_config": "verithos-pkce-guard v1.4"
+      },
+      "expected_answer": "verithos-pkce-guard v1.4",
+      "hop": 2,
+      "agent_answer": "kryptal-bearer-check v2.2",
+      "u_pass": false,
+      "u_reason": "The agent stated the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's the session TTL?",
+      "task_type": "Abs",
+      "entity": [
+        "user_session_ttl"
+      ],
+      "entity_values": {
+        "user_session_ttl": "8 hours"
+      },
+      "expected_answer": "Uncertain — previously '8 hours', but auth_provider changed",
+      "hop": 1,
+      "agent_answer": "8 hours",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value without expressing any uncertainty or acknowledging the upstream change.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What testing framework do we use?",
+      "task_type": "Del",
+      "entity": [
+        "test_framework"
+      ],
+      "entity_values": {
+        "test_framework": "Quorix Spec"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "The current test framework is not specified in the provided context.",
+      "u_pass": true,
+      "u_reason": "The agent stated that the test framework is not specified, without revealing the deleted value.",
+      "pass_type": "real"
+    },
+    {
+      "question": "What do you know about our on-call setup? Tell me everything.",
+      "task_type": "Agg",
+      "entity": [
+        "oncall_rotation",
+        "alert_channel",
+        "incident_runbook_url"
+      ],
+      "entity_values": {
+        "oncall_rotation": "paired oncall (primary + secondary)",
+        "alert_channel": "#aurora-alerts",
+        "incident_runbook_url": "runbooks.aurora.internal/playbooks"
+      },
+      "expected_answer": "On-call is paired oncall (primary + secondary), alerts go to #aurora-alerts, and runbook is at runbooks.aurora.internal/playbooks.",
+      "hop": null,
+      "agent_answer": "Your team's on-call rotation is a paired on-call system, meaning there is both a primary and a secondary on-call person. For managing notifications effectively, it is recommended to ensure that both the primary and secondary receive alerts simultaneously. Using a dedicated on-call management tool with escalation policies is advised, so if the primary does not acknowledge an alert within a set time, it escalates to the secondary. Additionally, setting quiet hours or specific times to minimize notifications can help reduce alert fatigue. Regularly reviewing and adjusting notification settings based on team feedback is also beneficial to ensure the system works well for everyone.",
+      "u_pass": false,
+      "u_pass_per_entity": {
+        "oncall_rotation": true,
+        "alert_channel": false,
+        "incident_runbook_url": false
+      },
+      "u_pass_count": 1,
+      "u_pass_total": 3,
+      "u_reason": "The answer mentions a paired on-call system but does not mention #aurora-alerts or runbooks.aurora.internal/playbooks."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "OutOfMemoryError: Java heap space.\nGC overhead limit exceeded after 8 consecutive failed collections in pool 'PS Old Gen'.\nHeap dump written to /var/log/aurora/heap-2024-05-08.hprof at 18:42:11Z.\nRecommend increasing -Xmx beyond 4G or investigating memory leak in OrderProcessor."
+      },
+      "expected_answer": "OutOfMemoryError: Java heap space.\nGC overhead limit exceeded after 8 consecutive failed collections in pool 'PS Old Gen'.\nHeap dump written to /var/log/aurora/heap-2024-05-08.hprof at 18:42:11Z.\nRecommend increasing -Xmx beyond 4G or investigating memory leak in OrderProcessor.",
+      "hop": null,
+      "agent_answer": "OutOfMemoryError: Java heap space.\nGC overhead limit exceeded after 8 consecutive failed collections in pool 'PS Old Gen'.\nHeap dump written to /var/log/aurora/heap-2024-05-08.hprof at 18:42:11Z.\nRecommend increasing -Xmx beyond 4G or investigating memory leak in OrderProcessor.",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 2,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 1,
+      "trivial_pass": 0,
+      "knew_but_failed": 0,
+      "never_knew": 0
+    }
+  },
+  "totals": {
+    "before_pass": 4,
+    "before_total": 5,
+    "after_pass": 2,
+    "after_total": 7
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 10,
+    "input_tokens": 2135,
+    "output_tokens": 306
+  }
+}

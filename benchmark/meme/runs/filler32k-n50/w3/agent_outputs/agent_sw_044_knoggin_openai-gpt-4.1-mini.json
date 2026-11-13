@@ -1,0 +1,202 @@
+{
+  "episode_id": 44,
+  "domain": "software_project",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What testing framework do we use?",
+      "task_type": "Cas",
+      "entity": [
+        "test_framework"
+      ],
+      "entity_values": {
+        "test_framework": "Quorix Spec"
+      },
+      "expected_answer": "Quorix Spec",
+      "hop": 1,
+      "agent_answer": "Quorix Spec"
+    },
+    {
+      "question": "What's the test command?",
+      "task_type": "Cas",
+      "entity": [
+        "test_command"
+      ],
+      "entity_values": {
+        "test_command": "quorix spec --run all"
+      },
+      "expected_answer": "quorix spec --run all",
+      "hop": 2,
+      "agent_answer": "quorix spec --run all"
+    },
+    {
+      "question": "What's our build tool?",
+      "task_type": "Abs",
+      "entity": [
+        "build_tool"
+      ],
+      "entity_values": {
+        "build_tool": "Zelthra Pack"
+      },
+      "expected_answer": "Zelthra Pack",
+      "hop": 1,
+      "agent_answer": "Zelthra Pack"
+    },
+    {
+      "question": "What's the build command?",
+      "task_type": "Abs",
+      "entity": [
+        "build_command"
+      ],
+      "entity_values": {
+        "build_command": "zelthra pack --minify"
+      },
+      "expected_answer": "zelthra pack --minify",
+      "hop": 2,
+      "agent_answer": "zelthra pack --minify"
+    },
+    {
+      "question": "Who's the escalation contact?",
+      "task_type": "Del",
+      "entity": [
+        "escalation_contact"
+      ],
+      "entity_values": {
+        "escalation_contact": "Kevin Park"
+      },
+      "expected_answer": "Kevin Park",
+      "hop": null,
+      "agent_answer": "Kevin Park"
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover."
+      },
+      "expected_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover.",
+      "hop": null,
+      "agent_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover."
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all package managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "package_manager"
+      ],
+      "entity_values": {
+        "package_manager": [
+          "Pyronis Bundle",
+          "Quorix Hub",
+          "Synthari Modules"
+        ]
+      },
+      "expected_answer": "Pyronis Bundle, Quorix Hub, Synthari Modules",
+      "hop": null,
+      "agent_answer": "Pyronis Bundle, Quorix Hub, Synthari Modules"
+    },
+    {
+      "question": "What testing framework do we use?",
+      "task_type": "Cas",
+      "entity": [
+        "test_framework"
+      ],
+      "entity_values": {
+        "test_framework": "Pyronis Check"
+      },
+      "expected_answer": "Pyronis Check",
+      "hop": 1,
+      "agent_answer": "Quorix Spec"
+    },
+    {
+      "question": "What's the test command?",
+      "task_type": "Cas",
+      "entity": [
+        "test_command"
+      ],
+      "entity_values": {
+        "test_command": "pyronis check --snapshot"
+      },
+      "expected_answer": "pyronis check --snapshot",
+      "hop": 2,
+      "agent_answer": "quorix spec --run all"
+    },
+    {
+      "question": "What's our build tool?",
+      "task_type": "Abs",
+      "entity": [
+        "build_tool"
+      ],
+      "entity_values": {
+        "build_tool": "Zelthra Pack"
+      },
+      "expected_answer": "Uncertain — previously 'Zelthra Pack', but framework changed",
+      "hop": 1,
+      "agent_answer": "Zelthra Pack"
+    },
+    {
+      "question": "What's the build command?",
+      "task_type": "Abs",
+      "entity": [
+        "build_command"
+      ],
+      "entity_values": {
+        "build_command": "zelthra pack --minify"
+      },
+      "expected_answer": "Uncertain — previously 'zelthra pack --minify', but build_tool changed",
+      "hop": 2,
+      "agent_answer": "zelthra pack --minify"
+    },
+    {
+      "question": "Who's the escalation contact?",
+      "task_type": "Del",
+      "entity": [
+        "escalation_contact"
+      ],
+      "entity_values": {
+        "escalation_contact": "Kevin Park"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "The context does not provide the name or identity of the escalation contact."
+    },
+    {
+      "question": "What are our code quality standards? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "design_system",
+        "test_coverage_target",
+        "code_review_policy"
+      ],
+      "entity_values": {
+        "design_system": "Quenthar Design v1",
+        "test_coverage_target": "80% minimum overall",
+        "code_review_policy": "2 approvals required"
+      },
+      "expected_answer": "We use Quenthar Design v1, target 80% minimum overall test coverage, and require 2 approvals required for reviews.",
+      "hop": null,
+      "agent_answer": "- The team's code review policy requires 2 approvals per code review to maintain high code quality, though this sometimes slows down progress."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover."
+      },
+      "expected_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover.",
+      "hop": null,
+      "agent_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover."
+    }
+  ]
+}

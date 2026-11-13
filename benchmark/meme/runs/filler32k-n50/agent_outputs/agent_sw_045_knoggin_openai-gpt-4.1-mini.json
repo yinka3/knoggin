@@ -1,0 +1,150 @@
+{
+  "episode_id": 45,
+  "domain": "software_project",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "Who's the escalation contact?",
+      "task_type": "Cas",
+      "entity": [
+        "escalation_contact"
+      ],
+      "entity_values": {
+        "escalation_contact": "Kevin Park"
+      },
+      "expected_answer": "Kevin Park",
+      "hop": 1,
+      "agent_answer": "Kevin Park"
+    },
+    {
+      "question": "Who reviews our code?",
+      "task_type": "Abs",
+      "entity": [
+        "code_reviewer"
+      ],
+      "entity_values": {
+        "code_reviewer": "Seoyun Choi"
+      },
+      "expected_answer": "Seoyun Choi",
+      "hop": 1,
+      "agent_answer": "Seoyun Choi reviews the code."
+    },
+    {
+      "question": "Where's the onboarding guide?",
+      "task_type": "Del",
+      "entity": [
+        "onboarding_guide"
+      ],
+      "entity_values": {
+        "onboarding_guide": "docs.aurora.internal/onboarding"
+      },
+      "expected_answer": "docs.aurora.internal/onboarding",
+      "hop": null,
+      "agent_answer": "docs.aurora.internal/onboarding"
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z."
+      },
+      "expected_answer": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z.",
+      "hop": null,
+      "agent_answer": "\"PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23. Stack trace shows recursive call in middleware_chain to request_validator to token_parser. Restart triggered automatic failover at 2024-04-02T14:18:33Z.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all secret managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "secret_manager"
+      ],
+      "entity_values": {
+        "secret_manager": [
+          "Verisigil Lock",
+          "Kerberos Trove",
+          "Pyronos Crypt"
+        ]
+      },
+      "expected_answer": "Verisigil Lock, Kerberos Trove, Pyronos Crypt",
+      "hop": null,
+      "agent_answer": "Verisigil Lock, Kerberos Trove, Pyronos Crypt"
+    },
+    {
+      "question": "Who's the escalation contact?",
+      "task_type": "Cas",
+      "entity": [
+        "escalation_contact"
+      ],
+      "entity_values": {
+        "escalation_contact": "Jiwon Han"
+      },
+      "expected_answer": "Jiwon Han",
+      "hop": 1,
+      "agent_answer": "Kevin Park"
+    },
+    {
+      "question": "Who reviews our code?",
+      "task_type": "Abs",
+      "entity": [
+        "code_reviewer"
+      ],
+      "entity_values": {
+        "code_reviewer": "Seoyun Choi"
+      },
+      "expected_answer": "Uncertain — previously 'Seoyun Choi', but team_lead changed",
+      "hop": 1,
+      "agent_answer": "Seoyun Choi reviews your code."
+    },
+    {
+      "question": "Where's the onboarding guide?",
+      "task_type": "Del",
+      "entity": [
+        "onboarding_guide"
+      ],
+      "entity_values": {
+        "onboarding_guide": "docs.aurora.internal/onboarding"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "I don't have that information."
+    },
+    {
+      "question": "What are our code quality standards? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "design_system",
+        "test_coverage_target",
+        "code_review_policy"
+      ],
+      "entity_values": {
+        "design_system": "Synthari Elements v1.2",
+        "test_coverage_target": "80% minimum overall",
+        "code_review_policy": "2 approvals + security review for auth/"
+      },
+      "expected_answer": "We use Synthari Elements v1.2, target 80% minimum overall test coverage, and require 2 approvals + security review for auth/ for reviews.",
+      "hop": null,
+      "agent_answer": "- Test coverage target is at least 80% overall.  \n- Code reviews require 2 approvals plus a security review specifically for the `auth/` directory to maintain authentication security.  \n- Code reviews are assigned to Seoyun Choi, with Sarah Chen currently assigning this role; if the team lead changes, the assignment changes accordingly.  \n- Escalations are assigned to Kevin Park, with Sarah Chen assigning this role; if the team lead changes, the escalation contact changes to Jiwon Han.  \n- Communication and clear expectations with code reviewers and escalation contacts are emphasized."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z."
+      },
+      "expected_answer": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z.",
+      "hop": null,
+      "agent_answer": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23. Stack trace shows recursive call in middleware_chain to request_validator to token_parser. Restart triggered automatic failover at 2024-04-02T14:18:33Z."
+    }
+  ]
+}

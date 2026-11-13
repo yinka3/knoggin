@@ -1,0 +1,250 @@
+{
+  "episode_id": 12,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What ORM do we use?",
+      "task_type": "Cas",
+      "entity": [
+        "orm_library"
+      ],
+      "entity_values": {
+        "orm_library": "Pyravar Mapper"
+      },
+      "expected_answer": "Pyravar Mapper",
+      "hop": 1,
+      "agent_answer": "Pyravar Mapper",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What's the model syntax?",
+      "task_type": "Cas",
+      "entity": [
+        "model_syntax"
+      ],
+      "entity_values": {
+        "model_syntax": "Pyravar.entity('Model', attrs)"
+      },
+      "expected_answer": "Pyravar.entity('Model', attrs)",
+      "hop": 2,
+      "agent_answer": "Pyravar.entity('Model', attrs)",
+      "u_pass": true,
+      "u_reason": "The agent's answer is semantically equivalent to the gold answer."
+    },
+    {
+      "question": "What migration tool do we use?",
+      "task_type": "Abs",
+      "entity": [
+        "migration_tool"
+      ],
+      "entity_values": {
+        "migration_tool": "Zyndra Alter"
+      },
+      "expected_answer": "Zyndra Alter",
+      "hop": 1,
+      "agent_answer": "Zyndra Alter",
+      "u_pass": true,
+      "u_reason": "The agent's answer 'Zyndra Alter' matches the gold answer semantically."
+    },
+    {
+      "question": "What token format do we use?",
+      "task_type": "Del",
+      "entity": [
+        "token_format"
+      ],
+      "entity_values": {
+        "token_format": "Cerberix-SAML-assertion"
+      },
+      "expected_answer": "Cerberix-SAML-assertion",
+      "hop": null,
+      "agent_answer": "Cerberix-SAML-assertion",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review."
+      },
+      "expected_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.",
+      "hop": null,
+      "agent_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all secret managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "secret_manager"
+      ],
+      "entity_values": {
+        "secret_manager": [
+          "Cryptara Vault",
+          "Selvex Secrets",
+          "Pyronos Crypt"
+        ]
+      },
+      "expected_answer": "Cryptara Vault, Selvex Secrets, Pyronos Crypt",
+      "hop": null,
+      "agent_answer": "Selvex Secrets, Cryptara Vault, Pyronos Crypt",
+      "u_pass": false,
+      "u_reason": "The agent's answer does not list the secret managers in the correct chronological order as specified in the gold.",
+      "u_pass_count": 2,
+      "u_pass_total": 3
+    },
+    {
+      "question": "What ORM do we use?",
+      "task_type": "Cas",
+      "entity": [
+        "orm_library"
+      ],
+      "entity_values": {
+        "orm_library": "Vorathis ODM"
+      },
+      "expected_answer": "Vorathis ODM",
+      "hop": 1,
+      "agent_answer": "Pyravar Mapper",
+      "u_pass": false,
+      "u_reason": "The agent reported the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's the model syntax?",
+      "task_type": "Cas",
+      "entity": [
+        "model_syntax"
+      ],
+      "entity_values": {
+        "model_syntax": "Vorathis.collection('Model', spec)"
+      },
+      "expected_answer": "Vorathis.collection('Model', spec)",
+      "hop": 2,
+      "agent_answer": "Pyravar.entity('Model', attrs)",
+      "u_pass": false,
+      "u_reason": "The agent reported the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What migration tool do we use?",
+      "task_type": "Abs",
+      "entity": [
+        "migration_tool"
+      ],
+      "entity_values": {
+        "migration_tool": "Zyndra Alter"
+      },
+      "expected_answer": "Uncertain — previously 'Zyndra Alter', but database changed",
+      "hop": 1,
+      "agent_answer": "Zyndra Alter",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value 'Zyndra Alter' without expressing uncertainty or acknowledging the upstream change.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What token format do we use?",
+      "task_type": "Del",
+      "entity": [
+        "token_format"
+      ],
+      "entity_values": {
+        "token_format": "Cerberix-SAML-assertion"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "JSON",
+      "u_pass": true,
+      "u_reason": "The agent responded with 'JSON', which does not reveal the deleted value.",
+      "pass_type": "real"
+    },
+    {
+      "question": "Where can I find project documentation? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "documentation_url",
+        "onboarding_guide",
+        "changelog_location"
+      ],
+      "entity_values": {
+        "documentation_url": "aurora-docs.readthedocs.io",
+        "onboarding_guide": "notion.so/aurora-team/new-hire",
+        "changelog_location": "GitHub Releases page"
+      },
+      "expected_answer": "Docs are at aurora-docs.readthedocs.io, onboarding guide at notion.so/aurora-team/new-hire, and changelog at GitHub Releases page.",
+      "hop": null,
+      "agent_answer": "- Hosted at notion.so/aurora-team/new-hire  \n- Hosted at aurora-docs.readthedocs.io",
+      "u_pass": false,
+      "u_pass_per_entity": {
+        "documentation_url": true,
+        "onboarding_guide": true,
+        "changelog_location": false
+      },
+      "u_pass_count": 2,
+      "u_pass_total": 3,
+      "u_reason": "The agent's answer includes the first two target values but does not mention the GitHub Releases page."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review."
+      },
+      "expected_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.",
+      "hop": null,
+      "agent_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 2,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 1,
+      "trivial_pass": 0,
+      "knew_but_failed": 0,
+      "never_knew": 0
+    }
+  },
+  "totals": {
+    "before_pass": 4,
+    "before_total": 5,
+    "after_pass": 2,
+    "after_total": 7
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 10,
+    "input_tokens": 2016,
+    "output_tokens": 308
+  }
+}

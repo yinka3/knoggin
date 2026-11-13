@@ -1,0 +1,176 @@
+{
+  "episode_id": 47,
+  "domain": "software_project",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What authentication method do we use?",
+      "task_type": "Cas",
+      "entity": [
+        "auth_method"
+      ],
+      "entity_values": {
+        "auth_method": "API Key + HMAC"
+      },
+      "expected_answer": "API Key + HMAC",
+      "hop": 1,
+      "agent_answer": "API Key + HMAC"
+    },
+    {
+      "question": "What's the auth middleware config?",
+      "task_type": "Cas",
+      "entity": [
+        "middleware_config"
+      ],
+      "entity_values": {
+        "middleware_config": "phalanx-hmac-validator v2.0"
+      },
+      "expected_answer": "phalanx-hmac-validator v2.0",
+      "hop": 2,
+      "agent_answer": "phalanx-hmac-validator v2.0"
+    },
+    {
+      "question": "What token format do we use?",
+      "task_type": "Abs",
+      "entity": [
+        "token_format"
+      ],
+      "entity_values": {
+        "token_format": "Zenthos-Session-v1"
+      },
+      "expected_answer": "Zenthos-Session-v1",
+      "hop": 1,
+      "agent_answer": "Zenthos-Session-v1"
+    },
+    {
+      "question": "What's our build tool?",
+      "task_type": "Del",
+      "entity": [
+        "build_tool"
+      ],
+      "entity_values": {
+        "build_tool": "Dranith Compiler"
+      },
+      "expected_answer": "Dranith Compiler",
+      "hop": null,
+      "agent_answer": "Dranith Compiler"
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded."
+      },
+      "expected_answer": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded.",
+      "hop": null,
+      "agent_answer": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded."
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all secret managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "secret_manager"
+      ],
+      "entity_values": {
+        "secret_manager": [
+          "Kerberos Trove",
+          "Pyronos Crypt",
+          "Orinthal Sealed"
+        ]
+      },
+      "expected_answer": "Kerberos Trove, Pyronos Crypt, Orinthal Sealed",
+      "hop": null,
+      "agent_answer": "1. Pyronos Crypt  \n2. Kerberos Trove  \n3. Orinthal Sealed"
+    },
+    {
+      "question": "What authentication method do we use?",
+      "task_type": "Cas",
+      "entity": [
+        "auth_method"
+      ],
+      "entity_values": {
+        "auth_method": "mTLS Client Cert"
+      },
+      "expected_answer": "mTLS Client Cert",
+      "hop": 1,
+      "agent_answer": "API Key + HMAC"
+    },
+    {
+      "question": "What's the auth middleware config?",
+      "task_type": "Cas",
+      "entity": [
+        "middleware_config"
+      ],
+      "entity_values": {
+        "middleware_config": "oathkeeper-mtls-proxy v4.1"
+      },
+      "expected_answer": "oathkeeper-mtls-proxy v4.1",
+      "hop": 2,
+      "agent_answer": "phalanx-hmac-validator v2.0"
+    },
+    {
+      "question": "What token format do we use?",
+      "task_type": "Abs",
+      "entity": [
+        "token_format"
+      ],
+      "entity_values": {
+        "token_format": "Zenthos-Session-v1"
+      },
+      "expected_answer": "Uncertain — previously 'Zenthos-Session-v1', but auth_provider changed",
+      "hop": 1,
+      "agent_answer": "Zenthos-Session-v1"
+    },
+    {
+      "question": "What's our build tool?",
+      "task_type": "Del",
+      "entity": [
+        "build_tool"
+      ],
+      "entity_values": {
+        "build_tool": "Dranith Compiler"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "Dranith Compiler"
+    },
+    {
+      "question": "What are our code quality standards? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "design_system",
+        "test_coverage_target",
+        "code_review_policy"
+      ],
+      "entity_values": {
+        "design_system": "Synthari Elements v1.2",
+        "test_coverage_target": "70% overall, 95% for auth",
+        "code_review_policy": "1 approval + CI green"
+      },
+      "expected_answer": "We use Synthari Elements v1.2, target 70% overall, 95% for auth test coverage, and require 1 approval + CI green for reviews.",
+      "hop": null,
+      "agent_answer": "- Code review policy requires 1 approval plus passing CI pipeline before merging changes.\n- CI pipeline must include comprehensive test coverage: unit tests, integration tests, linting/style checks.\n- Monitoring for performance benchmarks and security scans is recommended.\n- Test coverage targets: 70% overall, 95% for authentication components.\n- Use pytest as the testing framework.\n- Recommended pytest plugins: pytest-cov and coverage.py for effective coverage monitoring with minimal overhead.\n- Build tool: Dranith Compiler.\n- Build optimization strategies: parallel builds, incremental compilation, caching mechanisms, enabling strict warnings.\n- Package manager: Veltrion Pkg.\n- Dependency management best practices: regular updates, use of lock files for consistent installs, semantic versioning, careful handling of version ranges to avoid conflicts.\n- Development methodology: monorepo with all apps, libraries, and packages centralized.\n- Use Trunk Based Development with prehooks preventing code that fails compilation, tests, or validation from being pushed.\n- Main branch maintains continuous integration in a staging environment.\n- Feature management via feature/integration/abstraction flags instead of branching.\n- Apply Atomic Design methodology to structure UI components into atoms, molecules, and organisms.\n- Testing includes unit tests, end-to-end tests, and integration tests.\n- Developer productivity enhanced by ergonomic development practices, debugging tools, traceability, pair programming, code reviews, Docker-based common stack, and development tools like database viewers and server code debuggers.\n- Accessibility and user experience are prioritized for both product and developer tools.\n- Technical debt is tracked with tickets and code comments; procedures and timelines are established for its repayment to maintain project sustainability."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded."
+      },
+      "expected_answer": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded.",
+      "hop": null,
+      "agent_answer": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded."
+    }
+  ]
+}

@@ -1,0 +1,219 @@
+{
+  "episode_id": 21,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "Who's the escalation contact?",
+      "task_type": "Cas",
+      "entity": [
+        "escalation_contact"
+      ],
+      "entity_values": {
+        "escalation_contact": "Rachel Yoo"
+      },
+      "expected_answer": "Rachel Yoo",
+      "hop": 1,
+      "agent_answer": "Rachel Yoo",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "Who receives the weekly report?",
+      "task_type": "Abs",
+      "entity": [
+        "weekly_report_recipient"
+      ],
+      "entity_values": {
+        "weekly_report_recipient": "Taehyun Kim"
+      },
+      "expected_answer": "Taehyun Kim",
+      "hop": 1,
+      "agent_answer": "Taehyun Kim",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "Where's the incident runbook?",
+      "task_type": "Del",
+      "entity": [
+        "incident_runbook_url"
+      ],
+      "entity_values": {
+        "incident_runbook_url": "runbooks.aurora.internal/playbooks"
+      },
+      "expected_answer": "runbooks.aurora.internal/playbooks",
+      "hop": null,
+      "agent_answer": "runbooks.aurora.internal/playbooks",
+      "u_pass": true,
+      "u_reason": "The agent's answer is semantically equivalent to the gold answer."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z."
+      },
+      "expected_answer": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z.",
+      "hop": null,
+      "agent_answer": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z.",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all package managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "package_manager"
+      ],
+      "entity_values": {
+        "package_manager": [
+          "Quorix Hub",
+          "Dranith Stack",
+          "Synthari Modules"
+        ]
+      },
+      "expected_answer": "Quorix Hub, Dranith Stack, Synthari Modules",
+      "hop": null,
+      "agent_answer": "1. Quorix Hub  \n2. Dranith Stack  \n3. Synthari Modules",
+      "u_pass": true,
+      "u_reason": "The agent's answer contains all the gold values in the correct chronological order.",
+      "u_pass_count": 3,
+      "u_pass_total": 3
+    },
+    {
+      "question": "Who's the escalation contact?",
+      "task_type": "Cas",
+      "entity": [
+        "escalation_contact"
+      ],
+      "entity_values": {
+        "escalation_contact": "Seungmin Oh"
+      },
+      "expected_answer": "Seungmin Oh",
+      "hop": 1,
+      "agent_answer": "Rachel Yoo",
+      "u_pass": false,
+      "u_reason": "The agent incorrectly reported the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "Who receives the weekly report?",
+      "task_type": "Abs",
+      "entity": [
+        "weekly_report_recipient"
+      ],
+      "entity_values": {
+        "weekly_report_recipient": "Taehyun Kim"
+      },
+      "expected_answer": "Uncertain — previously 'Taehyun Kim', but team_lead changed",
+      "hop": 1,
+      "agent_answer": "Taehyun Kim",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value without expressing any uncertainty or acknowledging the upstream change.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "Where's the incident runbook?",
+      "task_type": "Del",
+      "entity": [
+        "incident_runbook_url"
+      ],
+      "entity_values": {
+        "incident_runbook_url": "runbooks.aurora.internal/playbooks"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "runbooks.aurora.internal/playbooks",
+      "u_pass": false,
+      "u_reason": "The agent returned the deleted value as if it still exists.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "Where can I find project documentation? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "documentation_url",
+        "onboarding_guide",
+        "changelog_location"
+      ],
+      "entity_values": {
+        "documentation_url": "confluence.aurora.dev/aurora",
+        "onboarding_guide": "github.com/aurora-team/onboarding",
+        "changelog_location": "docs.aurora.internal/changelog"
+      },
+      "expected_answer": "Docs are at confluence.aurora.dev/aurora, onboarding guide at github.com/aurora-team/onboarding, and changelog at docs.aurora.internal/changelog.",
+      "hop": null,
+      "agent_answer": "- Onboarding guide: github.com/aurora-team/onboarding  \n- Incident runbook: runbooks.aurora.internal/playbooks  \n- Project changelog: docs.aurora.internal/changelog  \n- DhiWise documentation: https://docs.dhiwise.com/",
+      "u_pass": false,
+      "u_pass_per_entity": {
+        "documentation_url": false,
+        "onboarding_guide": true,
+        "changelog_location": true
+      },
+      "u_pass_count": 2,
+      "u_pass_total": 3,
+      "u_reason": "Two target values are present in the agent's answer, while one is absent."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z."
+      },
+      "expected_answer": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z.",
+      "hop": null,
+      "agent_answer": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z.",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    }
+  },
+  "totals": {
+    "before_pass": 3,
+    "before_total": 4,
+    "after_pass": 2,
+    "after_total": 6
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 8,
+    "input_tokens": 1640,
+    "output_tokens": 241
+  }
+}

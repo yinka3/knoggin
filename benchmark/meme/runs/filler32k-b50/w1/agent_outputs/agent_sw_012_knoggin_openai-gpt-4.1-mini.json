@@ -1,0 +1,176 @@
+{
+  "episode_id": 12,
+  "domain": "software_project",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What ORM do we use?",
+      "task_type": "Cas",
+      "entity": [
+        "orm_library"
+      ],
+      "entity_values": {
+        "orm_library": "Pyravar Mapper"
+      },
+      "expected_answer": "Pyravar Mapper",
+      "hop": 1,
+      "agent_answer": "Pyravar Mapper"
+    },
+    {
+      "question": "What's the model syntax?",
+      "task_type": "Cas",
+      "entity": [
+        "model_syntax"
+      ],
+      "entity_values": {
+        "model_syntax": "Pyravar.entity('Model', attrs)"
+      },
+      "expected_answer": "Pyravar.entity('Model', attrs)",
+      "hop": 2,
+      "agent_answer": "Pyravar.entity('Model', attrs)"
+    },
+    {
+      "question": "What migration tool do we use?",
+      "task_type": "Abs",
+      "entity": [
+        "migration_tool"
+      ],
+      "entity_values": {
+        "migration_tool": "Zyndra Alter"
+      },
+      "expected_answer": "Zyndra Alter",
+      "hop": 1,
+      "agent_answer": "Zyndra Alter"
+    },
+    {
+      "question": "What token format do we use?",
+      "task_type": "Del",
+      "entity": [
+        "token_format"
+      ],
+      "entity_values": {
+        "token_format": "Cerberix-SAML-assertion"
+      },
+      "expected_answer": "Cerberix-SAML-assertion",
+      "hop": null,
+      "agent_answer": "Cerberix-SAML-assertion"
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review."
+      },
+      "expected_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.",
+      "hop": null,
+      "agent_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review."
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all secret managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "secret_manager"
+      ],
+      "entity_values": {
+        "secret_manager": [
+          "Cryptara Vault",
+          "Selvex Secrets",
+          "Pyronos Crypt"
+        ]
+      },
+      "expected_answer": "Cryptara Vault, Selvex Secrets, Pyronos Crypt",
+      "hop": null,
+      "agent_answer": "Selvex Secrets, Cryptara Vault, Pyronos Crypt"
+    },
+    {
+      "question": "What ORM do we use?",
+      "task_type": "Cas",
+      "entity": [
+        "orm_library"
+      ],
+      "entity_values": {
+        "orm_library": "Vorathis ODM"
+      },
+      "expected_answer": "Vorathis ODM",
+      "hop": 1,
+      "agent_answer": "Pyravar Mapper"
+    },
+    {
+      "question": "What's the model syntax?",
+      "task_type": "Cas",
+      "entity": [
+        "model_syntax"
+      ],
+      "entity_values": {
+        "model_syntax": "Vorathis.collection('Model', spec)"
+      },
+      "expected_answer": "Vorathis.collection('Model', spec)",
+      "hop": 2,
+      "agent_answer": "Pyravar.entity('Model', attrs)"
+    },
+    {
+      "question": "What migration tool do we use?",
+      "task_type": "Abs",
+      "entity": [
+        "migration_tool"
+      ],
+      "entity_values": {
+        "migration_tool": "Zyndra Alter"
+      },
+      "expected_answer": "Uncertain — previously 'Zyndra Alter', but database changed",
+      "hop": 1,
+      "agent_answer": "Zyndra Alter"
+    },
+    {
+      "question": "What token format do we use?",
+      "task_type": "Del",
+      "entity": [
+        "token_format"
+      ],
+      "entity_values": {
+        "token_format": "Cerberix-SAML-assertion"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "JSON"
+    },
+    {
+      "question": "Where can I find project documentation? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "documentation_url",
+        "onboarding_guide",
+        "changelog_location"
+      ],
+      "entity_values": {
+        "documentation_url": "aurora-docs.readthedocs.io",
+        "onboarding_guide": "notion.so/aurora-team/new-hire",
+        "changelog_location": "GitHub Releases page"
+      },
+      "expected_answer": "Docs are at aurora-docs.readthedocs.io, onboarding guide at notion.so/aurora-team/new-hire, and changelog at GitHub Releases page.",
+      "hop": null,
+      "agent_answer": "- Hosted at notion.so/aurora-team/new-hire  \n- Hosted at aurora-docs.readthedocs.io"
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review."
+      },
+      "expected_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.",
+      "hop": null,
+      "agent_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review."
+    }
+  ]
+}

@@ -1,0 +1,219 @@
+{
+  "episode_id": 33,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "Who receives the weekly report?",
+      "task_type": "Cas",
+      "entity": [
+        "weekly_report_recipient"
+      ],
+      "entity_values": {
+        "weekly_report_recipient": "Hyunwoo Nam"
+      },
+      "expected_answer": "Hyunwoo Nam",
+      "hop": 1,
+      "agent_answer": "Hyunwoo Nam",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "Who reviews our code?",
+      "task_type": "Abs",
+      "entity": [
+        "code_reviewer"
+      ],
+      "entity_values": {
+        "code_reviewer": "Seoyun Choi"
+      },
+      "expected_answer": "Seoyun Choi",
+      "hop": 1,
+      "agent_answer": "Seoyun Choi",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What's our log drain endpoint?",
+      "task_type": "Del",
+      "entity": [
+        "log_drain_endpoint"
+      ],
+      "entity_values": {
+        "log_drain_endpoint": "stream.velturis.io/aurora"
+      },
+      "expected_answer": "stream.velturis.io/aurora",
+      "hop": null,
+      "agent_answer": "stream.velturis.io/aurora",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer exactly, indicating semantic equivalence."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded."
+      },
+      "expected_answer": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded.",
+      "hop": null,
+      "agent_answer": "\"ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded.\"",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all package managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "package_manager"
+      ],
+      "entity_values": {
+        "package_manager": [
+          "Karnex Pack",
+          "Dranith Stack",
+          "Synthari Modules"
+        ]
+      },
+      "expected_answer": "Karnex Pack, Dranith Stack, Synthari Modules",
+      "hop": null,
+      "agent_answer": "1. Karnex Pack  \n2. Dranith Stack  \n3. Synthari Modules",
+      "u_pass": true,
+      "u_reason": "The agent's answer contains all the gold values in the exact chronological order specified.",
+      "u_pass_count": 3,
+      "u_pass_total": 3
+    },
+    {
+      "question": "Who receives the weekly report?",
+      "task_type": "Cas",
+      "entity": [
+        "weekly_report_recipient"
+      ],
+      "entity_values": {
+        "weekly_report_recipient": "James Lee"
+      },
+      "expected_answer": "James Lee",
+      "hop": 1,
+      "agent_answer": "Hyunwoo Nam",
+      "u_pass": false,
+      "u_reason": "The agent reported the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "Who reviews our code?",
+      "task_type": "Abs",
+      "entity": [
+        "code_reviewer"
+      ],
+      "entity_values": {
+        "code_reviewer": "Seoyun Choi"
+      },
+      "expected_answer": "Uncertain — previously 'Seoyun Choi', but team_lead changed",
+      "hop": 1,
+      "agent_answer": "Seoyun Choi",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value without expressing any uncertainty or acknowledging the upstream change.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's our log drain endpoint?",
+      "task_type": "Del",
+      "entity": [
+        "log_drain_endpoint"
+      ],
+      "entity_values": {
+        "log_drain_endpoint": "stream.velturis.io/aurora"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "I don't have that information.",
+      "u_pass": true,
+      "u_reason": "The agent correctly stated it does not have the information without revealing the deleted value.",
+      "pass_type": "real"
+    },
+    {
+      "question": "What do you know about our on-call setup? Tell me everything.",
+      "task_type": "Agg",
+      "entity": [
+        "oncall_rotation",
+        "alert_channel",
+        "incident_runbook_url"
+      ],
+      "entity_values": {
+        "oncall_rotation": "paired oncall (primary + secondary)",
+        "alert_channel": "#aurora-pager",
+        "incident_runbook_url": "wiki.aurora.dev/incident-response"
+      },
+      "expected_answer": "On-call is paired oncall (primary + secondary), alerts go to #aurora-pager, and runbook is at wiki.aurora.dev/incident-response.",
+      "hop": null,
+      "agent_answer": "Your team's on-call rotation is a paired on-call setup, meaning there is both a primary and a secondary person on duty at the same time. This arrangement provides a backup to the primary responder, which helps support incident handling and can lead to quicker resolution times. Effective management of this rotation includes having clear documentation of processes and incident response guidelines so everyone knows what to expect. Regular debriefs after incidents are recommended to help the team learn and improve. It is also useful to gather feedback from team members periodically to assess how the rotation is working and whether any adjustments are needed. However, details on how your team currently handles the handoff between the primary and secondary on-call are not provided.",
+      "u_pass": false,
+      "u_pass_per_entity": {
+        "oncall_rotation": true,
+        "alert_channel": false,
+        "incident_runbook_url": false
+      },
+      "u_pass_count": 1,
+      "u_pass_total": 3,
+      "u_reason": "The answer mentions a paired on-call setup but does not mention #aurora-pager or wiki.aurora.dev/incident-response."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded."
+      },
+      "expected_answer": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded.",
+      "hop": null,
+      "agent_answer": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded.",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 1,
+      "trivial_pass": 0,
+      "knew_but_failed": 0,
+      "never_knew": 0
+    }
+  },
+  "totals": {
+    "before_pass": 3,
+    "before_total": 4,
+    "after_pass": 3,
+    "after_total": 6
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 8,
+    "input_tokens": 1719,
+    "output_tokens": 253
+  }
+}

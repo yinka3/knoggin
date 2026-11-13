@@ -1,0 +1,202 @@
+{
+  "episode_id": 21,
+  "domain": "personal_life",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What's my work schedule?",
+      "task_type": "Cas",
+      "entity": [
+        "work_schedule"
+      ],
+      "entity_values": {
+        "work_schedule": "flexible hours"
+      },
+      "expected_answer": "flexible hours",
+      "hop": 1,
+      "agent_answer": "Flexible hours through your employer Thalwren Inc."
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Pyravar CrossFit"
+      },
+      "expected_answer": "Pyravar CrossFit",
+      "hop": 2,
+      "agent_answer": "Pyravar CrossFit"
+    },
+    {
+      "question": "What insurance do I have?",
+      "task_type": "Abs",
+      "entity": [
+        "insurance"
+      ],
+      "entity_values": {
+        "insurance": "marketplace health plan"
+      },
+      "expected_answer": "marketplace health plan",
+      "hop": 1,
+      "agent_answer": "Marketplace health insurance plan through the employer."
+    },
+    {
+      "question": "What's my favorite restaurant?",
+      "task_type": "Abs",
+      "entity": [
+        "favorite_restaurant"
+      ],
+      "entity_values": {
+        "favorite_restaurant": "Kinthar Grill"
+      },
+      "expected_answer": "Kinthar Grill",
+      "hop": 2,
+      "agent_answer": "Kinthar Grill"
+    },
+    {
+      "question": "What am I subscribed to?",
+      "task_type": "Del",
+      "entity": [
+        "subscription_service"
+      ],
+      "entity_values": {
+        "subscription_service": "meal kit (Kelvimeal)"
+      },
+      "expected_answer": "meal kit (Kelvimeal)",
+      "hop": null,
+      "agent_answer": "Kelvimeal"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world."
+      },
+      "expected_answer": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.",
+      "hop": null,
+      "agent_answer": "\"We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all vehicles I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "vehicle"
+      ],
+      "entity_values": {
+        "vehicle": [
+          "Therwyn Compact",
+          "Vorantel SUV",
+          "Xylorim Scooter"
+        ]
+      },
+      "expected_answer": "Therwyn Compact, Vorantel SUV, Xylorim Scooter",
+      "hop": null,
+      "agent_answer": "Therwyn Compact car, Vorantel SUV, Xylorim Scooter"
+    },
+    {
+      "question": "What's my work schedule?",
+      "task_type": "Cas",
+      "entity": [
+        "work_schedule"
+      ],
+      "entity_values": {
+        "work_schedule": "hybrid (3 office + 2 remote)"
+      },
+      "expected_answer": "hybrid (3 office + 2 remote)",
+      "hop": 1,
+      "agent_answer": "Flexible hours through your current employer, Thalwren Inc."
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Velthari Studio"
+      },
+      "expected_answer": "Velthari Studio",
+      "hop": 2,
+      "agent_answer": "Pyravar CrossFit"
+    },
+    {
+      "question": "What insurance do I have?",
+      "task_type": "Abs",
+      "entity": [
+        "insurance"
+      ],
+      "entity_values": {
+        "insurance": "marketplace health plan"
+      },
+      "expected_answer": "Uncertain — previously 'marketplace health plan', but employer changed",
+      "hop": 1,
+      "agent_answer": "Marketplace health plan through your employer (Thalwren Inc.)."
+    },
+    {
+      "question": "What's my favorite restaurant?",
+      "task_type": "Abs",
+      "entity": [
+        "favorite_restaurant"
+      ],
+      "entity_values": {
+        "favorite_restaurant": "Kinthar Grill"
+      },
+      "expected_answer": "Uncertain — previously 'Kinthar Grill', but work_location changed",
+      "hop": 2,
+      "agent_answer": "Kinthar Grill"
+    },
+    {
+      "question": "What am I subscribed to?",
+      "task_type": "Del",
+      "entity": [
+        "subscription_service"
+      ],
+      "entity_values": {
+        "subscription_service": "meal kit (Kelvimeal)"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "Marketplace health plan for insurance through your employer at Thalwren Inc."
+    },
+    {
+      "question": "Tell me everything you know about my commute.",
+      "task_type": "Agg",
+      "entity": [
+        "commute_method",
+        "commute_duration",
+        "work_location"
+      ],
+      "entity_values": {
+        "commute_method": "subway",
+        "commute_duration": "50 min",
+        "work_location": "Belvona Harbor"
+      },
+      "expected_answer": "The user commutes by subway for 50 min to Belvona Harbor.",
+      "hop": null,
+      "agent_answer": "- You commute by subway and find it generally convenient despite occasional delays.\n- Your commute duration is about 50 minutes.\n- You use this commute time to listen to podcasts or music.\n- You drive a Vorantel SUV, which you find spacious and comfortable, enhancing your commuting experience especially on longer drives.\n- You also currently drive a Xylorim Scooter, which you find convenient for urban commuting, appreciating its balance of speed and durability suitable for city travel.\n- Important features for your urban scooter include reliable braking, good suspension, built-in lights, reflectors, lightweight and foldable design for portability and safety."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world."
+      },
+      "expected_answer": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.",
+      "hop": null,
+      "agent_answer": "\"We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.\""
+    }
+  ]
+}

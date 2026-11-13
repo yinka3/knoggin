@@ -1,0 +1,150 @@
+{
+  "episode_id": 24,
+  "domain": "personal_life",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What type of home do I live in?",
+      "task_type": "Cas",
+      "entity": [
+        "housing_type"
+      ],
+      "entity_values": {
+        "housing_type": "condo"
+      },
+      "expected_answer": "condo",
+      "hop": 1,
+      "agent_answer": "Condo"
+    },
+    {
+      "question": "What family event do I have coming up?",
+      "task_type": "Abs",
+      "entity": [
+        "family_event"
+      ],
+      "entity_values": {
+        "family_event": "family reunion"
+      },
+      "expected_answer": "family reunion",
+      "hop": 1,
+      "agent_answer": "Family reunion"
+    },
+    {
+      "question": "What trip am I planning?",
+      "task_type": "Del",
+      "entity": [
+        "travel_plan"
+      ],
+      "entity_values": {
+        "travel_plan": "Zynthera Bay beach trip (1 week)"
+      },
+      "expected_answer": "Zynthera Bay beach trip (1 week)",
+      "hop": null,
+      "agent_answer": "A one-week beach trip to Zynthera Bay."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you."
+      },
+      "expected_answer": "Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you.",
+      "hop": null,
+      "agent_answer": "\"Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all partners I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "partner"
+      ],
+      "entity_values": {
+        "partner": [
+          "Sarah",
+          "Jessica",
+          "Taylor"
+        ]
+      },
+      "expected_answer": "Sarah, Jessica, Taylor",
+      "hop": null,
+      "agent_answer": "Jessica  \nSarah  \nTaylor"
+    },
+    {
+      "question": "What type of home do I live in?",
+      "task_type": "Cas",
+      "entity": [
+        "housing_type"
+      ],
+      "entity_values": {
+        "housing_type": "townhouse"
+      },
+      "expected_answer": "townhouse",
+      "hop": 1,
+      "agent_answer": "Condo"
+    },
+    {
+      "question": "What family event do I have coming up?",
+      "task_type": "Abs",
+      "entity": [
+        "family_event"
+      ],
+      "entity_values": {
+        "family_event": "family reunion"
+      },
+      "expected_answer": "Uncertain — previously 'family reunion', but relationship_status changed",
+      "hop": 1,
+      "agent_answer": "Family reunion"
+    },
+    {
+      "question": "What trip am I planning?",
+      "task_type": "Del",
+      "entity": [
+        "travel_plan"
+      ],
+      "entity_values": {
+        "travel_plan": "Zynthera Bay beach trip (1 week)"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "A music festival trip."
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "video games",
+        "sports": "basketball",
+        "club_membership": "hiking club"
+      },
+      "expected_answer": "The user's hobby is video games, plays basketball, and is part of hiking club.",
+      "hop": null,
+      "agent_answer": "- Play basketball recreationally, enjoying pickup games with friends at local courts  \n- Share interests including basketball and hiking with partner Taylor  \n- Play video games, particularly action-adventure games and RPGs, with a preference for open-world titles that allow exploration and quest completion at their own pace  \n- Play video games together with partner Sarah, enhancing the fun and social aspect of gaming"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you."
+      },
+      "expected_answer": "Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you.",
+      "hop": null,
+      "agent_answer": "\"Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you.\""
+    }
+  ]
+}

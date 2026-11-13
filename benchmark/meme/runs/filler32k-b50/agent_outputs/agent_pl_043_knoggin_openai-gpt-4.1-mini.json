@@ -1,0 +1,150 @@
+{
+  "episode_id": 43,
+  "domain": "personal_life",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What trip am I planning?",
+      "task_type": "Cas",
+      "entity": [
+        "travel_plan"
+      ],
+      "entity_values": {
+        "travel_plan": "no travel planned"
+      },
+      "expected_answer": "no travel planned",
+      "hop": 1,
+      "agent_answer": "A baby shower contingent on being in a relationship, with no travel planned while in the relationship, and an island getaway planned if the relationship status changes."
+    },
+    {
+      "question": "What family event do I have coming up?",
+      "task_type": "Abs",
+      "entity": [
+        "family_event"
+      ],
+      "entity_values": {
+        "family_event": "baby shower"
+      },
+      "expected_answer": "baby shower",
+      "hop": 1,
+      "agent_answer": "Baby shower"
+    },
+    {
+      "question": "What regular appointments do I have?",
+      "task_type": "Del",
+      "entity": [
+        "regular_appointment"
+      ],
+      "entity_values": {
+        "regular_appointment": "chiropractor (biweekly)"
+      },
+      "expected_answer": "chiropractor (biweekly)",
+      "hop": null,
+      "agent_answer": "A regular chiropractic appointment every two weeks."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world."
+      },
+      "expected_answer": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.",
+      "hop": null,
+      "agent_answer": "\"We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all subscription services I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "subscription_service"
+      ],
+      "entity_values": {
+        "subscription_service": [
+          "Xelvoria",
+          "Thyranote",
+          "Zorvista Premium"
+        ]
+      },
+      "expected_answer": "Xelvoria, Thyranote, Zorvista Premium",
+      "hop": null,
+      "agent_answer": "Xelvoria, Zorvista Premium"
+    },
+    {
+      "question": "What trip am I planning?",
+      "task_type": "Cas",
+      "entity": [
+        "travel_plan"
+      ],
+      "entity_values": {
+        "travel_plan": "island getaway"
+      },
+      "expected_answer": "island getaway",
+      "hop": 1,
+      "agent_answer": "A baby shower and a no travel plan, contingent on your current relationship status; if your relationship status changes, you plan an island getaway."
+    },
+    {
+      "question": "What family event do I have coming up?",
+      "task_type": "Abs",
+      "entity": [
+        "family_event"
+      ],
+      "entity_values": {
+        "family_event": "baby shower"
+      },
+      "expected_answer": "Uncertain — previously 'baby shower', but relationship_status changed",
+      "hop": 1,
+      "agent_answer": "Baby shower"
+    },
+    {
+      "question": "What regular appointments do I have?",
+      "task_type": "Del",
+      "entity": [
+        "regular_appointment"
+      ],
+      "entity_values": {
+        "regular_appointment": "chiropractor (biweekly)"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "You don't have that information."
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "knitting",
+        "sports": "rock climbing",
+        "club_membership": "book club"
+      },
+      "expected_answer": "The user's hobby is knitting, plays rock climbing, and is part of book club.",
+      "hop": null,
+      "agent_answer": "- Play rock climbing  \n- Use the Thyranote app to track climbing goals and progress  \n- Participate in pickup basketball on Saturdays as a social and fitness activity complementary to climbing"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world."
+      },
+      "expected_answer": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.",
+      "hop": null,
+      "agent_answer": "\"We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.\""
+    }
+  ]
+}

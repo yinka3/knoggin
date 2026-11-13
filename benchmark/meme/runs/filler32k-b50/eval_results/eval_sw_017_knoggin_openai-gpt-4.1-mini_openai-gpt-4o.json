@@ -1,0 +1,250 @@
+{
+  "episode_id": 17,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What authentication method do we use?",
+      "task_type": "Cas",
+      "entity": [
+        "auth_method"
+      ],
+      "entity_values": {
+        "auth_method": "API Key + HMAC"
+      },
+      "expected_answer": "API Key + HMAC",
+      "hop": 1,
+      "agent_answer": "API Key + HMAC",
+      "u_pass": true,
+      "u_reason": "The agent's answer 'API Key + HMAC' is semantically equivalent to the gold answer."
+    },
+    {
+      "question": "What's the auth middleware config?",
+      "task_type": "Cas",
+      "entity": [
+        "middleware_config"
+      ],
+      "entity_values": {
+        "middleware_config": "phalanx-key-guard v1.3"
+      },
+      "expected_answer": "phalanx-key-guard v1.3",
+      "hop": 2,
+      "agent_answer": "phalanx-key-guard v1.3",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What's the login endpoint?",
+      "task_type": "Abs",
+      "entity": [
+        "login_endpoint"
+      ],
+      "entity_values": {
+        "login_endpoint": "/zenthos/id/authenticate"
+      },
+      "expected_answer": "/zenthos/id/authenticate",
+      "hop": 1,
+      "agent_answer": "/zenthos/id/authenticate",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What framework are we using?",
+      "task_type": "Del",
+      "entity": [
+        "framework"
+      ],
+      "entity_values": {
+        "framework": "Moxira"
+      },
+      "expected_answer": "Moxira",
+      "hop": null,
+      "agent_answer": "Moxira",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded."
+      },
+      "expected_answer": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded.",
+      "hop": null,
+      "agent_answer": "ConnectionRefusedError: [Errno 111] Connection refused.  \nService crysthene-db-primary on port 5432 is not accepting connections.  \nLast successful heartbeat was at 2024-03-15T08:23:41Z.  \nCheck firewall rules and verify that max_connections has not been exceeded.",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all sprint deadlines we've had, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "sprint_deadline"
+      ],
+      "entity_values": {
+        "sprint_deadline": [
+          "2025 April 11",
+          "2025 May 9",
+          "2025 May 23"
+        ]
+      },
+      "expected_answer": "2025 April 11, 2025 May 9, 2025 May 23",
+      "hop": null,
+      "agent_answer": "April 11, 2025; May 9, 2025; May 23, 2025",
+      "u_pass": true,
+      "u_reason": "The agent's answer contains all the gold values in the exact order specified.",
+      "u_pass_count": 0,
+      "u_pass_total": 3
+    },
+    {
+      "question": "What authentication method do we use?",
+      "task_type": "Cas",
+      "entity": [
+        "auth_method"
+      ],
+      "entity_values": {
+        "auth_method": "SAML 2.0 SSO"
+      },
+      "expected_answer": "SAML 2.0 SSO",
+      "hop": 1,
+      "agent_answer": "API Key + HMAC",
+      "u_pass": false,
+      "u_reason": "The agent reported the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's the auth middleware config?",
+      "task_type": "Cas",
+      "entity": [
+        "middleware_config"
+      ],
+      "entity_values": {
+        "middleware_config": "cerberix-sso-bridge v1.9"
+      },
+      "expected_answer": "cerberix-sso-bridge v1.9",
+      "hop": 2,
+      "agent_answer": "phalanx-key-guard v1.3",
+      "u_pass": false,
+      "u_reason": "The agent stated only the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's the login endpoint?",
+      "task_type": "Abs",
+      "entity": [
+        "login_endpoint"
+      ],
+      "entity_values": {
+        "login_endpoint": "/zenthos/id/authenticate"
+      },
+      "expected_answer": "Uncertain — previously '/zenthos/id/authenticate', but auth_provider changed",
+      "hop": 1,
+      "agent_answer": "/zenthos/id/authenticate",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value without expressing any uncertainty or acknowledging the upstream change.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What framework are we using?",
+      "task_type": "Del",
+      "entity": [
+        "framework"
+      ],
+      "entity_values": {
+        "framework": "Moxira"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "React",
+      "u_pass": false,
+      "u_reason": "The agent incorrectly returned the deleted value 'React' instead of indicating it was unavailable.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What do you know about our on-call setup? Tell me everything.",
+      "task_type": "Agg",
+      "entity": [
+        "oncall_rotation",
+        "alert_channel",
+        "incident_runbook_url"
+      ],
+      "entity_values": {
+        "oncall_rotation": "paired oncall (primary + secondary)",
+        "alert_channel": "#vortex-alerts",
+        "incident_runbook_url": "github.com/aurora-team/runbooks"
+      },
+      "expected_answer": "On-call is paired oncall (primary + secondary), alerts go to #vortex-alerts, and runbook is at github.com/aurora-team/runbooks.",
+      "hop": null,
+      "agent_answer": "Your team's on-call rotation uses a paired on-call system with a primary and a secondary on-call for each shift to ensure continuous support and backup availability. For handoffs between the primary and secondary on-call personnel, best practices include having a structured handoff process with clear communication, sharing critical updates, ongoing issues, and pending tickets via shared documents or checklists. Scheduling a brief overlap period for the outgoing and incoming on-call members to touch base is recommended to facilitate smooth transitions and address any questions.",
+      "u_pass": false,
+      "u_pass_per_entity": {
+        "oncall_rotation": true,
+        "alert_channel": false,
+        "incident_runbook_url": false
+      },
+      "u_pass_count": 1,
+      "u_pass_total": 3,
+      "u_reason": "The answer mentions a paired on-call system with primary and secondary roles, but does not mention #vortex-alerts or github.com/aurora-team/runbooks."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded."
+      },
+      "expected_answer": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded.",
+      "hop": null,
+      "agent_answer": "ConnectionRefusedError: [Errno 111] Connection refused.  \nService crysthene-db-primary on port 5432 is not accepting connections.  \nLast successful heartbeat was at 2024-03-15T08:23:41Z.  \nCheck firewall rules and verify that max_connections has not been exceeded.",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 2,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    }
+  },
+  "totals": {
+    "before_pass": 4,
+    "before_total": 5,
+    "after_pass": 2,
+    "after_total": 7
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 10,
+    "input_tokens": 2117,
+    "output_tokens": 310
+  }
+}

@@ -1,0 +1,250 @@
+{
+  "episode_id": 29,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What's the database connection string?",
+      "task_type": "Cas",
+      "entity": [
+        "connection_string"
+      ],
+      "entity_values": {
+        "connection_string": "thalnex://store-backup:8529/aurora"
+      },
+      "expected_answer": "thalnex://store-backup:8529/aurora",
+      "hop": 1,
+      "agent_answer": "thalnex://store-backup:8529/aurora",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer exactly, indicating semantic equivalence."
+    },
+    {
+      "question": "What's the model syntax?",
+      "task_type": "Cas",
+      "entity": [
+        "model_syntax"
+      ],
+      "entity_values": {
+        "model_syntax": "Keldaris.object('Model', props)"
+      },
+      "expected_answer": "Keldaris.object('Model', props)",
+      "hop": 2,
+      "agent_answer": "Thalnex.document('Model', {fields})",
+      "u_pass": false,
+      "u_reason": "The agent's answer uses a different syntax and does not match the gold answer semantically."
+    },
+    {
+      "question": "What's our backup schedule?",
+      "task_type": "Abs",
+      "entity": [
+        "backup_schedule"
+      ],
+      "entity_values": {
+        "backup_schedule": "twice daily at 2am and 2pm UTC"
+      },
+      "expected_answer": "twice daily at 2am and 2pm UTC",
+      "hop": 1,
+      "agent_answer": "Twice daily at 2am and 2pm UTC.",
+      "u_pass": true,
+      "u_reason": "The agent's answer is semantically equivalent to the gold answer."
+    },
+    {
+      "question": "What's our log drain endpoint?",
+      "task_type": "Del",
+      "entity": [
+        "log_drain_endpoint"
+      ],
+      "entity_values": {
+        "log_drain_endpoint": "pipe.thandrel.io/aurora-logs"
+      },
+      "expected_answer": "pipe.thandrel.io/aurora-logs",
+      "hop": null,
+      "agent_answer": "pipe.thandrel.io/aurora-logs",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review."
+      },
+      "expected_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.",
+      "hop": null,
+      "agent_answer": "\"DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.\"",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all secret managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "secret_manager"
+      ],
+      "entity_values": {
+        "secret_manager": [
+          "Kerberos Trove",
+          "Sigilix Manager",
+          "Pyronos Crypt"
+        ]
+      },
+      "expected_answer": "Kerberos Trove, Sigilix Manager, Pyronos Crypt",
+      "hop": null,
+      "agent_answer": "Kerberos Trove, Sigilix Manager, Pyronos Crypt",
+      "u_pass": true,
+      "u_reason": "The agent's answer contains all the gold values in the correct chronological order.",
+      "u_pass_count": 3,
+      "u_pass_total": 3
+    },
+    {
+      "question": "What's the database connection string?",
+      "task_type": "Cas",
+      "entity": [
+        "connection_string"
+      ],
+      "entity_values": {
+        "connection_string": "thalnex://store-prod:8529/aurora"
+      },
+      "expected_answer": "thalnex://store-prod:8529/aurora",
+      "hop": 1,
+      "agent_answer": "thalnex://store-backup:8529/aurora",
+      "u_pass": false,
+      "u_reason": "The agent reported the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's the model syntax?",
+      "task_type": "Cas",
+      "entity": [
+        "model_syntax"
+      ],
+      "entity_values": {
+        "model_syntax": "Thalnex.document('Model', {fields})"
+      },
+      "expected_answer": "Thalnex.document('Model', {fields})",
+      "hop": 2,
+      "agent_answer": "Thalnex.document('Model', {fields})",
+      "u_pass": true,
+      "u_reason": "The agent correctly states the new cascaded value as the sole, definitive answer.",
+      "pass_type": "trivial"
+    },
+    {
+      "question": "What's our backup schedule?",
+      "task_type": "Abs",
+      "entity": [
+        "backup_schedule"
+      ],
+      "entity_values": {
+        "backup_schedule": "twice daily at 2am and 2pm UTC"
+      },
+      "expected_answer": "Uncertain — previously 'twice daily at 2am and 2pm UTC', but database changed",
+      "hop": 1,
+      "agent_answer": "Twice daily at 2am and 2pm UTC.",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value without expressing uncertainty or acknowledging the upstream change.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's our log drain endpoint?",
+      "task_type": "Del",
+      "entity": [
+        "log_drain_endpoint"
+      ],
+      "entity_values": {
+        "log_drain_endpoint": "pipe.thandrel.io/aurora-logs"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "pipe.thandrel.io/aurora-logs",
+      "u_pass": false,
+      "u_reason": "The agent returned the deleted value as if it still exists.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "Where can I find project documentation? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "documentation_url",
+        "onboarding_guide",
+        "changelog_location"
+      ],
+      "entity_values": {
+        "documentation_url": "docs.aurora.internal/wiki",
+        "onboarding_guide": "notion.so/aurora-team/new-hire",
+        "changelog_location": "CHANGELOG.md in repo root"
+      },
+      "expected_answer": "Docs are at docs.aurora.internal/wiki, onboarding guide at notion.so/aurora-team/new-hire, and changelog at CHANGELOG.md in repo root.",
+      "hop": null,
+      "agent_answer": "docs.aurora.internal/wiki",
+      "u_pass": false,
+      "u_pass_per_entity": {
+        "documentation_url": true,
+        "onboarding_guide": false,
+        "changelog_location": false
+      },
+      "u_pass_count": 1,
+      "u_pass_total": 3,
+      "u_reason": "Only 'docs.aurora.internal/wiki' is present in the agent's answer."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review."
+      },
+      "expected_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.",
+      "hop": null,
+      "agent_answer": "\"DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.\"",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 1,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    }
+  },
+  "totals": {
+    "before_pass": 3,
+    "before_total": 5,
+    "after_pass": 3,
+    "after_total": 7
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 10,
+    "input_tokens": 2088,
+    "output_tokens": 296
+  }
+}

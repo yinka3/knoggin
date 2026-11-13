@@ -1,0 +1,219 @@
+{
+  "episode_id": 43,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What trip am I planning?",
+      "task_type": "Cas",
+      "entity": [
+        "travel_plan"
+      ],
+      "entity_values": {
+        "travel_plan": "no travel planned"
+      },
+      "expected_answer": "no travel planned",
+      "hop": 1,
+      "agent_answer": "A baby shower contingent on being in a relationship, with no travel planned while in the relationship, and an island getaway planned if the relationship status changes.",
+      "u_pass": true,
+      "u_reason": "The agent's answer includes 'no travel planned,' which matches the gold answer."
+    },
+    {
+      "question": "What family event do I have coming up?",
+      "task_type": "Abs",
+      "entity": [
+        "family_event"
+      ],
+      "entity_values": {
+        "family_event": "baby shower"
+      },
+      "expected_answer": "baby shower",
+      "hop": 1,
+      "agent_answer": "Baby shower",
+      "u_pass": true,
+      "u_reason": "The agent's answer 'Baby shower' is semantically equivalent to the gold answer 'baby shower'."
+    },
+    {
+      "question": "What regular appointments do I have?",
+      "task_type": "Del",
+      "entity": [
+        "regular_appointment"
+      ],
+      "entity_values": {
+        "regular_appointment": "chiropractor (biweekly)"
+      },
+      "expected_answer": "chiropractor (biweekly)",
+      "hop": null,
+      "agent_answer": "A regular chiropractic appointment every two weeks.",
+      "u_pass": true,
+      "u_reason": "The agent's answer semantically matches the gold answer by indicating a biweekly chiropractic appointment."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world."
+      },
+      "expected_answer": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.",
+      "hop": null,
+      "agent_answer": "\"We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.\"",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all subscription services I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "subscription_service"
+      ],
+      "entity_values": {
+        "subscription_service": [
+          "Xelvoria",
+          "Thyranote",
+          "Zorvista Premium"
+        ]
+      },
+      "expected_answer": "Xelvoria, Thyranote, Zorvista Premium",
+      "hop": null,
+      "agent_answer": "Xelvoria, Zorvista Premium",
+      "u_pass": false,
+      "u_reason": "The agent's answer is missing 'Thyranote' and does not match the full ordered history.",
+      "u_pass_count": 2,
+      "u_pass_total": 3
+    },
+    {
+      "question": "What trip am I planning?",
+      "task_type": "Cas",
+      "entity": [
+        "travel_plan"
+      ],
+      "entity_values": {
+        "travel_plan": "island getaway"
+      },
+      "expected_answer": "island getaway",
+      "hop": 1,
+      "agent_answer": "A baby shower and a no travel plan, contingent on your current relationship status; if your relationship status changes, you plan an island getaway.",
+      "u_pass": false,
+      "u_reason": "The agent lists multiple options and uses future tense instead of confirming the new value as current.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What family event do I have coming up?",
+      "task_type": "Abs",
+      "entity": [
+        "family_event"
+      ],
+      "entity_values": {
+        "family_event": "baby shower"
+      },
+      "expected_answer": "Uncertain — previously 'baby shower', but relationship_status changed",
+      "hop": 1,
+      "agent_answer": "Baby shower",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value 'baby shower' without expressing uncertainty or acknowledging the upstream change.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What regular appointments do I have?",
+      "task_type": "Del",
+      "entity": [
+        "regular_appointment"
+      ],
+      "entity_values": {
+        "regular_appointment": "chiropractor (biweekly)"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "You don't have that information.",
+      "u_pass": true,
+      "u_reason": "The agent correctly stated that the information is no longer available without revealing the deleted value.",
+      "pass_type": "real"
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "knitting",
+        "sports": "rock climbing",
+        "club_membership": "book club"
+      },
+      "expected_answer": "The user's hobby is knitting, plays rock climbing, and is part of book club.",
+      "hop": null,
+      "agent_answer": "- Play rock climbing  \n- Use the Thyranote app to track climbing goals and progress  \n- Participate in pickup basketball on Saturdays as a social and fitness activity complementary to climbing",
+      "u_pass": false,
+      "u_pass_per_entity": {
+        "hobby": false,
+        "sports": true,
+        "club_membership": false
+      },
+      "u_pass_count": 1,
+      "u_pass_total": 3,
+      "u_reason": "Only 'rock climbing' is mentioned in the agent's answer."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world."
+      },
+      "expected_answer": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.",
+      "hop": null,
+      "agent_answer": "\"We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.\"",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 1,
+      "trivial_pass": 0,
+      "knew_but_failed": 0,
+      "never_knew": 0
+    }
+  },
+  "totals": {
+    "before_pass": 3,
+    "before_total": 4,
+    "after_pass": 2,
+    "after_total": 6
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 8,
+    "input_tokens": 1633,
+    "output_tokens": 257
+  }
+}

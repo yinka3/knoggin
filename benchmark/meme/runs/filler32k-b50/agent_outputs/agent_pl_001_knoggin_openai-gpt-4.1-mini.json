@@ -1,0 +1,176 @@
+{
+  "episode_id": 1,
+  "domain": "personal_life",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What medication am I taking?",
+      "task_type": "Cas",
+      "entity": [
+        "medication"
+      ],
+      "entity_values": {
+        "medication": "Quelmithin"
+      },
+      "expected_answer": "Quelmithin",
+      "hop": 1,
+      "agent_answer": "Quelmithin"
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Crysthene Pool"
+      },
+      "expected_answer": "Crysthene Pool",
+      "hop": 2,
+      "agent_answer": "Crysthene Pool"
+    },
+    {
+      "question": "What regular appointments do I have?",
+      "task_type": "Abs",
+      "entity": [
+        "regular_appointment"
+      ],
+      "entity_values": {
+        "regular_appointment": "tutoring session (weekly)"
+      },
+      "expected_answer": "tutoring session (weekly)",
+      "hop": 1,
+      "agent_answer": "You have a regular weekly tutoring session."
+    },
+    {
+      "question": "What's my partner's name?",
+      "task_type": "Del",
+      "entity": [
+        "partner"
+      ],
+      "entity_values": {
+        "partner": "James"
+      },
+      "expected_answer": "James",
+      "hop": null,
+      "agent_answer": "James"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world."
+      },
+      "expected_answer": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.",
+      "hop": null,
+      "agent_answer": "\"We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all vehicles I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "vehicle"
+      ],
+      "entity_values": {
+        "vehicle": [
+          "Zyvanta Sedan",
+          "Therwyn Compact",
+          "Xylorim Scooter"
+        ]
+      },
+      "expected_answer": "Zyvanta Sedan, Therwyn Compact, Xylorim Scooter",
+      "hop": null,
+      "agent_answer": "Therwyn Compact, Zyvanta Sedan"
+    },
+    {
+      "question": "What medication am I taking?",
+      "task_type": "Cas",
+      "entity": [
+        "medication"
+      ],
+      "entity_values": {
+        "medication": "multivitamin"
+      },
+      "expected_answer": "multivitamin",
+      "hop": 1,
+      "agent_answer": "Quelmithin"
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Velthari Studio"
+      },
+      "expected_answer": "Velthari Studio",
+      "hop": 2,
+      "agent_answer": "Crysthene Pool"
+    },
+    {
+      "question": "What regular appointments do I have?",
+      "task_type": "Abs",
+      "entity": [
+        "regular_appointment"
+      ],
+      "entity_values": {
+        "regular_appointment": "tutoring session (weekly)"
+      },
+      "expected_answer": "Uncertain — previously 'tutoring session (weekly)', but health_condition changed",
+      "hop": 1,
+      "agent_answer": "You have a regular weekly tutoring session."
+    },
+    {
+      "question": "What's my partner's name?",
+      "task_type": "Del",
+      "entity": [
+        "partner"
+      ],
+      "entity_values": {
+        "partner": "James"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "I don't have that information."
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "pottery",
+        "sports": "rock climbing",
+        "club_membership": "book club"
+      },
+      "expected_answer": "The user's hobby is pottery, plays rock climbing, and is part of book club.",
+      "hop": null,
+      "agent_answer": "- Play rock climbing, enjoying both bouldering and roped climbing, with a preference for bouldering to build strength and technique in shorter sessions.  \n- Read the book \"The Quorath Codex.\""
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world."
+      },
+      "expected_answer": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.",
+      "hop": null,
+      "agent_answer": "\"We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.\""
+    }
+  ]
+}

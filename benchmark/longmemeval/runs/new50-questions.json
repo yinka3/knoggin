@@ -1,0 +1,356 @@
+{
+  "source": "longmemeval_m_new50.json",
+  "sha256": "d389ee6d5cc77fb010bb41367459dc7c774bada086a8f4eb73fe229efa09eb15",
+  "questions": [
+    {
+      "question_id": "gpt4_4cd9eba1",
+      "question_type": "temporal-reasoning",
+      "question": "How many weeks have I been accepted into the exchange program when I started attending the pre-departure orientation sessions?",
+      "question_date": "2023/04/19 (Wed) 17:49",
+      "answer": "one week"
+    },
+    {
+      "question_id": "gpt4_85da3956",
+      "question_type": "temporal-reasoning",
+      "question": "How many weeks ago did I attend the 'Summer Nights' festival at Universal Studios Hollywood?",
+      "question_date": "2023/08/05 (Sat) 10:41",
+      "answer": "3 weeks ago"
+    },
+    {
+      "question_id": "gpt4_1a1dc16d",
+      "question_type": "temporal-reasoning",
+      "question": "Which event happened first, the meeting with Rachel or the pride parade?",
+      "question_date": "2023/05/09 (Tue) 09:58",
+      "answer": "The meeting with Rachel"
+    },
+    {
+      "question_id": "gpt4_468eb063",
+      "question_type": "temporal-reasoning",
+      "question": "How many days ago did I meet Emma?",
+      "question_date": "2023/04/20 (Thu) 02:35",
+      "answer": "9 days ago. 10 days (including the last day) is also acceptable."
+    },
+    {
+      "question_id": "gpt4_70e84552_abs",
+      "question_type": "temporal-reasoning",
+      "question": "Which task did I complete first, fixing the fence or purchasing three cows from Peter?",
+      "question_date": "2023/05/26 (Fri) 04:24",
+      "answer": "The information provided is not enough. You mentioned fixing the fence but did not mention purchasing cows from Peter."
+    },
+    {
+      "question_id": "gpt4_d9af6064",
+      "question_type": "temporal-reasoning",
+      "question": "Which device did I set up first, the smart thermostat or the new router?",
+      "question_date": "2023/03/28 (Tue) 01:10",
+      "answer": "new router"
+    },
+    {
+      "question_id": "0bc8ad92",
+      "question_type": "temporal-reasoning",
+      "question": "How many months have passed since I last visited a museum with a friend?",
+      "question_date": "2023/03/25 (Sat) 12:56",
+      "answer": 5
+    },
+    {
+      "question_id": "gpt4_f420262c",
+      "question_type": "temporal-reasoning",
+      "question": "What is the order of airlines I flew with from earliest to latest before today?",
+      "question_date": "2023/03/02 (Thu) 23:17",
+      "answer": "JetBlue, Delta, United, American Airlines"
+    },
+    {
+      "question_id": "gpt4_7abb270c",
+      "question_type": "temporal-reasoning",
+      "question": "What is the order of the six museums I visited from earliest to latest?",
+      "question_date": "2023/03/10 (Fri) 08:04",
+      "answer": "Science Museum, Museum of Contemporary Art, Metropolitan Museum of Art, Museum of History, Modern Art Museum, Natural History Museum"
+    },
+    {
+      "question_id": "6e984302",
+      "question_type": "temporal-reasoning",
+      "question": "I mentioned an investment for a competition four weeks ago? What did I buy?",
+      "question_date": "2023/04/01 (Sat) 06:39",
+      "answer": "I got my own set of sculpting tools."
+    },
+    {
+      "question_id": "gpt4_e061b84g",
+      "question_type": "temporal-reasoning",
+      "question": "I mentioned participating in a sports event two weeks ago. What was the event?",
+      "question_date": "2023/07/01 (Sat) 06:23",
+      "answer": "The company's annual charity soccer tournament."
+    },
+    {
+      "question_id": "982b5123",
+      "question_type": "temporal-reasoning",
+      "question": "How many months ago did I book the Airbnb in San Francisco?",
+      "question_date": "2023/05/23 (Tue) 01:05",
+      "answer": "Five months ago"
+    },
+    {
+      "question_id": "0bb5a684",
+      "question_type": "temporal-reasoning",
+      "question": "How many days before the team meeting I was preparing for did I attend the workshop on 'Effective Communication in the Workplace'?",
+      "question_date": "2023/01/13 (Fri) 13:41",
+      "answer": "7 days. 8 days (including the last day) is also acceptable."
+    },
+    {
+      "question_id": "9aaed6a3",
+      "question_type": "multi-session",
+      "question": "How much cashback did I earn at SaveMart last Thursday?",
+      "question_date": "2023/05/30 (Tue) 22:57",
+      "answer": "$0.75"
+    },
+    {
+      "question_id": "7405e8b1",
+      "question_type": "multi-session",
+      "question": "Did I receive a higher percentage discount on my first order from HelloFresh, compared to my first UberEats order?",
+      "question_date": "2023/05/30 (Tue) 23:29",
+      "answer": "Yes."
+    },
+    {
+      "question_id": "gpt4_f2262a51",
+      "question_type": "multi-session",
+      "question": "How many different doctors did I visit?",
+      "question_date": "2023/05/30 (Tue) 23:48",
+      "answer": "I visited three different doctors: a primary care physician, an ENT specialist, and a dermatologist."
+    },
+    {
+      "question_id": "a1cc6108",
+      "question_type": "multi-session",
+      "question": "How old was I when Alex was born?",
+      "question_date": "2023/05/30 (Tue) 23:15",
+      "answer": "11"
+    },
+    {
+      "question_id": "bb7c3b45",
+      "question_type": "multi-session",
+      "question": "How much did I save on the Jimmy Choo heels?",
+      "question_date": "2023/05/30 (Tue) 22:41",
+      "answer": "$300"
+    },
+    {
+      "question_id": "21d02d0d",
+      "question_type": "multi-session",
+      "question": "How many fun runs did I miss in March due to work commitments?",
+      "question_date": "2023/04/26 (Wed) 23:59",
+      "answer": "2"
+    },
+    {
+      "question_id": "681a1674",
+      "question_type": "multi-session",
+      "question": "How many Marvel movies did I re-watch?",
+      "question_date": "2023/05/30 (Tue) 23:57",
+      "answer": "2"
+    },
+    {
+      "question_id": "a4996e51",
+      "question_type": "multi-session",
+      "question": "How many hours do I work in a typical week during peak campaign seasons?",
+      "question_date": "2023/05/30 (Tue) 23:05",
+      "answer": "50"
+    },
+    {
+      "question_id": "00ca467f",
+      "question_type": "multi-session",
+      "question": "How many doctor's appointments did I go to in March?",
+      "question_date": "2023/03/27 (Mon) 23:56",
+      "answer": 2
+    },
+    {
+      "question_id": "e6041065",
+      "question_type": "multi-session",
+      "question": "What percentage of packed shoes did I wear on my last trip?",
+      "question_date": "2023/05/30 (Tue) 23:53",
+      "answer": "40%"
+    },
+    {
+      "question_id": "88432d0a",
+      "question_type": "multi-session",
+      "question": "How many times did I bake something in the past two weeks?",
+      "question_date": "2023/05/30 (Tue) 23:22",
+      "answer": 4
+    },
+    {
+      "question_id": "4f54b7c9",
+      "question_type": "multi-session",
+      "question": "How many antique items did I inherit or acquire from my family members?",
+      "question_date": "2023/05/30 (Tue) 23:26",
+      "answer": "5"
+    },
+    {
+      "question_id": "a9f6b44c",
+      "question_type": "multi-session",
+      "question": "How many bikes did I service or plan to service in March?",
+      "question_date": "2023/03/20 (Mon) 23:58",
+      "answer": 2
+    },
+    {
+      "question_id": "89941a93",
+      "question_type": "knowledge-update",
+      "question": "How many bikes do I currently own?",
+      "question_date": "2023/10/20 (Fri) 06:25",
+      "answer": "4"
+    },
+    {
+      "question_id": "affe2881",
+      "question_type": "knowledge-update",
+      "question": "How many different species of birds have I seen in my local park?",
+      "question_date": "2023/06/21 (Wed) 22:31",
+      "answer": "32"
+    },
+    {
+      "question_id": "e61a7584",
+      "question_type": "knowledge-update",
+      "question": "How long have I had my cat, Luna?",
+      "question_date": "2023/11/30 (Thu) 13:57",
+      "answer": "9 months"
+    },
+    {
+      "question_id": "4b24c848",
+      "question_type": "knowledge-update",
+      "question": "How many tops have I bought from H&M so far?",
+      "question_date": "2023/10/05 (Thu) 07:46",
+      "answer": "five"
+    },
+    {
+      "question_id": "06db6396",
+      "question_type": "knowledge-update",
+      "question": "How many projects have I completed since starting painting classes?",
+      "question_date": "2023/10/10 (Tue) 02:01",
+      "answer": "5"
+    },
+    {
+      "question_id": "f9e8c073",
+      "question_type": "knowledge-update",
+      "question": "How many sessions of the bereavement support group did I attend?",
+      "question_date": "2023/10/31 (Tue) 18:51",
+      "answer": "five"
+    },
+    {
+      "question_id": "ed4ddc30",
+      "question_type": "knowledge-update",
+      "question": "How many dozen eggs do we currently have stocked up in our refrigerator?",
+      "question_date": "2023/03/16 (Thu) 01:36",
+      "answer": "20"
+    },
+    {
+      "question_id": "2133c1b5",
+      "question_type": "knowledge-update",
+      "question": "How long have I been living in my current apartment in Harajuku?",
+      "question_date": "2023/10/15 (Sun) 09:37",
+      "answer": "3 months"
+    },
+    {
+      "question_id": "c960da58",
+      "question_type": "single-session-user",
+      "question": "How many playlists do I have on Spotify?",
+      "question_date": "2023/05/30 (Tue) 23:27",
+      "answer": "20"
+    },
+    {
+      "question_id": "d52b4f67",
+      "question_type": "single-session-user",
+      "question": "Where did I attend my cousin's wedding?",
+      "question_date": "2023/05/30 (Tue) 22:30",
+      "answer": "The Grand Ballroom"
+    },
+    {
+      "question_id": "ec81a493",
+      "question_type": "single-session-user",
+      "question": "How many copies of my favorite artist's debut album were released worldwide?",
+      "question_date": "2023/05/30 (Tue) 22:26",
+      "answer": "500"
+    },
+    {
+      "question_id": "19b5f2b3_abs",
+      "question_type": "single-session-user",
+      "question": "How long was I in Korea for?",
+      "question_date": "2023/05/30 (Tue) 23:46",
+      "answer": "You did not mention this information. You mentioned staying in Japan, but not in Korea."
+    },
+    {
+      "question_id": "c14c00dd",
+      "question_type": "single-session-user",
+      "question": "What brand of shampoo do I currently use?",
+      "question_date": "2023/05/30 (Tue) 23:58",
+      "answer": "Trader Joe's"
+    },
+    {
+      "question_id": "76d63226",
+      "question_type": "single-session-user",
+      "question": "What size is my new Samsung TV?",
+      "question_date": "2023/05/30 (Tue) 22:33",
+      "answer": "55-inch"
+    },
+    {
+      "question_id": "66f24dbb",
+      "question_type": "single-session-user",
+      "question": "What did I buy for my sister's birthday gift?",
+      "question_date": "2023/05/30 (Tue) 23:31",
+      "answer": "a yellow dress"
+    },
+    {
+      "question_id": "d596882b",
+      "question_type": "single-session-assistant",
+      "question": "I'm planning another trip to New York City and I was wondering if you could remind me of that vegan eatery you recommended last time, the one with multiple locations throughout the city?",
+      "question_date": "2023/05/30 (Tue) 23:54",
+      "answer": "By Chloe"
+    },
+    {
+      "question_id": "b759caee",
+      "question_type": "single-session-assistant",
+      "question": "I was looking back at our previous conversation about buying unique engagement rings directly from designers. Can you remind me of the Instagram handle of the UK-based designer who works with unusual gemstones?",
+      "question_date": "2023/05/30 (Tue) 23:48",
+      "answer": "@jessica_poole_jewellery"
+    },
+    {
+      "question_id": "1b9b7252",
+      "question_type": "single-session-assistant",
+      "question": "I wanted to follow up on our previous conversation about mindfulness techniques. You mentioned some great resources for guided imagery exercises, can you remind me of the website that had free exercises like 'The Mountain Meditation' and 'The Body Scan Meditation'?",
+      "question_date": "2023/05/30 (Tue) 22:29",
+      "answer": "Mindful.org."
+    },
+    {
+      "question_id": "eaca4986",
+      "question_type": "single-session-assistant",
+      "question": "I'm looking back at our previous conversation where you created two sad songs for me. Can you remind me what was the chord progression for the chorus in the second song?",
+      "question_date": "2023/05/30 (Tue) 23:55",
+      "answer": "C D E F G A B A G F E D C"
+    },
+    {
+      "question_id": "fca762bc",
+      "question_type": "single-session-assistant",
+      "question": "I wanted to follow up on our previous conversation about language learning apps. You mentioned a few options, and I was wondering if you could remind me of the one that uses mnemonics to help learners memorize words and phrases?",
+      "question_date": "2023/05/30 (Tue) 23:52",
+      "answer": "Memrise"
+    },
+    {
+      "question_id": "e48988bc",
+      "question_type": "single-session-assistant",
+      "question": "I was looking back at our previous conversation about environmentally responsible supply chain practices, and I was wondering if you could remind me of the company you mentioned that's doing a great job with sustainability?",
+      "question_date": "2023/05/30 (Tue) 23:52",
+      "answer": "Patagonia"
+    },
+    {
+      "question_id": "caf03d32",
+      "question_type": "single-session-preference",
+      "question": "I've been struggling with my slow cooker recipes. Any advice on getting better results?",
+      "question_date": "2023/05/30 (Tue) 23:45",
+      "answer": "The user would prefer responses that provide tips and advice specifically tailored to their slow cooker experiences, utilizing their recent success with beef stew and interest in making yogurt in the slow cooker. They might not prefer general slow cooker recipes or advice unrelated to their specific experiences and interests."
+    },
+    {
+      "question_id": "1c0ddc50",
+      "question_type": "single-session-preference",
+      "question": "Can you suggest some activities I can do during my commute to work?",
+      "question_date": "2023/05/30 (Tue) 23:50",
+      "answer": "The user would prefer suggestions related to listening to new podcasts or audiobooks, especially the genre beyond true crime or self-improvement, such as history. They may not be interested in activities that require visual attention, such as reading or watching videos, as they are commuting. The user would not prefer general podcast topics such as true crime or self-improvement, as the user wants to explore other topics."
+    },
+    {
+      "question_id": "0edc2aef",
+      "question_type": "single-session-preference",
+      "question": "Can you suggest a hotel for my upcoming trip to Miami?",
+      "question_date": "2023/05/30 (Tue) 22:27",
+      "answer": "The user would prefer suggestions of hotels in Miami that offer great views, possibly of the ocean or the city skyline, and have unique features such as a rooftop pool or a hot tub on the balcony. They may not prefer suggestions of basic or budget hotels without these features."
+    }
+  ]
+}

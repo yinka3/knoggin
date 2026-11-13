@@ -1,0 +1,150 @@
+{
+  "episode_id": 17,
+  "domain": "personal_life",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What regular appointments do I have?",
+      "task_type": "Cas",
+      "entity": [
+        "regular_appointment"
+      ],
+      "entity_values": {
+        "regular_appointment": "physical therapy (2x/week)"
+      },
+      "expected_answer": "physical therapy (2x/week)",
+      "hop": 1,
+      "agent_answer": "Physical therapy twice a week and biweekly chiropractor appointments."
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Abs",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Thandrel YMCA"
+      },
+      "expected_answer": "Thandrel YMCA",
+      "hop": 1,
+      "agent_answer": "Thandrel YMCA"
+    },
+    {
+      "question": "What health condition do I have?",
+      "task_type": "Del",
+      "entity": [
+        "health_condition"
+      ],
+      "entity_values": {
+        "health_condition": "high blood pressure"
+      },
+      "expected_answer": "high blood pressure",
+      "hop": null,
+      "agent_answer": "high blood pressure"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives."
+      },
+      "expected_answer": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.",
+      "hop": null,
+      "agent_answer": "\"Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all vehicles I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "vehicle"
+      ],
+      "entity_values": {
+        "vehicle": [
+          "Zyvanta Sedan",
+          "Therwyn Compact",
+          "Vorantel SUV"
+        ]
+      },
+      "expected_answer": "Zyvanta Sedan, Therwyn Compact, Vorantel SUV",
+      "hop": null,
+      "agent_answer": "Vorantel SUV"
+    },
+    {
+      "question": "What regular appointments do I have?",
+      "task_type": "Cas",
+      "entity": [
+        "regular_appointment"
+      ],
+      "entity_values": {
+        "regular_appointment": "chiropractor (biweekly)"
+      },
+      "expected_answer": "chiropractor (biweekly)",
+      "hop": 1,
+      "agent_answer": "Physical therapy twice a week and biweekly chiropractor appointments."
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Abs",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Thandrel YMCA"
+      },
+      "expected_answer": "Uncertain — previously 'Thandrel YMCA', but residence_location changed",
+      "hop": 1,
+      "agent_answer": "Thandrel YMCA"
+    },
+    {
+      "question": "What health condition do I have?",
+      "task_type": "Del",
+      "entity": [
+        "health_condition"
+      ],
+      "entity_values": {
+        "health_condition": "high blood pressure"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "I don't have that information."
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "photography",
+        "sports": "running club",
+        "club_membership": "wine tasting club"
+      },
+      "expected_answer": "The user's hobby is photography, plays running club, and is part of wine tasting club.",
+      "hop": null,
+      "agent_answer": "Unwind by listening to music or podcasts during your 30-minute commute."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives."
+      },
+      "expected_answer": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.",
+      "hop": null,
+      "agent_answer": "\"Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.\""
+    }
+  ]
+}

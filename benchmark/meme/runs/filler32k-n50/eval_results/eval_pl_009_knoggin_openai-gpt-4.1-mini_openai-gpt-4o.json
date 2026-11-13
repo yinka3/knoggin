@@ -1,0 +1,250 @@
+{
+  "episode_id": 9,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What dietary restrictions do I have?",
+      "task_type": "Cas",
+      "entity": [
+        "dietary_restriction"
+      ],
+      "entity_values": {
+        "dietary_restriction": "low-sodium"
+      },
+      "expected_answer": "low-sodium",
+      "hop": 1,
+      "agent_answer": "Low-sodium",
+      "u_pass": true,
+      "u_reason": "The agent's answer 'Low-sodium' is semantically equivalent to the gold answer 'low-sodium'."
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Zorathel Peak Gym"
+      },
+      "expected_answer": "Zorathel Peak Gym",
+      "hop": 2,
+      "agent_answer": "Zorathel Peak Gym",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically by providing the same location, Zorathel Peak Gym."
+    },
+    {
+      "question": "What's my exercise routine?",
+      "task_type": "Abs",
+      "entity": [
+        "exercise_routine"
+      ],
+      "entity_values": {
+        "exercise_routine": "pilates 3x/week"
+      },
+      "expected_answer": "pilates 3x/week",
+      "hop": 1,
+      "agent_answer": "Pilates 3 times per week.",
+      "u_pass": true,
+      "u_reason": "The agent's answer is semantically equivalent to the gold answer."
+    },
+    {
+      "question": "What regular appointments do I have?",
+      "task_type": "Del",
+      "entity": [
+        "regular_appointment"
+      ],
+      "entity_values": {
+        "regular_appointment": "tutoring session (weekly)"
+      },
+      "expected_answer": "tutoring session (weekly)",
+      "hop": null,
+      "agent_answer": "Weekly tutoring session and monthly social meetup brunch with college friends.",
+      "u_pass": true,
+      "u_reason": "The agent's answer includes the weekly tutoring session, matching the gold answer."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world."
+      },
+      "expected_answer": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.",
+      "hop": null,
+      "agent_answer": "\"We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.\"",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all vehicles I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "vehicle"
+      ],
+      "entity_values": {
+        "vehicle": [
+          "Zyvanta Sedan",
+          "Quorvel EV",
+          "Vorantel SUV"
+        ]
+      },
+      "expected_answer": "Zyvanta Sedan, Quorvel EV, Vorantel SUV",
+      "hop": null,
+      "agent_answer": "Zyvanta Sedan, Quorvel EV, Vorantel SUV",
+      "u_pass": true,
+      "u_reason": "The agent's answer contains all the gold values in the exact order specified.",
+      "u_pass_count": 3,
+      "u_pass_total": 3
+    },
+    {
+      "question": "What dietary restrictions do I have?",
+      "task_type": "Cas",
+      "entity": [
+        "dietary_restriction"
+      ],
+      "entity_values": {
+        "dietary_restriction": "no alcohol"
+      },
+      "expected_answer": "no alcohol",
+      "hop": 1,
+      "agent_answer": "Low-sodium and no alcohol (if health condition changes).",
+      "u_pass": false,
+      "u_reason": "The agent lists both old and new values together.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Crysthene Pool"
+      },
+      "expected_answer": "Crysthene Pool",
+      "hop": 2,
+      "agent_answer": "Zorathel Peak Gym",
+      "u_pass": false,
+      "u_reason": "The agent stated the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's my exercise routine?",
+      "task_type": "Abs",
+      "entity": [
+        "exercise_routine"
+      ],
+      "entity_values": {
+        "exercise_routine": "pilates 3x/week"
+      },
+      "expected_answer": "Uncertain — previously 'pilates 3x/week', but health_condition changed",
+      "hop": 1,
+      "agent_answer": "Pilates 3 times per week.",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value without expressing any uncertainty or acknowledging the upstream change.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What regular appointments do I have?",
+      "task_type": "Del",
+      "entity": [
+        "regular_appointment"
+      ],
+      "entity_values": {
+        "regular_appointment": "tutoring session (weekly)"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "You have a monthly social meetup brunch with college friends.",
+      "u_pass": false,
+      "u_reason": "The agent incorrectly returned the deleted value as if it still exists.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "cooking",
+        "sports": "running club",
+        "club_membership": "book club"
+      },
+      "expected_answer": "The user's hobby is cooking, plays running club, and is part of book club.",
+      "hop": null,
+      "agent_answer": "- Participate in a book club that reads a different book each month, preferring a mix of genres with a leaning towards contemporary fiction and thrillers, appreciating books with complex characters and moral dilemmas that spark intense discussions.  \n- Attend a monthly social meetup brunch with college friends to maintain and strengthen friendships over time.",
+      "u_pass": false,
+      "u_pass_per_entity": {
+        "hobby": false,
+        "sports": false,
+        "club_membership": true
+      },
+      "u_pass_count": 1,
+      "u_pass_total": 3,
+      "u_reason": "Only 'book club' is mentioned in the agent's answer."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world."
+      },
+      "expected_answer": "We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.",
+      "hop": null,
+      "agent_answer": "\"We are what we repeatedly do. Excellence, then, is not an act, but a habit. The whole is greater than the sum of its parts. We must become the change we wish to see in the world.\"",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 2,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    }
+  },
+  "totals": {
+    "before_pass": 4,
+    "before_total": 5,
+    "after_pass": 2,
+    "after_total": 7
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 10,
+    "input_tokens": 2048,
+    "output_tokens": 288
+  }
+}

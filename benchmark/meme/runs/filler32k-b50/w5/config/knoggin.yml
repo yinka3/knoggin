@@ -1,0 +1,20 @@
+developer_settings:
+  chat_compaction:
+    enabled: false
+  community:
+    enabled: false
+  ingestion:
+    context:
+      maintenance_model: openai/gpt-4.1-mini
+      update_model: openai/gpt-4.1-mini
+  jobs:
+    conflict_discovery:
+      enabled: false
+    duplicate_review:
+      enabled: false
+llm:
+  agent_model: openai/gpt-4.1-mini
+  extraction_model: openai/gpt-4.1-mini
+  merge_model: openai/gpt-4.1-mini
+  spending_budget:
+    limit_usd: 5.0

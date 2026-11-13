@@ -1,0 +1,219 @@
+{
+  "episode_id": 2,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "How long is my commute?",
+      "task_type": "Cas",
+      "entity": [
+        "commute_duration"
+      ],
+      "entity_values": {
+        "commute_duration": "1.5 hours"
+      },
+      "expected_answer": "1.5 hours",
+      "hop": 1,
+      "agent_answer": "About 1.5 hours.",
+      "u_pass": true,
+      "u_reason": "The agent's answer 'About 1.5 hours' semantically matches the gold answer '1.5 hours'."
+    },
+    {
+      "question": "What's my favorite restaurant?",
+      "task_type": "Abs",
+      "entity": [
+        "favorite_restaurant"
+      ],
+      "entity_values": {
+        "favorite_restaurant": "Zefiro's Kitchen"
+      },
+      "expected_answer": "Zefiro's Kitchen",
+      "hop": 1,
+      "agent_answer": "Zefiro's Kitchen",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What's my sleep schedule?",
+      "task_type": "Del",
+      "entity": [
+        "sleep_pattern"
+      ],
+      "entity_values": {
+        "sleep_pattern": "varies by shift"
+      },
+      "expected_answer": "varies by shift",
+      "hop": null,
+      "agent_answer": "Your sleep usually varies by shift, and you sometimes have to adjust your sleep routine depending on your schedule.",
+      "u_pass": true,
+      "u_reason": "The agent's answer includes the core information that the sleep schedule varies by shift."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it."
+      },
+      "expected_answer": "The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it.",
+      "hop": null,
+      "agent_answer": "\"The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it.\"",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all vehicles I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "vehicle"
+      ],
+      "entity_values": {
+        "vehicle": [
+          "Therwyn Compact",
+          "Dranthis Pickup",
+          "Xylorim Scooter"
+        ]
+      },
+      "expected_answer": "Therwyn Compact, Dranthis Pickup, Xylorim Scooter",
+      "hop": null,
+      "agent_answer": "Therwyn Compact, Samsung Galaxy S22",
+      "u_pass": false,
+      "u_reason": "The agent's answer is missing two of the historical vehicle values and includes an incorrect item.",
+      "u_pass_count": 1,
+      "u_pass_total": 3
+    },
+    {
+      "question": "How long is my commute?",
+      "task_type": "Cas",
+      "entity": [
+        "commute_duration"
+      ],
+      "entity_values": {
+        "commute_duration": "10 min"
+      },
+      "expected_answer": "10 min",
+      "hop": 1,
+      "agent_answer": "About 1.5 hours.",
+      "u_pass": false,
+      "u_reason": "The agent stated an incorrect value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's my favorite restaurant?",
+      "task_type": "Abs",
+      "entity": [
+        "favorite_restaurant"
+      ],
+      "entity_values": {
+        "favorite_restaurant": "Zefiro's Kitchen"
+      },
+      "expected_answer": "Uncertain — previously 'Zefiro's Kitchen', but residence_location changed",
+      "hop": 1,
+      "agent_answer": "Zefiro's Kitchen",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value without expressing any uncertainty.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's my sleep schedule?",
+      "task_type": "Del",
+      "entity": [
+        "sleep_pattern"
+      ],
+      "entity_values": {
+        "sleep_pattern": "varies by shift"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "Your sleep usually varies by shift, and you sometimes have to adjust your sleep routine depending on your schedule.",
+      "u_pass": false,
+      "u_reason": "The agent revealed the deleted value by stating that the sleep schedule varies by shift.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "knitting",
+        "sports": "basketball",
+        "club_membership": "board game group"
+      },
+      "expected_answer": "The user's hobby is knitting, plays basketball, and is part of board game group.",
+      "hop": null,
+      "agent_answer": "- Enjoy surfing lessons in Pacific Beach, San Diego with family  \n- Spend time at beaches and engage in outdoor beach activities  \n- Stay active through basketball and CrossFit workouts (works out regularly at Pyravar CrossFit)  \n- Share activities and interests with partner James  \n- Explore scenic coastal routes and wine country stops  \n- Participate in wine and food pairing experiences at wineries  \n- Book private tours and tastings at wineries (e.g., Fess Parker Winery)  \n- Read books and organize reading lists, engage with book communities like Goodreads  \n- Reduce screen time using analog and low-tech productivity tools such as planners, bullet journaling, and Pomodoro timers  \n- Reduce waste in the kitchen through meal planning, proper storage, using leftovers, composting, and using eco-friendly kitchen products  \n- Explore sustainable fashion and lifestyle through documentaries, YouTube channels, and blogs  \n- Organize photos using photo management apps on Samsung Galaxy S22  \n- Travel and explore new destinations (e.g., road trips along Pacific Coast Highway, wine country trips, Tanzania itinerary)",
+      "u_pass": false,
+      "u_pass_per_entity": {
+        "hobby": false,
+        "sports": true,
+        "club_membership": false
+      },
+      "u_pass_count": 1,
+      "u_pass_total": 3,
+      "u_reason": "Only 'basketball' is mentioned in the agent's answer."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it."
+      },
+      "expected_answer": "The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it.",
+      "hop": null,
+      "agent_answer": "\"The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it.\"",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    }
+  },
+  "totals": {
+    "before_pass": 3,
+    "before_total": 4,
+    "after_pass": 1,
+    "after_total": 6
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 8,
+    "input_tokens": 1793,
+    "output_tokens": 239
+  }
+}

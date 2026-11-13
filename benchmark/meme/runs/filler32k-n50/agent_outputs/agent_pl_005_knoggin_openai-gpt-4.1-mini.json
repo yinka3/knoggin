@@ -1,0 +1,150 @@
+{
+  "episode_id": 5,
+  "domain": "personal_life",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What's my current financial goal?",
+      "task_type": "Cas",
+      "entity": [
+        "financial_goal"
+      ],
+      "entity_values": {
+        "financial_goal": "paying off credit card debt"
+      },
+      "expected_answer": "paying off credit card debt",
+      "hop": 1,
+      "agent_answer": "Paying off credit card debt"
+    },
+    {
+      "question": "What am I currently learning?",
+      "task_type": "Abs",
+      "entity": [
+        "skill_acquisition"
+      ],
+      "entity_values": {
+        "skill_acquisition": "Python programming"
+      },
+      "expected_answer": "Python programming",
+      "hop": 1,
+      "agent_answer": "Python programming"
+    },
+    {
+      "question": "What big purchase am I planning?",
+      "task_type": "Del",
+      "entity": [
+        "planned_purchase"
+      ],
+      "entity_values": {
+        "planned_purchase": "engagement ring"
+      },
+      "expected_answer": "engagement ring",
+      "hop": null,
+      "agent_answer": "An engagement ring."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "In three words I can sum up everything I've learned about life: it goes on. You'll have bad times, but it will always wake you up to the stuff you weren't paying attention to."
+      },
+      "expected_answer": "In three words I can sum up everything I've learned about life: it goes on. You'll have bad times, but it will always wake you up to the stuff you weren't paying attention to.",
+      "hop": null,
+      "agent_answer": "\"In three words I can sum up everything I've learned about life: it goes on. You'll have bad times, but it will always wake you up to the stuff you weren't paying attention to.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all media I've consumed over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "media_consumption"
+      ],
+      "entity_values": {
+        "media_consumption": [
+          "The Veldrakon Spiral (TV)",
+          "Whispers of Zarinthea (TV)",
+          "The Quorath Codex (book)"
+        ]
+      },
+      "expected_answer": "The Veldrakon Spiral (TV), Whispers of Zarinthea (TV), The Quorath Codex (book)",
+      "hop": null,
+      "agent_answer": "- Coffee and baking recipes and experiments (including caramel-based pastries and caramel macchiatos)\n- Spicy homemade salsa with fresh tomatoes and various ingredient experiments\n- Must-see museums and historical sites in Rome, including off-the-beaten-path museums and tips for avoiding crowds\n- Must-see historical sites in Istanbul, Turkey, and related tours and transportation advice\n- Demographic breakdown and travel information about North Holland and Amsterdam\n- Financial goals and life philosophy related to studying MS in CS at Quessara University and learning Python programming\n- Hiking club participation and reading \"The Quorath Codex\"\n- Homemade pizza dough making with a focus on achieving a crispy crust, topping combinations, flour types, and preferments"
+    },
+    {
+      "question": "What's my current financial goal?",
+      "task_type": "Cas",
+      "entity": [
+        "financial_goal"
+      ],
+      "entity_values": {
+        "financial_goal": "saving for kids' education fund"
+      },
+      "expected_answer": "saving for kids' education fund",
+      "hop": 1,
+      "agent_answer": "Paying off credit card debt"
+    },
+    {
+      "question": "What am I currently learning?",
+      "task_type": "Abs",
+      "entity": [
+        "skill_acquisition"
+      ],
+      "entity_values": {
+        "skill_acquisition": "Python programming"
+      },
+      "expected_answer": "Uncertain — previously 'Python programming', but school changed",
+      "hop": 1,
+      "agent_answer": "Python programming"
+    },
+    {
+      "question": "What big purchase am I planning?",
+      "task_type": "Del",
+      "entity": [
+        "planned_purchase"
+      ],
+      "entity_values": {
+        "planned_purchase": "engagement ring"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "You are planning a purchase of an engagement ring."
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "knitting",
+        "sports": "basketball",
+        "club_membership": "hiking club"
+      },
+      "expected_answer": "The user's hobby is knitting, plays basketball, and is part of hiking club.",
+      "hop": null,
+      "agent_answer": "- Unwind after work with hobbies  \n- Spend time outdoors  \n- Engage in knitting, focusing on scarves and blankets, experimenting with colors and textures  \n- Participate in hiking club weekend hikes  \n- Read fantasy books like \"The Quorath Codex\"  \n- Explore hobbies and outdoor activities for relaxation and recharging"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "In three words I can sum up everything I've learned about life: it goes on. You'll have bad times, but it will always wake you up to the stuff you weren't paying attention to."
+      },
+      "expected_answer": "In three words I can sum up everything I've learned about life: it goes on. You'll have bad times, but it will always wake you up to the stuff you weren't paying attention to.",
+      "hop": null,
+      "agent_answer": "\"In three words I can sum up everything I've learned about life: it goes on. You'll have bad times, but it will always wake you up to the stuff you weren't paying attention to.\""
+    }
+  ]
+}

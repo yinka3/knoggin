@@ -1,0 +1,176 @@
+{
+  "episode_id": 48,
+  "domain": "software_project",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What's the login endpoint?",
+      "task_type": "Cas",
+      "entity": [
+        "login_endpoint"
+      ],
+      "entity_values": {
+        "login_endpoint": "/cerberix/saml/sso-init"
+      },
+      "expected_answer": "/cerberix/saml/sso-init",
+      "hop": 1,
+      "agent_answer": "/cerberix/saml/sso-init"
+    },
+    {
+      "question": "What's the auth middleware config?",
+      "task_type": "Cas",
+      "entity": [
+        "middleware_config"
+      ],
+      "entity_values": {
+        "middleware_config": "oathkeeper-mtls-proxy v4.1"
+      },
+      "expected_answer": "oathkeeper-mtls-proxy v4.1",
+      "hop": 2,
+      "agent_answer": "oathkeeper-mtls-proxy v4.1"
+    },
+    {
+      "question": "What authentication method do we use?",
+      "task_type": "Abs",
+      "entity": [
+        "auth_method"
+      ],
+      "entity_values": {
+        "auth_method": "SAML 2.0 SSO"
+      },
+      "expected_answer": "SAML 2.0 SSO",
+      "hop": 1,
+      "agent_answer": "SAML 2.0 SSO with Zenthos ID"
+    },
+    {
+      "question": "What's our log drain endpoint?",
+      "task_type": "Del",
+      "entity": [
+        "log_drain_endpoint"
+      ],
+      "entity_values": {
+        "log_drain_endpoint": "stream.velturis.io/aurora"
+      },
+      "expected_answer": "stream.velturis.io/aurora",
+      "hop": null,
+      "agent_answer": "stream.velturis.io/aurora"
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review."
+      },
+      "expected_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.",
+      "hop": null,
+      "agent_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.  \nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.  \nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.  \nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review."
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all package managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "package_manager"
+      ],
+      "entity_values": {
+        "package_manager": [
+          "Quorix Hub",
+          "Dranith Stack",
+          "Veltrion Pkg"
+        ]
+      },
+      "expected_answer": "Quorix Hub, Dranith Stack, Veltrion Pkg",
+      "hop": null,
+      "agent_answer": "Dranith Stack, Quorix Hub, Veltrion Pkg"
+    },
+    {
+      "question": "What's the login endpoint?",
+      "task_type": "Cas",
+      "entity": [
+        "login_endpoint"
+      ],
+      "entity_values": {
+        "login_endpoint": "/auth/kryptal/signin"
+      },
+      "expected_answer": "/auth/kryptal/signin",
+      "hop": 1,
+      "agent_answer": "/cerberix/saml/sso-init"
+    },
+    {
+      "question": "What's the auth middleware config?",
+      "task_type": "Cas",
+      "entity": [
+        "middleware_config"
+      ],
+      "entity_values": {
+        "middleware_config": "verithos-oauth-middleware v2.1"
+      },
+      "expected_answer": "verithos-oauth-middleware v2.1",
+      "hop": 2,
+      "agent_answer": "oathkeeper-mtls-proxy v4.1"
+    },
+    {
+      "question": "What authentication method do we use?",
+      "task_type": "Abs",
+      "entity": [
+        "auth_method"
+      ],
+      "entity_values": {
+        "auth_method": "SAML 2.0 SSO"
+      },
+      "expected_answer": "Uncertain — previously 'SAML 2.0 SSO', but auth_provider changed",
+      "hop": 1,
+      "agent_answer": "SAML 2.0 SSO with Zenthos ID"
+    },
+    {
+      "question": "What's our log drain endpoint?",
+      "task_type": "Del",
+      "entity": [
+        "log_drain_endpoint"
+      ],
+      "entity_values": {
+        "log_drain_endpoint": "stream.velturis.io/aurora"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "I don't have that information."
+    },
+    {
+      "question": "What do you know about our release process? Tell me everything.",
+      "task_type": "Agg",
+      "entity": [
+        "branch_strategy",
+        "default_branch",
+        "release_cadence"
+      ],
+      "entity_values": {
+        "branch_strategy": "trunk-based with feature flags",
+        "default_branch": "main",
+        "release_cadence": "weekly on Tuesday"
+      },
+      "expected_answer": "We use trunk-based with feature flags branching on main, releasing weekly on Tuesday.",
+      "hop": null,
+      "agent_answer": "The team currently follows a solid weekly release cadence on Tuesdays. They are considering whether to adjust this schedule based on sprint feedback to optimize the release process. It is suggested to gather insights from the team after each release to identify any recurring issues or bottlenecks. Evaluating the stability of releases is also recommended, especially if certain features frequently cause bugs or require hotfixes. Maintaining open communication within the team about the effectiveness of the release schedule is encouraged to facilitate valuable improvements."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review."
+      },
+      "expected_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.",
+      "hop": null,
+      "agent_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.  \nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.  \nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.  \nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review."
+    }
+  ]
+}

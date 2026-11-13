@@ -1,0 +1,150 @@
+{
+  "episode_id": 4,
+  "domain": "personal_life",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What trip am I planning?",
+      "task_type": "Cas",
+      "entity": [
+        "travel_plan"
+      ],
+      "entity_values": {
+        "travel_plan": "no travel planned"
+      },
+      "expected_answer": "no travel planned",
+      "hop": 1,
+      "agent_answer": "A road trip from London starting April 3rd, arriving in Nice by April 10th for at least two nights, and returning to the UK by April 16th via the Harwich-Hook of Holland ferry outbound and Eurotunnel return, visiting Amsterdam, Luxembourg City, Lucerne, Lake Como, Nice, Lyon, Reims, and Calais, covering about 2,059 miles (3,316 km)."
+    },
+    {
+      "question": "Who do I live with?",
+      "task_type": "Abs",
+      "entity": [
+        "living_arrangement"
+      ],
+      "entity_values": {
+        "living_arrangement": "alone"
+      },
+      "expected_answer": "alone",
+      "hop": 1,
+      "agent_answer": "You live in a dormitory, sharing space with others."
+    },
+    {
+      "question": "What's my regular social meetup?",
+      "task_type": "Del",
+      "entity": [
+        "social_gathering"
+      ],
+      "entity_values": {
+        "social_gathering": "trivia night Wednesdays"
+      },
+      "expected_answer": "trivia night Wednesdays",
+      "hop": null,
+      "agent_answer": "Trivia night on Wednesdays"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you."
+      },
+      "expected_answer": "Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you.",
+      "hop": null,
+      "agent_answer": "\"Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all vehicles I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "vehicle"
+      ],
+      "entity_values": {
+        "vehicle": [
+          "Therwyn Compact",
+          "Quorvel EV",
+          "Xylorim Scooter"
+        ]
+      },
+      "expected_answer": "Therwyn Compact, Quorvel EV, Xylorim Scooter",
+      "hop": null,
+      "agent_answer": "Therwyn Compact, Quorvel EV, Xylorim Scooter"
+    },
+    {
+      "question": "What trip am I planning?",
+      "task_type": "Cas",
+      "entity": [
+        "travel_plan"
+      ],
+      "entity_values": {
+        "travel_plan": "island getaway"
+      },
+      "expected_answer": "island getaway",
+      "hop": 1,
+      "agent_answer": "A road trip from London starting April 3rd, arriving in Nice by April 10th for at least two nights, and returning to the UK by April 16th via the Harwich-Hook of Holland ferry outbound and Eurotunnel return, visiting Amsterdam, Luxembourg City, Lucerne, Lake Como, Nice, Lyon, Reims, and Calais, covering about 2,059 miles (3,316 km)."
+    },
+    {
+      "question": "Who do I live with?",
+      "task_type": "Abs",
+      "entity": [
+        "living_arrangement"
+      ],
+      "entity_values": {
+        "living_arrangement": "alone"
+      },
+      "expected_answer": "Uncertain — previously 'alone', but relationship_status changed",
+      "hop": 1,
+      "agent_answer": "You live alone."
+    },
+    {
+      "question": "What's my regular social meetup?",
+      "task_type": "Del",
+      "entity": [
+        "social_gathering"
+      ],
+      "entity_values": {
+        "social_gathering": "trivia night Wednesdays"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "You no longer attend the social meetup for trivia night on Wednesdays and have requested to forget this activity."
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "guitar",
+        "sports": "pickleball",
+        "club_membership": "hiking club"
+      },
+      "expected_answer": "The user's hobby is guitar, plays pickleball, and is part of hiking club.",
+      "hop": null,
+      "agent_answer": "- Play pickleball as a hobby and work on improving techniques such as serving, returning, positioning near the non-volley zone line, communication with doubles partners, footwork, and agility.  \n- Explore traditional dance forms performed during autumn festivals in the Northern Hemisphere, especially the UK Harvest festival dance and its regional variations like the Hobby Horse Dance in Somerset, the Pace Egg Play in Yorkshire, and Plough Monday in East Anglia.  \n- Ride a Xylorim Scooter for short distances and commuting, enjoying city streets or parks and exploring favorite routes or spots for scooter riding.  \n- Read fantasy or science fiction books with rich world-building and complex characters, such as \"Xelvari Dawn,\" and seek recommendations for similar books.  \n- Increase online presence on Instagram by posting regularly, engaging with followers, using Instagram Live for behind-the-scenes content and sneak peeks, and exploring strategies to grow followers and engagement."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you."
+      },
+      "expected_answer": "Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you.",
+      "hop": null,
+      "agent_answer": "\"Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you.\""
+    }
+  ]
+}

@@ -1,0 +1,202 @@
+{
+  "episode_id": 28,
+  "domain": "personal_life",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What is my job title?",
+      "task_type": "Cas",
+      "entity": [
+        "job_title"
+      ],
+      "entity_values": {
+        "job_title": "staff engineer"
+      },
+      "expected_answer": "staff engineer",
+      "hop": 1,
+      "agent_answer": "staff engineer"
+    },
+    {
+      "question": "How long is my commute?",
+      "task_type": "Cas",
+      "entity": [
+        "commute_duration"
+      ],
+      "entity_values": {
+        "commute_duration": "10 min"
+      },
+      "expected_answer": "10 min",
+      "hop": 2,
+      "agent_answer": "10 minutes"
+    },
+    {
+      "question": "What insurance do I have?",
+      "task_type": "Abs",
+      "entity": [
+        "insurance"
+      ],
+      "entity_values": {
+        "insurance": "interim coverage plan"
+      },
+      "expected_answer": "interim coverage plan",
+      "hop": 1,
+      "agent_answer": "Interim coverage plan"
+    },
+    {
+      "question": "What's my favorite restaurant?",
+      "task_type": "Abs",
+      "entity": [
+        "favorite_restaurant"
+      ],
+      "entity_values": {
+        "favorite_restaurant": "Velmara Taqueria"
+      },
+      "expected_answer": "Velmara Taqueria",
+      "hop": 2,
+      "agent_answer": "Velmara Taqueria"
+    },
+    {
+      "question": "What's my exercise routine?",
+      "task_type": "Del",
+      "entity": [
+        "exercise_routine"
+      ],
+      "entity_values": {
+        "exercise_routine": "walking daily"
+      },
+      "expected_answer": "walking daily",
+      "hop": null,
+      "agent_answer": "Walking daily"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you."
+      },
+      "expected_answer": "Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you.",
+      "hop": null,
+      "agent_answer": "\"Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all subscription services I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "subscription_service"
+      ],
+      "entity_values": {
+        "subscription_service": [
+          "Zorvista Premium",
+          "Dranthazon",
+          "Pyrethon Plus"
+        ]
+      },
+      "expected_answer": "Zorvista Premium, Dranthazon, Pyrethon Plus",
+      "hop": null,
+      "agent_answer": "1. Dranthazon  \n2. Zorvista Premium  \n3. Pyrethon Plus"
+    },
+    {
+      "question": "What is my job title?",
+      "task_type": "Cas",
+      "entity": [
+        "job_title"
+      ],
+      "entity_values": {
+        "job_title": "designer"
+      },
+      "expected_answer": "designer",
+      "hop": 1,
+      "agent_answer": "staff engineer"
+    },
+    {
+      "question": "How long is my commute?",
+      "task_type": "Cas",
+      "entity": [
+        "commute_duration"
+      ],
+      "entity_values": {
+        "commute_duration": "20 min"
+      },
+      "expected_answer": "20 min",
+      "hop": 2,
+      "agent_answer": "10 minutes"
+    },
+    {
+      "question": "What insurance do I have?",
+      "task_type": "Abs",
+      "entity": [
+        "insurance"
+      ],
+      "entity_values": {
+        "insurance": "interim coverage plan"
+      },
+      "expected_answer": "Uncertain — previously 'interim coverage plan', but employer changed",
+      "hop": 1,
+      "agent_answer": "Interim coverage plan"
+    },
+    {
+      "question": "What's my favorite restaurant?",
+      "task_type": "Abs",
+      "entity": [
+        "favorite_restaurant"
+      ],
+      "entity_values": {
+        "favorite_restaurant": "Velmara Taqueria"
+      },
+      "expected_answer": "Uncertain — previously 'Velmara Taqueria', but work_location changed",
+      "hop": 2,
+      "agent_answer": "Velmara Taqueria"
+    },
+    {
+      "question": "What's my exercise routine?",
+      "task_type": "Del",
+      "entity": [
+        "exercise_routine"
+      ],
+      "entity_values": {
+        "exercise_routine": "walking daily"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "You have a good approach to your workouts at Zorathel Peak Gym, mixing different types of exercises such as strength training, cardio, and flexibility exercises to keep your routine fresh and balanced."
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "gardening",
+        "sports": "basketball",
+        "club_membership": "hiking club"
+      },
+      "expected_answer": "The user's hobby is gardening, plays basketball, and is part of hiking club.",
+      "hop": null,
+      "agent_answer": "- Play basketball  \n- Practice shooting a couple of times a week  \n- Subscribe to Dranthazon for basketball training content"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you."
+      },
+      "expected_answer": "Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you.",
+      "hop": null,
+      "agent_answer": "\"Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you.\""
+    }
+  ]
+}

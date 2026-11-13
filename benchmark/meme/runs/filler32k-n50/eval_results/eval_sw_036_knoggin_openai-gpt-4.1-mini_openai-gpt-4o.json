@@ -1,0 +1,281 @@
+{
+  "episode_id": 36,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What Docker image do we use?",
+      "task_type": "Cas",
+      "entity": [
+        "docker_image"
+      ],
+      "entity_values": {
+        "docker_image": "narvex-registry/aurora:latest"
+      },
+      "expected_answer": "narvex-registry/aurora:latest",
+      "hop": 1,
+      "agent_answer": "narvex-registry/aurora:latest",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What's the deploy command?",
+      "task_type": "Cas",
+      "entity": [
+        "deploy_command"
+      ],
+      "entity_values": {
+        "deploy_command": "thandrel ship --channel stable"
+      },
+      "expected_answer": "thandrel ship --channel stable",
+      "hop": 2,
+      "agent_answer": "thandrel ship --channel stable",
+      "u_pass": true,
+      "u_reason": "The agent's answer is semantically equivalent to the gold answer."
+    },
+    {
+      "question": "What's our staging URL?",
+      "task_type": "Abs",
+      "entity": [
+        "staging_url"
+      ],
+      "entity_values": {
+        "staging_url": "dev.orinthal.dev/aurora"
+      },
+      "expected_answer": "dev.orinthal.dev/aurora",
+      "hop": 1,
+      "agent_answer": "dev.orinthal.dev/aurora",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "Where's the Dockerfile?",
+      "task_type": "Abs",
+      "entity": [
+        "dockerfile_path"
+      ],
+      "entity_values": {
+        "dockerfile_path": "infra/narvex/Dockerfile"
+      },
+      "expected_answer": "infra/narvex/Dockerfile",
+      "hop": 2,
+      "agent_answer": "infra/narvex/Dockerfile",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What design system do we use?",
+      "task_type": "Del",
+      "entity": [
+        "design_system"
+      ],
+      "entity_values": {
+        "design_system": "Veltrion UI Kit v2"
+      },
+      "expected_answer": "Veltrion UI Kit v2",
+      "hop": null,
+      "agent_answer": "Veltrion UI Kit v2",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations."
+      },
+      "expected_answer": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations.",
+      "hop": null,
+      "agent_answer": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations.",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all secret managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "secret_manager"
+      ],
+      "entity_values": {
+        "secret_manager": [
+          "Selvex Secrets",
+          "Kerberos Trove",
+          "Orinthal Sealed"
+        ]
+      },
+      "expected_answer": "Selvex Secrets, Kerberos Trove, Orinthal Sealed",
+      "hop": null,
+      "agent_answer": "Selvex Secrets, Orinthal Sealed",
+      "u_pass": false,
+      "u_reason": "The agent's answer is missing 'Kerberos Trove' and does not match the full ordered history.",
+      "u_pass_count": 2,
+      "u_pass_total": 3
+    },
+    {
+      "question": "What Docker image do we use?",
+      "task_type": "Cas",
+      "entity": [
+        "docker_image"
+      ],
+      "entity_values": {
+        "docker_image": "korinth-repo/aurora:stable"
+      },
+      "expected_answer": "korinth-repo/aurora:stable",
+      "hop": 1,
+      "agent_answer": "narvex-registry/aurora:latest",
+      "u_pass": false,
+      "u_reason": "The agent reported an incorrect value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's the deploy command?",
+      "task_type": "Cas",
+      "entity": [
+        "deploy_command"
+      ],
+      "entity_values": {
+        "deploy_command": "orinthal publish --tier sandbox"
+      },
+      "expected_answer": "orinthal publish --tier sandbox",
+      "hop": 2,
+      "agent_answer": "thandrel ship --channel stable",
+      "u_pass": false,
+      "u_reason": "The agent stated an incorrect value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's our staging URL?",
+      "task_type": "Abs",
+      "entity": [
+        "staging_url"
+      ],
+      "entity_values": {
+        "staging_url": "dev.orinthal.dev/aurora"
+      },
+      "expected_answer": "Uncertain — previously 'dev.orinthal.dev/aurora', but deploy_target changed",
+      "hop": 1,
+      "agent_answer": "dev.orinthal.dev/aurora",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value without expressing any uncertainty or acknowledging the upstream change.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "Where's the Dockerfile?",
+      "task_type": "Abs",
+      "entity": [
+        "dockerfile_path"
+      ],
+      "entity_values": {
+        "dockerfile_path": "infra/narvex/Dockerfile"
+      },
+      "expected_answer": "Uncertain — previously 'infra/narvex/Dockerfile', but docker_image changed",
+      "hop": 2,
+      "agent_answer": "infra/narvex/Dockerfile",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value without expressing any uncertainty or acknowledging the upstream change.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What design system do we use?",
+      "task_type": "Del",
+      "entity": [
+        "design_system"
+      ],
+      "entity_values": {
+        "design_system": "Veltrion UI Kit v2"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "Veltrion UI Kit v2",
+      "u_pass": false,
+      "u_reason": "The agent returned the deleted value as if it still exists.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What do you know about our on-call setup? Tell me everything.",
+      "task_type": "Agg",
+      "entity": [
+        "oncall_rotation",
+        "alert_channel",
+        "incident_runbook_url"
+      ],
+      "entity_values": {
+        "oncall_rotation": "volunteer-based with weekly signup",
+        "alert_channel": "#zenith-incidents",
+        "incident_runbook_url": "github.com/aurora-team/runbooks"
+      },
+      "expected_answer": "On-call is volunteer-based with weekly signup, alerts go to #zenith-incidents, and runbook is at github.com/aurora-team/runbooks.",
+      "hop": null,
+      "agent_answer": "Your team’s on-call rotation is volunteer-based with weekly signup. It is described as pretty flexible.",
+      "u_pass": false,
+      "u_pass_per_entity": {
+        "oncall_rotation": true,
+        "alert_channel": false,
+        "incident_runbook_url": false
+      },
+      "u_pass_count": 1,
+      "u_pass_total": 3,
+      "u_reason": "The agent's answer includes 'volunteer-based with weekly signup' but does not mention '#zenith-incidents' or 'github.com/aurora-team/runbooks'."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations."
+      },
+      "expected_answer": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations.",
+      "hop": null,
+      "agent_answer": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations.",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 2,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 2,
+      "never_knew": 0
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    }
+  },
+  "totals": {
+    "before_pass": 5,
+    "before_total": 6,
+    "after_pass": 1,
+    "after_total": 8
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 12,
+    "input_tokens": 2442,
+    "output_tokens": 351
+  }
+}

@@ -1,0 +1,176 @@
+{
+  "episode_id": 44,
+  "domain": "personal_life",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What's my sleep schedule?",
+      "task_type": "Cas",
+      "entity": [
+        "sleep_pattern"
+      ],
+      "entity_values": {
+        "sleep_pattern": "varies by shift"
+      },
+      "expected_answer": "varies by shift",
+      "hop": 1,
+      "agent_answer": "Your sleep schedule varies by shift due to your high blood pressure; if your health condition changes, your sleep pattern will likely shift to 1am-9am."
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Velthari Studio"
+      },
+      "expected_answer": "Velthari Studio",
+      "hop": 2,
+      "agent_answer": "Velthari Studio"
+    },
+    {
+      "question": "What's my exercise routine?",
+      "task_type": "Abs",
+      "entity": [
+        "exercise_routine"
+      ],
+      "entity_values": {
+        "exercise_routine": "walking daily"
+      },
+      "expected_answer": "walking daily",
+      "hop": 1,
+      "agent_answer": "Walking daily"
+    },
+    {
+      "question": "What's my regular social meetup?",
+      "task_type": "Del",
+      "entity": [
+        "social_gathering"
+      ],
+      "entity_values": {
+        "social_gathering": "game night with neighbors"
+      },
+      "expected_answer": "game night with neighbors",
+      "hop": null,
+      "agent_answer": "Game night with your neighbors."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it."
+      },
+      "expected_answer": "The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it.",
+      "hop": null,
+      "agent_answer": "\"The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all subscription services I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "subscription_service"
+      ],
+      "entity_values": {
+        "subscription_service": [
+          "Xelvoria",
+          "Zorvista Premium",
+          "meal kit (Kelvimeal)"
+        ]
+      },
+      "expected_answer": "Xelvoria, Zorvista Premium, meal kit (Kelvimeal)",
+      "hop": null,
+      "agent_answer": "1. Zorvista Premium  \n2. Kelvimeal"
+    },
+    {
+      "question": "What's my sleep schedule?",
+      "task_type": "Cas",
+      "entity": [
+        "sleep_pattern"
+      ],
+      "entity_values": {
+        "sleep_pattern": "1am-9am"
+      },
+      "expected_answer": "1am-9am",
+      "hop": 1,
+      "agent_answer": "Your sleep schedule varies by shift due to your high blood pressure; if your health condition changes, your sleep pattern will likely shift to 1am-9am."
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Thandrel YMCA"
+      },
+      "expected_answer": "Thandrel YMCA",
+      "hop": 2,
+      "agent_answer": "Velthari Studio"
+    },
+    {
+      "question": "What's my exercise routine?",
+      "task_type": "Abs",
+      "entity": [
+        "exercise_routine"
+      ],
+      "entity_values": {
+        "exercise_routine": "walking daily"
+      },
+      "expected_answer": "Uncertain — previously 'walking daily', but health_condition changed",
+      "hop": 1,
+      "agent_answer": "Walking daily"
+    },
+    {
+      "question": "What's my regular social meetup?",
+      "task_type": "Del",
+      "entity": [
+        "social_gathering"
+      ],
+      "entity_values": {
+        "social_gathering": "game night with neighbors"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "Pickup basketball games focused on skill development."
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "knitting",
+        "sports": "basketball",
+        "club_membership": "running club"
+      },
+      "expected_answer": "The user's hobby is knitting, plays basketball, and is part of running club.",
+      "hop": null,
+      "agent_answer": "- Play basketball mainly in pickup games focusing on skill development  \n- Interested in basketball teams and players  \n- Subscribed to Zorvista Premium  \n- Had regularly attended social meetup game nights with neighbors (but requested to forget this participation)  \n- Part of a running club focused on improving running and building endurance  \n- Recently subscribed to a meal kit service called Kelvimeal, enjoys meal prep and trying new recipes  \n- Engages in sourdough baking, especially sweet breads and pastries with chocolate and fruit  \n- Planning and experimenting with BBQ cooking, including sauces, rubs, grill temperature control, and smoking woods  \n- Organizing closet and tracking clothes using the Closet app  \n- Interested in music, particularly Fleetwood Mac, and looks forward to seeing the band live  \n- Role-plays as Val in a romantic narrative involving Odyl"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it."
+      },
+      "expected_answer": "The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it.",
+      "hop": null,
+      "agent_answer": "\"The only way to do great work is to love what you do. If you haven't found it yet, keep looking. Don't settle. As with all matters of the heart, you'll know when you find it.\""
+    }
+  ]
+}

@@ -1,0 +1,281 @@
+{
+  "episode_id": 38,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What's our project structure?",
+      "task_type": "Cas",
+      "entity": [
+        "project_structure"
+      ],
+      "entity_values": {
+        "project_structure": "modular with /modules and /shared"
+      },
+      "expected_answer": "modular with /modules and /shared",
+      "hop": 1,
+      "agent_answer": "Our project follows a modular structure with /modules and /shared directories, as determined by the Synthari framework we use.",
+      "u_pass": true,
+      "u_reason": "The agent's answer contains the correct information about the project structure being modular with /modules and /shared."
+    },
+    {
+      "question": "What's the test command?",
+      "task_type": "Cas",
+      "entity": [
+        "test_command"
+      ],
+      "entity_values": {
+        "test_command": "karnex test --ci"
+      },
+      "expected_answer": "karnex test --ci",
+      "hop": 2,
+      "agent_answer": "karnex test --ci",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What's our build tool?",
+      "task_type": "Abs",
+      "entity": [
+        "build_tool"
+      ],
+      "entity_values": {
+        "build_tool": "Karnex Bundler"
+      },
+      "expected_answer": "Karnex Bundler",
+      "hop": 1,
+      "agent_answer": "Karnex Bundler",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What's the build command?",
+      "task_type": "Abs",
+      "entity": [
+        "build_command"
+      ],
+      "entity_values": {
+        "build_command": "karnex build --prod"
+      },
+      "expected_answer": "karnex build --prod",
+      "hop": 2,
+      "agent_answer": "karnex build --prod",
+      "u_pass": true,
+      "u_reason": "The agent's answer is semantically equivalent to the gold answer."
+    },
+    {
+      "question": "What secret manager do we use?",
+      "task_type": "Del",
+      "entity": [
+        "secret_manager"
+      ],
+      "entity_values": {
+        "secret_manager": "Orinthal Sealed"
+      },
+      "expected_answer": "Orinthal Sealed",
+      "hop": null,
+      "agent_answer": "Orinthal Sealed",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations."
+      },
+      "expected_answer": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations.",
+      "hop": null,
+      "agent_answer": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations.",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all package managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "package_manager"
+      ],
+      "entity_values": {
+        "package_manager": [
+          "Pyronis Bundle",
+          "Veltrion Pkg",
+          "Synthari Modules"
+        ]
+      },
+      "expected_answer": "Pyronis Bundle, Veltrion Pkg, Synthari Modules",
+      "hop": null,
+      "agent_answer": "Pyronis Bundle, Veltrion Pkg, Synthari Modules",
+      "u_pass": true,
+      "u_reason": "The agent's answer contains all the gold values in the correct chronological order.",
+      "u_pass_count": 3,
+      "u_pass_total": 3
+    },
+    {
+      "question": "What's our project structure?",
+      "task_type": "Cas",
+      "entity": [
+        "project_structure"
+      ],
+      "entity_values": {
+        "project_structure": "monorepo with /apps and /packages"
+      },
+      "expected_answer": "monorepo with /apps and /packages",
+      "hop": 1,
+      "agent_answer": "/modular with /modules and /shared directories (determined by using the Synthari framework)",
+      "u_pass": false,
+      "u_reason": "The agent incorrectly reported the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's the test command?",
+      "task_type": "Cas",
+      "entity": [
+        "test_command"
+      ],
+      "entity_values": {
+        "test_command": "zelthra assert --suite all"
+      },
+      "expected_answer": "zelthra assert --suite all",
+      "hop": 2,
+      "agent_answer": "karnex test --ci",
+      "u_pass": false,
+      "u_reason": "The agent did not state the new value as the sole, definitive answer.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's our build tool?",
+      "task_type": "Abs",
+      "entity": [
+        "build_tool"
+      ],
+      "entity_values": {
+        "build_tool": "Karnex Bundler"
+      },
+      "expected_answer": "Uncertain — previously 'Karnex Bundler', but framework changed",
+      "hop": 1,
+      "agent_answer": "Karnex Bundler",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value without expressing any uncertainty or acknowledging the upstream change.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's the build command?",
+      "task_type": "Abs",
+      "entity": [
+        "build_command"
+      ],
+      "entity_values": {
+        "build_command": "karnex build --prod"
+      },
+      "expected_answer": "Uncertain — previously 'karnex build --prod', but build_tool changed",
+      "hop": 2,
+      "agent_answer": "karnex build --prod",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value without expressing any uncertainty or acknowledging the upstream change.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What secret manager do we use?",
+      "task_type": "Del",
+      "entity": [
+        "secret_manager"
+      ],
+      "entity_values": {
+        "secret_manager": "Orinthal Sealed"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "You don't have that information.",
+      "u_pass": true,
+      "u_reason": "The agent correctly stated that the information is not available without revealing the deleted value.",
+      "pass_type": "real"
+    },
+    {
+      "question": "Where can I find project documentation? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "documentation_url",
+        "onboarding_guide",
+        "changelog_location"
+      ],
+      "entity_values": {
+        "documentation_url": "aurora-docs.readthedocs.io",
+        "onboarding_guide": "wiki.aurora.dev/getting-started",
+        "changelog_location": "docs.aurora.internal/changelog"
+      },
+      "expected_answer": "Docs are at aurora-docs.readthedocs.io, onboarding guide at wiki.aurora.dev/getting-started, and changelog at docs.aurora.internal/changelog.",
+      "hop": null,
+      "agent_answer": "aurora-docs.readthedocs.io  \nwiki.aurora.dev/getting-started  \ndocs.aurora.internal/changelog  \ndocs.aurora.internal/runbooks",
+      "u_pass": true,
+      "u_pass_per_entity": {
+        "documentation_url": true,
+        "onboarding_guide": true,
+        "changelog_location": true
+      },
+      "u_pass_count": 3,
+      "u_pass_total": 3,
+      "u_reason": "All target values are present in the agent's answer."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations."
+      },
+      "expected_answer": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations.",
+      "hop": null,
+      "agent_answer": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations.",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 2,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 2,
+      "never_knew": 0
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 1,
+      "trivial_pass": 0,
+      "knew_but_failed": 0,
+      "never_knew": 0
+    }
+  },
+  "totals": {
+    "before_pass": 5,
+    "before_total": 6,
+    "after_pass": 4,
+    "after_total": 8
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 12,
+    "input_tokens": 2446,
+    "output_tokens": 344
+  }
+}

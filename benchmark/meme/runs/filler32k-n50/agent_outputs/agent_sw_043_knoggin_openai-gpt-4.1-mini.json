@@ -1,0 +1,176 @@
+{
+  "episode_id": 43,
+  "domain": "software_project",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What's the database connection string?",
+      "task_type": "Cas",
+      "entity": [
+        "connection_string"
+      ],
+      "entity_values": {
+        "connection_string": "thalnex://store-backup:8529/aurora"
+      },
+      "expected_answer": "thalnex://store-backup:8529/aurora",
+      "hop": 1,
+      "agent_answer": "thalnex://store-backup:8529/aurora"
+    },
+    {
+      "question": "What's the model syntax?",
+      "task_type": "Cas",
+      "entity": [
+        "model_syntax"
+      ],
+      "entity_values": {
+        "model_syntax": "Zyndra.struct('Model', types)"
+      },
+      "expected_answer": "Zyndra.struct('Model', types)",
+      "hop": 2,
+      "agent_answer": "Zyndra.struct('Model', types)"
+    },
+    {
+      "question": "What's our backup schedule?",
+      "task_type": "Abs",
+      "entity": [
+        "backup_schedule"
+      ],
+      "entity_values": {
+        "backup_schedule": "twice daily at 2am and 2pm UTC"
+      },
+      "expected_answer": "twice daily at 2am and 2pm UTC",
+      "hop": 1,
+      "agent_answer": "Twice daily at 2am and 2pm UTC."
+    },
+    {
+      "question": "What's the auth middleware config?",
+      "task_type": "Del",
+      "entity": [
+        "middleware_config"
+      ],
+      "entity_values": {
+        "middleware_config": "phalanx-key-guard v1.3"
+      },
+      "expected_answer": "phalanx-key-guard v1.3",
+      "hop": null,
+      "agent_answer": "phalanx-key-guard v1.3"
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review."
+      },
+      "expected_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.",
+      "hop": null,
+      "agent_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review."
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all package managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "package_manager"
+      ],
+      "entity_values": {
+        "package_manager": [
+          "Tarvex Mod",
+          "Dranith Stack",
+          "Synthari Modules"
+        ]
+      },
+      "expected_answer": "Tarvex Mod, Dranith Stack, Synthari Modules",
+      "hop": null,
+      "agent_answer": "1. Dranith Stack  \n2. Synthari Modules  \n3. Tarvex Mod"
+    },
+    {
+      "question": "What's the database connection string?",
+      "task_type": "Cas",
+      "entity": [
+        "connection_string"
+      ],
+      "entity_values": {
+        "connection_string": "thalnex://store-prod:8529/aurora"
+      },
+      "expected_answer": "thalnex://store-prod:8529/aurora",
+      "hop": 1,
+      "agent_answer": "thalnex://store-backup:8529/aurora"
+    },
+    {
+      "question": "What's the model syntax?",
+      "task_type": "Cas",
+      "entity": [
+        "model_syntax"
+      ],
+      "entity_values": {
+        "model_syntax": "Thalnex.document('Model', {fields})"
+      },
+      "expected_answer": "Thalnex.document('Model', {fields})",
+      "hop": 2,
+      "agent_answer": "Thalnex.document('Model', {fields})"
+    },
+    {
+      "question": "What's our backup schedule?",
+      "task_type": "Abs",
+      "entity": [
+        "backup_schedule"
+      ],
+      "entity_values": {
+        "backup_schedule": "twice daily at 2am and 2pm UTC"
+      },
+      "expected_answer": "Uncertain — previously 'twice daily at 2am and 2pm UTC', but database changed",
+      "hop": 1,
+      "agent_answer": "Twice daily at 2am and 2pm UTC."
+    },
+    {
+      "question": "What's the auth middleware config?",
+      "task_type": "Del",
+      "entity": [
+        "middleware_config"
+      ],
+      "entity_values": {
+        "middleware_config": "phalanx-key-guard v1.3"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "Authentication middleware phalanx-key-guard v1.3 is stable; best practices for configuration and maintenance are under consideration to ensure security and performance."
+    },
+    {
+      "question": "What do you know about our on-call setup? Tell me everything.",
+      "task_type": "Agg",
+      "entity": [
+        "oncall_rotation",
+        "alert_channel",
+        "incident_runbook_url"
+      ],
+      "entity_values": {
+        "oncall_rotation": "biweekly rotation",
+        "alert_channel": "#aurora-alerts",
+        "incident_runbook_url": "wiki.aurora.dev/incident-response"
+      },
+      "expected_answer": "On-call is biweekly rotation, alerts go to #aurora-alerts, and runbook is at wiki.aurora.dev/incident-response.",
+      "hop": null,
+      "agent_answer": "The team's on-call rotation is biweekly. It is described as a bit of a grind but keeps the team on their toes. The assistant recommended creating clear documentation for common issues, prioritizing alerts for critical problems, and establishing a handoff process to ensure smooth shift transitions. The team uses a dedicated channel (#aurora-alerts) for production alerts to monitor the live environment."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review."
+      },
+      "expected_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.",
+      "hop": null,
+      "agent_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review."
+    }
+  ]
+}

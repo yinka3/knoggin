@@ -1,0 +1,150 @@
+{
+  "episode_id": 7,
+  "domain": "personal_life",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What regular appointments do I have?",
+      "task_type": "Cas",
+      "entity": [
+        "regular_appointment"
+      ],
+      "entity_values": {
+        "regular_appointment": "dermatologist (monthly)"
+      },
+      "expected_answer": "dermatologist (monthly)",
+      "hop": 1,
+      "agent_answer": "Monthly dermatologist appointment and weekly therapy appointment if you move."
+    },
+    {
+      "question": "How long is my commute?",
+      "task_type": "Abs",
+      "entity": [
+        "commute_duration"
+      ],
+      "entity_values": {
+        "commute_duration": "20 min"
+      },
+      "expected_answer": "20 min",
+      "hop": 1,
+      "agent_answer": "About 20 minutes"
+    },
+    {
+      "question": "What am I subscribed to?",
+      "task_type": "Del",
+      "entity": [
+        "subscription_service"
+      ],
+      "entity_values": {
+        "subscription_service": "Dranthazon"
+      },
+      "expected_answer": "Dranthazon",
+      "hop": null,
+      "agent_answer": "- Netflix  \n- Disney+  \n- Hulu  \n- Apple TV+  \n- Peacock  \n- HBO (considering canceling)  \n- Amazon Prime Video"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "In three words I can sum up everything I've learned about life: it goes on. You'll have bad times, but it will always wake you up to the stuff you weren't paying attention to."
+      },
+      "expected_answer": "In three words I can sum up everything I've learned about life: it goes on. You'll have bad times, but it will always wake you up to the stuff you weren't paying attention to.",
+      "hop": null,
+      "agent_answer": "\"In three words I can sum up everything I've learned about life: it goes on. You'll have bad times, but it will always wake you up to the stuff you weren't paying attention to.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all media I've consumed over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "media_consumption"
+      ],
+      "entity_values": {
+        "media_consumption": [
+          "Thyrelion (anime)",
+          "a history documentary series",
+          "Xelvari Dawn (book)"
+        ]
+      },
+      "expected_answer": "Thyrelion (anime), a history documentary series, Xelvari Dawn (book)",
+      "hop": null,
+      "agent_answer": "- History documentary series (earliest mentioned)\n- The Crown (Netflix)\n- Stranger Things (Netflix)\n- Schitt's Creek (Netflix)\n- The Mandalorian (Disney+)\n- The Good Place (Hulu)\n- Grey's Anatomy (Hulu)\n- The Morning Show (Apple TV+)\n- The Office (Peacock)\n- Parks and Recreation (Peacock)\n- Considering canceling HBO subscription (no specific shows mentioned)\n- Planning to watch The Lord of the Rings trilogy (Amazon Prime Video)"
+    },
+    {
+      "question": "What regular appointments do I have?",
+      "task_type": "Cas",
+      "entity": [
+        "regular_appointment"
+      ],
+      "entity_values": {
+        "regular_appointment": "therapy (weekly)"
+      },
+      "expected_answer": "therapy (weekly)",
+      "hop": 1,
+      "agent_answer": "Monthly dermatologist appointment; if you move, it would change to weekly therapy appointments."
+    },
+    {
+      "question": "How long is my commute?",
+      "task_type": "Abs",
+      "entity": [
+        "commute_duration"
+      ],
+      "entity_values": {
+        "commute_duration": "20 min"
+      },
+      "expected_answer": "Uncertain — previously '20 min', but residence_location changed",
+      "hop": 1,
+      "agent_answer": "About 20 minutes"
+    },
+    {
+      "question": "What am I subscribed to?",
+      "task_type": "Del",
+      "entity": [
+        "subscription_service"
+      ],
+      "entity_values": {
+        "subscription_service": "Dranthazon"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "- Netflix  \n- Disney+  \n- Hulu  \n- Apple TV+  \n- Peacock  \n- HBO (considering canceling)  \n- Amazon Prime Video"
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "cooking",
+        "sports": "running club",
+        "club_membership": "book club"
+      },
+      "expected_answer": "The user's hobby is cooking, plays running club, and is part of book club.",
+      "hop": null,
+      "agent_answer": "- Play in a running club, meeting a couple of times a week  \n- Watch history documentary series  \n- Visit and enjoy dining at favorite restaurants like The Ondreth Pot  \n- Take commuter rail for work travel  \n- Attend trivia night regularly on Wednesdays with friends"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "In three words I can sum up everything I've learned about life: it goes on. You'll have bad times, but it will always wake you up to the stuff you weren't paying attention to."
+      },
+      "expected_answer": "In three words I can sum up everything I've learned about life: it goes on. You'll have bad times, but it will always wake you up to the stuff you weren't paying attention to.",
+      "hop": null,
+      "agent_answer": "\"In three words I can sum up everything I've learned about life: it goes on. You'll have bad times, but it will always wake you up to the stuff you weren't paying attention to.\""
+    }
+  ]
+}

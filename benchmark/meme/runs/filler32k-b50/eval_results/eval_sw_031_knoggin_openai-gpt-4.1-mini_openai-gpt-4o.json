@@ -1,0 +1,250 @@
+{
+  "episode_id": 31,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What authentication method do we use?",
+      "task_type": "Cas",
+      "entity": [
+        "auth_method"
+      ],
+      "entity_values": {
+        "auth_method": "mTLS Client Cert"
+      },
+      "expected_answer": "mTLS Client Cert",
+      "hop": 1,
+      "agent_answer": "mTLS Client Certificate via Kryptal Auth",
+      "u_pass": true,
+      "u_reason": "The agent's answer includes 'mTLS Client Certificate,' which semantically matches the gold answer 'mTLS Client Cert.'"
+    },
+    {
+      "question": "What's the auth middleware config?",
+      "task_type": "Cas",
+      "entity": [
+        "middleware_config"
+      ],
+      "entity_values": {
+        "middleware_config": "oathkeeper-mtls-proxy v4.1"
+      },
+      "expected_answer": "oathkeeper-mtls-proxy v4.1",
+      "hop": 2,
+      "agent_answer": "oathkeeper-mtls-proxy v4.1",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What token format do we use?",
+      "task_type": "Abs",
+      "entity": [
+        "token_format"
+      ],
+      "entity_values": {
+        "token_format": "Zenthos-Session-v1"
+      },
+      "expected_answer": "Zenthos-Session-v1",
+      "hop": 1,
+      "agent_answer": "Zenthos-Session-v1",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What's the model syntax?",
+      "task_type": "Del",
+      "entity": [
+        "model_syntax"
+      ],
+      "entity_values": {
+        "model_syntax": "Crysthene.define('Model', {fields})"
+      },
+      "expected_answer": "Crysthene.define('Model', {fields})",
+      "hop": null,
+      "agent_answer": "Crysthene.define('Model', {fields})",
+      "u_pass": true,
+      "u_reason": "The agent's answer is semantically equivalent to the gold answer."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z."
+      },
+      "expected_answer": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z.",
+      "hop": null,
+      "agent_answer": "\"PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z.\"",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all secret managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "secret_manager"
+      ],
+      "entity_values": {
+        "secret_manager": [
+          "Cryptara Vault",
+          "Sigilix Manager",
+          "Velthri Keys"
+        ]
+      },
+      "expected_answer": "Cryptara Vault, Sigilix Manager, Velthri Keys",
+      "hop": null,
+      "agent_answer": "Sigilix Manager, Cryptara Vault, Velthri Keys",
+      "u_pass": false,
+      "u_reason": "The agent's answer does not preserve the correct chronological order of the secret managers.",
+      "u_pass_count": 2,
+      "u_pass_total": 3
+    },
+    {
+      "question": "What authentication method do we use?",
+      "task_type": "Cas",
+      "entity": [
+        "auth_method"
+      ],
+      "entity_values": {
+        "auth_method": "Session Cookie + CSRF"
+      },
+      "expected_answer": "Session Cookie + CSRF",
+      "hop": 1,
+      "agent_answer": "mTLS Client Certificate via Kryptal Auth",
+      "u_pass": false,
+      "u_reason": "The agent reported the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's the auth middleware config?",
+      "task_type": "Cas",
+      "entity": [
+        "middleware_config"
+      ],
+      "entity_values": {
+        "middleware_config": "zenthos-session-middleware v1.8"
+      },
+      "expected_answer": "zenthos-session-middleware v1.8",
+      "hop": 2,
+      "agent_answer": "oathkeeper-mtls-proxy v4.1",
+      "u_pass": false,
+      "u_reason": "The agent stated only the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What token format do we use?",
+      "task_type": "Abs",
+      "entity": [
+        "token_format"
+      ],
+      "entity_values": {
+        "token_format": "Zenthos-Session-v1"
+      },
+      "expected_answer": "Uncertain — previously 'Zenthos-Session-v1', but auth_provider changed",
+      "hop": 1,
+      "agent_answer": "Zenthos-Session-v1",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value without expressing any uncertainty.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's the model syntax?",
+      "task_type": "Del",
+      "entity": [
+        "model_syntax"
+      ],
+      "entity_values": {
+        "model_syntax": "Crysthene.define('Model', {fields})"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "I don't have that information.",
+      "u_pass": true,
+      "u_reason": "The agent correctly stated it does not have the information without revealing the deleted value.",
+      "pass_type": "real"
+    },
+    {
+      "question": "Where can I find project documentation? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "documentation_url",
+        "onboarding_guide",
+        "changelog_location"
+      ],
+      "entity_values": {
+        "documentation_url": "docs.aurora.internal/wiki",
+        "onboarding_guide": "wiki.aurora.dev/getting-started",
+        "changelog_location": "docs.aurora.internal/changelog"
+      },
+      "expected_answer": "Docs are at docs.aurora.internal/wiki, onboarding guide at wiki.aurora.dev/getting-started, and changelog at docs.aurora.internal/changelog.",
+      "hop": null,
+      "agent_answer": "docs.aurora.internal/wiki",
+      "u_pass": false,
+      "u_pass_per_entity": {
+        "documentation_url": true,
+        "onboarding_guide": false,
+        "changelog_location": false
+      },
+      "u_pass_count": 1,
+      "u_pass_total": 3,
+      "u_reason": "Only 'docs.aurora.internal/wiki' is present in the agent's answer."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z."
+      },
+      "expected_answer": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z.",
+      "hop": null,
+      "agent_answer": "\"PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z.\"",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 2,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 1,
+      "trivial_pass": 0,
+      "knew_but_failed": 0,
+      "never_knew": 0
+    }
+  },
+  "totals": {
+    "before_pass": 4,
+    "before_total": 5,
+    "after_pass": 2,
+    "after_total": 7
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 10,
+    "input_tokens": 2039,
+    "output_tokens": 298
+  }
+}

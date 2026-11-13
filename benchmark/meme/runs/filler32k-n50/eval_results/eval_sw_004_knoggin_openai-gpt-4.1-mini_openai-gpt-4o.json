@@ -1,0 +1,219 @@
+{
+  "episode_id": 4,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "Who reviews our code?",
+      "task_type": "Cas",
+      "entity": [
+        "code_reviewer"
+      ],
+      "entity_values": {
+        "code_reviewer": "David Lee"
+      },
+      "expected_answer": "David Lee",
+      "hop": 1,
+      "agent_answer": "David Lee reviews your code. If the team lead changes, Seoyun Choi will take over the code review responsibility.",
+      "u_pass": true,
+      "u_reason": "The agent's answer includes the correct information that David Lee reviews the code."
+    },
+    {
+      "question": "Who receives the weekly report?",
+      "task_type": "Abs",
+      "entity": [
+        "weekly_report_recipient"
+      ],
+      "entity_values": {
+        "weekly_report_recipient": "Taehyun Kim"
+      },
+      "expected_answer": "Taehyun Kim",
+      "hop": 1,
+      "agent_answer": "Taehyun Kim",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What's our test coverage target?",
+      "task_type": "Del",
+      "entity": [
+        "test_coverage_target"
+      ],
+      "entity_values": {
+        "test_coverage_target": "90% for core modules"
+      },
+      "expected_answer": "90% for core modules",
+      "hop": null,
+      "agent_answer": "90%",
+      "u_pass": false,
+      "u_reason": "The agent's answer lacks the specific detail about 'core modules' present in the gold answer."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover."
+      },
+      "expected_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover.",
+      "hop": null,
+      "agent_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover.",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all sprint deadlines we've had, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "sprint_deadline"
+      ],
+      "entity_values": {
+        "sprint_deadline": [
+          "2025 March 28",
+          "2025 April 11",
+          "2025 June 6"
+        ]
+      },
+      "expected_answer": "2025 March 28, 2025 April 11, 2025 June 6",
+      "hop": null,
+      "agent_answer": "1. 2025 April 11  \n2. 2025 June 6",
+      "u_pass": false,
+      "u_reason": "The agent's answer is missing the earliest sprint deadline, 2025 March 28.",
+      "u_pass_count": 2,
+      "u_pass_total": 3
+    },
+    {
+      "question": "Who reviews our code?",
+      "task_type": "Cas",
+      "entity": [
+        "code_reviewer"
+      ],
+      "entity_values": {
+        "code_reviewer": "Seoyun Choi"
+      },
+      "expected_answer": "Seoyun Choi",
+      "hop": 1,
+      "agent_answer": "David Lee reviews the code; if the team lead changes, Seoyun Choi will take over the code review responsibility.",
+      "u_pass": false,
+      "u_reason": "The agent uses future tense and lists both old and new values instead of stating the new value as the sole answer.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "Who receives the weekly report?",
+      "task_type": "Abs",
+      "entity": [
+        "weekly_report_recipient"
+      ],
+      "entity_values": {
+        "weekly_report_recipient": "Taehyun Kim"
+      },
+      "expected_answer": "Uncertain — previously 'Taehyun Kim', but team_lead changed",
+      "hop": 1,
+      "agent_answer": "Taehyun Kim",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value without expressing uncertainty or acknowledging the upstream change.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's our test coverage target?",
+      "task_type": "Del",
+      "entity": [
+        "test_coverage_target"
+      ],
+      "entity_values": {
+        "test_coverage_target": "90% for core modules"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "90%",
+      "u_pass": false,
+      "u_reason": "The agent returned the deleted value as if it still exists.",
+      "pass_type": "never_knew"
+    },
+    {
+      "question": "What do you know about our on-call setup? Tell me everything.",
+      "task_type": "Agg",
+      "entity": [
+        "oncall_rotation",
+        "alert_channel",
+        "incident_runbook_url"
+      ],
+      "entity_values": {
+        "oncall_rotation": "paired oncall (primary + secondary)",
+        "alert_channel": "#aurora-alerts",
+        "incident_runbook_url": "github.com/aurora-team/runbooks"
+      },
+      "expected_answer": "On-call is paired oncall (primary + secondary), alerts go to #aurora-alerts, and runbook is at github.com/aurora-team/runbooks.",
+      "hop": null,
+      "agent_answer": "Your team's on-call rotation is a paired on-call system, meaning there is both a primary and a secondary on-call person for support. To manage handoffs effectively between the primary and secondary on-call members, it is recommended to establish a clear communication protocol for the transition. This can include having a dedicated time for both on-call members to discuss ongoing issues and hand over any critical context. Documenting key incidents and decisions in a shared space is also helpful to ensure the secondary on-call is fully briefed. Additionally, using a checklist or a quick summary that the primary reviews with the secondary before their shift ends can improve the smoothness of transitions. Regularly revisiting and refining this handoff process based on team feedback can further enhance support quality.",
+      "u_pass": false,
+      "u_pass_per_entity": {
+        "oncall_rotation": true,
+        "alert_channel": false,
+        "incident_runbook_url": false
+      },
+      "u_pass_count": 1,
+      "u_pass_total": 3,
+      "u_reason": "The answer mentions a paired on-call system but does not mention #aurora-alerts or the GitHub runbooks link."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover."
+      },
+      "expected_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover.",
+      "hop": null,
+      "agent_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover.",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 0,
+      "never_knew": 1
+    }
+  },
+  "totals": {
+    "before_pass": 2,
+    "before_total": 4,
+    "after_pass": 1,
+    "after_total": 6
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 8,
+    "input_tokens": 1759,
+    "output_tokens": 265
+  }
+}

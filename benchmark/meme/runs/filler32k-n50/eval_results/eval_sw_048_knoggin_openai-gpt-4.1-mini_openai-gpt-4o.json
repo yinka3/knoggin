@@ -1,0 +1,250 @@
+{
+  "episode_id": 48,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What's the login endpoint?",
+      "task_type": "Cas",
+      "entity": [
+        "login_endpoint"
+      ],
+      "entity_values": {
+        "login_endpoint": "/cerberix/saml/sso-init"
+      },
+      "expected_answer": "/cerberix/saml/sso-init",
+      "hop": 1,
+      "agent_answer": "/cerberix/saml/sso-init",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What's the auth middleware config?",
+      "task_type": "Cas",
+      "entity": [
+        "middleware_config"
+      ],
+      "entity_values": {
+        "middleware_config": "oathkeeper-mtls-proxy v4.1"
+      },
+      "expected_answer": "oathkeeper-mtls-proxy v4.1",
+      "hop": 2,
+      "agent_answer": "oathkeeper-mtls-proxy v4.1",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What authentication method do we use?",
+      "task_type": "Abs",
+      "entity": [
+        "auth_method"
+      ],
+      "entity_values": {
+        "auth_method": "SAML 2.0 SSO"
+      },
+      "expected_answer": "SAML 2.0 SSO",
+      "hop": 1,
+      "agent_answer": "SAML 2.0 SSO with Zenthos ID",
+      "u_pass": true,
+      "u_reason": "The agent's answer includes 'SAML 2.0 SSO', which matches the gold answer."
+    },
+    {
+      "question": "What's our log drain endpoint?",
+      "task_type": "Del",
+      "entity": [
+        "log_drain_endpoint"
+      ],
+      "entity_values": {
+        "log_drain_endpoint": "stream.velturis.io/aurora"
+      },
+      "expected_answer": "stream.velturis.io/aurora",
+      "hop": null,
+      "agent_answer": "stream.velturis.io/aurora",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer exactly, indicating semantic equivalence."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review."
+      },
+      "expected_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.",
+      "hop": null,
+      "agent_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.  \nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.  \nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.  \nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all package managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "package_manager"
+      ],
+      "entity_values": {
+        "package_manager": [
+          "Quorix Hub",
+          "Dranith Stack",
+          "Veltrion Pkg"
+        ]
+      },
+      "expected_answer": "Quorix Hub, Dranith Stack, Veltrion Pkg",
+      "hop": null,
+      "agent_answer": "Dranith Stack, Quorix Hub, Veltrion Pkg",
+      "u_pass": false,
+      "u_reason": "The agent's answer lists the package managers in the wrong order, not matching the chronological sequence in the gold.",
+      "u_pass_count": 2,
+      "u_pass_total": 3
+    },
+    {
+      "question": "What's the login endpoint?",
+      "task_type": "Cas",
+      "entity": [
+        "login_endpoint"
+      ],
+      "entity_values": {
+        "login_endpoint": "/auth/kryptal/signin"
+      },
+      "expected_answer": "/auth/kryptal/signin",
+      "hop": 1,
+      "agent_answer": "/cerberix/saml/sso-init",
+      "u_pass": false,
+      "u_reason": "The agent stated only the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's the auth middleware config?",
+      "task_type": "Cas",
+      "entity": [
+        "middleware_config"
+      ],
+      "entity_values": {
+        "middleware_config": "verithos-oauth-middleware v2.1"
+      },
+      "expected_answer": "verithos-oauth-middleware v2.1",
+      "hop": 2,
+      "agent_answer": "oathkeeper-mtls-proxy v4.1",
+      "u_pass": false,
+      "u_reason": "The agent stated the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What authentication method do we use?",
+      "task_type": "Abs",
+      "entity": [
+        "auth_method"
+      ],
+      "entity_values": {
+        "auth_method": "SAML 2.0 SSO"
+      },
+      "expected_answer": "Uncertain — previously 'SAML 2.0 SSO', but auth_provider changed",
+      "hop": 1,
+      "agent_answer": "SAML 2.0 SSO with Zenthos ID",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value without expressing any uncertainty.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's our log drain endpoint?",
+      "task_type": "Del",
+      "entity": [
+        "log_drain_endpoint"
+      ],
+      "entity_values": {
+        "log_drain_endpoint": "stream.velturis.io/aurora"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "I don't have that information.",
+      "u_pass": true,
+      "u_reason": "The agent correctly stated it does not have the information without revealing the deleted value.",
+      "pass_type": "real"
+    },
+    {
+      "question": "What do you know about our release process? Tell me everything.",
+      "task_type": "Agg",
+      "entity": [
+        "branch_strategy",
+        "default_branch",
+        "release_cadence"
+      ],
+      "entity_values": {
+        "branch_strategy": "trunk-based with feature flags",
+        "default_branch": "main",
+        "release_cadence": "weekly on Tuesday"
+      },
+      "expected_answer": "We use trunk-based with feature flags branching on main, releasing weekly on Tuesday.",
+      "hop": null,
+      "agent_answer": "The team currently follows a solid weekly release cadence on Tuesdays. They are considering whether to adjust this schedule based on sprint feedback to optimize the release process. It is suggested to gather insights from the team after each release to identify any recurring issues or bottlenecks. Evaluating the stability of releases is also recommended, especially if certain features frequently cause bugs or require hotfixes. Maintaining open communication within the team about the effectiveness of the release schedule is encouraged to facilitate valuable improvements.",
+      "u_pass": false,
+      "u_pass_per_entity": {
+        "branch_strategy": false,
+        "default_branch": false,
+        "release_cadence": true
+      },
+      "u_pass_count": 1,
+      "u_pass_total": 3,
+      "u_reason": "Only 'weekly on Tuesday' is mentioned in the agent's answer."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review."
+      },
+      "expected_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.",
+      "hop": null,
+      "agent_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.  \nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.  \nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.  \nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 2,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 1,
+      "trivial_pass": 0,
+      "knew_but_failed": 0,
+      "never_knew": 0
+    }
+  },
+  "totals": {
+    "before_pass": 4,
+    "before_total": 5,
+    "after_pass": 2,
+    "after_total": 7
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 10,
+    "input_tokens": 2138,
+    "output_tokens": 288
+  }
+}

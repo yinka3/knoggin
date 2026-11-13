@@ -1,0 +1,97 @@
+{
+  "source": "longmemeval_m_hard13.json",
+  "sha256": "b7c5d6441688a33a59ececf28a0104c4aaaf5f5b624bfa9adc2010d3ab3fd9f7",
+  "questions": [
+    {
+      "question_id": "gpt4_1e4a8aeb",
+      "question_type": "temporal-reasoning",
+      "question": "How many days passed between the day I attended the gardening workshop and the day I planted the tomato saplings?",
+      "question_date": "2023/05/08 (Mon) 05:13",
+      "answer": "6 days. 7 days (including the last day) is also acceptable."
+    },
+    {
+      "question_id": "0f05491a",
+      "question_type": "knowledge-update",
+      "question": "How many stars do I need to reach the gold level on my Starbucks Rewards app?",
+      "question_date": "2023/08/01 (Tue) 09:17",
+      "answer": 120
+    },
+    {
+      "question_id": "gpt4_2c50253f",
+      "question_type": "temporal-reasoning",
+      "question": "What time do I wake up on Tuesdays and Thursdays?",
+      "question_date": "2023/05/20 (Sat) 03:59",
+      "answer": "6:45 AM"
+    },
+    {
+      "question_id": "eeda8a6d",
+      "question_type": "multi-session",
+      "question": "How many fish are there in total in both of my aquariums?",
+      "question_date": "2023/05/30 (Tue) 23:14",
+      "answer": 17
+    },
+    {
+      "question_id": "d6233ab6",
+      "question_type": "single-session-preference",
+      "question": "I've been feeling nostalgic lately. Do you think it would be a good idea to attend my high school reunion?",
+      "question_date": "2023/05/30 (Tue) 22:57",
+      "answer": "The user would prefer responses that draw upon their personal experiences and memories, specifically their positive high school experiences such as being part of the debate team and taking advanced placement courses. They would prefer suggestions that highlight the potential benefits of attending the reunion, such as reconnecting with old friends and revisiting favorite subjects like history and economics. The user might not prefer generic or vague responses that do not take into account their individual experiences and interests."
+    },
+    {
+      "question_id": "a1cc6108",
+      "question_type": "multi-session",
+      "question": "How old was I when Alex was born?",
+      "question_date": "2023/05/30 (Tue) 23:15",
+      "answer": "11"
+    },
+    {
+      "question_id": "gpt4_f420262c",
+      "question_type": "temporal-reasoning",
+      "question": "What is the order of airlines I flew with from earliest to latest before today?",
+      "question_date": "2023/03/02 (Thu) 23:17",
+      "answer": "JetBlue, Delta, United, American Airlines"
+    },
+    {
+      "question_id": "7405e8b1",
+      "question_type": "multi-session",
+      "question": "Did I receive a higher percentage discount on my first order from HelloFresh, compared to my first UberEats order?",
+      "question_date": "2023/05/30 (Tue) 23:29",
+      "answer": "Yes."
+    },
+    {
+      "question_id": "a9f6b44c",
+      "question_type": "multi-session",
+      "question": "How many bikes did I service or plan to service in March?",
+      "question_date": "2023/03/20 (Mon) 23:58",
+      "answer": 2
+    },
+    {
+      "question_id": "gpt4_7abb270c",
+      "question_type": "temporal-reasoning",
+      "question": "What is the order of the six museums I visited from earliest to latest?",
+      "question_date": "2023/03/10 (Fri) 08:04",
+      "answer": "Science Museum, Museum of Contemporary Art, Metropolitan Museum of Art, Museum of History, Modern Art Museum, Natural History Museum"
+    },
+    {
+      "question_id": "bb7c3b45",
+      "question_type": "multi-session",
+      "question": "How much did I save on the Jimmy Choo heels?",
+      "question_date": "2023/05/30 (Tue) 22:41",
+      "answer": "$300"
+    },
+    {
+      "question_id": "b0479f84",
+      "question_type": "single-session-preference",
+      "question": "I've got some free time tonight, any documentary recommendations?",
+      "question_date": "2023/05/30 (Tue) 23:50",
+      "answer": "The user would prefer documentary recommendations that are similar in style and theme to 'Our Planet', 'Free Solo', and 'Tiger King', which they have previously enjoyed. They might not prefer recommendations of documentaries that are vastly different in tone or subject matter from these titles. The preferred response utilizes the user's previously mentioned viewing history to suggest documentaries that cater to their tastes."
+    },
+    {
+      "question_id": "06f04340",
+      "question_type": "single-session-preference",
+      "question": "What should I serve for dinner this weekend with my homegrown ingredients?",
+      "question_date": "2023/05/30 (Tue) 23:56",
+      "answer": "The user would prefer dinner suggestions that incorporate their homegrown cherry tomatoes and herbs like basil and mint, highlighting recipes that showcase their garden produce. They might not prefer suggestions that do not utilize these specific ingredients or do not emphasize the use of homegrown elements."
+    }
+  ]
+}

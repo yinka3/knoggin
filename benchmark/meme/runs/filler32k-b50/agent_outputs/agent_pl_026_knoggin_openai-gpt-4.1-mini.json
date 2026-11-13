@@ -1,0 +1,150 @@
+{
+  "episode_id": 26,
+  "domain": "personal_life",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "How do I get to work?",
+      "task_type": "Cas",
+      "entity": [
+        "commute_method"
+      ],
+      "entity_values": {
+        "commute_method": "bike"
+      },
+      "expected_answer": "bike",
+      "hop": 1,
+      "agent_answer": "By bike, since you live in Zaravel Heights."
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Abs",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Thandrel YMCA"
+      },
+      "expected_answer": "Thandrel YMCA",
+      "hop": 1,
+      "agent_answer": "Thandrel YMCA"
+    },
+    {
+      "question": "What regular appointments do I have?",
+      "task_type": "Del",
+      "entity": [
+        "regular_appointment"
+      ],
+      "entity_values": {
+        "regular_appointment": "tutoring session (weekly)"
+      },
+      "expected_answer": "tutoring session (weekly)",
+      "hop": null,
+      "agent_answer": "Weekly tutoring session"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "In three words I can sum up everything I've learned about life: it goes on. You'll have bad times, but it will always wake you up to the stuff you weren't paying attention to."
+      },
+      "expected_answer": "In three words I can sum up everything I've learned about life: it goes on. You'll have bad times, but it will always wake you up to the stuff you weren't paying attention to.",
+      "hop": null,
+      "agent_answer": "\"In three words I can sum up everything I've learned about life: it goes on. You'll have bad times, but it will always wake you up to the stuff you weren't paying attention to.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all subscription services I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "subscription_service"
+      ],
+      "entity_values": {
+        "subscription_service": [
+          "Thyranote",
+          "meal kit (Kelvimeal)",
+          "Pyrethon Plus"
+        ]
+      },
+      "expected_answer": "Thyranote, meal kit (Kelvimeal), Pyrethon Plus",
+      "hop": null,
+      "agent_answer": "Kelvimeal, Pyrethon Plus"
+    },
+    {
+      "question": "How do I get to work?",
+      "task_type": "Cas",
+      "entity": [
+        "commute_method"
+      ],
+      "entity_values": {
+        "commute_method": "subway"
+      },
+      "expected_answer": "subway",
+      "hop": 1,
+      "agent_answer": "By bike if you live in Zaravel Heights; if you move, you will switch to subway for commuting."
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Abs",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Thandrel YMCA"
+      },
+      "expected_answer": "Uncertain — previously 'Thandrel YMCA', but residence_location changed",
+      "hop": 1,
+      "agent_answer": "Thandrel YMCA"
+    },
+    {
+      "question": "What regular appointments do I have?",
+      "task_type": "Del",
+      "entity": [
+        "regular_appointment"
+      ],
+      "entity_values": {
+        "regular_appointment": "tutoring session (weekly)"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "None (the weekly tutoring session was removed from memory)."
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "guitar",
+        "sports": "pickleball",
+        "club_membership": "cycling club"
+      },
+      "expected_answer": "The user's hobby is guitar, plays pickleball, and is part of cycling club.",
+      "hop": null,
+      "agent_answer": "- Play pickleball regularly at a local court, enjoying the fast-paced gameplay and strategy involved.  \n- Engage with the community aspect of pickleball by playing with others at the local court.  \n- Use the Kelvimeal meal kit service for convenient and varied meal preparation after games.  \n- Explore different cuisines through meal kits and remain open to trying new types of food.  \n- Pursue activities that help unwind or pursue interests enjoyed, balancing work and personal life."
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "In three words I can sum up everything I've learned about life: it goes on. You'll have bad times, but it will always wake you up to the stuff you weren't paying attention to."
+      },
+      "expected_answer": "In three words I can sum up everything I've learned about life: it goes on. You'll have bad times, but it will always wake you up to the stuff you weren't paying attention to.",
+      "hop": null,
+      "agent_answer": "\"In three words I can sum up everything I've learned about life: it goes on. You'll have bad times, but it will always wake you up to the stuff you weren't paying attention to.\""
+    }
+  ]
+}

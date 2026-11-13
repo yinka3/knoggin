@@ -1,0 +1,150 @@
+{
+  "episode_id": 36,
+  "domain": "personal_life",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "How long is my commute?",
+      "task_type": "Cas",
+      "entity": [
+        "commute_duration"
+      ],
+      "entity_values": {
+        "commute_duration": "30 min"
+      },
+      "expected_answer": "30 min",
+      "hop": 1,
+      "agent_answer": "About 30 minutes."
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Abs",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Zorathel Peak Gym"
+      },
+      "expected_answer": "Zorathel Peak Gym",
+      "hop": 1,
+      "agent_answer": "Zorathel Peak Gym"
+    },
+    {
+      "question": "What big purchase am I planning?",
+      "task_type": "Del",
+      "entity": [
+        "planned_purchase"
+      ],
+      "entity_values": {
+        "planned_purchase": "electric car"
+      },
+      "expected_answer": "electric car",
+      "hop": null,
+      "agent_answer": "An electric car"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives."
+      },
+      "expected_answer": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.",
+      "hop": null,
+      "agent_answer": "\"Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all partners I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "partner"
+      ],
+      "entity_values": {
+        "partner": [
+          "James",
+          "Jordan",
+          "Taylor"
+        ]
+      },
+      "expected_answer": "James, Jordan, Taylor",
+      "hop": null,
+      "agent_answer": "James, Taylor, Jordan"
+    },
+    {
+      "question": "How long is my commute?",
+      "task_type": "Cas",
+      "entity": [
+        "commute_duration"
+      ],
+      "entity_values": {
+        "commute_duration": "10 min"
+      },
+      "expected_answer": "10 min",
+      "hop": 1,
+      "agent_answer": "About 30 minutes."
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Abs",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Zorathel Peak Gym"
+      },
+      "expected_answer": "Uncertain — previously 'Zorathel Peak Gym', but residence_location changed",
+      "hop": 1,
+      "agent_answer": "Zorathel Peak Gym"
+    },
+    {
+      "question": "What big purchase am I planning?",
+      "task_type": "Del",
+      "entity": [
+        "planned_purchase"
+      ],
+      "entity_values": {
+        "planned_purchase": "electric car"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "You don't have that information."
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "drawing/painting",
+        "sports": "running club",
+        "club_membership": "wine tasting club"
+      },
+      "expected_answer": "The user's hobby is drawing/painting, plays running club, and is part of wine tasting club.",
+      "hop": null,
+      "agent_answer": "- Drawing and painting, experimenting with mediums like watercolor and charcoal  \n- Enjoying dining at Lorwen & Sage after creative activities  \n- Biking to work for exercise  \n- Using Kelvimeal meal kits for convenient cooking amid a busy schedule  \n- Participating in a wine tasting club, exploring different wine varieties and learning wine tasting techniques with partner Taylor  \n- Maintaining a vinyl record collection and upgrading related equipment  \n- Collecting and categorizing coins, including rare error coins stored in a bank safety deposit box  \n- Engaging in a regular social meetup of game night with neighbors"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives."
+      },
+      "expected_answer": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.",
+      "hop": null,
+      "agent_answer": "\"Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.\""
+    }
+  ]
+}

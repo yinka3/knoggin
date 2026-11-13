@@ -1,0 +1,150 @@
+{
+  "episode_id": 32,
+  "domain": "personal_life",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What family event do I have coming up?",
+      "task_type": "Cas",
+      "entity": [
+        "family_event"
+      ],
+      "entity_values": {
+        "family_event": "baby shower"
+      },
+      "expected_answer": "baby shower",
+      "hop": 1,
+      "agent_answer": "Baby shower"
+    },
+    {
+      "question": "Who do I live with?",
+      "task_type": "Abs",
+      "entity": [
+        "living_arrangement"
+      ],
+      "entity_values": {
+        "living_arrangement": "with roommate"
+      },
+      "expected_answer": "with roommate",
+      "hop": 1,
+      "agent_answer": "Roommate"
+    },
+    {
+      "question": "What big purchase am I planning?",
+      "task_type": "Del",
+      "entity": [
+        "planned_purchase"
+      ],
+      "entity_values": {
+        "planned_purchase": "new laptop"
+      },
+      "expected_answer": "new laptop",
+      "hop": null,
+      "agent_answer": "A new laptop"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives."
+      },
+      "expected_answer": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.",
+      "hop": null,
+      "agent_answer": "\"Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all subscription services I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "subscription_service"
+      ],
+      "entity_values": {
+        "subscription_service": [
+          "Thyranote",
+          "Zorvista Premium",
+          "meal kit (Kelvimeal)"
+        ]
+      },
+      "expected_answer": "Thyranote, Zorvista Premium, meal kit (Kelvimeal)",
+      "hop": null,
+      "agent_answer": "1. Zorvista Premium  \n2. Kelvimeal"
+    },
+    {
+      "question": "What family event do I have coming up?",
+      "task_type": "Cas",
+      "entity": [
+        "family_event"
+      ],
+      "entity_values": {
+        "family_event": "parent's birthday"
+      },
+      "expected_answer": "parent's birthday",
+      "hop": 1,
+      "agent_answer": "College reunion"
+    },
+    {
+      "question": "Who do I live with?",
+      "task_type": "Abs",
+      "entity": [
+        "living_arrangement"
+      ],
+      "entity_values": {
+        "living_arrangement": "with roommate"
+      },
+      "expected_answer": "Uncertain — previously 'with roommate', but relationship_status changed",
+      "hop": 1,
+      "agent_answer": "Roommate"
+    },
+    {
+      "question": "What big purchase am I planning?",
+      "task_type": "Del",
+      "entity": [
+        "planned_purchase"
+      ],
+      "entity_values": {
+        "planned_purchase": "new laptop"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "A new laptop"
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "reading",
+        "sports": "basketball",
+        "club_membership": "running club"
+      },
+      "expected_answer": "The user's hobby is reading, plays basketball, and is part of running club.",
+      "hop": null,
+      "agent_answer": "- Reading and exploring different genres  \n- Using Thyranote to keep track of reading and notes  \n- Planning a mountain ski trip and seeking recommendations and tips  \n- Preparing for a college reunion and seeking advice on how to make the most of it  \n- Participating in a running club, enjoying group runs and races  \n- Hosting dinner parties and enhancing home ambiance with lighting design  \n- Tracking grocery shopping and managing food waste  \n- Caring for a cat, including buying cat food and planning pet expenses"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives."
+      },
+      "expected_answer": "Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.",
+      "hop": null,
+      "agent_answer": "\"Try not to become a man of success, but rather try to become a man of value. Look around at how people want to get more out of life than they put in. A man of value will give more than he receives.\""
+    }
+  ]
+}

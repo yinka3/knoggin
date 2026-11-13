@@ -1,0 +1,202 @@
+{
+  "episode_id": 37,
+  "domain": "software_project",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What's our log drain endpoint?",
+      "task_type": "Cas",
+      "entity": [
+        "log_drain_endpoint"
+      ],
+      "entity_values": {
+        "log_drain_endpoint": "logs.korinth.dev/aurora"
+      },
+      "expected_answer": "logs.korinth.dev/aurora",
+      "hop": 1,
+      "agent_answer": "logs.korinth.dev/aurora"
+    },
+    {
+      "question": "What's the deploy command?",
+      "task_type": "Cas",
+      "entity": [
+        "deploy_command"
+      ],
+      "entity_values": {
+        "deploy_command": "thandrel ship --channel stable"
+      },
+      "expected_answer": "thandrel ship --channel stable",
+      "hop": 2,
+      "agent_answer": "thandrel ship --channel stable"
+    },
+    {
+      "question": "What's our staging URL?",
+      "task_type": "Abs",
+      "entity": [
+        "staging_url"
+      ],
+      "entity_values": {
+        "staging_url": "staging.narvex.internal/aurora"
+      },
+      "expected_answer": "staging.narvex.internal/aurora",
+      "hop": 1,
+      "agent_answer": "staging.narvex.internal/aurora"
+    },
+    {
+      "question": "Where's the Dockerfile?",
+      "task_type": "Abs",
+      "entity": [
+        "dockerfile_path"
+      ],
+      "entity_values": {
+        "dockerfile_path": "infra/velturis/Dockerfile"
+      },
+      "expected_answer": "infra/velturis/Dockerfile",
+      "hop": 2,
+      "agent_answer": "infra/velturis/Dockerfile"
+    },
+    {
+      "question": "What Docker image do we use?",
+      "task_type": "Del",
+      "entity": [
+        "docker_image"
+      ],
+      "entity_values": {
+        "docker_image": "thandrel-images/aurora:release"
+      },
+      "expected_answer": "thandrel-images/aurora:release",
+      "hop": null,
+      "agent_answer": "thandrel-images/aurora:release"
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review."
+      },
+      "expected_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.",
+      "hop": null,
+      "agent_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review."
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all secret managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "secret_manager"
+      ],
+      "entity_values": {
+        "secret_manager": [
+          "Verisigil Lock",
+          "Sigilix Manager",
+          "Velthri Keys"
+        ]
+      },
+      "expected_answer": "Verisigil Lock, Sigilix Manager, Velthri Keys",
+      "hop": null,
+      "agent_answer": "Verisigil Lock, Sigilix Manager, Velthri Keys"
+    },
+    {
+      "question": "What's our log drain endpoint?",
+      "task_type": "Cas",
+      "entity": [
+        "log_drain_endpoint"
+      ],
+      "entity_values": {
+        "log_drain_endpoint": "sink.orinthal.dev/aurora"
+      },
+      "expected_answer": "sink.orinthal.dev/aurora",
+      "hop": 1,
+      "agent_answer": "logs.korinth.dev/aurora"
+    },
+    {
+      "question": "What's the deploy command?",
+      "task_type": "Cas",
+      "entity": [
+        "deploy_command"
+      ],
+      "entity_values": {
+        "deploy_command": "velturis deploy --region ap-northeast"
+      },
+      "expected_answer": "velturis deploy --region ap-northeast",
+      "hop": 2,
+      "agent_answer": "thandrel ship --channel stable"
+    },
+    {
+      "question": "What's our staging URL?",
+      "task_type": "Abs",
+      "entity": [
+        "staging_url"
+      ],
+      "entity_values": {
+        "staging_url": "staging.narvex.internal/aurora"
+      },
+      "expected_answer": "Uncertain — previously 'staging.narvex.internal/aurora', but deploy_target changed",
+      "hop": 1,
+      "agent_answer": "staging.narvex.internal/aurora"
+    },
+    {
+      "question": "Where's the Dockerfile?",
+      "task_type": "Abs",
+      "entity": [
+        "dockerfile_path"
+      ],
+      "entity_values": {
+        "dockerfile_path": "infra/velturis/Dockerfile"
+      },
+      "expected_answer": "Uncertain — previously 'infra/velturis/Dockerfile', but docker_image changed",
+      "hop": 2,
+      "agent_answer": "In the project directory, with this content:\n\n```Dockerfile\n# Use an official Python runtime as a parent image\nFROM python:3.9-slim\n\n# Set the working directory to /app\nWORKDIR /app\n\n# Copy the current directory contents into the container at /app\nCOPY . /app\n\n# Install any needed packages specified in requirements.txt\nRUN pip install --trusted-host pypi.python.org -r requirements.txt\n\n# Make port 80 available to the world outside this container\nEXPOSE 80\n\n# Define environment variable\nENV SLACK_BOT_TOKEN your_slack_bot_token\nENV OPENAI_API_KEY your_openai_api_key\n\n# Run slackbot.py when the container launches\nCMD [\"python\", \"slackbot.py\"]\n```"
+    },
+    {
+      "question": "What Docker image do we use?",
+      "task_type": "Del",
+      "entity": [
+        "docker_image"
+      ],
+      "entity_values": {
+        "docker_image": "thandrel-images/aurora:release"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "thandrel-images/aurora:release"
+    },
+    {
+      "question": "How does our team coordinate? Tell me everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "meeting_day",
+        "slack_channel",
+        "standup_format"
+      ],
+      "entity_values": {
+        "meeting_day": "every Friday 9:30am",
+        "slack_channel": "#aurora-dev",
+        "standup_format": "Monday/Thursday sync, async rest"
+      },
+      "expected_answer": "Team meets every Friday 9:30am, uses #aurora-dev for chat, and standups are Monday/Thursday sync, async rest.",
+      "hop": null,
+      "agent_answer": "The team coordinates primarily through the dedicated Slack channel named **#aurora-dev**, which is used for all project-related discussions and collaboration. They hold **weekly meetings every Friday at 9:30am** to sync on progress and blockers, with consideration to implement a standing agenda to keep meetings focused and productive. Additionally, the team uses a **standup format with synchronous meetings on Mondays and Thursdays** and asynchronous communication on other days, balancing updates and independent work effectively.\n\nFor onboarding, the team maintains a **centralized onboarding guide at wiki.aurora.dev/getting-started** to help new members get up to speed with processes and tools, providing a consistent and clear integration experience.\n\nSensitive information is managed by a designated **secret manager, currently Velthri Keys**, responsible for handling secrets securely within the project. The team is planning to document the secret manager's responsibilities and processes to ensure clarity and security best practices.\n\nDeployment is handled via the **Zephyra Platform**, which is important for deployment processes and application management.\n\nThe team also uses a **monitoring dashboard at status.orinthal.dev/aurora** to monitor system performance and issues, with alerts sent to the **#aurora-pager** channel, prioritizing alerts by severity to manage response efficiency.\n\nDependencies are managed using the **Synthari Modules** package manager, with best practices including version ranges, regular updates, and conflict detection tools.\n\nOverall, the team uses a combination of structured synchronous meetings, asynchronous communication, centralized documentation, dedicated communication channels, secure secret management, and monitoring tools to coordinate effectively."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review."
+      },
+      "expected_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.",
+      "hop": null,
+      "agent_answer": "```\nDeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.\n```"
+    }
+  ]
+}

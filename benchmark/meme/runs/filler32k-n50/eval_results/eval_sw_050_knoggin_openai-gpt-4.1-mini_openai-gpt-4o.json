@@ -1,0 +1,281 @@
+{
+  "episode_id": 50,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What's our staging URL?",
+      "task_type": "Cas",
+      "entity": [
+        "staging_url"
+      ],
+      "entity_values": {
+        "staging_url": "dev.orinthal.dev/aurora"
+      },
+      "expected_answer": "dev.orinthal.dev/aurora",
+      "hop": 1,
+      "agent_answer": "dev.orinthal.dev/aurora",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What's the deploy command?",
+      "task_type": "Cas",
+      "entity": [
+        "deploy_command"
+      ],
+      "entity_values": {
+        "deploy_command": "korinth release --canary"
+      },
+      "expected_answer": "korinth release --canary",
+      "hop": 2,
+      "agent_answer": "korinth release --canary",
+      "u_pass": true,
+      "u_reason": "The agent's answer is semantically equivalent to the gold answer."
+    },
+    {
+      "question": "What's our log drain endpoint?",
+      "task_type": "Abs",
+      "entity": [
+        "log_drain_endpoint"
+      ],
+      "entity_values": {
+        "log_drain_endpoint": "logs.narvex.io/aurora/drain"
+      },
+      "expected_answer": "logs.narvex.io/aurora/drain",
+      "hop": 1,
+      "agent_answer": "logs.narvex.io/aurora/drain",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer exactly, indicating semantic equivalence."
+    },
+    {
+      "question": "Where's the Dockerfile?",
+      "task_type": "Abs",
+      "entity": [
+        "dockerfile_path"
+      ],
+      "entity_values": {
+        "dockerfile_path": "infra/korinth/Dockerfile"
+      },
+      "expected_answer": "infra/korinth/Dockerfile",
+      "hop": 2,
+      "agent_answer": "infra/korinth/Dockerfile",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What design system do we use?",
+      "task_type": "Del",
+      "entity": [
+        "design_system"
+      ],
+      "entity_values": {
+        "design_system": "Moxira Components v3"
+      },
+      "expected_answer": "Moxira Components v3",
+      "hop": null,
+      "agent_answer": "Moxira Components v3",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "OutOfMemoryError: Java heap space.\nGC overhead limit exceeded after 8 consecutive failed collections in pool 'PS Old Gen'.\nHeap dump written to /var/log/aurora/heap-2024-05-08.hprof at 18:42:11Z.\nRecommend increasing -Xmx beyond 4G or investigating memory leak in OrderProcessor."
+      },
+      "expected_answer": "OutOfMemoryError: Java heap space.\nGC overhead limit exceeded after 8 consecutive failed collections in pool 'PS Old Gen'.\nHeap dump written to /var/log/aurora/heap-2024-05-08.hprof at 18:42:11Z.\nRecommend increasing -Xmx beyond 4G or investigating memory leak in OrderProcessor.",
+      "hop": null,
+      "agent_answer": "OutOfMemoryError: Java heap space.\nGC overhead limit exceeded after 8 consecutive failed collections in pool 'PS Old Gen'.\nHeap dump written to /var/log/aurora/heap-2024-05-08.hprof at 18:42:11Z.\nRecommend increasing -Xmx beyond 4G or investigating memory leak in OrderProcessor.",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all secret managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "secret_manager"
+      ],
+      "entity_values": {
+        "secret_manager": [
+          "Kerberos Trove",
+          "Pyronos Crypt",
+          "Velthri Keys"
+        ]
+      },
+      "expected_answer": "Kerberos Trove, Pyronos Crypt, Velthri Keys",
+      "hop": null,
+      "agent_answer": "Kerberos Trove, Pyronos Crypt, Velthri Keys",
+      "u_pass": true,
+      "u_reason": "The agent's answer contains all the gold values in the correct chronological order.",
+      "u_pass_count": 3,
+      "u_pass_total": 3
+    },
+    {
+      "question": "What's our staging URL?",
+      "task_type": "Cas",
+      "entity": [
+        "staging_url"
+      ],
+      "entity_values": {
+        "staging_url": "sandbox.thandrel.io/aurora"
+      },
+      "expected_answer": "sandbox.thandrel.io/aurora",
+      "hop": 1,
+      "agent_answer": "dev.orinthal.dev/aurora",
+      "u_pass": false,
+      "u_reason": "The agent reported an outdated value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's the deploy command?",
+      "task_type": "Cas",
+      "entity": [
+        "deploy_command"
+      ],
+      "entity_values": {
+        "deploy_command": "narvex deploy --env prod"
+      },
+      "expected_answer": "narvex deploy --env prod",
+      "hop": 2,
+      "agent_answer": "korinth release --canary",
+      "u_pass": false,
+      "u_reason": "The agent stated an incorrect value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's our log drain endpoint?",
+      "task_type": "Abs",
+      "entity": [
+        "log_drain_endpoint"
+      ],
+      "entity_values": {
+        "log_drain_endpoint": "logs.narvex.io/aurora/drain"
+      },
+      "expected_answer": "Uncertain — previously 'logs.narvex.io/aurora/drain', but deploy_target changed",
+      "hop": 1,
+      "agent_answer": "logs.narvex.io/aurora/drain",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value without expressing any uncertainty or acknowledging the upstream change.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "Where's the Dockerfile?",
+      "task_type": "Abs",
+      "entity": [
+        "dockerfile_path"
+      ],
+      "entity_values": {
+        "dockerfile_path": "infra/korinth/Dockerfile"
+      },
+      "expected_answer": "Uncertain — previously 'infra/korinth/Dockerfile', but docker_image changed",
+      "hop": 2,
+      "agent_answer": "infra/korinth/Dockerfile",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value without expressing any uncertainty or acknowledging the upstream change.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What design system do we use?",
+      "task_type": "Del",
+      "entity": [
+        "design_system"
+      ],
+      "entity_values": {
+        "design_system": "Moxira Components v3"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "Moxira Components v3",
+      "u_pass": false,
+      "u_reason": "The agent returned the deleted value as if it still exists.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "Where can I find project documentation? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "documentation_url",
+        "onboarding_guide",
+        "changelog_location"
+      ],
+      "entity_values": {
+        "documentation_url": "aurora-docs.readthedocs.io",
+        "onboarding_guide": "docs.aurora.internal/onboarding",
+        "changelog_location": "docs.aurora.internal/changelog"
+      },
+      "expected_answer": "Docs are at aurora-docs.readthedocs.io, onboarding guide at docs.aurora.internal/onboarding, and changelog at docs.aurora.internal/changelog.",
+      "hop": null,
+      "agent_answer": "aurora-docs.readthedocs.io  \ndocs.aurora.internal/onboarding",
+      "u_pass": false,
+      "u_pass_per_entity": {
+        "documentation_url": true,
+        "onboarding_guide": true,
+        "changelog_location": false
+      },
+      "u_pass_count": 2,
+      "u_pass_total": 3,
+      "u_reason": "The agent's answer includes the first two target values but not the third."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "OutOfMemoryError: Java heap space.\nGC overhead limit exceeded after 8 consecutive failed collections in pool 'PS Old Gen'.\nHeap dump written to /var/log/aurora/heap-2024-05-08.hprof at 18:42:11Z.\nRecommend increasing -Xmx beyond 4G or investigating memory leak in OrderProcessor."
+      },
+      "expected_answer": "OutOfMemoryError: Java heap space.\nGC overhead limit exceeded after 8 consecutive failed collections in pool 'PS Old Gen'.\nHeap dump written to /var/log/aurora/heap-2024-05-08.hprof at 18:42:11Z.\nRecommend increasing -Xmx beyond 4G or investigating memory leak in OrderProcessor.",
+      "hop": null,
+      "agent_answer": "OutOfMemoryError: Java heap space.\nGC overhead limit exceeded after 8 consecutive failed collections in pool 'PS Old Gen'.\nHeap dump written to /var/log/aurora/heap-2024-05-08.hprof at 18:42:11Z.\nRecommend increasing -Xmx beyond 4G or investigating memory leak in OrderProcessor.",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 2,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 2,
+      "never_knew": 0
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    }
+  },
+  "totals": {
+    "before_pass": 5,
+    "before_total": 6,
+    "after_pass": 2,
+    "after_total": 8
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 12,
+    "input_tokens": 2440,
+    "output_tokens": 334
+  }
+}

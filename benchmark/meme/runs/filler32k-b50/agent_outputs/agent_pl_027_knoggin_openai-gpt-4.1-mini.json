@@ -1,0 +1,150 @@
+{
+  "episode_id": 27,
+  "domain": "personal_life",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "How long is my commute?",
+      "task_type": "Cas",
+      "entity": [
+        "commute_duration"
+      ],
+      "entity_values": {
+        "commute_duration": "10 min"
+      },
+      "expected_answer": "10 min",
+      "hop": 1,
+      "agent_answer": "About 10 minutes currently; if you change residence within Pyresta Meadow, it could increase to around 15 minutes."
+    },
+    {
+      "question": "What regular appointments do I have?",
+      "task_type": "Abs",
+      "entity": [
+        "regular_appointment"
+      ],
+      "entity_values": {
+        "regular_appointment": "physical therapy (2x/week)"
+      },
+      "expected_answer": "physical therapy (2x/week)",
+      "hop": 1,
+      "agent_answer": "Physical therapy (2x/week)"
+    },
+    {
+      "question": "What's my diet?",
+      "task_type": "Del",
+      "entity": [
+        "diet_preference"
+      ],
+      "entity_values": {
+        "diet_preference": "keto"
+      },
+      "expected_answer": "keto",
+      "hop": null,
+      "agent_answer": "keto"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "In three words I can sum up everything I've learned about life: it goes on. You'll have bad times, but it will always wake you up to the stuff you weren't paying attention to."
+      },
+      "expected_answer": "In three words I can sum up everything I've learned about life: it goes on. You'll have bad times, but it will always wake you up to the stuff you weren't paying attention to.",
+      "hop": null,
+      "agent_answer": "\"In three words I can sum up everything I've learned about life: it goes on. You'll have bad times, but it will always wake you up to the stuff you weren't paying attention to.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all subscription services I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "subscription_service"
+      ],
+      "entity_values": {
+        "subscription_service": [
+          "Xelvoria",
+          "Thyranote",
+          "Zorvista Premium"
+        ]
+      },
+      "expected_answer": "Xelvoria, Thyranote, Zorvista Premium",
+      "hop": null,
+      "agent_answer": "Thyranote, Zorvista Premium"
+    },
+    {
+      "question": "How long is my commute?",
+      "task_type": "Cas",
+      "entity": [
+        "commute_duration"
+      ],
+      "entity_values": {
+        "commute_duration": "15 min"
+      },
+      "expected_answer": "15 min",
+      "hop": 1,
+      "agent_answer": "About 10 minutes, potentially increasing to around 15 minutes if you change your residence within Pyresta Meadow."
+    },
+    {
+      "question": "What regular appointments do I have?",
+      "task_type": "Abs",
+      "entity": [
+        "regular_appointment"
+      ],
+      "entity_values": {
+        "regular_appointment": "physical therapy (2x/week)"
+      },
+      "expected_answer": "Uncertain — previously 'physical therapy (2x/week)', but residence_location changed",
+      "hop": 1,
+      "agent_answer": "Physical therapy (2x/week)"
+    },
+    {
+      "question": "What's my diet?",
+      "task_type": "Del",
+      "entity": [
+        "diet_preference"
+      ],
+      "entity_values": {
+        "diet_preference": "keto"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "I don't have that information."
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "photography",
+        "sports": "golf",
+        "club_membership": "hiking club"
+      },
+      "expected_answer": "The user's hobby is photography, plays golf, and is part of hiking club.",
+      "hop": null,
+      "agent_answer": "- Photography (landscapes, portraits, street photography; seeks tips on camera settings, composition, lighting)\n- Golf (practices swing drills; seeks recommendations for improving mechanics)\n- Hiking (part of a hiking club exploring varied trails monthly; values scenic and geological diversity; seeks tips for finding good hiking spots)\n- Fashion (recently bought a white ruffled button-down shirt and a designer handbag; wore a flowy maxi dress; considering coral and mint green colors; seeks styling advice)\n- Footwear care (owns Birkenstocks leather sandals and suede loafers; seeks care and cleaning advice)\n- Selling old footwear (considering selling old Ugg boots; evaluating platforms and pricing strategies)\n- Dining at Thyssel Lane\n- Working out at Kaelstrom Fitness (interested in strength, cardio, and flexibility routines)\n- Reading fiction blending humor, satire, and social commentary (enjoys Zadie Smith's short stories and George Saunders' style)\n- Reading during daily commute (prefers books easy to pick up and put down)\n- Listening to podcasts during commute (interested in storytelling, learning, language apps, mindfulness exercises)\n- Using Thyranote for note-taking and productivity\n- Engaging with community aspects of Xelvoria media service and Zorvista Premium for hiking and outdoor activities"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "In three words I can sum up everything I've learned about life: it goes on. You'll have bad times, but it will always wake you up to the stuff you weren't paying attention to."
+      },
+      "expected_answer": "In three words I can sum up everything I've learned about life: it goes on. You'll have bad times, but it will always wake you up to the stuff you weren't paying attention to.",
+      "hop": null,
+      "agent_answer": "\"In three words I can sum up everything I've learned about life: it goes on. You'll have bad times, but it will always wake you up to the stuff you weren't paying attention to.\""
+    }
+  ]
+}

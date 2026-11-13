@@ -1,0 +1,250 @@
+{
+  "episode_id": 24,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What authentication method do we use?",
+      "task_type": "Cas",
+      "entity": [
+        "auth_method"
+      ],
+      "entity_values": {
+        "auth_method": "mTLS Client Cert"
+      },
+      "expected_answer": "mTLS Client Cert",
+      "hop": 1,
+      "agent_answer": "mTLS Client Cert",
+      "u_pass": true,
+      "u_reason": "The agent's answer 'mTLS Client Cert' matches the gold answer semantically."
+    },
+    {
+      "question": "What's the auth middleware config?",
+      "task_type": "Cas",
+      "entity": [
+        "middleware_config"
+      ],
+      "entity_values": {
+        "middleware_config": "oathkeeper-mtls-proxy v4.1"
+      },
+      "expected_answer": "oathkeeper-mtls-proxy v4.1",
+      "hop": 2,
+      "agent_answer": "oathkeeper-mtls-proxy v4.1",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What's the session TTL?",
+      "task_type": "Abs",
+      "entity": [
+        "user_session_ttl"
+      ],
+      "entity_values": {
+        "user_session_ttl": "4 hours"
+      },
+      "expected_answer": "4 hours",
+      "hop": 1,
+      "agent_answer": "4 hours",
+      "u_pass": true,
+      "u_reason": "The agent's answer '4 hours' matches the gold answer semantically."
+    },
+    {
+      "question": "What's our on-call rotation?",
+      "task_type": "Del",
+      "entity": [
+        "oncall_rotation"
+      ],
+      "entity_values": {
+        "oncall_rotation": "follow-the-sun across timezones"
+      },
+      "expected_answer": "follow-the-sun across timezones",
+      "hop": null,
+      "agent_answer": "follow-the-sun across timezones",
+      "u_pass": true,
+      "u_reason": "The agent's answer is semantically equivalent to the gold answer."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover."
+      },
+      "expected_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover.",
+      "hop": null,
+      "agent_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover.",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all package managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "package_manager"
+      ],
+      "entity_values": {
+        "package_manager": [
+          "Karnex Pack",
+          "Quorix Hub",
+          "Veltrion Pkg"
+        ]
+      },
+      "expected_answer": "Karnex Pack, Quorix Hub, Veltrion Pkg",
+      "hop": null,
+      "agent_answer": "Karnex Pack, Veltrion Pkg, Quorix Hub",
+      "u_pass": false,
+      "u_reason": "The agent's answer contains all the values but in the wrong order.",
+      "u_pass_count": 2,
+      "u_pass_total": 3
+    },
+    {
+      "question": "What authentication method do we use?",
+      "task_type": "Cas",
+      "entity": [
+        "auth_method"
+      ],
+      "entity_values": {
+        "auth_method": "JWT Bearer"
+      },
+      "expected_answer": "JWT Bearer",
+      "hop": 1,
+      "agent_answer": "mTLS Client Cert",
+      "u_pass": false,
+      "u_reason": "The agent reported the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's the auth middleware config?",
+      "task_type": "Cas",
+      "entity": [
+        "middleware_config"
+      ],
+      "entity_values": {
+        "middleware_config": "kryptal-bearer-check v2.2"
+      },
+      "expected_answer": "kryptal-bearer-check v2.2",
+      "hop": 2,
+      "agent_answer": "oathkeeper-mtls-proxy v4.1 (for mTLS Client Cert) and kryptal-bearer-check v2.2 (for JWT Bearer)",
+      "u_pass": false,
+      "u_reason": "The agent listed both the old and new values together instead of only the new value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's the session TTL?",
+      "task_type": "Abs",
+      "entity": [
+        "user_session_ttl"
+      ],
+      "entity_values": {
+        "user_session_ttl": "4 hours"
+      },
+      "expected_answer": "Uncertain — previously '4 hours', but auth_provider changed",
+      "hop": 1,
+      "agent_answer": "4 hours",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value without expressing any uncertainty.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's our on-call rotation?",
+      "task_type": "Del",
+      "entity": [
+        "oncall_rotation"
+      ],
+      "entity_values": {
+        "oncall_rotation": "follow-the-sun across timezones"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "Follow-the-sun across timezones",
+      "u_pass": false,
+      "u_reason": "The agent returned the deleted value as if it still exists.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What do you know about our release process? Tell me everything.",
+      "task_type": "Agg",
+      "entity": [
+        "branch_strategy",
+        "default_branch",
+        "release_cadence"
+      ],
+      "entity_values": {
+        "branch_strategy": "GitHub Flow with PR reviews",
+        "default_branch": "trunk",
+        "release_cadence": "sprint-end release every 2 weeks"
+      },
+      "expected_answer": "We use GitHub Flow with PR reviews branching on trunk, releasing sprint-end release every 2 weeks.",
+      "hop": null,
+      "agent_answer": "- The team releases sprint-end releases every 2 weeks, which is a tight schedule requiring effective synchronization and time management.\n- To manage time effectively during sprints, it is recommended to prioritize tasks at the beginning of each sprint, conduct daily stand-ups to maintain momentum and address blockers early, and hold retrospectives at the end of each sprint to identify improvements.\n- Dependency management uses the Veltrion Pkg package manager.\n- Best practices for managing dependencies with Veltrion Pkg include regularly checking for updates at the start of each sprint, testing updates in separate branches before merging to ensure compatibility, and using lock files if supported to maintain consistent versions across environments.\n- The team has a code review policy requiring two approvals plus a security review specifically for authentication-related changes.\n- The login endpoint for authentication is `/oathkeeper/mtls/handshake`, which requires strong TLS configurations, proper certificate management including validation for expiration, revocation, and trusted CA signatures, as well as rate limiting and logging to detect abuse.\n- Security reviews include checklists covering input validation, authentication mechanisms, and data handling, supported by automated static analysis tools to detect vulnerabilities early.\n- Sprint releases require tight synchronization and prioritization of tasks, daily stand-ups, and retrospectives to improve workflow.",
+      "u_pass": false,
+      "u_pass_per_entity": {
+        "branch_strategy": false,
+        "default_branch": false,
+        "release_cadence": true
+      },
+      "u_pass_count": 1,
+      "u_pass_total": 3,
+      "u_reason": "Only 'sprint-end release every 2 weeks' is mentioned in the agent's answer."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover."
+      },
+      "expected_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover.",
+      "hop": null,
+      "agent_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover.",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 2,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    }
+  },
+  "totals": {
+    "before_pass": 4,
+    "before_total": 5,
+    "after_pass": 1,
+    "after_total": 7
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 10,
+    "input_tokens": 2277,
+    "output_tokens": 287
+  }
+}

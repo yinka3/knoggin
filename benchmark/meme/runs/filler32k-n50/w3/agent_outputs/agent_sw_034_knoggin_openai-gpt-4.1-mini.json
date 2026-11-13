@@ -1,0 +1,202 @@
+{
+  "episode_id": 34,
+  "domain": "software_project",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What's our build tool?",
+      "task_type": "Cas",
+      "entity": [
+        "build_tool"
+      ],
+      "entity_values": {
+        "build_tool": "Pyronis Build"
+      },
+      "expected_answer": "Pyronis Build",
+      "hop": 1,
+      "agent_answer": "Pyronis Build"
+    },
+    {
+      "question": "What's the build command?",
+      "task_type": "Cas",
+      "entity": [
+        "build_command"
+      ],
+      "entity_values": {
+        "build_command": "pyronis pack --quick"
+      },
+      "expected_answer": "pyronis pack --quick",
+      "hop": 2,
+      "agent_answer": "pyronis pack --quick"
+    },
+    {
+      "question": "What testing framework do we use?",
+      "task_type": "Abs",
+      "entity": [
+        "test_framework"
+      ],
+      "entity_values": {
+        "test_framework": "Tarvex Verify"
+      },
+      "expected_answer": "Tarvex Verify",
+      "hop": 1,
+      "agent_answer": "Tarvex Verify"
+    },
+    {
+      "question": "What's the test command?",
+      "task_type": "Abs",
+      "entity": [
+        "test_command"
+      ],
+      "entity_values": {
+        "test_command": "tarvex verify --all"
+      },
+      "expected_answer": "tarvex verify --all",
+      "hop": 2,
+      "agent_answer": "tarvex verify --all"
+    },
+    {
+      "question": "What's our backup schedule?",
+      "task_type": "Del",
+      "entity": [
+        "backup_schedule"
+      ],
+      "entity_values": {
+        "backup_schedule": "every 12 hours with 7-day retention"
+      },
+      "expected_answer": "every 12 hours with 7-day retention",
+      "hop": null,
+      "agent_answer": "Every 12 hours with a 7-day retention policy."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review."
+      },
+      "expected_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.",
+      "hop": null,
+      "agent_answer": "\"DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all secret managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "secret_manager"
+      ],
+      "entity_values": {
+        "secret_manager": [
+          "Cryptara Vault",
+          "Selvex Secrets",
+          "Velthri Keys"
+        ]
+      },
+      "expected_answer": "Cryptara Vault, Selvex Secrets, Velthri Keys",
+      "hop": null,
+      "agent_answer": "Cryptara Vault, Selvex Secrets, Velthri Keys"
+    },
+    {
+      "question": "What's our build tool?",
+      "task_type": "Cas",
+      "entity": [
+        "build_tool"
+      ],
+      "entity_values": {
+        "build_tool": "Dranith Compiler"
+      },
+      "expected_answer": "Dranith Compiler",
+      "hop": 1,
+      "agent_answer": "Pyronis Build"
+    },
+    {
+      "question": "What's the build command?",
+      "task_type": "Cas",
+      "entity": [
+        "build_command"
+      ],
+      "entity_values": {
+        "build_command": "dranith compile --emit bundle"
+      },
+      "expected_answer": "dranith compile --emit bundle",
+      "hop": 2,
+      "agent_answer": "pyronis pack --quick"
+    },
+    {
+      "question": "What testing framework do we use?",
+      "task_type": "Abs",
+      "entity": [
+        "test_framework"
+      ],
+      "entity_values": {
+        "test_framework": "Tarvex Verify"
+      },
+      "expected_answer": "Uncertain — previously 'Tarvex Verify', but framework changed",
+      "hop": 1,
+      "agent_answer": "Tarvex Verify"
+    },
+    {
+      "question": "What's the test command?",
+      "task_type": "Abs",
+      "entity": [
+        "test_command"
+      ],
+      "entity_values": {
+        "test_command": "tarvex verify --all"
+      },
+      "expected_answer": "Uncertain — previously 'tarvex verify --all', but test_framework changed",
+      "hop": 2,
+      "agent_answer": "tarvex verify --all"
+    },
+    {
+      "question": "What's our backup schedule?",
+      "task_type": "Del",
+      "entity": [
+        "backup_schedule"
+      ],
+      "entity_values": {
+        "backup_schedule": "every 12 hours with 7-day retention"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "Every 12 hours with a 7-day retention policy."
+    },
+    {
+      "question": "What are our code quality standards? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "design_system",
+        "test_coverage_target",
+        "code_review_policy"
+      ],
+      "entity_values": {
+        "design_system": "Veltrion UI Kit v2",
+        "test_coverage_target": "80% minimum overall",
+        "code_review_policy": "2 approvals + security review for auth/"
+      },
+      "expected_answer": "We use Veltrion UI Kit v2, target 80% minimum overall test coverage, and require 2 approvals + security review for auth/ for reviews.",
+      "hop": null,
+      "agent_answer": "- Minimum test coverage target is 80% overall.  \n- Tests are structured logically by features or components, with small and focused test cases.  \n- Code review policy requires 2 approvals plus a security review specifically for the auth/ directory to ensure robust authentication processes."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review."
+      },
+      "expected_answer": "DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.",
+      "hop": null,
+      "agent_answer": "\"DeadlockDetected: transactions 4821 and 4823 are deadlocked on table aurora_orders.\nQuery 1 was UPDATE orders SET status = 'shipped' WHERE region = 'us-east'.\nQuery 2 was DELETE FROM orders WHERE created_at < NOW() - INTERVAL '30 days'.\nFirst seen at 2024-08-04T22:33:18Z; recommend serializable isolation review.\""
+    }
+  ]
+}

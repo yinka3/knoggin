@@ -1,0 +1,281 @@
+{
+  "episode_id": 44,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What testing framework do we use?",
+      "task_type": "Cas",
+      "entity": [
+        "test_framework"
+      ],
+      "entity_values": {
+        "test_framework": "Quorix Spec"
+      },
+      "expected_answer": "Quorix Spec",
+      "hop": 1,
+      "agent_answer": "Quorix Spec",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What's the test command?",
+      "task_type": "Cas",
+      "entity": [
+        "test_command"
+      ],
+      "entity_values": {
+        "test_command": "quorix spec --run all"
+      },
+      "expected_answer": "quorix spec --run all",
+      "hop": 2,
+      "agent_answer": "quorix spec --run all",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What's our build tool?",
+      "task_type": "Abs",
+      "entity": [
+        "build_tool"
+      ],
+      "entity_values": {
+        "build_tool": "Zelthra Pack"
+      },
+      "expected_answer": "Zelthra Pack",
+      "hop": 1,
+      "agent_answer": "Zelthra Pack",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What's the build command?",
+      "task_type": "Abs",
+      "entity": [
+        "build_command"
+      ],
+      "entity_values": {
+        "build_command": "zelthra pack --minify"
+      },
+      "expected_answer": "zelthra pack --minify",
+      "hop": 2,
+      "agent_answer": "zelthra pack --minify",
+      "u_pass": true,
+      "u_reason": "The agent's answer is semantically equivalent to the gold answer."
+    },
+    {
+      "question": "Who's the escalation contact?",
+      "task_type": "Del",
+      "entity": [
+        "escalation_contact"
+      ],
+      "entity_values": {
+        "escalation_contact": "Kevin Park"
+      },
+      "expected_answer": "Kevin Park",
+      "hop": null,
+      "agent_answer": "Kevin Park",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover."
+      },
+      "expected_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover.",
+      "hop": null,
+      "agent_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover.",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all package managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "package_manager"
+      ],
+      "entity_values": {
+        "package_manager": [
+          "Pyronis Bundle",
+          "Quorix Hub",
+          "Synthari Modules"
+        ]
+      },
+      "expected_answer": "Pyronis Bundle, Quorix Hub, Synthari Modules",
+      "hop": null,
+      "agent_answer": "Pyronis Bundle, Quorix Hub, Synthari Modules",
+      "u_pass": true,
+      "u_reason": "The agent's answer contains all the gold values in the exact chronological order specified.",
+      "u_pass_count": 3,
+      "u_pass_total": 3
+    },
+    {
+      "question": "What testing framework do we use?",
+      "task_type": "Cas",
+      "entity": [
+        "test_framework"
+      ],
+      "entity_values": {
+        "test_framework": "Pyronis Check"
+      },
+      "expected_answer": "Pyronis Check",
+      "hop": 1,
+      "agent_answer": "Quorix Spec",
+      "u_pass": false,
+      "u_reason": "The agent reported the old value 'Quorix Spec' instead of the new value 'Pyronis Check'.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's the test command?",
+      "task_type": "Cas",
+      "entity": [
+        "test_command"
+      ],
+      "entity_values": {
+        "test_command": "pyronis check --snapshot"
+      },
+      "expected_answer": "pyronis check --snapshot",
+      "hop": 2,
+      "agent_answer": "quorix spec --run all",
+      "u_pass": false,
+      "u_reason": "The agent provided an incorrect command and did not state the new cascaded value as the sole answer.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's our build tool?",
+      "task_type": "Abs",
+      "entity": [
+        "build_tool"
+      ],
+      "entity_values": {
+        "build_tool": "Zelthra Pack"
+      },
+      "expected_answer": "Uncertain — previously 'Zelthra Pack', but framework changed",
+      "hop": 1,
+      "agent_answer": "Zelthra Pack",
+      "u_pass": false,
+      "u_reason": "The agent confidently states the old value without expressing uncertainty.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's the build command?",
+      "task_type": "Abs",
+      "entity": [
+        "build_command"
+      ],
+      "entity_values": {
+        "build_command": "zelthra pack --minify"
+      },
+      "expected_answer": "Uncertain — previously 'zelthra pack --minify', but build_tool changed",
+      "hop": 2,
+      "agent_answer": "zelthra pack --minify",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value without expressing any uncertainty or acknowledging the upstream change.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "Who's the escalation contact?",
+      "task_type": "Del",
+      "entity": [
+        "escalation_contact"
+      ],
+      "entity_values": {
+        "escalation_contact": "Kevin Park"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "The context does not provide the name or identity of the escalation contact.",
+      "u_pass": true,
+      "u_reason": "The agent correctly stated that the context does not provide the escalation contact without revealing the deleted value.",
+      "pass_type": "real"
+    },
+    {
+      "question": "What are our code quality standards? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "design_system",
+        "test_coverage_target",
+        "code_review_policy"
+      ],
+      "entity_values": {
+        "design_system": "Quenthar Design v1",
+        "test_coverage_target": "80% minimum overall",
+        "code_review_policy": "2 approvals required"
+      },
+      "expected_answer": "We use Quenthar Design v1, target 80% minimum overall test coverage, and require 2 approvals required for reviews.",
+      "hop": null,
+      "agent_answer": "- The team's code review policy requires 2 approvals per code review to maintain high code quality, though this sometimes slows down progress.",
+      "u_pass": false,
+      "u_pass_per_entity": {
+        "design_system": false,
+        "test_coverage_target": false,
+        "code_review_policy": true
+      },
+      "u_pass_count": 1,
+      "u_pass_total": 3,
+      "u_reason": "Only '2 approvals required' is paraphrased in the agent's answer."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover."
+      },
+      "expected_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover.",
+      "hop": null,
+      "agent_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover.",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 2,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 2,
+      "never_knew": 0
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 1,
+      "trivial_pass": 0,
+      "knew_but_failed": 0,
+      "never_knew": 0
+    }
+  },
+  "totals": {
+    "before_pass": 5,
+    "before_total": 6,
+    "after_pass": 3,
+    "after_total": 8
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 12,
+    "input_tokens": 2387,
+    "output_tokens": 340
+  }
+}

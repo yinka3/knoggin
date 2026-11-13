@@ -1,0 +1,176 @@
+{
+  "episode_id": 8,
+  "domain": "software_project",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What token format do we use?",
+      "task_type": "Cas",
+      "entity": [
+        "token_format"
+      ],
+      "entity_values": {
+        "token_format": "Verithos-JWT-v2"
+      },
+      "expected_answer": "Verithos-JWT-v2",
+      "hop": 1,
+      "agent_answer": "Verithos-JWT-v2"
+    },
+    {
+      "question": "What's the auth middleware config?",
+      "task_type": "Cas",
+      "entity": [
+        "middleware_config"
+      ],
+      "entity_values": {
+        "middleware_config": "verithos-oauth-middleware v2.1"
+      },
+      "expected_answer": "verithos-oauth-middleware v2.1",
+      "hop": 2,
+      "agent_answer": "verithos-oauth-middleware v2.1"
+    },
+    {
+      "question": "What's the login endpoint?",
+      "task_type": "Abs",
+      "entity": [
+        "login_endpoint"
+      ],
+      "entity_values": {
+        "login_endpoint": "/auth/kryptal/signin"
+      },
+      "expected_answer": "/auth/kryptal/signin",
+      "hop": 1,
+      "agent_answer": "/auth/kryptal/signin"
+    },
+    {
+      "question": "What's our monitoring URL?",
+      "task_type": "Del",
+      "entity": [
+        "monitoring_url"
+      ],
+      "entity_values": {
+        "monitoring_url": "watch.korinth.dev/aurora"
+      },
+      "expected_answer": "watch.korinth.dev/aurora",
+      "hop": null,
+      "agent_answer": "watch.korinth.dev/aurora"
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded."
+      },
+      "expected_answer": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded.",
+      "hop": null,
+      "agent_answer": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded."
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all sprint deadlines we've had, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "sprint_deadline"
+      ],
+      "entity_values": {
+        "sprint_deadline": [
+          "2025 April 25",
+          "2025 May 9",
+          "2025 June 20"
+        ]
+      },
+      "expected_answer": "2025 April 25, 2025 May 9, 2025 June 20",
+      "hop": null,
+      "agent_answer": "1. 2025 April 25  \n2. 2025 May 9  \n3. 2025 June 20"
+    },
+    {
+      "question": "What token format do we use?",
+      "task_type": "Cas",
+      "entity": [
+        "token_format"
+      ],
+      "entity_values": {
+        "token_format": "Oathkeeper-mTLS-cert"
+      },
+      "expected_answer": "Oathkeeper-mTLS-cert",
+      "hop": 1,
+      "agent_answer": "Verithos-JWT-v2"
+    },
+    {
+      "question": "What's the auth middleware config?",
+      "task_type": "Cas",
+      "entity": [
+        "middleware_config"
+      ],
+      "entity_values": {
+        "middleware_config": "phalanx-key-guard v1.3"
+      },
+      "expected_answer": "phalanx-key-guard v1.3",
+      "hop": 2,
+      "agent_answer": "verithos-oauth-middleware v2.1"
+    },
+    {
+      "question": "What's the login endpoint?",
+      "task_type": "Abs",
+      "entity": [
+        "login_endpoint"
+      ],
+      "entity_values": {
+        "login_endpoint": "/auth/kryptal/signin"
+      },
+      "expected_answer": "Uncertain — previously '/auth/kryptal/signin', but auth_provider changed",
+      "hop": 1,
+      "agent_answer": "/auth/kryptal/signin"
+    },
+    {
+      "question": "What's our monitoring URL?",
+      "task_type": "Del",
+      "entity": [
+        "monitoring_url"
+      ],
+      "entity_values": {
+        "monitoring_url": "watch.korinth.dev/aurora"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "runbooks.aurora.internal/playbooks"
+    },
+    {
+      "question": "What do you know about our release process? Tell me everything.",
+      "task_type": "Agg",
+      "entity": [
+        "branch_strategy",
+        "default_branch",
+        "release_cadence"
+      ],
+      "entity_values": {
+        "branch_strategy": "GitFlow with release branches",
+        "default_branch": "release",
+        "release_cadence": "sprint-end release every 2 weeks"
+      },
+      "expected_answer": "We use GitFlow with release branches branching on release, releasing sprint-end release every 2 weeks.",
+      "hop": null,
+      "agent_answer": "- Your team uses GitFlow with release branches branching to manage features and fixes systematically.\n- The default branch for stable code before production deployment is the \"release\" branch.\n- Feature branches are used to isolate development work, and best practices include keeping them short-lived, regularly syncing with the main branch, and incorporating code reviews before merging.\n- The sprint deadline is set for May 9, 2025, with another mention of a sprint deadline on April 25, 2025, and June 20, 2025, indicating multiple sprint cycles or milestones.\n- You maintain a sprint-end release every two weeks to keep momentum and track progress.\n- Sprint planning involves breaking down tasks into manageable chunks, prioritizing based on urgency and dependencies, and using tools like Kanban boards, JIRA, or Trello for tracking progress.\n- Regular stand-ups and check-ins are held to assess progress, address blockers, and adjust priorities as needed.\n- The incident runbook is maintained at runbooks.aurora.internal/playbooks, documenting response procedures for various incidents with clear troubleshooting and escalation steps, and is regularly reviewed and drilled.\n- The changelog is auto-generated from commit messages, with recommendations to write clear, concise, imperative-style commit messages including issue references to maintain a consistent and informative changelog.\n- Communication within the team is organized through channels like #aurora-core, with emphasis on clear, regular updates and engagement.\n- Authentication is managed via Phalanx Gate, with considerations for multi-factor authentication, role management, and regular configuration reviews to maintain security."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded."
+      },
+      "expected_answer": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded.",
+      "hop": null,
+      "agent_answer": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded."
+    }
+  ]
+}

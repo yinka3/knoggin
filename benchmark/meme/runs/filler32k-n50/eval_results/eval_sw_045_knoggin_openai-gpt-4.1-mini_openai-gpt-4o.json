@@ -1,0 +1,219 @@
+{
+  "episode_id": 45,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "Who's the escalation contact?",
+      "task_type": "Cas",
+      "entity": [
+        "escalation_contact"
+      ],
+      "entity_values": {
+        "escalation_contact": "Kevin Park"
+      },
+      "expected_answer": "Kevin Park",
+      "hop": 1,
+      "agent_answer": "Kevin Park",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "Who reviews our code?",
+      "task_type": "Abs",
+      "entity": [
+        "code_reviewer"
+      ],
+      "entity_values": {
+        "code_reviewer": "Seoyun Choi"
+      },
+      "expected_answer": "Seoyun Choi",
+      "hop": 1,
+      "agent_answer": "Seoyun Choi reviews the code.",
+      "u_pass": true,
+      "u_reason": "The agent's answer semantically matches the gold answer by stating that Seoyun Choi reviews the code."
+    },
+    {
+      "question": "Where's the onboarding guide?",
+      "task_type": "Del",
+      "entity": [
+        "onboarding_guide"
+      ],
+      "entity_values": {
+        "onboarding_guide": "docs.aurora.internal/onboarding"
+      },
+      "expected_answer": "docs.aurora.internal/onboarding",
+      "hop": null,
+      "agent_answer": "docs.aurora.internal/onboarding",
+      "u_pass": true,
+      "u_reason": "The agent's answer is semantically equivalent to the gold answer."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z."
+      },
+      "expected_answer": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z.",
+      "hop": null,
+      "agent_answer": "\"PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23. Stack trace shows recursive call in middleware_chain to request_validator to token_parser. Restart triggered automatic failover at 2024-04-02T14:18:33Z.\"",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all secret managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "secret_manager"
+      ],
+      "entity_values": {
+        "secret_manager": [
+          "Verisigil Lock",
+          "Kerberos Trove",
+          "Pyronos Crypt"
+        ]
+      },
+      "expected_answer": "Verisigil Lock, Kerberos Trove, Pyronos Crypt",
+      "hop": null,
+      "agent_answer": "Verisigil Lock, Kerberos Trove, Pyronos Crypt",
+      "u_pass": true,
+      "u_reason": "The agent's answer contains all the gold values in the correct chronological order.",
+      "u_pass_count": 3,
+      "u_pass_total": 3
+    },
+    {
+      "question": "Who's the escalation contact?",
+      "task_type": "Cas",
+      "entity": [
+        "escalation_contact"
+      ],
+      "entity_values": {
+        "escalation_contact": "Jiwon Han"
+      },
+      "expected_answer": "Jiwon Han",
+      "hop": 1,
+      "agent_answer": "Kevin Park",
+      "u_pass": false,
+      "u_reason": "The agent incorrectly reported the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "Who reviews our code?",
+      "task_type": "Abs",
+      "entity": [
+        "code_reviewer"
+      ],
+      "entity_values": {
+        "code_reviewer": "Seoyun Choi"
+      },
+      "expected_answer": "Uncertain — previously 'Seoyun Choi', but team_lead changed",
+      "hop": 1,
+      "agent_answer": "Seoyun Choi reviews your code.",
+      "u_pass": false,
+      "u_reason": "The agent confidently states the old value without expressing uncertainty.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "Where's the onboarding guide?",
+      "task_type": "Del",
+      "entity": [
+        "onboarding_guide"
+      ],
+      "entity_values": {
+        "onboarding_guide": "docs.aurora.internal/onboarding"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "I don't have that information.",
+      "u_pass": true,
+      "u_reason": "The agent correctly stated it doesn't have the information without revealing the deleted value.",
+      "pass_type": "real"
+    },
+    {
+      "question": "What are our code quality standards? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "design_system",
+        "test_coverage_target",
+        "code_review_policy"
+      ],
+      "entity_values": {
+        "design_system": "Synthari Elements v1.2",
+        "test_coverage_target": "80% minimum overall",
+        "code_review_policy": "2 approvals + security review for auth/"
+      },
+      "expected_answer": "We use Synthari Elements v1.2, target 80% minimum overall test coverage, and require 2 approvals + security review for auth/ for reviews.",
+      "hop": null,
+      "agent_answer": "- Test coverage target is at least 80% overall.  \n- Code reviews require 2 approvals plus a security review specifically for the `auth/` directory to maintain authentication security.  \n- Code reviews are assigned to Seoyun Choi, with Sarah Chen currently assigning this role; if the team lead changes, the assignment changes accordingly.  \n- Escalations are assigned to Kevin Park, with Sarah Chen assigning this role; if the team lead changes, the escalation contact changes to Jiwon Han.  \n- Communication and clear expectations with code reviewers and escalation contacts are emphasized.",
+      "u_pass": false,
+      "u_pass_per_entity": {
+        "design_system": false,
+        "test_coverage_target": true,
+        "code_review_policy": true
+      },
+      "u_pass_count": 2,
+      "u_pass_total": 3,
+      "u_reason": "The agent's answer includes the test coverage target of at least 80% overall and the requirement for 2 approvals plus a security review for the auth/ directory, but does not mention Synthari Elements v1.2."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z."
+      },
+      "expected_answer": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z.",
+      "hop": null,
+      "agent_answer": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23. Stack trace shows recursive call in middleware_chain to request_validator to token_parser. Restart triggered automatic failover at 2024-04-02T14:18:33Z.",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 1,
+      "trivial_pass": 0,
+      "knew_but_failed": 0,
+      "never_knew": 0
+    }
+  },
+  "totals": {
+    "before_pass": 3,
+    "before_total": 4,
+    "after_pass": 3,
+    "after_total": 6
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 8,
+    "input_tokens": 1692,
+    "output_tokens": 273
+  }
+}

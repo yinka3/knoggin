@@ -1,0 +1,4 @@
+{"question_id": "a1eacc2a", "usage": {"prompt_tokens": 35438, "completion_tokens": 241, "total_tokens": 35679, "approximate": false}}
+{"question_id": "1a8a66a6", "usage": {"prompt_tokens": 108965, "completion_tokens": 989, "total_tokens": 109954, "approximate": false}}
+{"question_id": "b0479f84", "usage": {"prompt_tokens": 100907, "completion_tokens": 6367, "total_tokens": 107274, "approximate": false}}
+{"question_id": "gpt4_0b2f1d21", "usage": {"prompt_tokens": 120375, "completion_tokens": 1478, "total_tokens": 121853, "approximate": false}}

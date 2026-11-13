@@ -1,0 +1,150 @@
+{
+  "episode_id": 3,
+  "domain": "personal_life",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Zorathel Peak Gym"
+      },
+      "expected_answer": "Zorathel Peak Gym",
+      "hop": 1,
+      "agent_answer": "You work out at Zorathel Peak Gym, and if you change your residence location within Pyresta Meadow, you plan to work out at Kaelstrom Fitness."
+    },
+    {
+      "question": "How long is my commute?",
+      "task_type": "Abs",
+      "entity": [
+        "commute_duration"
+      ],
+      "entity_values": {
+        "commute_duration": "30 min"
+      },
+      "expected_answer": "30 min",
+      "hop": 1,
+      "agent_answer": "About 30 minutes."
+    },
+    {
+      "question": "What food allergies do I have?",
+      "task_type": "Del",
+      "entity": [
+        "food_allergy"
+      ],
+      "entity_values": {
+        "food_allergy": "eggs"
+      },
+      "expected_answer": "eggs",
+      "hop": null,
+      "agent_answer": "Egg allergy"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you."
+      },
+      "expected_answer": "Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you.",
+      "hop": null,
+      "agent_answer": "\"Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all partners I've had over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "partner"
+      ],
+      "entity_values": {
+        "partner": [
+          "Sarah",
+          "Emily",
+          "Alex"
+        ]
+      },
+      "expected_answer": "Sarah, Emily, Alex",
+      "hop": null,
+      "agent_answer": "Emily, Alex"
+    },
+    {
+      "question": "Where do I work out?",
+      "task_type": "Cas",
+      "entity": [
+        "fitness_facility"
+      ],
+      "entity_values": {
+        "fitness_facility": "Kaelstrom Fitness"
+      },
+      "expected_answer": "Kaelstrom Fitness",
+      "hop": 1,
+      "agent_answer": "Zorathel Peak Gym"
+    },
+    {
+      "question": "How long is my commute?",
+      "task_type": "Abs",
+      "entity": [
+        "commute_duration"
+      ],
+      "entity_values": {
+        "commute_duration": "30 min"
+      },
+      "expected_answer": "Uncertain — previously '30 min', but residence_location changed",
+      "hop": 1,
+      "agent_answer": "About 30 minutes."
+    },
+    {
+      "question": "What food allergies do I have?",
+      "task_type": "Del",
+      "entity": [
+        "food_allergy"
+      ],
+      "entity_values": {
+        "food_allergy": "eggs"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "I don't have that information."
+    },
+    {
+      "question": "What do I do in my free time? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "hobby",
+        "sports",
+        "club_membership"
+      ],
+      "entity_values": {
+        "hobby": "guitar",
+        "sports": "rock climbing",
+        "club_membership": "hiking club"
+      },
+      "expected_answer": "The user's hobby is guitar, plays rock climbing, and is part of hiking club.",
+      "hop": null,
+      "agent_answer": "- Play rock climbing as a way to stay active and challenge yourself  \n- Focus on improving climbing skills such as technique, foot placement, balance, strength training (fingerboard, core exercises), and mental visualization  \n- Climb with your partner Emily, sharing the experience and enhancing safety and motivation  \n- Explore different climbing routes and are interested in climbing spots with a similar vibe to Pyresta Meadow, such as Sierra Nevada, Wasatch Range, Adirondacks, and Rocky Mountain National Park  \n- Participate in a hiking club, exploring different trails and new areas with other members  \n- Hike with your partner named Alex, appreciating the enhanced experience of sharing adventures and motivation with a partner"
+    },
+    {
+      "question": "Recite my life philosophy verbatim.",
+      "task_type": "ER",
+      "entity": [
+        "life_philosophy"
+      ],
+      "entity_values": {
+        "life_philosophy": "Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you."
+      },
+      "expected_answer": "Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you.",
+      "hop": null,
+      "agent_answer": "\"Most people never run far enough on their first wind to find out they've got a second. Give your dreams all you've got and you'll be amazed at the energy that comes out of you.\""
+    }
+  ]
+}

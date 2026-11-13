@@ -1,0 +1,176 @@
+{
+  "episode_id": 40,
+  "domain": "software_project",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What's the session TTL?",
+      "task_type": "Cas",
+      "entity": [
+        "user_session_ttl"
+      ],
+      "entity_values": {
+        "user_session_ttl": "24 hours"
+      },
+      "expected_answer": "24 hours",
+      "hop": 1,
+      "agent_answer": "24 hours"
+    },
+    {
+      "question": "What's the auth middleware config?",
+      "task_type": "Cas",
+      "entity": [
+        "middleware_config"
+      ],
+      "entity_values": {
+        "middleware_config": "phalanx-hmac-validator v2.0"
+      },
+      "expected_answer": "phalanx-hmac-validator v2.0",
+      "hop": 2,
+      "agent_answer": "phalanx-hmac-validator v2.0"
+    },
+    {
+      "question": "What authentication method do we use?",
+      "task_type": "Abs",
+      "entity": [
+        "auth_method"
+      ],
+      "entity_values": {
+        "auth_method": "Session Cookie + CSRF"
+      },
+      "expected_answer": "Session Cookie + CSRF",
+      "hop": 1,
+      "agent_answer": "Session Cookie + CSRF"
+    },
+    {
+      "question": "What's the model syntax?",
+      "task_type": "Del",
+      "entity": [
+        "model_syntax"
+      ],
+      "entity_values": {
+        "model_syntax": "Pyravar.record('Model', schema)"
+      },
+      "expected_answer": "Pyravar.record('Model', schema)",
+      "hop": null,
+      "agent_answer": "Pyravar.record('Model', schema)"
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z."
+      },
+      "expected_answer": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z.",
+      "hop": null,
+      "agent_answer": "\"PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all package managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "package_manager"
+      ],
+      "entity_values": {
+        "package_manager": [
+          "Quorix Hub",
+          "Dranith Stack",
+          "Synthari Modules"
+        ]
+      },
+      "expected_answer": "Quorix Hub, Dranith Stack, Synthari Modules",
+      "hop": null,
+      "agent_answer": "Dranith Stack, Synthari Modules"
+    },
+    {
+      "question": "What's the session TTL?",
+      "task_type": "Cas",
+      "entity": [
+        "user_session_ttl"
+      ],
+      "entity_values": {
+        "user_session_ttl": "4 hours"
+      },
+      "expected_answer": "4 hours",
+      "hop": 1,
+      "agent_answer": "24 hours"
+    },
+    {
+      "question": "What's the auth middleware config?",
+      "task_type": "Cas",
+      "entity": [
+        "middleware_config"
+      ],
+      "entity_values": {
+        "middleware_config": "oathkeeper-mtls-proxy v4.1"
+      },
+      "expected_answer": "oathkeeper-mtls-proxy v4.1",
+      "hop": 2,
+      "agent_answer": "phalanx-hmac-validator v2.0"
+    },
+    {
+      "question": "What authentication method do we use?",
+      "task_type": "Abs",
+      "entity": [
+        "auth_method"
+      ],
+      "entity_values": {
+        "auth_method": "Session Cookie + CSRF"
+      },
+      "expected_answer": "Uncertain — previously 'Session Cookie + CSRF', but auth_provider changed",
+      "hop": 1,
+      "agent_answer": "Session Cookie + CSRF"
+    },
+    {
+      "question": "What's the model syntax?",
+      "task_type": "Del",
+      "entity": [
+        "model_syntax"
+      ],
+      "entity_values": {
+        "model_syntax": "Pyravar.record('Model', schema)"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "½(a - a')²"
+    },
+    {
+      "question": "What do you know about our release process? Tell me everything.",
+      "task_type": "Agg",
+      "entity": [
+        "branch_strategy",
+        "default_branch",
+        "release_cadence"
+      ],
+      "entity_values": {
+        "branch_strategy": "ship/show/ask branching",
+        "default_branch": "release",
+        "release_cadence": "monthly first Monday"
+      },
+      "expected_answer": "We use ship/show/ask branching branching on release, releasing monthly first Monday.",
+      "hop": null,
+      "agent_answer": "- The team follows a monthly release schedule on the first Monday of each month, which helps in planning work effectively.\n- The default branch for development work is named `release`. All development work is merged into this branch.\n- Feature branches are used for individual tasks or features. Developers work in isolation on these branches.\n- After thorough testing and code review, feature branches are merged back into the `release` branch.\n- It is recommended to regularly merge changes from the `release` branch back into feature branches to avoid large merge conflicts.\n- Pull requests are used to facilitate code discussions and approvals before merging.\n- Best practices for managing the monthly release cycle include:\n  - Establishing a clear release checklist covering final testing, documentation updates, and deployment steps.\n  - Having a dedicated review period immediately before the release to ensure readiness.\n  - Conducting regular retrospectives after each release to identify improvements.\n  - Maintaining clear communication and coordination leading up to each release."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z."
+      },
+      "expected_answer": "PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z.",
+      "hop": null,
+      "agent_answer": "\"PanicException: thread 'tokio-runtime-worker' panicked at 'index out of bounds: the len is 0 but the index is 5', src/handlers/auth.rs:142:23.\nStack trace shows recursive call in middleware_chain to request_validator to token_parser.\nRestart triggered automatic failover at 2024-04-02T14:18:33Z.\""
+    }
+  ]
+}

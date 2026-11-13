@@ -1,0 +1,22 @@
+{
+  "knowledge-update": {
+    "accuracy": 0.0,
+    "count": 1
+  },
+  "temporal-reasoning": {
+    "accuracy": 0.75,
+    "count": 4
+  },
+  "multi-session": {
+    "accuracy": 0.2,
+    "count": 5
+  },
+  "single-session-preference": {
+    "accuracy": 0.6666666666666666,
+    "count": 3
+  },
+  "overall": {
+    "accuracy": 0.46153846153846156,
+    "count": 13
+  }
+}

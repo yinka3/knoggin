@@ -1,0 +1,219 @@
+{
+  "episode_id": 25,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "Who's the escalation contact?",
+      "task_type": "Cas",
+      "entity": [
+        "escalation_contact"
+      ],
+      "entity_values": {
+        "escalation_contact": "Kevin Park"
+      },
+      "expected_answer": "Kevin Park",
+      "hop": 1,
+      "agent_answer": "Kevin Park",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "Who reviews our code?",
+      "task_type": "Abs",
+      "entity": [
+        "code_reviewer"
+      ],
+      "entity_values": {
+        "code_reviewer": "Seoyun Choi"
+      },
+      "expected_answer": "Seoyun Choi",
+      "hop": 1,
+      "agent_answer": "Seoyun Choi reviews your code.",
+      "u_pass": true,
+      "u_reason": "The agent's answer semantically matches the gold answer by stating that Seoyun Choi reviews the code."
+    },
+    {
+      "question": "Where's the incident runbook?",
+      "task_type": "Del",
+      "entity": [
+        "incident_runbook_url"
+      ],
+      "entity_values": {
+        "incident_runbook_url": "github.com/aurora-team/runbooks"
+      },
+      "expected_answer": "github.com/aurora-team/runbooks",
+      "hop": null,
+      "agent_answer": "github.com/aurora-team/runbooks",
+      "u_pass": true,
+      "u_reason": "The agent's answer is semantically equivalent to the gold answer."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover."
+      },
+      "expected_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover.",
+      "hop": null,
+      "agent_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.  \nSubject CN does not match expected hostname; chain depth 2 unverified.  \nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.  \nRotate the cert via Cryptara Vault and restart the connection pool to recover.",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all sprint deadlines we've had, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "sprint_deadline"
+      ],
+      "entity_values": {
+        "sprint_deadline": [
+          "2025 March 28",
+          "2025 June 6",
+          "2025 June 20"
+        ]
+      },
+      "expected_answer": "2025 March 28, 2025 June 6, 2025 June 20",
+      "hop": null,
+      "agent_answer": "1. 2025 March 28  \n2. 2025 June 6  \n3. 2025 June 20",
+      "u_pass": true,
+      "u_reason": "The agent's answer contains all the gold values in the exact order specified.",
+      "u_pass_count": 3,
+      "u_pass_total": 3
+    },
+    {
+      "question": "Who's the escalation contact?",
+      "task_type": "Cas",
+      "entity": [
+        "escalation_contact"
+      ],
+      "entity_values": {
+        "escalation_contact": "Jiwon Han"
+      },
+      "expected_answer": "Jiwon Han",
+      "hop": 1,
+      "agent_answer": "Kevin Park",
+      "u_pass": false,
+      "u_reason": "The agent incorrectly reported the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "Who reviews our code?",
+      "task_type": "Abs",
+      "entity": [
+        "code_reviewer"
+      ],
+      "entity_values": {
+        "code_reviewer": "Seoyun Choi"
+      },
+      "expected_answer": "Uncertain — previously 'Seoyun Choi', but team_lead changed",
+      "hop": 1,
+      "agent_answer": "Seoyun Choi reviews your code.",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value without expressing any uncertainty or acknowledging the upstream change.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "Where's the incident runbook?",
+      "task_type": "Del",
+      "entity": [
+        "incident_runbook_url"
+      ],
+      "entity_values": {
+        "incident_runbook_url": "github.com/aurora-team/runbooks"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "github.com/aurora-team/runbooks",
+      "u_pass": false,
+      "u_reason": "The agent returned the deleted value as if it still exists.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What do you know about our release process? Tell me everything.",
+      "task_type": "Agg",
+      "entity": [
+        "branch_strategy",
+        "default_branch",
+        "release_cadence"
+      ],
+      "entity_values": {
+        "branch_strategy": "ship/show/ask branching",
+        "default_branch": "main",
+        "release_cadence": "sprint-end release every 2 weeks"
+      },
+      "expected_answer": "We use ship/show/ask branching branching on main, releasing sprint-end release every 2 weeks.",
+      "hop": null,
+      "agent_answer": "- The team uses a two-week sprint cycle for releases to maintain momentum and enable quick iteration.\n- The sprint deadline is set for June 20, 2025, providing a clear timeline for planning.\n- The team is considering adding a dedicated development branch (dev) alongside the main branch to manage feature work more effectively.\n- Sprint-end releases occur every 2 weeks to keep things fresh and allow quick iteration.\n- The team lead is Jihoon Ryu, who plays a key role in maintaining team focus and morale.\n- The team uses a round-robin text post format for daily standups by 10am to document updates and maintain accountability.\n- Discussions include how Jihoon communicates priorities and delegates tasks.\n- There is an emphasis on making text standup posts more effective by encouraging clear, structured updates highlighting achievements, challenges, and next steps.\n- The team uses a centralized incident runbook at github.com/aurora-team/runbooks, regularly updated after major incidents with team contributions encouraged.\n- The code review policy requires 1 approval plus CI green, with strategies to ensure timely reviews including clear feedback timelines, designated reviewers per code area, and active communication about review progress.\n- Recommendations for release planning include establishing clear sprint goals, prioritizing tasks by impact and urgency as deadlines approach, using visual task management tools like Kanban boards or Gantt charts, and conducting regular check-ins or stand-ups to monitor progress and address roadblocks.",
+      "u_pass": false,
+      "u_pass_per_entity": {
+        "branch_strategy": false,
+        "default_branch": true,
+        "release_cadence": true
+      },
+      "u_pass_count": 2,
+      "u_pass_total": 3,
+      "u_reason": "The answer mentions 'main' and 'sprint-end releases occur every 2 weeks', but does not mention 'ship/show/ask branching'."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover."
+      },
+      "expected_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover.",
+      "hop": null,
+      "agent_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.  \nSubject CN does not match expected hostname; chain depth 2 unverified.  \nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.  \nRotate the cert via Cryptara Vault and restart the connection pool to recover.",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    }
+  },
+  "totals": {
+    "before_pass": 3,
+    "before_total": 4,
+    "after_pass": 2,
+    "after_total": 6
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 8,
+    "input_tokens": 1887,
+    "output_tokens": 256
+  }
+}

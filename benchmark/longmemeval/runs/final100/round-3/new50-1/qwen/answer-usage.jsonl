@@ -1,0 +1,10 @@
+{"question_id": "0bb5a684", "usage": {"prompt_tokens": 34589, "completion_tokens": 168, "total_tokens": 34757, "approximate": false}}
+{"question_id": "gpt4_468eb063", "usage": {"prompt_tokens": 120538, "completion_tokens": 662, "total_tokens": 121200, "approximate": false}}
+{"question_id": "gpt4_d9af6064", "usage": {"prompt_tokens": 116864, "completion_tokens": 602, "total_tokens": 117466, "approximate": false}}
+{"question_id": "4f54b7c9", "usage": {"prompt_tokens": 109600, "completion_tokens": 3590, "total_tokens": 113190, "approximate": false}}
+{"question_id": "a1cc6108", "usage": {"prompt_tokens": 152907, "completion_tokens": 3814, "total_tokens": 156721, "approximate": false}}
+{"question_id": "gpt4_f2262a51", "usage": {"prompt_tokens": 119577, "completion_tokens": 2005, "total_tokens": 121582, "approximate": false}}
+{"question_id": "affe2881", "usage": {"prompt_tokens": 34694, "completion_tokens": 168, "total_tokens": 34862, "approximate": false}}
+{"question_id": "66f24dbb", "usage": {"prompt_tokens": 122730, "completion_tokens": 2806, "total_tokens": 125536, "approximate": false}}
+{"question_id": "ec81a493", "usage": {"prompt_tokens": 183521, "completion_tokens": 1469, "total_tokens": 184990, "approximate": false}}
+{"question_id": "eaca4986", "usage": {"prompt_tokens": 182523, "completion_tokens": 881, "total_tokens": 183404, "approximate": false}}

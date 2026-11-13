@@ -1,0 +1,150 @@
+{
+  "episode_id": 14,
+  "domain": "software_project",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "Who's the escalation contact?",
+      "task_type": "Cas",
+      "entity": [
+        "escalation_contact"
+      ],
+      "entity_values": {
+        "escalation_contact": "Kevin Park"
+      },
+      "expected_answer": "Kevin Park",
+      "hop": 1,
+      "agent_answer": "Kevin Park"
+    },
+    {
+      "question": "Who has approval authority?",
+      "task_type": "Abs",
+      "entity": [
+        "approval_authority"
+      ],
+      "entity_values": {
+        "approval_authority": "CTO Soojung Lim"
+      },
+      "expected_answer": "CTO Soojung Lim",
+      "hop": 1,
+      "agent_answer": "CTO Soojung Lim"
+    },
+    {
+      "question": "What's the deploy command?",
+      "task_type": "Del",
+      "entity": [
+        "deploy_command"
+      ],
+      "entity_values": {
+        "deploy_command": "thandrel ship --channel beta"
+      },
+      "expected_answer": "thandrel ship --channel beta",
+      "hop": null,
+      "agent_answer": "thandrel ship --channel beta"
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations."
+      },
+      "expected_answer": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations.",
+      "hop": null,
+      "agent_answer": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations."
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all secret managers we've used over time, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "secret_manager"
+      ],
+      "entity_values": {
+        "secret_manager": [
+          "Cryptara Vault",
+          "Selvex Secrets",
+          "Kerberos Trove"
+        ]
+      },
+      "expected_answer": "Cryptara Vault, Selvex Secrets, Kerberos Trove",
+      "hop": null,
+      "agent_answer": "Cryptara Vault, Selvex Secrets, Kerberos Trove"
+    },
+    {
+      "question": "Who's the escalation contact?",
+      "task_type": "Cas",
+      "entity": [
+        "escalation_contact"
+      ],
+      "entity_values": {
+        "escalation_contact": "Rachel Yoo"
+      },
+      "expected_answer": "Rachel Yoo",
+      "hop": 1,
+      "agent_answer": "Kevin Park"
+    },
+    {
+      "question": "Who has approval authority?",
+      "task_type": "Abs",
+      "entity": [
+        "approval_authority"
+      ],
+      "entity_values": {
+        "approval_authority": "CTO Soojung Lim"
+      },
+      "expected_answer": "Uncertain — previously 'CTO Soojung Lim', but team_lead changed",
+      "hop": 1,
+      "agent_answer": "CTO Soojung Lim"
+    },
+    {
+      "question": "What's the deploy command?",
+      "task_type": "Del",
+      "entity": [
+        "deploy_command"
+      ],
+      "entity_values": {
+        "deploy_command": "thandrel ship --channel beta"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "thandrel ship --channel beta"
+    },
+    {
+      "question": "What are our code quality standards? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "design_system",
+        "test_coverage_target",
+        "code_review_policy"
+      ],
+      "entity_values": {
+        "design_system": "Dravex Blocks v2.4",
+        "test_coverage_target": "no strict target, PR-reviewed",
+        "code_review_policy": "2 approvals required"
+      },
+      "expected_answer": "We use Dravex Blocks v2.4, target no strict target, PR-reviewed test coverage, and require 2 approvals required for reviews.",
+      "hop": null,
+      "agent_answer": "- Code reviews require two approvals before merging pull requests.  \n- Code review feedback should be clear and actionable to help developers understand context and intent.  \n- Use integrated review tools to track comments and suggestions centrally.  \n- Encourage open communication and dialogue during code reviews, including developer responses to feedback.  \n- Include detailed context in pull requests, such as summaries of changes and relevant information, to streamline reviews.  \n- Set dedicated times for code reviews to ensure timely attention.  \n- Use pull request templates to guide contributors on required information.  \n- Implement automated checks for code quality and tests on pull requests.  \n- Maintain a ship/show/ask branching strategy with clear naming conventions and guidelines for branch purposes.  \n- Establish timelines for merging branches to encourage timely feedback and avoid long-lived branches.  \n- Manage version updates with semantic versioning to communicate the nature of changes (major, minor, patches).  \n- Maintain centralized documentation for design systems and code to ensure consistency and clarity.  \n- Assign thorough code reviewers (e.g., Sujin Yoo) to catch issues early.  \n- Foster collaboration and continuous learning through team lead support, regular check-ins, pair programming, and learning resources.  \n- Encourage writing meaningful tests that cover critical code paths and edge cases.  \n- Ensure test code clarity and maintainability, adding comments when tests are complex.  \n- Encourage developers to write tests before or alongside code development.  \n- Integrate documentation updates into workflows, such as requiring updates in pull requests or scheduling regular reviews.  \n- Designate a documentation champion to oversee consistency and relevance.  \n- Gather regular team feedback on documentation clarity and usefulness."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations."
+      },
+      "expected_answer": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations.",
+      "hop": null,
+      "agent_answer": "SegmentationFault at 0x00007fff5a3b2c40 in vorathis_query_planner.so.\nBacktrace: frame 0 query_optimize, frame 1 plan_join, frame 2 execute_select.\nCore dump saved to /var/crash/core.aurora.18923 on 2024-06-12T03:55:09Z.\nLast known good build was commit 7a4f9e2; bisect against recent migrations."
+    }
+  ]
+}

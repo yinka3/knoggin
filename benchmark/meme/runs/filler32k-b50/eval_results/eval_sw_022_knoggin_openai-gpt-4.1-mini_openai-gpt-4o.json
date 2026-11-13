@@ -1,0 +1,250 @@
+{
+  "episode_id": 22,
+  "root": "",
+  "agent_config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What's the session TTL?",
+      "task_type": "Cas",
+      "entity": [
+        "user_session_ttl"
+      ],
+      "entity_values": {
+        "user_session_ttl": "4 hours"
+      },
+      "expected_answer": "4 hours",
+      "hop": 1,
+      "agent_answer": "4 hours",
+      "u_pass": true,
+      "u_reason": "The agent's answer '4 hours' matches the gold answer semantically."
+    },
+    {
+      "question": "What's the auth middleware config?",
+      "task_type": "Cas",
+      "entity": [
+        "middleware_config"
+      ],
+      "entity_values": {
+        "middleware_config": "verithos-oauth-middleware v2.1"
+      },
+      "expected_answer": "verithos-oauth-middleware v2.1",
+      "hop": 2,
+      "agent_answer": "verithos-oauth-middleware v2.1",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "What token format do we use?",
+      "task_type": "Abs",
+      "entity": [
+        "token_format"
+      ],
+      "entity_values": {
+        "token_format": "Cerberix-SAML-assertion"
+      },
+      "expected_answer": "Cerberix-SAML-assertion",
+      "hop": 1,
+      "agent_answer": "Cerberix-SAML-assertion",
+      "u_pass": true,
+      "u_reason": "The agent's answer matches the gold answer semantically."
+    },
+    {
+      "question": "How often do we release?",
+      "task_type": "Del",
+      "entity": [
+        "release_cadence"
+      ],
+      "entity_values": {
+        "release_cadence": "continuous deploy on merge"
+      },
+      "expected_answer": "continuous deploy on merge",
+      "hop": null,
+      "agent_answer": "Continuously on merge.",
+      "u_pass": true,
+      "u_reason": "The agent's answer is semantically equivalent to the gold answer."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded."
+      },
+      "expected_answer": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded.",
+      "hop": null,
+      "agent_answer": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded.",
+      "u_pass": false,
+      "u_reason": "skipped (ER)"
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all sprint deadlines we've had, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "sprint_deadline"
+      ],
+      "entity_values": {
+        "sprint_deadline": [
+          "2025 April 25",
+          "2025 May 9",
+          "2025 July 4"
+        ]
+      },
+      "expected_answer": "2025 April 25, 2025 May 9, 2025 July 4",
+      "hop": null,
+      "agent_answer": "1. April 25, 2025  \n2. July 4, 2025",
+      "u_pass": false,
+      "u_reason": "The agent's answer is missing the date '2025 May 9' and does not include all gold values.",
+      "u_pass_count": 0,
+      "u_pass_total": 3
+    },
+    {
+      "question": "What's the session TTL?",
+      "task_type": "Cas",
+      "entity": [
+        "user_session_ttl"
+      ],
+      "entity_values": {
+        "user_session_ttl": "1 hour"
+      },
+      "expected_answer": "1 hour",
+      "hop": 1,
+      "agent_answer": "4 hours",
+      "u_pass": false,
+      "u_reason": "The agent incorrectly reported the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What's the auth middleware config?",
+      "task_type": "Cas",
+      "entity": [
+        "middleware_config"
+      ],
+      "entity_values": {
+        "middleware_config": "kryptal-bearer-check v2.2"
+      },
+      "expected_answer": "kryptal-bearer-check v2.2",
+      "hop": 2,
+      "agent_answer": "verithos-oauth-middleware v2.1",
+      "u_pass": false,
+      "u_reason": "The agent stated only the old value instead of the new cascaded value.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What token format do we use?",
+      "task_type": "Abs",
+      "entity": [
+        "token_format"
+      ],
+      "entity_values": {
+        "token_format": "Cerberix-SAML-assertion"
+      },
+      "expected_answer": "Uncertain — previously 'Cerberix-SAML-assertion', but auth_provider changed",
+      "hop": 1,
+      "agent_answer": "Cerberix-SAML-assertion",
+      "u_pass": false,
+      "u_reason": "The agent provided the old value without expressing uncertainty or acknowledging the upstream change.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "How often do we release?",
+      "task_type": "Del",
+      "entity": [
+        "release_cadence"
+      ],
+      "entity_values": {
+        "release_cadence": "continuous deploy on merge"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "Continuously on merge.",
+      "u_pass": false,
+      "u_reason": "The agent revealed the deleted value by stating 'Continuously on merge'.",
+      "pass_type": "knew_but_failed"
+    },
+    {
+      "question": "What do you know about our on-call setup? Tell me everything.",
+      "task_type": "Agg",
+      "entity": [
+        "oncall_rotation",
+        "alert_channel",
+        "incident_runbook_url"
+      ],
+      "entity_values": {
+        "oncall_rotation": "follow-the-sun across timezones",
+        "alert_channel": "#aurora-pager",
+        "incident_runbook_url": "runbooks.aurora.internal/playbooks"
+      },
+      "expected_answer": "On-call is follow-the-sun across timezones, alerts go to #aurora-pager, and runbook is at runbooks.aurora.internal/playbooks.",
+      "hop": null,
+      "agent_answer": "- The team uses a follow-the-sun on-call rotation across timezones to ensure continuous incident handling.\n- This approach ensures that someone is always available to handle incidents.\n- To make on-call shifts smoother, it is recommended to keep a shared document or tool where team members can log incidents, important context, and handoff notes to help the next person in line.\n- Regular check-ins to discuss recurring issues or process improvements are beneficial.\n- Providing helpful resources or documentation can reduce the load during off-hours.\n- How the team currently manages handoffs during on-call shifts is not specified.",
+      "u_pass": false,
+      "u_pass_per_entity": {
+        "oncall_rotation": true,
+        "alert_channel": false,
+        "incident_runbook_url": false
+      },
+      "u_pass_count": 1,
+      "u_pass_total": 3,
+      "u_reason": "The agent mentions 'follow-the-sun on-call rotation across timezones', but does not mention '#aurora-pager' or 'runbooks.aurora.internal/playbooks'."
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded."
+      },
+      "expected_answer": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded.",
+      "hop": null,
+      "agent_answer": "ConnectionRefusedError: [Errno 111] Connection refused.\nService crysthene-db-primary on port 5432 is not accepting connections.\nLast successful heartbeat was at 2024-03-15T08:23:41Z.\nCheck firewall rules and verify that max_connections has not been exceeded.",
+      "u_pass": true,
+      "u_reason": "Gold value found in answer (substring match)"
+    }
+  ],
+  "trivial_analysis": {
+    "Cas": {
+      "total": 2,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 2,
+      "never_knew": 0
+    },
+    "Abs": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    },
+    "Del": {
+      "total": 1,
+      "real_pass": 0,
+      "trivial_pass": 0,
+      "knew_but_failed": 1,
+      "never_knew": 0
+    }
+  },
+  "totals": {
+    "before_pass": 4,
+    "before_total": 5,
+    "after_pass": 1,
+    "after_total": 7
+  },
+  "judge_config": {
+    "judge_model": "openai/gpt-4o"
+  },
+  "judge_usage": {
+    "calls": 10,
+    "input_tokens": 2138,
+    "output_tokens": 317
+  }
+}

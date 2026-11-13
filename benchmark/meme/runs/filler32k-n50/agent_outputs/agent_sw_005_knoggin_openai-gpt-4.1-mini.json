@@ -1,0 +1,202 @@
+{
+  "episode_id": 5,
+  "domain": "software_project",
+  "config": {
+    "agent_type": "knoggin",
+    "agent_model": "openai/gpt-4.1-mini"
+  },
+  "before_answers": [
+    {
+      "question": "What's our monitoring URL?",
+      "task_type": "Cas",
+      "entity": [
+        "monitoring_url"
+      ],
+      "entity_values": {
+        "monitoring_url": "monitor.narvex.io/proj-aurora"
+      },
+      "expected_answer": "monitor.narvex.io/proj-aurora",
+      "hop": 1,
+      "agent_answer": "monitor.narvex.io/proj-aurora"
+    },
+    {
+      "question": "What's the deploy command?",
+      "task_type": "Cas",
+      "entity": [
+        "deploy_command"
+      ],
+      "entity_values": {
+        "deploy_command": "narvex deploy --env prod"
+      },
+      "expected_answer": "narvex deploy --env prod",
+      "hop": 2,
+      "agent_answer": "narvex deploy --env prod"
+    },
+    {
+      "question": "What's our staging URL?",
+      "task_type": "Abs",
+      "entity": [
+        "staging_url"
+      ],
+      "entity_values": {
+        "staging_url": "dev.orinthal.dev/aurora"
+      },
+      "expected_answer": "dev.orinthal.dev/aurora",
+      "hop": 1,
+      "agent_answer": "dev.orinthal.dev/aurora"
+    },
+    {
+      "question": "Where's the Dockerfile?",
+      "task_type": "Abs",
+      "entity": [
+        "dockerfile_path"
+      ],
+      "entity_values": {
+        "dockerfile_path": "infra/zephyra/Dockerfile"
+      },
+      "expected_answer": "infra/zephyra/Dockerfile",
+      "hop": 2,
+      "agent_answer": "infra/zephyra/Dockerfile"
+    },
+    {
+      "question": "When's our team meeting?",
+      "task_type": "Del",
+      "entity": [
+        "meeting_day"
+      ],
+      "entity_values": {
+        "meeting_day": "every Thursday 2pm"
+      },
+      "expected_answer": "every Thursday 2pm",
+      "hop": null,
+      "agent_answer": "Every Thursday at 2pm"
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover."
+      },
+      "expected_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover.",
+      "hop": null,
+      "agent_answer": "\"CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover.\""
+    }
+  ],
+  "after_answers": [
+    {
+      "question": "List all sprint deadlines we've had, from earliest to latest.",
+      "task_type": "Tr",
+      "entity": [
+        "sprint_deadline"
+      ],
+      "entity_values": {
+        "sprint_deadline": [
+          "2025 April 25",
+          "2025 May 23",
+          "2025 June 6"
+        ]
+      },
+      "expected_answer": "2025 April 25, 2025 May 23, 2025 June 6",
+      "hop": null,
+      "agent_answer": "2025 May 23  \n2025 June 6"
+    },
+    {
+      "question": "What's our monitoring URL?",
+      "task_type": "Cas",
+      "entity": [
+        "monitoring_url"
+      ],
+      "entity_values": {
+        "monitoring_url": "observe.velturis.io/aurora"
+      },
+      "expected_answer": "observe.velturis.io/aurora",
+      "hop": 1,
+      "agent_answer": "monitor.narvex.io/proj-aurora"
+    },
+    {
+      "question": "What's the deploy command?",
+      "task_type": "Cas",
+      "entity": [
+        "deploy_command"
+      ],
+      "entity_values": {
+        "deploy_command": "orinthal publish --tier sandbox"
+      },
+      "expected_answer": "orinthal publish --tier sandbox",
+      "hop": 2,
+      "agent_answer": "narvex deploy --env prod"
+    },
+    {
+      "question": "What's our staging URL?",
+      "task_type": "Abs",
+      "entity": [
+        "staging_url"
+      ],
+      "entity_values": {
+        "staging_url": "dev.orinthal.dev/aurora"
+      },
+      "expected_answer": "Uncertain — previously 'dev.orinthal.dev/aurora', but deploy_target changed",
+      "hop": 1,
+      "agent_answer": "dev.orinthal.dev/aurora"
+    },
+    {
+      "question": "Where's the Dockerfile?",
+      "task_type": "Abs",
+      "entity": [
+        "dockerfile_path"
+      ],
+      "entity_values": {
+        "dockerfile_path": "infra/zephyra/Dockerfile"
+      },
+      "expected_answer": "Uncertain — previously 'infra/zephyra/Dockerfile', but docker_image changed",
+      "hop": 2,
+      "agent_answer": "infra/zephyra/Dockerfile"
+    },
+    {
+      "question": "When's our team meeting?",
+      "task_type": "Del",
+      "entity": [
+        "meeting_day"
+      ],
+      "entity_values": {
+        "meeting_day": "every Thursday 2pm"
+      },
+      "expected_answer": "No — explicitly removed",
+      "hop": null,
+      "agent_answer": "The team meeting schedule has been removed from current plans; there is no scheduled team meeting."
+    },
+    {
+      "question": "Where can I find project documentation? List everything you know.",
+      "task_type": "Agg",
+      "entity": [
+        "documentation_url",
+        "onboarding_guide",
+        "changelog_location"
+      ],
+      "entity_values": {
+        "documentation_url": "confluence.aurora.dev/aurora",
+        "onboarding_guide": "wiki.aurora.dev/getting-started",
+        "changelog_location": "GitHub Releases page"
+      },
+      "expected_answer": "Docs are at confluence.aurora.dev/aurora, onboarding guide at wiki.aurora.dev/getting-started, and changelog at GitHub Releases page.",
+      "hop": null,
+      "agent_answer": "confluence.aurora.dev/aurora"
+    },
+    {
+      "question": "Recite the exact error log I shared.",
+      "task_type": "ER",
+      "entity": [
+        "error_log"
+      ],
+      "entity_values": {
+        "error_log": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover."
+      },
+      "expected_answer": "CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover.",
+      "hop": null,
+      "agent_answer": "\"CertificateVerificationError: certificate chain validation failed for crysthene-db-primary.internal.\nSubject CN does not match expected hostname; chain depth 2 unverified.\nObserved at 2024-07-22T11:09:47Z by tls_handshake_listener.\nRotate the cert via Cryptara Vault and restart the connection pool to recover.\""
+    }
+  ]
+}
