@@ -66,10 +66,26 @@ class ContextBlockReference(ConfigModel):
     block_id: UUID
 
 
+def _bare_handle(value: object) -> object:
+    """Read a bare "M1" or "C1" as {"handle": ...}. Some models drop the object
+    around a handle; the citation means the same, and rejecting it would drop
+    the whole edit it belongs to."""
+
+    if isinstance(value, str):
+        logger.info("Read bare Context handle {!r} as a handle object", value)
+        return {"handle": value}
+    return value
+
+
 class LocalContextBlockReference(ConfigModel):
     """A revision-local model/debug handle; never a durable identifier."""
 
     handle: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_bare_handle(cls, value: object) -> object:
+        return _bare_handle(value)
 
     @field_validator("handle")
     @classmethod
@@ -88,6 +104,11 @@ class LocalContextEvidenceReference(ConfigModel):
     """
 
     handle: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_bare_handle(cls, value: object) -> object:
+        return _bare_handle(value)
 
     @field_validator("handle")
     @classmethod
@@ -260,15 +281,16 @@ class ContextDelete(ContextEditBase):
     target: LocalContextBlockReference
 
 
-# The per-window update may add and replace but never delete, so one window
-# cannot empty Context. A finished plan is replaced with its outcome.
+# The per-window update deletes only what a user message asks it to forget;
+# the updater rejects any other delete. A finished plan is replaced with its
+# outcome.
 ContextUpdateOperation = Annotated[
-    ContextAdd | ContextReplace,
+    ContextAdd | ContextReplace | ContextDelete,
     Field(discriminator="operation"),
 ]
 
 
-_OPERATION: TypeAdapter[ContextAdd | ContextReplace] = TypeAdapter(
+_OPERATION: TypeAdapter[ContextAdd | ContextReplace | ContextDelete] = TypeAdapter(
     ContextUpdateOperation
 )
 
@@ -284,11 +306,59 @@ def _operation_rejection(operation: ContextEditBase) -> str | None:
     return None
 
 
+class ContextForget(ConfigModel):
+    """A user's request to forget something. Every message that contains one
+    of ``values``, and the request's own exchange, stop being memory evidence.
+
+    Each value must appear word for word in the cited request or in a cited
+    block, so the model cannot point at history the user did not name.
+    """
+
+    values: list[str] = Field(min_length=1, max_length=8)
+    evidence: list[LocalContextEvidenceReference] = Field(
+        min_length=1, max_length=_MAX_EDIT_EVIDENCE
+    )
+    blocks: list[LocalContextBlockReference] = Field(default_factory=list, max_length=16)
+
+    @field_validator("values")
+    @classmethod
+    def require_specific_values(cls, values: list[str]) -> list[str]:
+        values = [" ".join(value.split()) for value in values]
+        # A very short value would match unrelated messages everywhere.
+        if any(len(value) < 3 or len(value) > 200 for value in values):
+            raise ValueError("forget values must be 3 to 200 characters")
+        return values
+
+
 class LLMContextUpdate(StructuredLLMOutput):
     """The bounded local-reference operation set returned by the Context LLM."""
 
     operations: list[ContextUpdateOperation] = Field(default_factory=list, max_length=64)
+    forget: list[ContextForget] = Field(default_factory=list, max_length=8)
     edit_summary: str | None = Field(default=None, max_length=2_000)
+
+    @model_validator(mode="before")
+    @classmethod
+    def move_misplaced_forget(cls, data: object) -> object:
+        # Some models list a forget request among the edits; it is still the
+        # user's request, so keep it where it belongs instead of dropping it.
+        if not isinstance(data, dict) or not isinstance(data.get("operations"), list):
+            return data
+        misplaced = [
+            item for item in data["operations"]
+            if isinstance(item, dict) and item.get("operation") == "forget"
+        ]
+        if not misplaced:
+            return data
+        forget = data.get("forget")
+        return {
+            **data,
+            "operations": [item for item in data["operations"] if item not in misplaced],
+            "forget": [*(forget if isinstance(forget, list) else []), *(
+                {key: item[key] for key in ("values", "evidence", "blocks") if key in item}
+                for item in misplaced
+            )],
+        }
 
     @field_validator("operations", mode="before")
     @classmethod
@@ -306,14 +376,34 @@ class LLMContextUpdate(StructuredLLMOutput):
             try:
                 operation = _OPERATION.validate_python(value)
             except ValidationError as exc:
+                error = exc.errors()[0]
                 logger.warning(
-                    "Dropped malformed Context operation: {}", exc.errors()[0]["msg"]
+                    "Dropped malformed Context operation at {}: {} (got {})",
+                    ".".join(str(part) for part in error["loc"]),
+                    error["msg"],
+                    repr(error.get("input"))[:200],
                 )
                 continue
             if reason := _operation_rejection(operation):
                 logger.warning("Dropped invalid Context operation: {}", reason)
                 continue
             kept.append(operation)
+        return kept
+
+    @field_validator("forget", mode="before")
+    @classmethod
+    def keep_valid_forget(cls, values: object) -> object:
+        # Like edits: one bad request must not fail the whole window.
+        if not isinstance(values, list):
+            return values
+        kept = []
+        for value in values:
+            try:
+                kept.append(ContextForget.model_validate(value))
+            except ValidationError as exc:
+                logger.warning(
+                    "Dropped malformed forget request: {}", exc.errors()[0]["msg"]
+                )
         return kept
 
     @field_validator("edit_summary", mode="before")

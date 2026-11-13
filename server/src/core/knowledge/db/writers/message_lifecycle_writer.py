@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from typing import Any, Dict
+from uuid import UUID, uuid4
 
 from common.exceptions import IdempotencyConflictError
 from common.scoping import require_scope_value
@@ -44,6 +45,125 @@ class MessageLifecycleWriter:
     @staticmethod
     def _now_ms() -> int:
         return get_now_ms()
+
+    async def forget_messages(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        values: tuple[str, ...],
+        message_ids: tuple[int, ...],
+        block_ids: tuple[UUID, ...],
+    ) -> list[int]:
+        """Mark every project message containing one of ``values`` (ignoring
+        case), the given messages, and every message that supported one of
+        ``block_ids`` or a version it replaced, forgotten with their whole
+        exchanges; return what was newly forgotten.
+
+        A reply can repeat what its question said, so forgetting either half
+        forgets both. Repeating a request changes nothing.
+        """
+
+        if not values and not message_ids and not block_ids:
+            return []
+        if not message_ids:
+            raise ValueError("Forgetting requires a request message")
+        async with self.client.transaction() as cur:
+            await cur.execute(
+                """INSERT INTO project_forget_records (
+                       forget_id, project_id, user_name, request_message_ids, values, block_ids
+                   ) SELECT %s, %s, %s, %s, %s, %s
+                   WHERE EXISTS (SELECT 1 FROM projects WHERE project_id = %s AND user_name = %s)
+                   ON CONFLICT (project_id, request_message_ids) DO NOTHING
+                   RETURNING forget_id""",
+                (uuid4(), project_id, user_name, sorted(set(message_ids)), list(values),
+                 list(block_ids), project_id, user_name),
+            )
+            record = await cur.fetchone()
+            if record is None:
+                return []
+            await cur.execute(
+                """
+                WITH RECURSIVE versions AS (
+                    SELECT block.block_id, block.supersedes_block_id
+                    FROM public.project_context_blocks AS block
+                    WHERE block.project_id = %(project_id)s
+                      AND block.block_id = ANY(%(block_ids)s::uuid[])
+                    UNION
+                    SELECT older.block_id, older.supersedes_block_id
+                    FROM public.project_context_blocks AS older
+                    JOIN versions ON older.block_id = versions.supersedes_block_id
+                    WHERE older.project_id = %(project_id)s
+                ),
+                named AS (
+                    SELECT message.message_id
+                    FROM public.messages AS message
+                    WHERE message.project_id = %(project_id)s
+                      AND message.user_name = %(user_name)s
+                      AND message.lifecycle_state = 'sealed'
+                      AND EXISTS (
+                          SELECT 1 FROM unnest(%(values)s::text[]) AS value
+                          WHERE strpos(lower(message.content), lower(value)) > 0
+                      )
+                    UNION
+                    SELECT unnest(%(message_ids)s::bigint[])
+                    UNION
+                    SELECT support.message_id
+                    FROM public.project_context_block_supports AS support
+                    JOIN versions USING (block_id)
+                    WHERE support.project_id = %(project_id)s
+                ),
+                exchange AS (
+                    SELECT COALESCE(message.user_msg_id, message.message_id) AS user_id
+                    FROM public.messages AS message
+                    JOIN named USING (message_id)
+                    WHERE message.project_id = %(project_id)s
+                )
+                UPDATE public.messages AS message
+                SET lifecycle_state = 'forgotten', forgotten_at = NOW()
+                WHERE message.project_id = %(project_id)s
+                  AND message.user_name = %(user_name)s
+                  AND message.lifecycle_state = 'sealed'
+                  AND (
+                      message.message_id IN (SELECT message_id FROM named)
+                      OR message.message_id IN (SELECT user_id FROM exchange)
+                      OR message.user_msg_id IN (SELECT user_id FROM exchange)
+                  )
+                RETURNING message.message_id
+                """,
+                {
+                    "project_id": project_id,
+                    "user_name": user_name,
+                    "values": list(values),
+                    "message_ids": list(message_ids),
+                    "block_ids": list(block_ids),
+                },
+            )
+            forgotten = [int(row["message_id"]) for row in await cur.fetchall()]
+            if forgotten:
+                await cur.execute(
+                    """
+                    DELETE FROM public.exchange_embeddings
+                    WHERE project_id = %s AND user_message_id = ANY(%s)
+                    """,
+                    (project_id, forgotten),
+                )
+            await cur.execute(
+                """UPDATE project_forget_records
+                   SET message_ids = %s,
+                       episode_ids = ARRAY(SELECT DISTINCT episode_id FROM episode_messages
+                           WHERE project_id = %s AND message_id = ANY(%s) ORDER BY episode_id)
+                   WHERE forget_id = %s""",
+                (forgotten, project_id, forgotten, record["forget_id"]),
+            )
+        return forgotten
+
+    async def complete_forget_cleanup(self, *, user_name: str, project_id: str) -> None:
+        await self.client.execute(
+            """UPDATE project_forget_records SET cleanup_completed_at = now()
+               WHERE project_id = %s AND user_name = %s AND cleanup_completed_at IS NULL
+                 AND episode_ids <@ rewritten_episode_ids""", (project_id, user_name),
+        )
 
     async def record_run_steer(
         self, *, user_name: str, project_id: str, session_id: str,

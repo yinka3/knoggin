@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 _RESULT_UUID_FIELDS: Dict[str, Dict[str, str]] = {
     "search_episodes": {"episode_id": "ep"},
     "read_recent_episodes": {"episode_id": "ep"},
+    "read_episode_messages": {"episode_id": "ep"},
     "list_events": {"episode_id": "ep"},
     "list_project_documents": {"document_id": "doc"},
     "get_project_document_info": {"document_id": "doc"},

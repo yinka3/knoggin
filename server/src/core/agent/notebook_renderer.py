@@ -70,7 +70,8 @@ Entity pages:
 {% endfor %}{% endif %}{% if entities %}
 Entities:
 {% for item in entities %}- {{ item.reference }}{% if item.name %} {{ item.name }}{% endif %}{% if item.details %} — {{ item.details }}{% endif %}{{ '\n' }}
-{% endfor %}{% endif %}{% if relationships %}
+{% for note in item.forget_notes %}  {{ note }}
+{% endfor %}{% endfor %}{% endif %}{% if relationships %}
 Relationships:
 {% for item in relationships %}- {{ item.reference }}{% if item.endpoints %} {{ item.endpoints }}{% endif %}{% if item.label %}: {{ item.label }}{% endif %}{% if item.evidence %} (evidence: {{ item.evidence|join(', ') }}){% endif %}{{ '\n' }}
   qualification: observed evidence, not a current-state claim
@@ -82,7 +83,10 @@ Activities:
 {% endfor %}{% endif %}{% if episodes %}
 Episodes:
 {% for item in episodes %}- {{ item.reference }}{% if item.summary %}: {{ item.summary }}{% endif %}{{ '\n' }}
-{%- if item.chronology %}  chronology: {{ item.chronology }}
+{% if item.forget_note %}  {{ item.forget_note }}
+{% endif %}{% if item.context_updates %}  contributed to Context updates from: {{ item.context_updates|join(', ') }}
+{% endif %}{% if item.context_updated_by %}  related Context updated by: {{ item.context_updated_by|join(', ') }}
+{% endif %}{%- if item.chronology %}  chronology: {{ item.chronology }}
 {% endif %}{% if item.entity_names %}  entities: {{ item.entity_names|join(', ') }}
 {% endif %}{% if item.relationship_lines %}  relationships: {{ item.relationship_lines|join('; ') }}
 {% endif %}{% if item.event_lines %}  events: {{ item.event_lines|join('; ') }}
@@ -156,6 +160,7 @@ class _ReferenceLocalizer:
         }
         counters: dict[str, int] = {}
         episode_handles = self._episode_handles(snapshot, local_uuid_references)
+        self._episode_short_handles.update(episode_handles)
         for section, records in self._record_sections(snapshot):
             prefix = _REFERENCE_PREFIXES[section]
             for reference in records:
@@ -205,6 +210,12 @@ class _ReferenceLocalizer:
             reference.removeprefix("episode:")
             for reference in snapshot.get("knowledge", {}).get("episodes", {})
         ]
+        episode_ids.extend(
+            link["episode_id"]
+            for episode in snapshot.get("knowledge", {}).get("episodes", {}).values()
+            for direction in ("context_updates", "context_updated_by")
+            for link in episode.get(direction, []) if link.get("episode_id")
+        )
         fallback = register_short_uuid_references(episode_ids, "ep", {})
         known_handles = {
             str(actual_id): str(handle)
@@ -578,6 +589,7 @@ def _record_list(
             if isinstance(ref, str)
         ]
         if section == "entities":
+            item["forget_notes"] = [_safe_text(note) for note in item.get("forget_notes", [])]
             item["name"] = _safe_text(
                 item.get("canonical_name") or item.get("name") or ""
             )
@@ -612,6 +624,10 @@ def _record_list(
             )
             item["time"] = _safe_text(item.get("time") or "", limit=80)
         elif section == "episodes":
+            for direction in ("context_updates", "context_updated_by"):
+                item[direction] = [localizer.episode_handle(link.get("episode_id"))
+                                   for link in item.get(direction, [])]
+            item["forget_note"] = _safe_text(item.get("forget_note") or "")
             item["summary"] = _safe_text(item.get("summary") or "", limit=_EPISODE_TEXT_LIMIT)
             item["chronology"] = _episode_chronology(item)
             for field, source in (

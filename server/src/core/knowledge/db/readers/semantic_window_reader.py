@@ -581,6 +581,7 @@ class SemanticWindowReader:
                    message.content,
                    message.timestamp_ms,
                    message.user_msg_id,
+                   message.lifecycle_state,
                    exchange_user.exchange_outcome
             FROM public.project_semantic_window_messages AS membership
             JOIN public.project_semantic_windows AS semantic_window

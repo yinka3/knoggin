@@ -87,6 +87,9 @@ class EpisodeTool(KnowledgeRetrieval):
 
 
 class EpisodeStore:
+    async def get_episode_context_links(self, episode_ids, **scope):
+        return {eid: {'context_updates': [], 'context_updated_by': []} for eid in episode_ids}
+
     async def get_project_episode_source_refs(self, _episode_id, **_scope):
         return []
 
@@ -493,7 +496,7 @@ async def test_episode_and_message_hydration_share_durable_message_identity():
 async def _dated_search(*, after=None, before=None, episodes=()):
     calls = []
 
-    class Store:
+    class Store(EpisodeStore):
         async def search_project_episodes_by_events(self, _query, **_scope):
             return []
 
@@ -555,7 +558,7 @@ async def test_bad_date_ranges_are_rejected(after, before):
 
 
 async def test_episode_search_can_refuse_the_raw_message_fallback():
-    class Store:
+    class Store(EpisodeStore):
         async def search_project_episodes_by_events(self, _query, **_scope):
             return []
 
@@ -575,7 +578,7 @@ async def test_episode_search_can_refuse_the_raw_message_fallback():
     assert result == {"resolution": "no_episodes", "results": []}
 
 
-class _ExpansionStore:
+class _ExpansionStore(EpisodeStore):
     def __init__(self, hits):
         self.hits = hits
         self.searched = []
@@ -626,7 +629,7 @@ async def test_alternate_queries_skip_repeats_and_stop_at_the_configured_count()
 async def test_browsing_episodes_by_date_reports_the_next_page():
     calls = []
 
-    class Store:
+    class Store(EpisodeStore):
         async def get_recent_project_episodes(self, **scope):
             calls.append(scope)
             return [episode_card(episode_id) for episode_id in ("a", "b", "c")]
@@ -690,7 +693,7 @@ async def test_a_page_past_the_last_match_does_not_fall_back_to_raw_messages():
 async def test_listing_events_pages_by_date_and_hides_internal_ids():
     calls = []
 
-    class Store:
+    class Store(EpisodeStore):
         async def list_project_events(self, **scope):
             calls.append(scope)
             return [

@@ -418,6 +418,9 @@ class FakeEphemeralStore:
 
 
 class FakeKnowledgeStore:
+    async def forgotten_name_notes(self, **kwargs):
+        return []
+
     def __init__(self):
         self.saved_message_logs = []
         self.recent_project_messages = []

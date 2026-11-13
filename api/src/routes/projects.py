@@ -10,7 +10,7 @@ from contracts.projects import workspace_views
 from core.project.project_files import workspace_name
 from project_lease import project_documents
 
-from routes.project_settings import _error, _json
+from routes.project_settings import _error, _json, _project_error
 
 
 DEFAULT_DOMAIN = DomainConfig.from_mapping(
@@ -34,6 +34,17 @@ def _public(row):
 async def list_projects(request):
     rows = await request.app.state.runtime.projects.list_projects()
     return JSONResponse([_public(row) for row in rows])
+
+
+async def list_forget_records(request):
+    runtime = request.app.state.runtime
+    project_id = request.path_params["project_id"]
+    if error := await _project_error(runtime, project_id, write=False):
+        return error
+    rows = await runtime.resources.knowledge_store.list_forget_records(
+        user_name=runtime.sessions.user_name, project_id=project_id,
+    )
+    return JSONResponse(rows)
 
 
 async def get_project(request):
@@ -192,6 +203,7 @@ async def remove_workspace(request):
 
 
 routes = [
+    Route("/v1/projects/{project_id}/forget-records", list_forget_records, methods=["GET"]),
     Route("/v1/projects", list_projects, methods=["GET"]),
     Route("/v1/projects", create_project, methods=["POST"]),
     Route("/v1/projects/{project_id}", get_project, methods=["GET"]),

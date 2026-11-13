@@ -10,10 +10,9 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+from itertools import zip_longest
 from time import perf_counter
 from typing import Any, Dict, List, Optional, Tuple
-
-from itertools import zip_longest
 
 from loguru import logger
 
@@ -21,6 +20,9 @@ from common.schema.evidence import EvidenceTraversalLimits
 from common.schema.settings import SearchSettings
 from common.scoping import require_scope_value, require_visible_project_ids
 from common.utils.events import emit
+
+EPISODE_FORGET_NOTE = "This Episode was rewritten after the user asked to forget part of it."
+
 
 class KnowledgeRetrieval:
     """One project-scoped policy boundary for internal knowledge reads.
@@ -146,7 +148,25 @@ class KnowledgeRetrieval:
             visible_project_ids=self.readable_project_ids,
             limit=limit,
         )
-        return results or []
+        results = results or []
+        names = [query, *(name for row in results for name in
+                         [row.get("canonical_name", ""), *(row.get("aliases") or [])])]
+        notes = await self.knowledge_store.forgotten_name_notes(
+            user_name=self.user_name, project_id=self.project_id, names=names,
+        )
+        matched = set()
+        for row in results:
+            entity_names = {name.strip().lower() for name in
+                            [row.get("canonical_name", ""), *(row.get("aliases") or [])]}
+            reminders = [note for note in notes if note["name"].strip().lower() in entity_names]
+            if reminders:
+                row["forget_notes"] = [note["forget_note"] for note in reminders]
+                matched.update(note["name"] for note in reminders)
+        # A reminder is not a live entity and must not offer an ID-based follow-up.
+        results.extend({"name": note["name"], "forget_notes": [note["forget_note"]]}
+                       for note in notes if note["name"] not in matched
+                       and note["name"].strip().lower() == query.strip().lower())
+        return results
 
     async def get_connections(
         self,
@@ -475,10 +495,21 @@ class KnowledgeRetrieval:
                 ),
             },
         )
-        return [
+        result = [
             self._as_message_evidence(source, fallback_session_id=session_id)
             for source in sources
         ]
+        links = await self.knowledge_store.get_episode_context_links(
+            [episode.episode_id], user_name=self.user_name, project_id=self.project_id,
+            visible_project_ids=self.readable_project_ids,
+        )
+        metadata = {"episode_id": episode.episode_id,
+                    **{key: value for key, value in links[episode.episode_id].items() if value}}
+        if episode.generator_metadata.get("forgotten_rewritten_at"):
+            metadata["forget_note"] = EPISODE_FORGET_NOTE
+        if len(metadata) > 1:
+            result.insert(0, metadata)
+        return result
 
     async def read_recent_episodes(
         self,
@@ -1039,6 +1070,11 @@ class KnowledgeRetrieval:
         metrics: Optional[Dict[str, int | float]] = None,
     ) -> List[Dict]:
         serialized = []
+        links = await self.knowledge_store.get_episode_context_links(
+            [episode.episode_id for episode in episodes or []],
+            user_name=self.user_name, project_id=self.project_id,
+            visible_project_ids=self.readable_project_ids,
+        ) if episodes else {}
         for episode in episodes or []:
             sources_consulted = (
                 await self.knowledge_store.get_project_episode_source_refs(
@@ -1107,6 +1143,9 @@ class KnowledgeRetrieval:
                     for source in sources_consulted
                 ],
             }
+            item.update({key: value for key, value in links[episode.episode_id].items() if value})
+            if episode.generator_metadata.get("forgotten_rewritten_at"):
+                item["forget_note"] = EPISODE_FORGET_NOTE
             if similarity_by_episode and episode.episode_id in similarity_by_episode:
                 item["similarity"] = similarity_by_episode[episode.episode_id]
             serialized.append(item)

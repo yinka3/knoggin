@@ -34,6 +34,7 @@ from core.knowledge.db.readers.artifact_reader import ArtifactReader
 from core.knowledge.db.readers.entity_reader import EntityReader
 from core.knowledge.db.readers.episode_reader import EpisodeReader
 from core.knowledge.db.readers.evidence_traversal_reader import EvidenceTraversalReader
+from core.knowledge.db.readers.forget_reader import ForgetReader
 from core.knowledge.db.readers.graph_reader import GraphReader
 from core.knowledge.db.readers.knowledge_query_reader import KnowledgeQueryReader
 from core.knowledge.db.readers.message_reader import MessageReader
@@ -46,6 +47,7 @@ from core.knowledge.db.writers.entity_reclassification_writer import (
     HistoricalReclassificationResult,
 )
 from core.knowledge.db.writers.episode_writer import EpisodeWriter
+from core.knowledge.db.writers.forget_writer import ForgetWriter
 from core.knowledge.db.writers.graph_writer import GraphWriter
 from core.knowledge.db.writers.message_lifecycle_writer import (
     ExchangeClosure,
@@ -90,6 +92,7 @@ class KnowledgeStore:
         self._postgres_client = postgres_client
         self._id_allocator = IdAllocator(self._postgres_client)
         self._graph_writer = GraphWriter(self._postgres_client)
+        self._forget_writer = ForgetWriter(self._postgres_client)
         self._entity_reclassification_writer = EntityReclassificationWriter(
             self._postgres_client
         )
@@ -107,6 +110,7 @@ class KnowledgeStore:
         self._semantic_window_writer = SemanticWindowWriter(self._postgres_client)
         self._semantic_commit_writer = SemanticCommitWriter(self._postgres_client)
         self._entity_reader = EntityReader(self._postgres_client)
+        self._forget_reader = ForgetReader(self._postgres_client)
         self._evidence_service = EvidenceService(
             EvidenceTraversalReader(self._postgres_client)
         )
@@ -150,6 +154,36 @@ class KnowledgeStore:
 
     async def record_run_steer(self, **kwargs) -> bool:
         return await self._message_lifecycle_writer.record_run_steer(**kwargs)
+
+    async def get_episode_context_links(self, episode_ids, **kwargs) -> dict:
+        return await self._episode_reader.get_episode_context_links(episode_ids, **kwargs)
+
+    async def get_due_forget_records(self, **kwargs) -> list[dict]:
+        return await self._forget_reader.get_due_forget_records(**kwargs)
+
+    async def erase_forget_record(self, forget_id, **kwargs) -> bool:
+        return await self._forget_writer.erase_forget_record(forget_id, **kwargs)
+
+    async def list_forget_records(self, **kwargs) -> list[dict]:
+        return await self._forget_reader.list_forget_records(**kwargs)
+
+    async def forgotten_name_notes(self, **kwargs) -> list[dict]:
+        return await self._forget_reader.forgotten_name_notes(**kwargs)
+
+    async def complete_forget_cleanup(self, **kwargs) -> None:
+        await self._message_lifecycle_writer.complete_forget_cleanup(**kwargs)
+
+    async def forget_graph(self, **kwargs) -> list[int]:
+        return await self._graph_writer.forget_graph(**kwargs)
+
+    async def forget_messages(self, **kwargs) -> list[int]:
+        return await self._message_lifecycle_writer.forget_messages(**kwargs)
+
+    async def get_episodes_with_forgotten_sources(self, **kwargs) -> list[dict]:
+        return await self._episode_reader.get_episodes_with_forgotten_sources(**kwargs)
+
+    async def forget_in_episode(self, **kwargs) -> bool:
+        return await self._episode_writer.forget_in_episode(**kwargs)
 
     async def get_user_agent_exchange(
         self,

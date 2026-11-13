@@ -312,6 +312,134 @@ class EpisodeWriter:
             relationship_links = cur.rowcount
         return {"entities": entity_links, "relationships": relationship_links}
 
+    @_storage_write("forget_in_episode")
+    async def forget_in_episode(
+        self,
+        *,
+        episode_id: str,
+        user_name: str,
+        project_id: str,
+        summary: str,
+        new_developments: List[str],
+        updates: List[str],
+        unresolved: List[str],
+        embedding: List[float],
+        forgotten_message_ids: List[int],
+        expected_updated_at: datetime,
+    ) -> bool:
+        """Store a narrative rewritten without forgotten messages, and drop the
+        events, entity links, and relationship links only they supported.
+        Message links stay; reads skip forgotten messages.
+
+        Returns False when the Episode changed since it was read; the caller
+        reads it again and rewrites from the new state.
+        """
+
+        validated_embedding = Episode.validate_embedding(embedding)
+        if validated_embedding is None:
+            raise ValueError("Forgetting in an Episode requires an embedding")
+        async with self.client.transaction() as cur:
+            await cur.execute(
+                """
+                UPDATE episodes AS episode
+                SET summary = %s,
+                    new_developments = %s::jsonb,
+                    updates = %s::jsonb,
+                    unresolved = %s::jsonb,
+                    embedding = %s::vector,
+                    generator_metadata = generator_metadata || jsonb_build_object('forgotten_rewritten_at', NOW()),
+                    updated_at = NOW()
+                WHERE episode.episode_id = %s
+                  AND episode.project_id = %s
+                  AND episode.updated_at = %s
+                  AND EXISTS (
+                      SELECT 1 FROM projects AS project
+                      WHERE project.project_id = episode.project_id
+                        AND project.user_name = %s
+                  )
+                RETURNING episode.episode_id
+                """,
+                (
+                    summary.strip(),
+                    json.dumps([value.strip() for value in new_developments if value.strip()]),
+                    json.dumps([value.strip() for value in updates if value.strip()]),
+                    json.dumps([value.strip() for value in unresolved if value.strip()]),
+                    json.dumps(validated_embedding),
+                    episode_id,
+                    project_id,
+                    expected_updated_at,
+                    user_name,
+                ),
+            )
+            if await cur.fetchone() is None:
+                return False
+            await cur.execute(
+                """
+                DELETE FROM episode_events
+                WHERE episode_id = %s AND project_id = %s
+                  AND source_message_ids && %s::bigint[]
+                """,
+                (episode_id, project_id, forgotten_message_ids),
+            )
+            await cur.execute(
+                """
+                DELETE FROM episode_entity_occurrences
+                WHERE episode_id = %s AND project_id = %s AND message_id = ANY(%s)
+                """,
+                (episode_id, project_id, forgotten_message_ids),
+            )
+            await cur.execute(
+                """UPDATE project_forget_records record
+                   SET rewritten_episode_ids = ARRAY(SELECT DISTINCT unnest(
+                       record.rewritten_episode_ids || ARRAY[%s]::text[]) ORDER BY 1)
+                   WHERE project_id = %s AND user_name = %s
+                     AND episode_ids @> ARRAY[%s]::text[]
+                     AND message_ids && %s::bigint[]""",
+                (episode_id, project_id, user_name, episode_id, forgotten_message_ids),
+            )
+            # Only links built from occurrences can be checked this way.
+            await cur.execute(
+                """
+                DELETE FROM episode_entities AS link
+                WHERE link.episode_id = %s AND link.project_id = %s
+                  AND link.occurrence_provenance_complete
+                  AND NOT EXISTS (
+                      SELECT 1 FROM episode_entity_occurrences AS occurrence
+                      JOIN messages AS message ON message.message_id = occurrence.message_id
+                      WHERE occurrence.episode_id = link.episode_id
+                        AND occurrence.project_id = link.project_id
+                        AND coalesce(occurrence.corrected_entity_id,
+                                     occurrence.resolved_entity_id) = link.entity_id
+                        AND message.lifecycle_state <> 'forgotten'
+                  )
+                """,
+                (episode_id, project_id),
+            )
+            await cur.execute(
+                """
+                DELETE FROM episode_relationships AS link
+                WHERE link.episode_id = %s AND link.project_id = %s
+                  AND NOT EXISTS (
+                      SELECT 1 FROM episode_messages AS membership
+                      JOIN messages AS message
+                        ON message.message_id = membership.message_id
+                       AND message.lifecycle_state <> 'forgotten'
+                      JOIN relationship_observation_messages AS support
+                        ON support.message_id = membership.message_id
+                       AND support.project_id = membership.project_id
+                      JOIN relationship_observations AS observation
+                        ON observation.observation_id = support.observation_id
+                       AND observation.project_id = support.project_id
+                       AND observation.retired_at IS NULL
+                      WHERE membership.episode_id = link.episode_id
+                        AND membership.project_id = link.project_id
+                        AND observation.relationship_id = link.relationship_id
+                  )
+                """,
+                (episode_id, project_id),
+            )
+        return True
+
     @_storage_write("edit_episode")
     async def edit_episode(
         self,

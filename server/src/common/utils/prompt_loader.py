@@ -50,6 +50,11 @@ PIPELINE_PROMPTS: Dict[str, PromptDefinition] = {
         "Repair Episode Narrative",
         frozenset({"user_name", "max_narrative_chars"}),
     ),
+    "forget_episode_content": PromptDefinition(
+        "prompts/episode.md",
+        "Forget Episode Content",
+        frozenset({"user_name"}),
+    ),
     "update_context": PromptDefinition(
         "prompts/context.md",
         "Update Context",

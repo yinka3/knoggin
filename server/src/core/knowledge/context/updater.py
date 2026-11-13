@@ -16,6 +16,7 @@ from common.schema.context import (
     AssertionKind,
     ContextAdd,
     ContextBlockRecord,
+    ContextDelete,
     ContextEditBase,
     ContextReplace,
     ContextSnapshot,
@@ -44,7 +45,15 @@ class StructuredGenerator(Protocol):
         system: str,
         user: str,
         temperature: float = 1.0,
+        model: str | None = None,
     ) -> ResponseT: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ForgetRequest:
+    values: tuple[str, ...]
+    message_ids: tuple[int, ...]
+    block_ids: tuple[UUID, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +65,7 @@ class ContextUpdateResult:
     operation_count: int
     # Reasons for model operations that failed validation and were dropped.
     rejected_operations: tuple[str, ...] = ()
+    forget_requests: tuple[ForgetRequest, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -294,6 +304,9 @@ class ContextUpdateBuild:
                 continue
             resolved_operations.append(resolved)
             evidence_by_operation.append(evidence)
+        forget_requests = self._resolve_forget(
+            output, rejected
+        )
 
         materialization = apply_context_edits(
             self.snapshot,
@@ -307,6 +320,7 @@ class ContextUpdateBuild:
                 edit_summary=output.edit_summary or "No Context changes",
                 operation_count=len(output.operations),
                 rejected_operations=tuple(rejected),
+                forget_requests=forget_requests,
             )
         if len(materialization.operation_new_block_ids) != len(resolved_operations):
             raise RuntimeError("Context edit application did not retain operation mapping")
@@ -326,7 +340,50 @@ class ContextUpdateBuild:
             edit_summary=output.edit_summary or "Updated project Context",
             operation_count=len(output.operations),
             rejected_operations=tuple(rejected),
+            forget_requests=forget_requests,
         )
+
+    def _resolve_forget(
+        self, output: LLMContextUpdate, rejected: list[str]
+    ) -> tuple[ForgetRequest, ...]:
+        """Keep a request only when a user message asked for it and each value
+        is quoted from that request or a cited block: the model may say what
+        to forget, but only in words the user or their Context already used."""
+
+        requests: dict[tuple[int, ...], ForgetRequest] = {}
+        for request in output.forget:
+            requesters = [
+                self._message_by_handle[reference.handle]
+                for reference in request.evidence
+                if reference.handle in self._message_by_handle
+                and self._message_by_handle[reference.handle].role == "user"
+            ]
+            blocks = [
+                self._context_block_by_handle.get(reference.handle)
+                for reference in request.blocks
+            ]
+            if not requesters:
+                rejected.append("only a user message can ask to forget")
+                continue
+            if any(block is None for block in blocks):
+                rejected.append("forget references an unknown Context block")
+                continue
+            sources = " ".join(
+                [message.content for message in requesters]
+                + [block.markdown for block in blocks]
+            )
+            sources = " ".join(sources.split()).casefold()
+            if any(value.casefold() not in sources for value in request.values):
+                rejected.append("forget values must be quoted from the request or a cited block")
+                continue
+            message_ids = tuple(sorted({message.message_id for message in requesters}))
+            previous = requests.get(message_ids, ForgetRequest((), message_ids))
+            requests[message_ids] = ForgetRequest(
+                values=tuple(dict.fromkeys((*previous.values, *request.values))),
+                message_ids=message_ids,
+                block_ids=tuple(dict.fromkeys((*previous.block_ids, *(block.block_id for block in blocks)))),
+            )
+        return tuple(requests.values())
 
     def _context_tokens(self) -> int:
         if self.snapshot is None:
@@ -363,6 +420,10 @@ class ContextUpdateBuild:
             and all(message.is_clarification for message in resolved.messages)
         ):
             raise ValueError("Clarification questions alone cannot establish Context")
+        if isinstance(operation, ContextDelete):
+            if not any(message.role == "user" for message in resolved.messages):
+                raise ValueError("only a user message can remove Context")
+            return resolved
         if operation.assertion_kind is AssertionKind.HUMAN_ASSERTED:
             raise ValueError("the Context model cannot create human_asserted blocks")
         if operation.assertion_kind is AssertionKind.USER_ASSERTED:
@@ -392,7 +453,7 @@ class ContextUpdateBuild:
         operation: ContextEditBase,
         evidence: _ResolvedEvidence,
     ) -> None:
-        if not isinstance(operation, ContextReplace):
+        if not isinstance(operation, (ContextReplace, ContextDelete)):
             return
         target = self._context_block_by_handle.get(operation.target.handle)
         if target is None or target.source_time_ms is None:
@@ -406,6 +467,8 @@ class ContextUpdateBuild:
         operation: ContextEditBase,
         evidence: _ResolvedEvidence,
     ) -> ContextEditBase:
+        if isinstance(operation, ContextDelete):
+            return operation
         payload = operation.model_dump()
         payload["source_time_ms"] = ContextUpdateBuild._evidence_source_time(evidence)
         if isinstance(operation, ContextAdd):
@@ -467,8 +530,9 @@ def _episode_date(episode: EpisodeCard) -> str:
 class ContextUpdater:
     """Call the Context LLM once, then validate before any durable write."""
 
-    def __init__(self, *, llm: StructuredGenerator | None) -> None:
+    def __init__(self, *, llm: StructuredGenerator | None, model: str | None = None) -> None:
         self._llm = llm
+        self._model = model
 
     async def update(
         self,
@@ -499,6 +563,7 @@ class ContextUpdater:
             system=get_context_update_prompt(user_name),
             user=build.evidence_brief(),
             temperature=0.0,
+            model=self._model,
         )
         result = build.apply(output)
         for reason in result.rejected_operations:

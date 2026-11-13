@@ -5,8 +5,8 @@ publication, stage checkpoints, Knowledge commit, finalization, and Context
 projection all use their production implementations.
 """
 
-from datetime import datetime, timezone
 import asyncio
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -40,7 +40,11 @@ from core.ingestion.semantic_window_admission import SemanticWindowAdmission
 from core.ingestion.text_processor import TextProcessor
 from core.knowledge.context.projection import ContextProjection
 from core.knowledge.context.render import apply_context_edits, render_context_markdown
-from core.knowledge.context.updater import ContextUpdater, ContextUpdateResult
+from core.knowledge.context.updater import (
+    ContextUpdater,
+    ContextUpdateResult,
+    ForgetRequest,
+)
 from core.knowledge.db.readers.entity_reader import EntityReader
 from core.knowledge.db.readers.project_context_reader import ProjectContextReader
 from core.knowledge.db.writers.project_context_writer import ProjectContextWriter
@@ -1423,3 +1427,459 @@ async def test_episode_extraction_reuses_a_readable_foreign_identity(
     }
     assert {target_id, homonym_id} <= set(candidates)
     assert "ambiguous_alias" in candidates[target_id].signals
+
+
+class _EchoEpisodeGenerator:
+    """One Episode per window that repeats its messages; rewrites keep only
+    what the user did not ask to forget."""
+
+    def __init__(self):
+        self.rewrites = []
+
+    async def generate(self, *, project_id, messages, policy, **_kwargs):
+        build = ProjectEpisodeBuild(
+            project_id=project_id,
+            policy=policy,
+            messages=[dict(message) for message in messages],
+        )
+        build.prepare_local_references()
+        text = " ".join(str(message["content"]) for message in messages)
+        build.apply_llm_output(LLMEpisodeWindowDecision(proposals=[LLMEpisodeDecision(
+            summary=f"The user said: {text}",
+            message_influences=list(build.message_ids_by_local),
+            events=[{
+                "what": f"The user said: {text}", "kind": "other",
+                "start_date": "2023-03-10", "precision": "day",
+                "date_text": "today", "sources": ["message:1"],
+            }],
+        )]))
+        build.create_episodes()
+        build.attach_embeddings([[0.25] * 768])
+        return build
+
+    async def rewrite_without(self, *, user_name, episode, forgotten_texts):
+        self.rewrites.append((episode["summary"], forgotten_texts))
+        return (
+            SimpleNamespace(
+                summary="The user asked to forget part of the conversation.",
+                new_developments=[], updates=[], unresolved=[],
+            ),
+            [0.5] * 768,
+        )
+
+
+class _ForgetContextUpdater:
+    """Context only ever records pottery; the partner's name never reaches it.
+    The second window's request names the value to forget."""
+
+    async def update(self, *, snapshot, domain, project_id, messages, **_kwargs):
+        if snapshot is None:
+            return ContextUpdateResult(
+                materialization=apply_context_edits(snapshot, [ContextAdd(
+                    section_key="current_state", markdown="The user likes pottery.",
+                    assertion_kind=AssertionKind.AGENT_DERIVED,
+                    evidence=[{"handle": "M2"}],
+                )], domain, project_id=project_id),
+                edit_summary="Recorded pottery", operation_count=1,
+            )
+        requests = [m for m in messages if "forget" in str(m["content"])]
+        return ContextUpdateResult(
+            materialization=None, edit_summary="No Context change", operation_count=0,
+            forget_requests=tuple(ForgetRequest(("James",), (int(m["message_id"]),)) for m in requests),
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_forgetting_hides_messages_and_rewrites_their_episodes(
+    real_server_scope, tmp_path
+):
+    scope = real_server_scope
+    postgres = scope["postgres"]
+    user_name, project_id = scope["user_name"], scope["project_id"]
+    domain = _domain()
+    policy = IngestionPolicy.capture(
+        extraction=ExtractionSettings(),
+        entity_resolution=EntityResolutionSettings(),
+        compiled_domain=domain,
+    )
+    store = KnowledgeStore(postgres, object())
+
+    async def capture_semantic_policy():
+        return policy
+
+    episodes = _EchoEpisodeGenerator()
+    job = ProjectSemanticProcessor(
+        SemanticWindowAdmission(
+            store, IngestionSettings(semantic_window_tokens=100),
+            token_counter=lambda text: max(1, len(text.split())),
+            now_ms=lambda: 1_000_000,
+        ),
+        store,
+        episodes,
+        settings=IngestionSettings(semantic_window_tokens=100),
+        capture_semantic_policy=capture_semantic_policy,
+        context_updater=_ForgetContextUpdater(),
+        context_projection=ContextProjection(
+            reader=ProjectContextReader(postgres),
+            writer=ProjectContextWriter(postgres),
+            filesystem=ProjectFilesystem(tmp_path / project_id),
+        ),
+        entity_builder=_EmptyEntityBuilder(),
+        relationship_extractor=_EmptyRelationships(),
+        publish_committed_entity_ids=_publish_nothing,
+    )
+    context = JobContext(user_name=user_name, project_id=project_id)
+    await _insert_closed_exchange(postgres, scope, 301, "My partner is James.", 1)
+    await _insert_closed_exchange(postgres, scope, 302, "I like pottery.", 2)
+    assert (await job.execute(context)).success
+    await _insert_closed_exchange(
+        postgres, scope, 303, "My partner is James. Please forget that.", 3
+    )
+    assert (await job.execute(context)).success
+
+    states = {
+        row["message_id"]: row["lifecycle_state"]
+        for row in await postgres.fetch_all(
+            "SELECT message_id, lifecycle_state FROM public.messages "
+            "WHERE project_id = %s", (project_id,),
+        )
+    }
+    # 301 contains the value and 303 is the request; 302 never named it, and
+    # the pottery block it supports stays.
+    assert states == {301: "forgotten", 302: "sealed", 303: "forgotten"}
+    found = await store.search_messages_fts(
+        "James | pottery", user_name=user_name,
+        session_ids=[scope["session_id"]], visible_project_ids=[project_id],
+    )
+    assert [message_id for message_id, *_ in found] == [302]
+
+    rows = await postgres.fetch_all(
+        "SELECT episode_id, summary FROM public.episodes "
+        "WHERE project_id = %s ORDER BY created_at", (project_id,),
+    )
+    assert len(rows) == 2
+    assert all("James" not in row["summary"] for row in rows)
+    sources = [
+        [message["message_id"] for message in await store.get_project_episode_source_messages(
+            row["episode_id"], user_name=user_name, project_id=project_id,
+        )]
+        for row in rows
+    ]
+    assert sources == [[302], []]
+    events = await postgres.fetch_all(
+        "SELECT what FROM public.episode_events WHERE project_id = %s", (project_id,)
+    )
+    assert all("James" not in row["what"] for row in events)
+    # Both Episodes were rewritten once, each told what to leave out.
+    assert sorted(len(texts) for _, texts in episodes.rewrites) == [1, 1]
+    # A rewritten Episode is not rewritten again on the next window.
+    await _insert_closed_exchange(postgres, scope, 304, "I also like hiking.", 4)
+    assert (await job.execute(context)).success
+    assert len(episodes.rewrites) == 2
+
+
+class _ReleaseCadenceContextModel:
+    """Records the release cadence, updates it in other words, then forgets
+    it when asked, citing the block. Context only ever holds that one block."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def generate_structured(self, **_kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            return LLMContextUpdate.model_validate({"operations": [{
+                "operation": "add", "section_key": "current_state",
+                "markdown": "The team ships every merge.",
+                "assertion_kind": "user_asserted",
+                "user_quote": "The team ships every merge.",
+                "evidence": [{"handle": "M1"}],
+            }, {
+                "operation": "add", "section_key": "current_state",
+                "markdown": "I like pottery.", "assertion_kind": "user_asserted",
+                "user_quote": "I like pottery.", "evidence": [{"handle": "M2"}],
+            }]})
+        if self.calls == 2:
+            return LLMContextUpdate.model_validate({"operations": [{
+                "operation": "replace", "section_key": "current_state",
+                "target": {"handle": "C1"},
+                "markdown": "Merges now go straight to production.",
+                "assertion_kind": "user_asserted",
+                "user_quote": "Merges now go straight to production.",
+                "evidence": [{"handle": "M1"}],
+            }]})
+        return LLMContextUpdate.model_validate({
+            "operations": [{
+                "operation": "delete", "section_key": "current_state",
+                "target": {"handle": "C1"}, "evidence": [{"handle": "M1"}],
+            }],
+            "forget": [{
+                "values": ["continuous deploy on merge"],
+                "evidence": [{"handle": "M1"}],
+                "blocks": [{"handle": "C1"}],
+            }],
+        })
+
+
+@pytest.mark.integration
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_forgetting_a_block_forgets_what_the_user_said_in_other_words(
+    real_server_scope, tmp_path
+):
+    scope = real_server_scope
+    postgres = scope["postgres"]
+    user_name, project_id = scope["user_name"], scope["project_id"]
+    domain = _domain()
+    policy = IngestionPolicy.capture(
+        extraction=ExtractionSettings(),
+        entity_resolution=EntityResolutionSettings(),
+        compiled_domain=domain,
+    )
+    store = KnowledgeStore(postgres, object())
+
+    async def capture_semantic_policy():
+        return policy
+
+    job = ProjectSemanticProcessor(
+        SemanticWindowAdmission(
+            store, IngestionSettings(semantic_window_tokens=100),
+            token_counter=lambda text: max(1, len(text.split())),
+            now_ms=lambda: 1_000_000,
+        ),
+        store,
+        _EchoEpisodeGenerator(),
+        settings=IngestionSettings(semantic_window_tokens=100),
+        capture_semantic_policy=capture_semantic_policy,
+        context_updater=ContextUpdater(llm=_ReleaseCadenceContextModel()),
+        context_projection=ContextProjection(
+            reader=ProjectContextReader(postgres),
+            writer=ProjectContextWriter(postgres),
+            filesystem=ProjectFilesystem(tmp_path / project_id),
+        ),
+        entity_builder=_EmptyEntityBuilder(),
+        relationship_extractor=_EmptyRelationships(),
+        publish_committed_entity_ids=_publish_nothing,
+    )
+    context = JobContext(user_name=user_name, project_id=project_id)
+    await _insert_closed_exchange(postgres, scope, 401, "The team ships every merge.", 1)
+    await _insert_closed_exchange(postgres, scope, 402, "I like pottery.", 2)
+    assert (await job.execute(context)).success
+    await _insert_closed_exchange(
+        postgres, scope, 403, "Merges now go straight to production.", 3
+    )
+    assert (await job.execute(context)).success
+    episode_ids = [row['episode_id'] for row in await postgres.fetch_all(
+        'SELECT episode_id FROM episodes WHERE project_id = %s ORDER BY created_at', (project_id,))]
+    await postgres.execute("INSERT INTO episodes (episode_id, project_id, summary) VALUES ('unrelated', %s, 'Pottery')", (project_id,))
+    context_links = await store.get_episode_context_links([*episode_ids, 'unrelated'], user_name=user_name, project_id=project_id)
+    assert context_links['unrelated'] == {'context_updates': [], 'context_updated_by': []}
+    assert context_links[episode_ids[1]]['context_updates'] == [{'episode_id': episode_ids[0]}]
+    assert context_links[episode_ids[0]]['context_updated_by'] == [{'episode_id': episode_ids[1]}]
+    await _insert_closed_exchange(
+        postgres, scope, 404,
+        "Our release cadence is continuous deploy on merge. Please remove that.", 4,
+    )
+    assert (await job.execute(context)).success
+
+    states = {
+        row["message_id"]: row["lifecycle_state"]
+        for row in await postgres.fetch_all(
+            "SELECT message_id, lifecycle_state FROM public.messages "
+            "WHERE project_id = %s", (project_id,),
+        )
+    }
+    # Neither 401 nor 403 contains the quoted value. 403 supported the cited
+    # block and 401 the version it replaced; 402 supported neither.
+    assert states == {401: "forgotten", 402: "sealed", 403: "forgotten", 404: "forgotten"}
+
+    assert all(not value for directions in (await store.get_episode_context_links(
+        episode_ids, user_name=user_name, project_id=project_id)).values() for value in directions.values())
+
+    # The erase job must retain recent requests and never erase incomplete cleanup.
+    from common.schema.settings import ForgetSettings
+    from core.knowledge.context.render import context_block_hash
+    from core.knowledge.jobs.forget_erase_job import ForgetEraseJob
+    erase = ForgetEraseJob(store, ForgetSettings())
+    before = await postgres.fetch_all("SELECT * FROM messages ORDER BY message_id")
+    assert (await erase.execute(context)).success
+    assert await postgres.fetch_all("SELECT * FROM messages ORDER BY message_id") == before
+    await postgres.execute("UPDATE project_forget_records SET requested_at = now() - interval '4 days', cleanup_completed_at = NULL")
+    assert (await erase.execute(context)).success
+    assert await postgres.fetch_all("SELECT * FROM messages ORDER BY message_id") == before
+    await store.complete_forget_cleanup(user_name=user_name, project_id=project_id)
+    # Draft revisions and edit summaries must not preserve the removed text.
+    await postgres.execute(
+        "INSERT INTO message_revisions (user_name, session_id, project_id, message_id, revision, content, created_at_ms) "
+        "VALUES (%s, %s, %s, 401, 1, 'The team ships every merge.', 1)",
+        (user_name, scope['session_id'], project_id))
+    await postgres.execute("UPDATE project_context_revisions SET edit_summary = 'continuous deploy on merge'")
+    revision = await store.get_current_project_context_revision(user_name=user_name, project_id=project_id)
+    current = await ProjectContextReader(postgres).get_snapshot(revision.revision_id, user_name=user_name, project_id=project_id)
+    file_before = (tmp_path / project_id / 'CONTEXT.md').read_bytes()
+    # A live setting change adjusts the cutoff, without rebuilding the job.
+    erase.update_settings(ForgetSettings(erase_after_days=5))
+    await erase.execute(context)
+    assert await store.list_forget_records(user_name=user_name, project_id=project_id)
+    erase.update_settings(ForgetSettings(erase_after_days=3))
+    await postgres.execute("UPDATE project_contexts SET projection_revision_id = NULL")
+    await erase.execute(context)
+    assert await store.list_forget_records(user_name=user_name, project_id=project_id)
+    await postgres.execute("UPDATE project_contexts SET projection_revision_id = current_revision_id")
+    record = await postgres.fetch_one('SELECT * FROM project_forget_records')
+    await postgres.execute('UPDATE project_forget_records SET block_ids = block_ids || %s::uuid[]', ([current.blocks[0].block_id],))
+    await erase.execute(context)
+    assert await store.list_forget_records(user_name=user_name, project_id=project_id)
+    # Value-only requests must also erase history through message supports.
+    await postgres.execute("UPDATE project_forget_records SET block_ids = '{}'")
+    assert not await store.erase_forget_record(record['forget_id'], user_name='someone_else',
+                                               project_id=project_id, cutoff=datetime.now(timezone.utc))
+    # Failure at the last step rolls back every text wipe.
+    await postgres.execute("""CREATE FUNCTION reject_erase() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN RAISE EXCEPTION 'injected erase failure'; END $$""")
+    await postgres.execute("CREATE TRIGGER reject_erase BEFORE DELETE ON project_forget_records FOR EACH ROW EXECUTE FUNCTION reject_erase()")
+    import psycopg
+    with pytest.raises(psycopg.Error, match='injected erase failure'):
+        await erase.execute(context)
+    assert await postgres.fetch_all("SELECT * FROM messages ORDER BY message_id") == before
+    assert await store.list_forget_records(user_name=user_name, project_id=project_id)
+    await postgres.execute("DROP TRIGGER reject_erase ON project_forget_records")
+    assert (await erase.execute(context)).success
+    assert await store.list_forget_records(user_name=user_name, project_id=project_id) == []
+    messages = await postgres.fetch_all("SELECT message_id, content, search_tsvector::text AS search FROM messages ORDER BY message_id")
+    assert [row['content'] for row in messages] == ['', 'I like pottery.', '', '']
+    assert all(not row['search'] for row in messages if row['message_id'] != 402)
+    assert (await postgres.fetch_one("SELECT content FROM message_revisions WHERE message_id = 401"))['content'] == ''
+    blocks = await postgres.fetch_all("SELECT markdown, content_hash FROM project_context_blocks")
+    assert len(blocks) == 3
+    assert sorted(row['markdown'] for row in blocks) == ['I like pottery.', '[Erased at the user’s request.]', '[Erased at the user’s request.]']
+    assert all(row['content_hash'] == context_block_hash(row['markdown']) for row in blocks)
+    assert not await postgres.fetch_all("SELECT 1 FROM project_context_revisions WHERE edit_summary LIKE '%%continuous deploy%%'")
+    after = await ProjectContextReader(postgres).get_snapshot(revision.revision_id, user_name=user_name, project_id=project_id)
+    assert after.blocks == current.blocks and after.content_hash == current.content_hash
+    assert (tmp_path / project_id / 'CONTEXT.md').read_bytes() == file_before
+    assert (await erase.execute(context)).success
+    assert await postgres.fetch_all("SELECT message_id, content, search_tsvector::text AS search FROM messages ORDER BY message_id") == messages
+
+
+@pytest.mark.integration
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+@pytest.mark.parametrize("shared, fail_publication", [(False, False), (True, False), (False, True)])
+async def test_forget_removes_only_unsupported_graph_and_records_request(real_server_scope, tmp_path, shared, fail_publication):
+    scope = real_server_scope
+    postgres, user, project = scope['postgres'], scope['user_name'], scope['project_id']
+    store = KnowledgeStore(postgres, object())
+    resolver = EntityResolver(store, project, [project])
+    policy = IngestionPolicy.capture(
+        extraction=ExtractionSettings(), entity_resolution=EntityResolutionSettings(),
+        compiled_domain=_relationship_domain(),
+    )
+    now = [1_000_000]
+    job = _knowledge_job(
+        store, postgres, tmp_path, project, policy, resolver=resolver,
+        llm=_NamesLLM(['James', 'Sarah'], ['Delta']), user_name=user,
+        publisher=resolver.publish_committed_entity_ids, now_ms=lambda: now[0],
+    )
+    class ForgetUpdater:
+        async def update(self, *, messages, **kwargs):
+            requests = [m['message_id'] for m in messages if 'forget' in m['content']]
+            return ContextUpdateResult(
+                materialization=None, edit_summary='No change', operation_count=0,
+                forget_requests=tuple(ForgetRequest(('James', 'private'), (mid,)) for mid in requests),
+            )
+    job._context_updater = ForgetUpdater()
+    job.episode_generator = _EchoEpisodeGenerator()
+    ctx = JobContext(user_name=user, project_id=project)
+    for mid, content in [(501, 'James owns Delta.'), (502, 'Sarah owns Delta. private'),
+                         (503, 'Sarah owns Delta.')]:
+        await _insert_closed_exchange(postgres, scope, mid, content, mid)
+        assert (await job.execute(ctx)).success
+    james = (await store.search_entity('James', visible_project_ids=[project]))[0]['entity_id']
+    assert await resolver.get_profile(james) is not None
+    redirect_id = await store.allocate_entity_id()
+    await postgres.execute(
+        "INSERT INTO entities (entity_id, user_name, canonical_name, status, redirect_entity_id) "
+        "VALUES (%s, %s, 'Jim', 'redirected', %s)", (redirect_id, user, james))
+    await postgres.execute("INSERT INTO entity_aliases VALUES (%s, 'Jimmy')", (james,))
+    if shared:
+        await postgres.execute(
+            "INSERT INTO projects (project_id, user_name, name, domain_config) "
+            "SELECT 'other', user_name, 'Other', domain_config FROM projects WHERE project_id = %s", (project,))
+        await postgres.execute(
+            "INSERT INTO project_entity_contexts (project_id, entity_id, user_name, entity_type, topic) "
+            "SELECT 'other', entity_id, user_name, entity_type, topic FROM project_entity_contexts "
+            "WHERE project_id = %s AND entity_id = %s", (project, james))
+        await postgres.execute(
+            "INSERT INTO entity_name_supports (entity_id, name, project_id, source_kind, source_key) "
+            "VALUES (%s, 'Jimmy', 'other', 'project', 'other')", (james,))
+    # A loaded reader can cache the owner's profile without owning its data.
+    reader = EntityResolver(store, 'reader', ['reader', project])
+    assert await reader.get_profile(james) is not None
+    manager = ProjectManager(SimpleNamespace(postgres=postgres), user_name=user)
+    owner_runtime = SimpleNamespace(project_id=project, entities=resolver)
+    manager.active_projects.update({
+        project: owner_runtime,
+        'reader': SimpleNamespace(entities=reader),
+    })
+    async def publish(ids):
+        await manager.project_factory._publish_entity_ids(owner_runtime, ids)
+    job._publish_committed_entity_ids = publish
+    await _insert_closed_exchange(postgres, scope, 504, 'Please forget James and private.', 504)
+    if fail_publication:
+        async def fail_refresh(ids):
+            raise RuntimeError('Cache unavailable')
+        job._publish_committed_entity_ids = fail_refresh
+        assert not (await job.execute(ctx)).success
+        pending = await postgres.fetch_one('SELECT * FROM project_forget_records')
+        assert pending['cleanup_completed_at'] is None
+        assert james in pending['deleted_entity_ids']
+        job._publish_committed_entity_ids = publish
+        now[0] += 1_000_000
+    assert (await job.execute(ctx)).success
+    assert await store.search_entity('James', visible_project_ids=[project]) == []
+    assert await resolver.get_profile(james) is None
+    assert await reader.get_profile(james) is None
+    assert bool(await postgres.fetch_one("SELECT 1 FROM entities WHERE entity_id = %s", (james,))) == shared
+    assert await postgres.fetch_one("SELECT 1 FROM entities WHERE entity_id = %s", (redirect_id,)) is None
+    if shared:
+        assert await store.search_entity('Jimmy', visible_project_ids=['other'])
+    notes = await store.forgotten_name_notes(user_name=user, project_id=project,
+                                            names=['james', 'JIMMY', 'Jim', 'Sarah'])
+    assert {note['name'] for note in notes} == {'James', 'Jimmy', 'Jim'}
+    assert await store.forgotten_name_notes(user_name=user, project_id='other', names=['James']) == []
+    assert await store.search_entity('Sarah', visible_project_ids=[project])
+    rows = await postgres.fetch_all(
+        'SELECT context FROM relationship_observations WHERE project_id = %s', (project,))
+    assert [r['context'] for r in rows] == ['Sarah owns Delta.']
+    assert len(await postgres.fetch_all(
+        'SELECT * FROM relationships WHERE project_id = %s', (project,))) == 1
+    records = await store.list_forget_records(user_name=user, project_id=project)
+    assert len(records) == 1
+    assert records[0]['values'] == ['James', 'private']
+    assert records[0]['message_count'] == 3
+    assert len(records[0]['episodes']) == 3
+    before = await postgres.fetch_all('SELECT * FROM project_forget_records')
+    assert before[0]['cleanup_completed_at'] is not None
+    assert before[0]['request_message_ids'] == [504]
+    assert before[0]['message_ids'] == [501, 502, 504]
+    assert all(episode['date'] is not None for episode in records[0]['episodes'])
+    assert (await job.execute(ctx)).success
+    assert await postgres.fetch_all('SELECT * FROM project_forget_records') == before
+
+    # A genuinely new mention receives a new ID and only the temporary name reminder.
+    from core.knowledge.retrieval import KnowledgeRetrieval
+    await _insert_closed_exchange(postgres, scope, 505, 'James owns Delta.', 505)
+    assert (await job.execute(ctx)).success
+    retrieval = KnowledgeRetrieval(
+        project_id=project, readable_project_ids=[project], user_name=user,
+        entities=resolver, embedding_service=object(), knowledge_store=store,
+    )
+    found = await retrieval.search_entities('James')
+    assert len(found) == 1 and found[0]['entity_id'] != james
+    assert "previously forgotten" in found[0]['forget_notes'][0]
+    for episode in records[0]['episodes']:
+        messages = await retrieval.read_episode(episode['episode_id'], session_id=scope['session_id'])
+        assert messages[0]['forget_note'].startswith('This Episode was rewritten')

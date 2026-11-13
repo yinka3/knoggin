@@ -335,6 +335,22 @@ async def test_context_updater_uses_the_structured_contract_and_server_prompt():
     assert llm.calls[0]["response_model"] is LLMContextUpdate
     assert "EARLIER EPISODES are background" in llm.calls[0]["system"]
     assert llm.calls[0]["temperature"] == 0.0
+    assert llm.calls[0]["model"] is None
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_context_updater_calls_its_configured_model():
+    llm = _CapturingLLM(LLMContextUpdate())
+    updater = ContextUpdater(llm=llm, model="anthropic/claude-sonnet-5.5")
+
+    await updater.update(
+        user_name="ada", project_id="project-1", domain=_domain(),
+        snapshot=_snapshot(), messages=_messages(), assistant_source_refs=[],
+        earlier_episodes=[], budget_tokens=40_000,
+    )
+
+    assert llm.calls[0]["model"] == "anthropic/claude-sonnet-5.5"
 
 
 @pytest.mark.unit
@@ -467,16 +483,117 @@ def _earlier_episode(summary="Ada chose Postgres for the project last week."):
 
 @pytest.mark.unit
 @pytest.mark.no_network
-def test_per_window_update_cannot_delete_so_one_window_cannot_empty_context():
-    update = LLMContextUpdate.model_validate({"operations": [
+def test_user_asked_delete_removes_the_block():
+    build, _ = _build()
+
+    result = build.apply(LLMContextUpdate.model_validate({"operations": [
         {"operation": "delete", "section_key": "current_state",
          "target": {"handle": "C1"}, "evidence": [{"handle": "M1"}]},
-        {"operation": "replace", "section_key": "current_state",
-         "target": {"handle": "C1"}, "markdown": "The plan is finished.",
-         "evidence": [{"handle": "M1"}]},
+    ]}))
+
+    assert result.rejected_operations == ()
+    assert result.materialization.blocks == ()
+
+
+def _forget(*requests):
+    build, _ = _build()
+    return build.apply(LLMContextUpdate.model_validate(
+        {"operations": [], "forget": list(requests)}
+    ))
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_forget_takes_values_quoted_from_the_user_request():
+    result = _forget({"values": ["LOCAL-ONLY"], "evidence": [{"handle": "M1"}]})
+
+    assert result.rejected_operations == ()
+    assert result.forget_requests[0].values == ("LOCAL-ONLY",)
+    assert result.forget_requests[0].message_ids == (11,)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_forget_takes_values_quoted_from_a_cited_block():
+    build, _ = _build()
+    result = build.apply(LLMContextUpdate.model_validate({"forget": [{
+        "values": ["prior state"], "evidence": [{"handle": "M1"}],
+        "blocks": [{"handle": "C1"}],
+    }]}))
+
+    assert result.forget_requests[0].values == ("prior state",)
+    # The block's messages are forgotten too, whatever words they used.
+    assert result.forget_requests[0].block_ids == (build.snapshot.blocks[0].block_id,)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+@pytest.mark.parametrize(("request_", "reason"), [
+    # The model named something the user never said: that history stays.
+    ({"values": ["Postgres"], "evidence": [{"handle": "M1"}]},
+     "forget values must be quoted from the request or a cited block"),
+    ({"values": ["local-only"], "evidence": [{"handle": "M2"}]},
+     "only a user message can ask to forget"),
+    ({"values": ["local-only"], "evidence": [{"handle": "M1"}],
+      "blocks": [{"handle": "C9"}]},
+     "forget references an unknown Context block"),
+])
+def test_forget_is_rejected_unless_the_user_named_it(request_, reason):
+    result = _forget(request_)
+
+    assert result.forget_requests == ()
+    assert result.rejected_operations == (reason,)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_a_malformed_forget_request_is_dropped_alone():
+    update = LLMContextUpdate.model_validate({"forget": [
+        {"values": ["ab"], "evidence": [{"handle": "M1"}]},
+        {"values": ["local-only"], "evidence": [{"handle": "M1"}]},
     ]})
 
-    assert [operation.operation.value for operation in update.operations] == ["replace"]
+    assert [request.values for request in update.forget] == [["local-only"]]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_bare_handles_cite_like_handle_objects():
+    # Some models write "M1" where the schema asks for {"handle": "M1"}.
+    build, _ = _build()
+    result = build.apply(LLMContextUpdate.model_validate({"operations": [
+        {"operation": "delete", "section_key": "current_state",
+         "target": "C1", "evidence": ["M1"]},
+    ]}))
+
+    assert result.rejected_operations == ()
+    assert result.materialization.blocks == ()
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_a_forget_request_listed_among_edits_is_kept():
+    build, _ = _build()
+    result = build.apply(LLMContextUpdate.model_validate({"operations": [
+        {"operation": "forget", "values": ["LOCAL-ONLY"], "evidence": ["M1"]},
+    ]}))
+
+    assert result.rejected_operations == ()
+    assert result.forget_requests[0].values == ("LOCAL-ONLY",)
+    assert result.forget_requests[0].message_ids == (11,)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_delete_without_a_user_message_is_rejected():
+    build, _ = _build()
+
+    result = build.apply(LLMContextUpdate.model_validate({"operations": [
+        {"operation": "delete", "section_key": "current_state",
+         "target": {"handle": "C1"}, "evidence": [{"handle": "M2"}]},
+    ]}))
+
+    _assert_rejected(result, "only a user message can remove Context")
 
 
 @pytest.mark.unit
@@ -501,3 +618,21 @@ def test_brief_says_how_full_context_is():
     build, _ = _build(budget_tokens=40_000)
 
     assert "CONTEXT SIZE: about 4 of 40000 tokens" in build.evidence_brief()
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_separate_forget_requests_keep_their_own_values_and_evidence():
+    messages = _messages()
+    messages[1] = {**messages[1], 'role': 'user', 'content': 'Forget pottery.'}
+    build = ContextUpdateBuild(
+        project_id='project-1', domain=_domain(), snapshot=_snapshot(),
+        messages=messages, assistant_source_refs=[], budget_tokens=40_000,
+    )
+    result = build.apply(LLMContextUpdate.model_validate({'forget': [
+        {'values': ['local-only'], 'evidence': ['M1']},
+        {'values': ['pottery'], 'evidence': ['M2']},
+    ]}))
+    assert [(r.values, r.message_ids) for r in result.forget_requests] == [
+        (('local-only',), (11,)), (('pottery',), (12,)),
+    ]

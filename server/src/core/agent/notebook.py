@@ -735,6 +735,8 @@ class RunNotebook:
                 if isinstance(item, dict):
                     references.append(self._add_entity(item))
             for ref in dict.fromkeys(references):
+                if not ref.startswith("entity:"):
+                    continue
                 entity_id = ref.removeprefix("entity:")
                 self._add_system_hint(
                     "get_entity_relationships",
@@ -824,7 +826,11 @@ class RunNotebook:
         elif tool_name == "read_episode_messages":
             for item in data if isinstance(data, list) else []:
                 if isinstance(item, dict):
-                    references.append(self._add_message(item))
+                    if item.get("episode_id") and any(item.get(key) for key in
+                            ("forget_note", "context_updates", "context_updated_by")):
+                        references.append(self._add_episode(item))
+                    else:
+                        references.append(self._add_message(item))
         elif tool_name in {
             "list_project_documents",
             "get_project_document_info",

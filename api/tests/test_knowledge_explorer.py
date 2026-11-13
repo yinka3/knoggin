@@ -188,3 +188,39 @@ def test_message_jev_explanation_is_scoped_and_allowlisted(monkeypatch, tmp_path
                 assert (await client.get(path.replace("/p1/", "/p2/"))).status_code == 404
 
     asyncio.run(exercise())
+
+
+def test_forget_history_is_owner_scoped_read_only_and_available_when_archived(monkeypatch, tmp_path):
+    calls = []
+    records = [{'forget_id': str(uuid4()), 'values': ['James'],
+                'requested_at': '2026-11-11T00:00:00+00:00', 'message_count': 2,
+                'episodes': [{'episode_id': 'ep-1', 'date': '2026-11-10T00:00:00+00:00'}]}]
+
+    class Projects:
+        async def get_project(self, project_id):
+            return {'status': 'archived'} if project_id == 'p1' else None
+
+    class Store:
+        async def list_forget_records(self, **scope):
+            calls.append(scope)
+            return records
+
+    async def start(**kwargs):
+        async def shutdown():
+            pass
+        return SimpleNamespace(projects=Projects(), resources=SimpleNamespace(knowledge_store=Store()),
+                               sessions=SimpleNamespace(user_name='ada'), shutdown=shutdown)
+
+    monkeypatch.setattr('app.ApplicationRuntime.start', start)
+    app = create_app(user_name='ada', config_dir=tmp_path)
+
+    async def exercise():
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+                response = await client.get('/v1/projects/p1/forget-records')
+                assert response.status_code == 200
+                assert response.json() == records
+                assert (await client.get('/v1/projects/missing/forget-records')).status_code == 404
+                assert (await client.post('/v1/projects/p1/forget-records')).status_code == 405
+    asyncio.run(exercise())
+    assert calls == [{'user_name': 'ada', 'project_id': 'p1'}]

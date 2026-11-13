@@ -186,6 +186,8 @@ class SemanticCommitWriter:
              AND message.project_id = membership.project_id
             WHERE link.window_id = %s AND link.project_id = %s
               AND message.user_name = %s
+              -- Forgotten messages are left out of Knowledge input.
+              AND message.lifecycle_state <> 'forgotten'
             """,
             (build.window_id, build.project_id, build.user_name),
         )

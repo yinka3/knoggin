@@ -463,6 +463,23 @@ class _SemanticEpisodeStore:
     async def get_project_semantic_window_assistant_source_refs(self, _window_id, **_kwargs):
         return []
 
+    async def forget_messages(self, **kwargs):
+        self.__dict__.setdefault("forget_calls", []).append(kwargs)
+        return []
+
+    async def get_episodes_with_forgotten_sources(self, **kwargs):
+        return self.__dict__.get("forgotten_episodes", [])
+
+    async def forget_graph(self, **kwargs):
+        return []
+
+    async def complete_forget_cleanup(self, **kwargs):
+        pass
+
+    async def forget_in_episode(self, **kwargs):
+        self.__dict__.setdefault("episode_forgets", []).append(kwargs)
+        return True
+
     async def commit_project_context_revision(self, **kwargs):
         self.context_snapshot = ContextSnapshot(
             revision_id=uuid4(),
@@ -627,7 +644,10 @@ class _BlockingEpisodeGenerator(_ZeroEpisodeGenerator):
 
 class _NoopContextUpdater:
     async def update(self, **_kwargs):
-        return SimpleNamespace(materialization=None, edit_summary="No Context change")
+        return SimpleNamespace(
+            materialization=None, edit_summary="No Context change",
+            forget_requests=(),
+        )
 
 
 class _FailingContextUpdater:

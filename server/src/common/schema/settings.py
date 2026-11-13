@@ -59,7 +59,10 @@ class SemanticWindowRetrySettings(ConfigModel):
 class ContextSettings(ConfigModel):
     """Project Context size and what each update reads."""
 
-    # Optional per-run maintainer override; otherwise use the extraction model.
+    # Optional model overrides; otherwise both use the extraction model. The
+    # update runs once per window and decides what changed, including which
+    # user-stated rules a change triggers.
+    update_model: str | None = None
     maintenance_model: str | None = None
     # The size Context is kept under. The update is told how full it is.
     max_tokens: int = Field(40_000, ge=1_000, le=1_000_000)
@@ -71,6 +74,11 @@ class ContextSettings(ConfigModel):
     maintain_every_episodes: int = Field(12, ge=1, le=1_000)
     # The most blocks one maintainer run may remove, as a share of Context.
     maintain_max_removed_share: float = Field(0.3, gt=0, le=1)
+
+
+class ForgetSettings(ConfigModel):
+    erase_after_days: int = Field(3, ge=0)
+    erase_interval_seconds: int = Field(86_400, ge=1)
 
 
 class IngestionSettings(ConfigModel):
@@ -90,6 +98,7 @@ class IngestionSettings(ConfigModel):
         default_factory=SemanticWindowRetrySettings
     )
     context: ContextSettings = Field(default_factory=ContextSettings)
+    forget: ForgetSettings = Field(default_factory=ForgetSettings)
 
 
 class DocumentIndexingSettings(ConfigModel):

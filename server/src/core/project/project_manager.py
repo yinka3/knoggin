@@ -135,6 +135,7 @@ class ProjectManager:
             maintenance_service=self.maintenance_service,
             config_manager=config_manager,
             filesystem_factory=filesystem_factory,
+            invalidate_reading_entity_caches=self._invalidate_reading_entity_caches,
         )
         # Entity identity maintenance is user-global and must not be tied to a
         # loaded ProjectRuntime.  ProjectManager exposes the application-owned
@@ -169,6 +170,18 @@ class ProjectManager:
             await self._sandbox_manager.remove_project(project_id)
         except Exception:
             logger.exception("Sandbox cleanup failed for deleted project {}", project_id)
+
+    def _invalidate_reading_entity_caches(
+        self, source_project_id: str, entity_ids: tuple[int, ...],
+    ) -> None:
+        self._invalidate_entity_caches({
+            "affected_entity_ids": entity_ids,
+            "cache_project_ids": [
+                project_id for project_id, runtime in self.active_projects.items()
+                if project_id != source_project_id
+                and source_project_id in runtime.entities.readable_project_ids
+            ],
+        })
 
     def _invalidate_entity_caches(self, result: dict) -> dict[str, int]:
         explicit_entity_ids = result.get("affected_entity_ids")

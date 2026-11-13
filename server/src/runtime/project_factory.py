@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from functools import partial
-from typing import cast
+from typing import Callable, cast
 
 from loguru import logger
 
@@ -36,6 +36,7 @@ from core.knowledge.documents import (
 from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.episodes.generator import EpisodeGenerator
 from core.knowledge.jobs.conflict_discovery_job import ConflictDiscoveryJob
+from core.knowledge.jobs.forget_erase_job import ForgetEraseJob
 from core.knowledge.jobs.relationship_advisory_job import RelationshipAdvisoryJob
 from core.knowledge.retrieval import KnowledgeRetrieval
 from core.project.domain_config_store import DomainConfigStore
@@ -57,12 +58,14 @@ class ProjectRuntimeFactory:
         maintenance_service: ProjectMaintenanceService | None = None,
         config_manager: ConfigManager | None = None,
         filesystem_factory: ProjectFilesystemFactory | None = None,
+        invalidate_reading_entity_caches: Callable[[str, tuple[int, ...]], None] | None = None,
     ) -> None:
         self.resources = resources
         self.user_name = user_name
         self._maintenance_service = maintenance_service
         self._config_manager = config_manager
         self._filesystem_factory = filesystem_factory
+        self._invalidate_reading_entity_caches = invalidate_reading_entity_caches
 
     @property
     def dev_settings(self):
@@ -316,7 +319,10 @@ class ProjectRuntimeFactory:
             exchange_embedding_service=resources.embedding,
             settings=developer_settings.ingestion,
             capture_semantic_policy=runtime.capture_semantic_policy,
-            context_updater=ContextUpdater(llm=resources.llm_service),
+            context_updater=ContextUpdater(
+                llm=resources.llm_service,
+                model=developer_settings.ingestion.context.update_model,
+            ),
             context_maintainer=ContextMaintainer(
                 llm=resources.llm_service,
                 model=developer_settings.ingestion.context.maintenance_model,
@@ -328,11 +334,16 @@ class ProjectRuntimeFactory:
                 allocate_entity_id=resources.knowledge_store.allocate_entity_id,
             ),
             relationship_extractor=relationship_extractor,
-            publish_committed_entity_ids=runtime.entities.publish_committed_entity_ids,
+            publish_committed_entity_ids=partial(self._publish_entity_ids, runtime),
             signal_relationship_advisories=lambda: runtime.scheduler.wake_job(
                 "relationship_advisories"
             ),
         )
+
+    async def _publish_entity_ids(self, runtime, entity_ids: tuple[int, ...]) -> None:
+        await runtime.entities.publish_committed_entity_ids(entity_ids)
+        if self._invalidate_reading_entity_caches is not None:
+            self._invalidate_reading_entity_caches(runtime.project_id, entity_ids)
 
     @staticmethod
     def _extraction_context_window(llm):
@@ -391,6 +402,13 @@ class ProjectRuntimeFactory:
             )
         )
         scheduler.register(project_semantic_processor)
+        forget_erase = ForgetEraseJob(
+            self.resources.knowledge_store, config_manager.config.developer_settings.ingestion.forget,
+        )
+        scheduler.register(forget_erase)
+        runtime.add_config_unsubscriber(config_manager.subscribe(
+            forget_erase.update_settings, 'developer_settings.ingestion.forget',
+        ))
         if self._maintenance_service is not None:
             scheduler.register(RelationshipAdvisoryJob(self._maintenance_service))
         runtime.add_config_unsubscriber(

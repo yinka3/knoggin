@@ -22,9 +22,21 @@ Markdown blocks, not extracted triples or a transcript.
 <reconciliation_rules>
 - Add or replace only when the frozen window provides a reason. An empty
   operation list is valid when no durable Context change is warranted.
-- You cannot delete. When a plan finishes, a fact changes, or the user changes
-  a preference, replace that block with the new state ("The renovation
-  finished in June at $38,500"). Older blocks are retired separately.
+- When the user asks to forget or remove something, add a `forget` entry that
+  cites their request and lists the exact values to forget, such as a name,
+  number, or address, copied word for word from the request. If the request
+  only describes it ("forget my partner's name"), copy the value from the
+  block that states it. Cite every block that states it as `blocks`: the
+  messages behind those blocks are forgotten too, even when they used other
+  words. Every message containing a value is forgotten, so choose the
+  specific value, not a general word. Then delete each block that states it,
+  or replace it without the forgotten part when it holds other facts. Do not
+  repeat the removed value anywhere, including the edit summary. You may keep
+  a brief generic hint that the user requested forgetting, but neither the hint
+  nor its reason may reveal the forgotten details. Delete for no other reason: when a plan finishes, a fact
+  changes, or the user changes a preference, replace that block with the new
+  state ("The renovation finished in June at $38,500"). Older blocks are
+  retired separately.
 - When a plan finishes, replace only the block about its status. Its details
   (people, choices, costs) are still true; leave those blocks as they are.
 - Keep one block per thread. When the window continues a thread, replace its
@@ -52,6 +64,18 @@ Markdown blocks, not extracted triples or a transcript.
   chats. A window on a different topic does not make earlier Context false:
   leave blocks the window does not speak to. Replace a block only when this
   window changes or contradicts that same fact.
+- Exception: when CURRENT CONTEXT holds a dependency the user stated ("if I
+  change jobs, we'll move to Denver", "this is determined by my office
+  location") and this window changes the fact it depends on,
+  replace the dependent block too, and follow the chain when that block is
+  itself a dependency. If the user said what it becomes, state that new
+  value and that it follows from their stated plan ("Planned to move to
+  Denver after a job change; the job has changed"). If the user did not say,
+  state that the old value may no longer hold ("Commuted by train, which depended
+  on the old office; may have changed"). Follow only
+  dependencies the user stated; never infer new ones.
+- When the user says one fact depends on another, keep that link in the
+  block ("commutes by train, which depends on their office location").
 - Record what the user said about themselves, their plans, and their choices.
   Assistant content belongs only as what it did for the user: how and why it
   shaped a plan or choice ("Chose a sample repair over a full replacement after
@@ -69,7 +93,9 @@ Return exactly the structured response requested by the schema. Each operation
 must include one or more `evidence` handles. ADD and REPLACE provide bounded
 natural Markdown, an assertion kind, a configured section key, any needed
 dependencies, and `user_quote` when the kind is `user_asserted`. REPLACE
-targets one current `C` handle. Do not provide
+targets one current `C` handle. `forget` lists what the user asked to forget:
+the exact `values`, the request as `evidence`, and every `C` block that
+states what is forgotten as `blocks`. Do not provide
 durable IDs, source timestamps, or any prose outside the structured response.
 </output_contract>
 

@@ -5,7 +5,14 @@ from datetime import date
 from typing import List, Optional
 
 from loguru import logger
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+)
 
 from common.schema.episode.models import EpisodeEvent, EpisodeNarrative
 from common.schema.llm import StructuredLLMOutput, normalize_required_text
@@ -171,3 +178,12 @@ class LLMEpisodeWindowDecision(StructuredLLMOutput):
 
 _EVENT = TypeAdapter(LLMEpisodeEvent)
 _PROPOSAL = TypeAdapter(LLMEpisodeDecision)
+
+
+class LLMEpisodeForgetRewrite(StructuredLLMOutput):
+    """One Episode narrative rewritten without what the user asked to forget."""
+
+    summary: str = Field(..., min_length=1)
+    new_developments: List[str] = Field(default_factory=list)
+    updates: List[str] = Field(default_factory=list)
+    unresolved: List[str] = Field(default_factory=list)

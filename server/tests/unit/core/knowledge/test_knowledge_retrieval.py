@@ -201,6 +201,9 @@ async def test_message_search_propagates_lexical_storage_failure():
 @pytest.mark.no_network
 async def test_entity_search_returns_stable_identity_and_project_contexts():
     class Store:
+        async def forgotten_name_notes(self, **kwargs):
+            return []
+
         async def search_entity(self, query, **kwargs):
             assert query == "Ada"
             assert kwargs["visible_project_ids"] == ["project-1", "project-2"]
@@ -668,3 +671,66 @@ async def test_episode_reads_receive_the_directional_readable_project_scope():
             "visible_project_ids": ["project-1", "project-2"],
         }
     ]
+
+
+@pytest.mark.no_network
+async def test_forgotten_name_reminders_survive_agent_notebook_without_live_entity():
+    from core.agent.notebook import RunNotebook
+
+    class Store:
+        async def search_entity(self, *args, **kwargs):
+            return []
+
+        async def forgotten_name_notes(self, **kwargs):
+            assert kwargs['project_id'] == 'project-1'
+            return [{'name': 'James', 'forget_note': 'James was previously forgotten.'}]
+
+    retrieval = KnowledgeRetrieval(
+        project_id='project-1', readable_project_ids=['project-1'], user_name='ada',
+        entities=SimpleNamespace(), embedding_service=SimpleNamespace(), knowledge_store=Store(),
+    )
+    result = await retrieval.search_entities('James')
+    assert result == [{'name': 'James', 'forget_notes': ['James was previously forgotten.']}]
+    notebook = RunNotebook()
+    notebook.apply('search_knowledge_entities', {'data': result})
+    assert 'James was previously forgotten.' in notebook.render()
+    assert notebook.possible_next_steps == []
+
+
+@pytest.mark.no_network
+async def test_episode_rewrite_note_is_read_even_without_surviving_messages():
+    from common.schema.episode.models import EpisodeCard
+    from core.agent.notebook import RunNotebook
+    from core.knowledge.retrieval import EPISODE_FORGET_NOTE
+
+    episode = EpisodeCard(episode_id='episode-1', project_id='project-1', summary='Safe summary',
+                      generator_metadata={'forgotten_rewritten_at': '2026-11-11T00:00:00Z'})
+
+    class Store:
+        async def get_episode_context_links(self, episode_ids, **scope):
+            return {eid: {'context_updates': [], 'context_updated_by': []} for eid in episode_ids}
+
+        async def get_project_episode(self, *args, **kwargs):
+            return episode
+
+        async def get_project_episode_source_messages(self, *args, **kwargs):
+            return []
+
+        async def get_project_episode_source_refs(self, *args, **kwargs):
+            return []
+
+    retrieval = KnowledgeRetrieval(
+        project_id='project-1', readable_project_ids=['project-1'], user_name='ada',
+        entities=SimpleNamespace(), embedding_service=SimpleNamespace(), knowledge_store=Store(),
+    )
+    result = await retrieval.read_episode('episode-1', session_id='session-1')
+    assert result == [{'episode_id': 'episode-1', 'forget_note': EPISODE_FORGET_NOTE}]
+    notebook = RunNotebook()
+    notebook.apply('read_episode_messages', {'data': result})
+    assert EPISODE_FORGET_NOTE in notebook.render()
+    cards = await retrieval._serialize_episodes([episode])
+    assert cards[0]['forget_note'] == EPISODE_FORGET_NOTE
+    assert EPISODE_FORGET_NOTE not in cards[0]['summary']
+    episode.generator_metadata = {}
+    assert 'forget_note' not in (await retrieval._serialize_episodes([episode]))[0]
+    assert await retrieval.read_episode('episode-1', session_id='session-1') == []

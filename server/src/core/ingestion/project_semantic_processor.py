@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from time import monotonic
 from typing import Awaitable, Callable, Protocol
+from uuid import UUID
 
 from loguru import logger
 
@@ -114,6 +115,26 @@ class SemanticEpisodeStore(Protocol):
         materialization: ContextMaterialization,
         maintained: bool = False,
     ) -> ContextSnapshot: ...
+
+    async def forget_messages(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        values: tuple[str, ...],
+        message_ids: tuple[int, ...],
+        block_ids: tuple[UUID, ...],
+    ) -> list[int]: ...
+
+    async def get_episodes_with_forgotten_sources(
+        self, *, user_name: str, project_id: str
+    ) -> list[dict]: ...
+
+    async def forget_in_episode(self, **kwargs) -> bool: ...
+
+    async def forget_graph(self, **kwargs) -> list[int]: ...
+
+    async def complete_forget_cleanup(self, **kwargs) -> None: ...
 
     async def get_project_context_maintenance_state(
         self, revision_id: str, *, user_name: str, project_id: str
@@ -644,6 +665,7 @@ class ProjectSemanticProcessor(BaseJob):
                 project_id=ctx.project_id,
             )
             if existing is not None:
+                await self._forget_in_episodes(ctx)
                 await self._advance_context_stage(window, ctx, existing)
                 return JobResult(
                     success=True,
@@ -724,6 +746,16 @@ class ProjectSemanticProcessor(BaseJob):
                     edit_summary="The model refused this window",
                     operation_count=0,
                 )
+            # Before the commit, so a retry that resumes the committed revision
+            # cannot skip it. Forgetting the same messages again is a no-op.
+            for request in result.forget_requests:
+                await self.knowledge_store.forget_messages(
+                    user_name=ctx.user_name,
+                    project_id=ctx.project_id,
+                    values=request.values,
+                    message_ids=request.message_ids,
+                    block_ids=request.block_ids,
+                )
             if result.materialization is not None:
                 result, maintained = await self._maintain_context(
                     ctx, domain, snapshot, result, episodes=episodes, earlier=earlier[::-1]
@@ -782,6 +814,7 @@ class ProjectSemanticProcessor(BaseJob):
             else:
                 committed = snapshot
 
+            await self._forget_in_episodes(ctx)
             await self._advance_context_stage(window, ctx, committed)
             return JobResult(
                 success=True,
@@ -799,6 +832,46 @@ class ProjectSemanticProcessor(BaseJob):
                 failure_stage="context_update",
             )
             return JobResult(success=False, summary="Semantic Context stage failed")
+
+    async def _forget_in_episodes(self, ctx: JobContext) -> None:
+        """Rewrite every Episode linked to a message forgotten since its last
+        update. A failed window's retry finds and finishes the rest; an
+        Episode edited meanwhile is read again on that retry.
+        """
+
+        episodes = await self.knowledge_store.get_episodes_with_forgotten_sources(
+            user_name=ctx.user_name, project_id=ctx.project_id
+        )
+        stale = 0
+        for episode in episodes:
+            rewrite, embedding = await self.episode_generator.rewrite_without(
+                user_name=ctx.user_name,
+                episode=episode,
+                forgotten_texts=list(episode["forgotten_texts"]),
+            )
+            stored = await self.knowledge_store.forget_in_episode(
+                episode_id=episode["episode_id"],
+                user_name=ctx.user_name,
+                project_id=ctx.project_id,
+                summary=rewrite.summary,
+                new_developments=rewrite.new_developments,
+                updates=rewrite.updates,
+                unresolved=rewrite.unresolved,
+                embedding=embedding,
+                forgotten_message_ids=list(episode["forgotten_ids"]),
+                expected_updated_at=episode["updated_at"],
+            )
+            stale += not stored
+        if stale:
+            raise RuntimeError(f"{stale} Episodes changed while forgetting; retrying")
+        deleted_ids = await self.knowledge_store.forget_graph(
+            user_name=ctx.user_name, project_id=ctx.project_id,
+        )
+        if deleted_ids:
+            await self._publish_committed_entity_ids(tuple(deleted_ids))
+        await self.knowledge_store.complete_forget_cleanup(
+            user_name=ctx.user_name, project_id=ctx.project_id,
+        )
 
     async def _maintain_context(
         self,
@@ -967,11 +1040,13 @@ class ProjectSemanticProcessor(BaseJob):
         ) or []
         if not episodes:
             return {"episodes": ()}
+        # What the user asked to forget never becomes Knowledge.
         messages = {
             int(row["message_id"]): row
             for row in await self.knowledge_store.get_project_semantic_window_evidence_messages(
                 str(window.window_id), **scope
             )
+            if row.get("lifecycle_state") != "forgotten"
         }
         evidence = []
         for episode in episodes:

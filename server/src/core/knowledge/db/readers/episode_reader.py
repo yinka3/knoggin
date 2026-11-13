@@ -15,7 +15,6 @@ from common.schema.episode.models import (
 from common.scoping import require_scope_value, require_visible_project_ids
 from infrastructure.postgres_client import PostgresClient
 
-
 # Event text as searched: what happened plus the wording about when.
 _EVENT_TSVECTOR = "to_tsvector('english', ev.what || ' ' || coalesce(ev.date_text, ''))"
 
@@ -328,6 +327,88 @@ class EpisodeReader:
         )
         return [await self._hydrate_episode_card(row) for row in rows]
 
+    async def get_episode_context_links(
+        self, episode_ids: List[str], *, user_name: str, project_id: str,
+        visible_project_ids: Optional[List[str]] = None,
+    ) -> Dict[str, Dict[str, List[Dict]]]:
+        user_name, visible_project_ids = self._project_scope(
+            user_name, project_id, visible_project_ids, 'get_episode_context_links',
+        )
+        links = {episode_id: {'context_updates': [], 'context_updated_by': []}
+                 for episode_id in episode_ids}
+        if not episode_ids:
+            return links
+        # Only replacements carry supersedes_block_id. Adding another block
+        # creates no link. Even a replacement can be wording or added detail,
+        # so these are Context updates, not proof a previous fact became false.
+        rows = await self.client.fetch_all(
+            """SELECT DISTINCT older_episode.episode_id AS older_id,
+                               newer_episode.episode_id AS newer_id
+               FROM project_context_blocks newer
+               JOIN project_context_blocks older ON older.block_id = newer.supersedes_block_id
+                 AND older.project_id = newer.project_id
+               JOIN projects project ON project.project_id = newer.project_id
+               JOIN project_context_block_supports old_support ON old_support.block_id = older.block_id
+                 AND old_support.project_id = older.project_id
+               JOIN project_context_block_supports new_support ON new_support.block_id = newer.block_id
+                 AND new_support.project_id = newer.project_id
+               JOIN messages old_message ON old_message.message_id = old_support.message_id
+                 AND old_message.project_id = older.project_id AND old_message.lifecycle_state = 'sealed'
+               JOIN messages new_message ON new_message.message_id = new_support.message_id
+                 AND new_message.project_id = newer.project_id AND new_message.lifecycle_state = 'sealed'
+               JOIN episode_messages older_episode ON older_episode.message_id = old_message.message_id
+                 AND older_episode.project_id = older.project_id
+               JOIN episode_messages newer_episode ON newer_episode.message_id = new_message.message_id
+                 AND newer_episode.project_id = newer.project_id
+               WHERE newer.project_id = ANY(%s) AND project.user_name = %s
+                 AND older_episode.episode_id <> newer_episode.episode_id
+                 AND (older_episode.episode_id = ANY(%s) OR newer_episode.episode_id = ANY(%s))
+               ORDER BY older_id, newer_id""",
+            (visible_project_ids, user_name, episode_ids, episode_ids),
+        )
+        for row in rows:
+            if row['newer_id'] in links:
+                links[row['newer_id']]['context_updates'].append({'episode_id': row['older_id']})
+            if row['older_id'] in links:
+                links[row['older_id']]['context_updated_by'].append({'episode_id': row['newer_id']})
+        return links
+
+    async def get_episodes_with_forgotten_sources(
+        self, *, user_name: str, project_id: str
+    ) -> List[Dict]:
+        """Episodes linked to messages forgotten since their last update, with
+        those messages' text: what their rewrite must leave out."""
+
+        user_name = require_scope_value(
+            user_name, "user_name", "get_episodes_with_forgotten_sources"
+        )
+        project_id = require_scope_value(
+            project_id, "project_id", "get_episodes_with_forgotten_sources"
+        )
+        return await self.client.fetch_all(
+            """
+            SELECT e.episode_id, e.summary, e.new_developments, e.updates,
+                   e.unresolved, e.updated_at,
+                   array_agg(m.message_id ORDER BY em.message_position) AS forgotten_ids,
+                   array_agg(m.role || ': ' || m.content ORDER BY em.message_position)
+                       AS forgotten_texts
+            FROM episodes e
+            JOIN projects p ON p.project_id = e.project_id
+            JOIN episode_messages em ON em.episode_id = e.episode_id
+                                    AND em.project_id = e.project_id
+            JOIN messages m ON m.message_id = em.message_id AND m.project_id = em.project_id
+                           AND m.session_id = em.session_id
+            WHERE e.project_id = %s AND p.user_name = %s
+              AND m.lifecycle_state = 'forgotten'
+              AND m.forgotten_at > COALESCE(
+                  (e.generator_metadata ->> 'forgotten_rewritten_at')::timestamptz,
+                  e.created_at)
+            GROUP BY e.episode_id
+            ORDER BY e.episode_id
+            """,
+            (project_id, user_name),
+        )
+
     async def get_project_episode_source_messages(
         self,
         episode_id: str,
@@ -366,6 +447,7 @@ class EpisodeReader:
             JOIN messages m ON m.message_id = em.message_id AND m.project_id = em.project_id
                            AND m.session_id = em.session_id
             WHERE e.episode_id = %s AND e.project_id = ANY(%s) AND p.user_name = %s
+              AND m.lifecycle_state <> 'forgotten'
             ORDER BY em.message_position
             {limit_clause}
             {offset_clause}
