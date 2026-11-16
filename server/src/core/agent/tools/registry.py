@@ -9,6 +9,7 @@ from common.schema.agent.tool_contracts import (
     TOOL_SCHEMAS,
     get_schema_capability,
 )
+from core.agent.tools.commands import WorkspaceCommandTools
 from core.agent.tools.findings import ResearchFindingTools
 from core.agent.tools.health import HealthTools
 from core.agent.tools.jobs import BackgroundTaskTools
@@ -359,6 +360,9 @@ TOOL_DEFINITIONS = {
     "propose_entity_merge": _definition("propose_entity_merge"),
     "report_relationship_conflict": _definition("report_relationship_conflict"),
     "list_project_files": _definition("list_project_files", default_limit=4),
+    "run_workspace_command": _definition("run_workspace_command", default_limit=4),
+    "install_python_package": _definition("install_python_package", default_limit=2),
+    "list_command_workspaces": _definition("list_command_workspaces", default_limit=2),
     "read_project_file": _definition("read_project_file", default_limit=4),
     "create_project_file": _definition(
         "create_project_file",
@@ -677,6 +681,7 @@ class Tools(
     MaintenanceTools,
     HealthTools,
     ProjectFileTools,
+    WorkspaceCommandTools,
     BackgroundTaskTools,
     ResearchFindingTools,
     AnswerSourceTools,
@@ -698,6 +703,7 @@ class Tools(
         entity_maintenance_service: Optional[EntityMaintenanceService] = None,
         project_maintenance_service=None,
         background_tasks=None,
+        sandbox=None,
     ):
         if knowledge_store is None or postgres is None:
             raise ValueError("Tools requires explicit knowledge_store and postgres")
@@ -727,6 +733,7 @@ class Tools(
         self.entity_maintenance_service = entity_maintenance_service
         self.project_maintenance_service = project_maintenance_service
         self.background_tasks = background_tasks
+        self.sandbox = sandbox
         self.agent_run = None
 
         self._http_client = None

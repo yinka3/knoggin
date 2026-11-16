@@ -10,6 +10,27 @@ from common.schema.settings import RunEventSettings
 from run_events import RunEvents
 
 
+def test_command_events_reach_sse_with_stream_and_status():
+    async def raw():
+        yield {"event": "command_output", "data": {
+            "tool": "run_workspace_command", "call_id": "call-1",
+            "stream": "stderr", "text": "problem\n",
+        }}
+        yield {"event": "command_status", "data": {
+            "tool": "run_workspace_command", "call_id": "call-1",
+            "message": "Command is still running", "timeout_seconds": 300,
+        }}
+
+    async def exercise():
+        frames = [frame async for frame in _events(raw(), "run-1")]
+        assert b"event: command_output" in frames[1]
+        assert b'"stream":"stderr"' in frames[1]
+        assert b"event: command_status" in frames[2]
+        assert b'"timeout_seconds":300' in frames[2]
+
+    asyncio.run(exercise())
+
+
 def test_run_continues_after_event_subscriber_disconnects():
     async def exercise():
         release = asyncio.Event()

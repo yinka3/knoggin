@@ -1157,7 +1157,7 @@ class AgentExecutor:
                 self.ctx.record_tool_call(call.name, call.args)
 
                 async def invoke(call=call):
-                    async with asyncio.timeout(self.ctx.limits.tool_timeout):
+                    async with asyncio.timeout(self._timeout_for_call(call)):
                         return await execute_tool(self.tools, call.name, call.args)
 
                 async for item in stream_tool_calls([(call.call_id, call.name, invoke)]):
@@ -1257,7 +1257,7 @@ class AgentExecutor:
 
         def invoker(call: _ToolCall):
             async def invoke():
-                async with asyncio.timeout(self.ctx.limits.tool_timeout):
+                async with asyncio.timeout(self._timeout_for_call(call)):
                     return await execute_tool(self.tools, call.name, call.args)
             return invoke
 
@@ -1310,6 +1310,15 @@ class AgentExecutor:
                 },
             }
 
+    def _timeout_for_call(self, call: _ToolCall) -> float:
+        if call.name not in {"run_workspace_command", "install_python_package"}:
+            return self.ctx.limits.tool_timeout
+        seconds = call.args.get("timeout_seconds", 300)
+        if not isinstance(seconds, int) or isinstance(seconds, bool) or not 1 <= seconds <= 900:
+            return self.ctx.limits.tool_timeout
+        approval_seconds = 120 if call.name == "install_python_package" else 0
+        return max(self.ctx.limits.tool_timeout, approval_seconds + seconds + 15)
+
     async def _normalize_tool_failure(
         self,
         call: _ToolCall,
@@ -1322,7 +1331,7 @@ class AgentExecutor:
         if isinstance(failure, TimeoutError):
             message = (
                 "Tool execution timed out after "
-                f"{self.ctx.limits.tool_timeout:g} seconds"
+                f"{self._timeout_for_call(call):g} seconds"
             )
             retryable = True
             logger.warning("Tool {}: {}", call.name, message)

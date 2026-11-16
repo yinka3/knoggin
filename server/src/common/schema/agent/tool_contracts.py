@@ -1527,6 +1527,61 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "list_command_workspaces",
+            "description": "List the current project's workspaces and show which are read-only for commands.",
+            "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+            "tags": ["project", "core", "workspace:command"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "install_python_package",
+            "description": (
+                "Ask the user to approve installing one exact-version Python package "
+                "through a temporary networked container. Install into the project's "
+                "persistent home volume; the normal command container stays offline."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "package": {"type": "string", "minLength": 4, "maxLength": 260,
+                                "description": "Exact package and version, e.g. colorama==0.4.6."},
+                    "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 900},
+                },
+                "required": ["package"],
+                "additionalProperties": False,
+            },
+            "tags": ["project", "core", "workspace:install"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_workspace_command",
+            "description": (
+                "Run a non-interactive shell command in one configured project workspace. "
+                "The container has no network by default. Output is bounded and the "
+                "command has a hard time limit. Choose the workspace explicitly."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "workspace": {"type": "string", "minLength": 1, "maxLength": 100},
+                    "command": {"type": "string", "minLength": 1, "maxLength": 20000},
+                    "cwd": {"type": "string", "minLength": 1, "maxLength": 512,
+                            "description": "Existing directory relative to the workspace root (default .)."},
+                    "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 900},
+                },
+                "required": ["workspace", "command"],
+                "additionalProperties": False,
+            },
+            "tags": ["project", "core", "workspace:command"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "create_project_file",
             "description": (
                 "Create a non-empty bounded artifact in the current project's "
@@ -1703,6 +1758,8 @@ _TOOL_CAPABILITIES = {
     "propose_entity_merge": REVERSIBLE_WRITE_CAPABILITY,
     "report_relationship_conflict": REVERSIBLE_WRITE_CAPABILITY,
     "create_project_file": REVERSIBLE_WRITE_CAPABILITY,
+    "run_workspace_command": REVERSIBLE_WRITE_CAPABILITY,
+    "install_python_package": REVERSIBLE_WRITE_CAPABILITY,
     "update_project_file": REVERSIBLE_WRITE_CAPABILITY,
     "append_project_file": REVERSIBLE_WRITE_CAPABILITY,
     "move_project_file": REVERSIBLE_WRITE_CAPABILITY,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -153,9 +154,17 @@ class ApplicationRuntime:
             startup_cleanup.owners["projects"] = projects
             await projects.start()
             settings = config_manager.config.developer_settings
+            runtime_settings = settings.container_runtime
+            host_library_root = os.environ.get("KNOGGIN_HOST_LIBRARY_ROOT")
+            if host_library_root:
+                if not Path(host_library_root).is_absolute():
+                    raise ValueError("KNOGGIN_HOST_LIBRARY_ROOT must be an absolute path")
+                runtime_settings = runtime_settings.model_copy(
+                    update={"host_library_root": host_library_root}
+                )
             sandbox = SandboxManager(
                 user_name=user_name,
-                runtime_settings=settings.container_runtime,
+                runtime_settings=runtime_settings,
                 command_settings=settings.workspace_commands,
                 project_manager=projects,
                 library_root=filesystem_factory.library_root,
@@ -171,6 +180,7 @@ class ApplicationRuntime:
                 config_manager=config_manager,
                 entity_maintenance_service=projects.entity_maintenance_service,
                 project_maintenance_service=projects.maintenance_service,
+                sandbox=sandbox,
             )
             sessions = SessionManager(
                 resources=resources,

@@ -46,6 +46,7 @@ async def test_failed_startup_unwinds_sandbox_before_projects():
 
 async def test_application_start_owns_and_attaches_sandbox(monkeypatch, tmp_path):
     calls = []
+    monkeypatch.setenv("KNOGGIN_HOST_LIBRARY_ROOT", "/host/projects")
     config = RootConfig()
     config_manager = SimpleNamespace(
         config=config,
@@ -86,8 +87,9 @@ async def test_application_start_owns_and_attaches_sandbox(monkeypatch, tmp_path
             self.sandbox = sandbox
 
     class Sandbox(Owner):
-        def __init__(self, **_kwargs):
+        def __init__(self, **kwargs):
             super().__init__("sandbox", calls)
+            self.runtime_settings = kwargs["runtime_settings"]
 
         async def start(self):
             calls.append("sandbox_start")
@@ -129,6 +131,7 @@ async def test_application_start_owns_and_attaches_sandbox(monkeypatch, tmp_path
 
     runtime = await ApplicationRuntime.start(user_name="ada", config_dir=tmp_path)
     assert runtime.projects.sandbox is runtime.sandbox
+    assert runtime.sandbox.runtime_settings.host_library_root == "/host/projects"
     assert runtime.health_service.sandbox is runtime.sandbox
     assert calls[:2] == ["projects_start", "sandbox_start"]
     await runtime.shutdown()

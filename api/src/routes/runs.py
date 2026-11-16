@@ -76,6 +76,20 @@ async def _events(raw: AsyncIterator, run_id: str, *, runtime=None, session=None
                 event, public = "decision_resolved", {
                     "decision_id": data.get("decision_id"), "choice": data.get("choice"),
                 }
+            elif name == "command_output":
+                event, public = "command_output", {
+                    "tool": str(data.get("tool", "")),
+                    "call_id": str(data.get("call_id", "")),
+                    "stream": str(data.get("stream", "")),
+                    "text": str(data.get("text", "")),
+                }
+            elif name == "command_status":
+                event, public = "command_status", {
+                    "tool": str(data.get("tool", "")),
+                    "call_id": str(data.get("call_id", "")),
+                    "message": str(data.get("message", "")),
+                    "timeout_seconds": data.get("timeout_seconds"),
+                }
             elif name in {"tool_start", "tool_end", "tool_error"}:
                 event = "tool"
                 public = {"name": str(data.get("tool", "")), "state": name}

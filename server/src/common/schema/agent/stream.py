@@ -132,6 +132,30 @@ class ToolErrorEvent(_StrictStreamDict):
     data: ToolErrorData
 
 
+class CommandOutputData(_StrictStreamDict):
+    tool: NonBlankString
+    call_id: NonBlankString
+    stream: Literal["stdout", "stderr"]
+    text: str
+
+
+class CommandOutputEvent(_StrictStreamDict):
+    event: Literal["command_output"]
+    data: CommandOutputData
+
+
+class CommandStatusData(_StrictStreamDict):
+    tool: NonBlankString
+    call_id: NonBlankString
+    message: str
+    timeout_seconds: NonNegativeInt
+
+
+class CommandStatusEvent(_StrictStreamDict):
+    event: Literal["command_status"]
+    data: CommandStatusData
+
+
 class ResponseData(_StrictStreamDict):
     content: str
     usage: StreamUsage
@@ -204,6 +228,8 @@ AgentExecutionEvent = Union[
     ToolStartEvent,
     ToolEndEvent,
     ToolErrorEvent,
+    CommandOutputEvent,
+    CommandStatusEvent,
     ResponseEvent,
     ClarificationEvent,
     ErrorEvent,
