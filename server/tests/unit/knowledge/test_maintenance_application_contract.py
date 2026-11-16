@@ -791,5 +791,3 @@ async def test_merge_and_review_transition_share_one_transaction(monkeypatch):
 
     assert service.writer.cursor is service.review_writer.cursor
     assert client.transaction_enters == 1
-
-

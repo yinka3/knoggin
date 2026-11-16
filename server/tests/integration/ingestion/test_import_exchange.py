@@ -312,4 +312,3 @@ def test_imported_reply_must_not_precede_its_turn():
             user_timestamp=_USER_AT,
             assistant_content="Hello",
         )
-
