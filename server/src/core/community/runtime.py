@@ -19,9 +19,9 @@ from common.schema.agent.community_tools import (
 )
 from common.schema.agent.identity import AgentConfig
 from common.utils.lifecycle import settle_owned_task
+from core.agent.agent_manager import AgentManager
 from core.agent.executor import AgentExecutor
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
-from core.agent.services.agent_manager import AgentManager
 from core.agent.tools.registry import Tools
 from core.community.aac_store import AACStore
 from core.community.execution import config_owner, execute_aac_run

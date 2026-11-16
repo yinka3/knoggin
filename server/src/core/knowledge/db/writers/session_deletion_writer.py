@@ -25,6 +25,7 @@ class SessionDeletionWriter:
                     agent_id = NULL,
                     enabled_tools = NULL,
                     document_focus = NULL,
+                    chat_summary = NULL,
                     semantic_participation_enabled = FALSE
                 WHERE user_name = %(user_name)s
                   AND session_id = %(session_id)s
@@ -32,6 +33,6 @@ class SessionDeletionWriter:
                 """,
                 params,
             )
-            # Do not delete or mutate canonical messages (or their AGE
-            # projections). The session tombstone makes them read-only
+            # Do not delete or mutate canonical messages. The session
+            # tombstone makes them read-only
             # historical evidence and mutation paths require an open session.

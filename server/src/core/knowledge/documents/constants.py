@@ -1,6 +1,7 @@
 from pathlib import PurePosixPath
 
 from common.document_limits import MAX_DOCUMENT_SIZE as MAX_DOCUMENT_SIZE
+from common.embedding_contract import EMBEDDING_DIMENSION
 
 # Keep indexed relative paths comfortably below PostgreSQL's B-tree entry
 # limit, including multibyte UTF-8 path components.
@@ -16,7 +17,7 @@ DOCUMENT_RERANK_DEFAULT_CANDIDATES = 15
 # Token-based chunk settings for SentenceSplitter
 CHUNK_SIZE_TOKENS = 512
 CHUNK_OVERLAP_TOKENS = 50
-EXPECTED_EMBEDDING_DIMENSION = 1024
+EXPECTED_EMBEDDING_DIMENSION = EMBEDDING_DIMENSION
 MAX_ERROR_MESSAGE_LENGTH = 1000
 MAX_READ_LINES = 200
 MAX_READ_CHARACTERS = 20_000
@@ -161,23 +162,27 @@ def document_extension(file_name: str) -> str:
         PurePosixPath(normalized_name).suffix,
     )
 
+RICH_DOCUMENT_EXTENSIONS = {".pdf", ".docx"}
+# Images (OCR via pytesseract)
+OCR_IMAGE_EXTENSIONS = {".bmp", ".gif", ".heic", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
+PROSE_EXTENSIONS = {".md", ".rst", ".tex", ".txt"}
+DATA_EXTENSIONS = {".csv", ".htm", ".html", ".ipynb", ".json", ".xml", ".yaml", ".yml"}
+SOURCE_EXTENSIONS = {
+    ".bash", ".c", ".coffee", ".cpp", ".cs", ".css", ".dart", ".ex", ".exs",
+    ".go", ".groovy", ".h", ".hpp", ".hs", ".java", ".js", ".jsx", ".kt",
+    ".lua", ".m", ".php", ".pl", ".proto", ".py", ".r", ".rb", ".rs", ".scala",
+    ".sh", ".sql", ".swift", ".ts", ".tsx", ".vue", ".zig", ".zsh",
+}
+CONFIG_EXTENSIONS = {".cfg", ".conf", ".dockerfile", ".env", ".ini", ".toml"}
+
 # Extensions accepted for upload and indexing.
 ACCEPTED_EXTENSIONS = (
-    # Documents
-    {".pdf", ".docx"}
-    # Images (OCR via pytesseract)
-    | {".bmp", ".gif", ".heic", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
-    # Plain text and markup
-    | {".csv", ".htm", ".html", ".ipynb", ".json", ".md", ".rst", ".tex", ".txt", ".xml",
-       ".yaml", ".yml"}
-    # Source code
-    | {".bash", ".c", ".coffee", ".cpp", ".cs", ".css", ".dart", ".ex", ".exs",
-       ".go", ".groovy", ".h", ".hpp", ".hs", ".java", ".js", ".jsx", ".kt",
-       ".lua", ".m", ".php", ".pl", ".proto", ".py", ".r", ".rb", ".rs", ".scala",
-       ".sh", ".sql", ".swift", ".ts", ".tsx", ".vue", ".zsh"}
-    # Config / data
-    | {".cfg", ".conf", ".dockerfile", ".env", ".ini", ".toml"}
+    RICH_DOCUMENT_EXTENSIONS | OCR_IMAGE_EXTENSIONS | PROSE_EXTENSIONS
+    | DATA_EXTENSIONS | SOURCE_EXTENSIONS | CONFIG_EXTENSIONS
 )
+# Inside a workspace these are read directly (read_project_file,
+# grep_project_files, the sandbox) and kept, but not split or embedded.
+READ_DIRECTLY_EXTENSIONS = SOURCE_EXTENSIONS | CONFIG_EXTENSIONS | DATA_EXTENSIONS
 
 # Managed project workspaces are editable text/code/config files. Rich binary
 # documents and images remain supported for general document ingestion only.

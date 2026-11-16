@@ -5,10 +5,7 @@ from loguru import logger
 
 from common.exceptions import StorageReadError
 from common.schema.evidence import EvidenceTraversalLimits
-from common.scoping import (
-    IDENTITY_ENTITY_ID,
-    require_visible_project_ids,
-)
+from common.scoping import require_visible_project_ids
 from infrastructure.postgres_client import PostgresClient
 
 _MAX_PATH_DEPTH = 4
@@ -18,9 +15,8 @@ _MAX_OBSERVATION_REFS_PER_PATH_STEP = (
 
 
 class GraphReader:
-    def __init__(self, client: PostgresClient, graph_name: str = "knoggin_graph"):
+    def __init__(self, client: PostgresClient):
         self.client = client
-        self.graph_name = graph_name
 
     @staticmethod
     def _raise_storage_read(operation: str, exc: Exception) -> None:
@@ -215,12 +211,29 @@ class GraphReader:
             for row in rows
         }
 
-    def _path_scope_params(self, visible_project_ids: List[str]) -> Dict:
-        return {
-            "filter_projects": True,
-            "visible_project_ids": visible_project_ids,
-            "identity_entity_id": IDENTITY_ENTITY_ID,
-        }
+    async def _related_edges(
+        self, entity_ids: List[int], visible_project_ids: List[str]
+    ) -> List[Tuple[int, int, str]]:
+        """Return visible relationship edges touching any of the entities."""
+
+        rows = await self.client.fetch_all(
+            """
+            SELECT relationship.entity_a_id, relationship.entity_b_id,
+                   relationship.relationship_id
+            FROM public.relationships AS relationship
+            WHERE relationship.project_id = ANY(%s)
+              AND (
+                  relationship.entity_a_id = ANY(%s)
+                  OR relationship.entity_b_id = ANY(%s)
+              )
+            ORDER BY relationship.relationship_id
+            """,
+            (visible_project_ids, entity_ids, entity_ids),
+        )
+        return [
+            (int(row["entity_a_id"]), int(row["entity_b_id"]), str(row["relationship_id"]))
+            for row in rows
+        ]
 
     async def _find_shortest_path(
         self,
@@ -230,51 +243,69 @@ class GraphReader:
         visible_project_ids: List[str],
         max_depth: int = 4,
     ) -> Optional[Tuple[List[int], List[str], List[str]]]:
+        """Bidirectional breadth-first search over visible relationships.
+
+        Relationships are treated as undirected, matching graph traversal.
+        Each step expands the smaller frontier with one indexed query, so a
+        heavily connected entity (such as the user) does not blow up the search.
+        """
+
         max_depth = self._validate_path_depth(max_depth, "_find_shortest_path")
         visible_project_ids = require_visible_project_ids(
             visible_project_ids,
             "_find_shortest_path",
         )
-        cypher = f"""
-        MATCH (start:Entity {{id: $start_entity_id}})
-        MATCH (end:Entity {{id: $end_entity_id}})
-        MATCH p = (start)-[rels:RELATED_TO*1..{max_depth}]-(end)
-        WITH p, nodes(p) AS path_nodes, relationships(p) AS path_rels
-        WHERE ALL(relationship IN path_rels WHERE relationship.project_id IN $visible_project_ids)
-        ORDER BY length(p) ASC LIMIT 1
-        WITH path_nodes, path_rels,
-             [node IN path_nodes | node.id] AS entity_ids,
-             [node IN path_nodes | node.canonical_name] AS names,
-             [relationship IN path_rels | relationship.relationship_id] AS relationship_ids
-        RETURN entity_ids, names, relationship_ids
-        """
-        query = self.client.build_cypher(
-            cypher,
-            "entity_ids agtype, names agtype, relationship_ids agtype",
-        )
+        if start_entity_id == end_entity_id:
+            return None
+        # parents[side][node] = (previous node, relationship id) toward that side's root
+        parents: List[Dict[int, Optional[Tuple[int, str]]]] = [
+            {start_entity_id: None},
+            {end_entity_id: None},
+        ]
+        frontiers = [{start_entity_id}, {end_entity_id}]
         try:
-            rows = await self.client.fetch_all(
-                query,
-                (
-                    json.dumps(
-                        {
-                            "start_entity_id": start_entity_id,
-                            "end_entity_id": end_entity_id,
-                            **self._path_scope_params(visible_project_ids),
-                        }
-                    ),
-                ),
-            )
-            if not rows:
-                return None
-            row = rows[0]
-            return (
-                [int(entity_id) for entity_id in row["entity_ids"]],
-                row["names"],
-                row["relationship_ids"],
-            )
+            for _ in range(max_depth):
+                side = 0 if len(frontiers[0]) <= len(frontiers[1]) else 1
+                if not frontiers[side]:
+                    return None
+                next_frontier: set[int] = set()
+                meeting: Optional[int] = None
+                for entity_a, entity_b, relationship_id in await self._related_edges(
+                    sorted(frontiers[side]), visible_project_ids
+                ):
+                    for here, there in ((entity_a, entity_b), (entity_b, entity_a)):
+                        if here in frontiers[side] and there not in parents[side]:
+                            parents[side][there] = (here, relationship_id)
+                            next_frontier.add(there)
+                            if meeting is None and there in parents[1 - side]:
+                                meeting = there
+                if meeting is not None:
+                    return await self._path_through(meeting, parents)
+                frontiers[side] = next_frontier
+            return None
         except Exception as exc:
             self._raise_storage_read("find_shortest_path", exc)
+
+    async def _path_through(
+        self, meeting: int, parents: List[Dict[int, Optional[Tuple[int, str]]]]
+    ) -> Tuple[List[int], List[str], List[str]]:
+        entity_ids, relationship_ids = [meeting], []
+        node = meeting
+        while parents[0][node] is not None:
+            node, relationship_id = parents[0][node]
+            entity_ids.insert(0, node)
+            relationship_ids.insert(0, relationship_id)
+        node = meeting
+        while parents[1][node] is not None:
+            node, relationship_id = parents[1][node]
+            entity_ids.append(node)
+            relationship_ids.append(relationship_id)
+        rows = await self.client.fetch_all(
+            "SELECT entity_id, canonical_name FROM public.entities WHERE entity_id = ANY(%s)",
+            (entity_ids,),
+        )
+        names = {int(row["entity_id"]): row["canonical_name"] for row in rows}
+        return entity_ids, [names.get(entity_id) for entity_id in entity_ids], relationship_ids
 
     async def find_path(
         self,
@@ -327,29 +358,29 @@ class GraphReader:
             visible_project_ids,
             "get_neighbor_entities",
         )
-        cypher = """
-        MATCH (e:Entity {id: $entity_id})-[r:RELATED_TO]-(neighbor:Entity)
-        WHERE r.project_id IN $visible_project_ids
-        RETURN DISTINCT neighbor.id, neighbor.canonical_name
-        ORDER BY neighbor.canonical_name
-        LIMIT $limit
-        """
-        query = self.client.build_cypher(cypher, "id agtype, name agtype")
         try:
-            res = await self.client.fetch_all(
-                query,
-                (
-                    json.dumps(
-                        {
-                            "entity_id": entity_id,
-                            "limit": limit,
-                            "visible_project_ids": visible_project_ids,
-                            "identity_entity_id": IDENTITY_ENTITY_ID,
-                        }
-                    ),
-                ),
+            rows = await self.client.fetch_all(
+                """
+                SELECT DISTINCT neighbor.entity_id AS id, neighbor.canonical_name AS name
+                FROM public.relationships AS relationship
+                JOIN public.entities AS neighbor
+                  ON neighbor.entity_id = CASE
+                      WHEN relationship.entity_a_id = %(entity_id)s
+                      THEN relationship.entity_b_id
+                      ELSE relationship.entity_a_id
+                  END
+                WHERE relationship.project_id = ANY(%(visible_project_ids)s)
+                  AND %(entity_id)s IN (relationship.entity_a_id, relationship.entity_b_id)
+                ORDER BY neighbor.canonical_name, neighbor.entity_id
+                LIMIT %(limit)s
+                """,
+                {
+                    "entity_id": entity_id,
+                    "visible_project_ids": visible_project_ids,
+                    "limit": limit,
+                },
             )
-            return [{"id": int(r["id"]), "name": r["name"]} for r in res]
+            return [{"id": int(row["id"]), "name": row["name"]} for row in rows]
         except Exception as e:
             logger.error(f"Failed to get neighbor entities for {entity_id}: {e}")
             self._raise_storage_read("get_neighbor_entities", e)
@@ -411,34 +442,16 @@ class GraphReader:
         )
         if not entity_ids:
             return {}
-        cypher = """
-        MATCH (e:Entity)-[r:RELATED_TO]-(neighbor:Entity)
-        WHERE e.id IN $ids
-          AND r.project_id IN $visible_project_ids
-        RETURN e.id as entity_id, collect(DISTINCT neighbor.id) as neighbor_ids
-        """
-        query = self.client.build_cypher(
-            cypher, "entity_id agtype, neighbor_ids agtype"
-        )
         try:
-            res = await self.client.fetch_all(
-                query,
-                (
-                    json.dumps(
-                        {
-                            "ids": entity_ids,
-                            "visible_project_ids": visible_project_ids,
-                            "identity_entity_id": IDENTITY_ENTITY_ID,
-                        }
-                    ),
-                ),
-            )
+            requested = set(entity_ids)
             result_map = {eid: set() for eid in entity_ids}
-            for row in res:
-                if row["neighbor_ids"]:
-                    result_map[int(row["entity_id"])] = {
-                        int(x) for x in row["neighbor_ids"]
-                    }
+            for entity_a, entity_b, _relationship_id in await self._related_edges(
+                list(requested), visible_project_ids
+            ):
+                if entity_a in requested:
+                    result_map[entity_a].add(entity_b)
+                if entity_b in requested:
+                    result_map[entity_b].add(entity_a)
             return result_map
         except Exception as e:
             logger.error(f"Failed to batch fetch neighbor IDs: {e}")

@@ -12,12 +12,7 @@ async def test_recording_postgres_client_supports_writer_context_shape():
     )
 
     async with client.transaction() as cur:
-        cypher_query = client.build_cypher(
-            "MATCH (n) RETURN n.id",
-            "id agtype",
-            graph_name="test_graph",
-        )
-        await cur.execute(cypher_query, ("{}",))
+        await cur.execute("SELECT count(*) AS created_count FROM things", ("{}",))
         assert await cur.fetchone() == {"created_count": 2}
 
         await cur.execute("SELECT id FROM entity_search", (7,))
@@ -26,7 +21,7 @@ async def test_recording_postgres_client_supports_writer_context_shape():
     assert client.calls == [
         (
             "execute",
-            "cypher<test_graph|id agtype>:MATCH (n) RETURN n.id",
+            "SELECT count(*) AS created_count FROM things",
             ("{}",),
         ),
         ("execute", "SELECT id FROM entity_search", (7,)),

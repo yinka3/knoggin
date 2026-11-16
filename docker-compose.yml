@@ -1,8 +1,7 @@
 services:
   postgres:
-    build:
-      context: docker/postgres
-      dockerfile: Dockerfile
+    # Postgres 16 with pgvector. Trixie keeps the existing database text collation.
+    image: pgvector/pgvector:0.8.0-pg16-trixie@sha256:4f26f01433671ee540195bff27f4890acca58cb49cf6d61ea12008d842ec0699
     container_name: knoggin-postgres
     ports:
       - "127.0.0.1:5432:5432"
@@ -11,15 +10,47 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-knoggin}
       - POSTGRES_DB=knoggin_db
     volumes:
+      # The API creates and upgrades the schema when it starts.
       - knoggin_pg_data:/var/lib/postgresql/data
-      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
-      - ./server/src/infrastructure/schema.sql:/docker-entrypoint-initdb.d/02-schema.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U knoggin -d knoggin_db"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 10s
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      args:
+        UID: ${UID:-1000}
+    container_name: knoggin-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8000:8000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # These override .env, whose values point at the host.
+      - DATABASE_URL=postgresql://knoggin:${POSTGRES_PASSWORD:-knoggin}@postgres:5432/knoggin_db
+      - SETTINGS_DIR=/app/config
+    volumes:
+      # The same settings folder a local run uses: knoggin.yml and project files.
+      - ${SETTINGS_DIR:-./config}:/app/config
+    extra_hosts:
+      # Reach a local model server on the host, e.g. Ollama at
+      # http://host.docker.internal:11434.
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/v1/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 120s
     restart: unless-stopped
 
 volumes:

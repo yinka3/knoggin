@@ -1,9 +1,17 @@
-"""Strict LLM-boundary schemas for entity and relationship extraction."""
+"""LLM-boundary schemas for per-Episode entity and relationship extraction."""
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from loguru import logger
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+)
 
 from common.schema.llm import (
     StructuredLLMOutput,
@@ -11,15 +19,45 @@ from common.schema.llm import (
     normalize_required_text,
 )
 
+_MESSAGE_HANDLE = re.compile(r"^M[1-9]\d*$")
+_ENTITY_HANDLE = re.compile(r"^e[1-9]\d*$")
 
-class EntityMention(BaseModel):
-    """One model-returned mention with a canonical entity type."""
+
+def _message_handles(value: List[str]) -> List[str]:
+    if not value or len(value) != len(set(value)):
+        raise ValueError("messages must list one or more unique M handles")
+    if any(not _MESSAGE_HANDLE.match(item) for item in value):
+        raise ValueError("messages must contain local M handles")
+    return value
+
+
+def _keep_valid(values: object, adapter: TypeAdapter, what: str) -> object:
+    # Check each item alone: one bad item must not reject the others and
+    # fail the whole window.
+    if not isinstance(values, list):
+        return values
+    kept = []
+    for value in values:
+        try:
+            kept.append(adapter.validate_python(value))
+        except ValidationError as exc:
+            logger.warning("Dropped malformed {}: {}", what, exc.errors()[0]["msg"])
+    return kept
+
+
+class EpisodeEntityMention(BaseModel):
+    """One named entity and the Episode messages that mention it."""
 
     model_config = ConfigDict(extra="forbid")
 
-    msg_id: str = Field(..., pattern=r"^m[1-9]\d*$")
+    messages: List[str] = Field(..., max_length=72)
     name: str
     type: str
+
+    @field_validator("messages")
+    @classmethod
+    def validate_messages(cls, value: List[str]) -> List[str]:
+        return _message_handles(value)
 
     @field_validator("name", "type")
     @classmethod
@@ -27,127 +65,41 @@ class EntityMention(BaseModel):
         return normalize_required_text(value, field_name=info.field_name)
 
 
-class EntityExtraction(StructuredLLMOutput):
-    """Top-level model response for entity-mention extraction."""
-
-    mentions: List[EntityMention] = Field(default_factory=list)
+_ENTITY_MENTION = TypeAdapter(EpisodeEntityMention)
 
 
-class ContextEntityMention(BaseModel):
-    """One fallback candidate tied to a Context block and optional source quote."""
+class EpisodeEntityExtraction(StructuredLLMOutput):
+    """VP-01 output for one Episode."""
+
+    mentions: List[EpisodeEntityMention] = Field(default_factory=list)
+
+    @field_validator("mentions", mode="before")
+    @classmethod
+    def keep_valid_mentions(cls, values: object) -> object:
+        return _keep_valid(values, _ENTITY_MENTION, "entity mention")
+
+
+class EpisodeRelationshipMention(BaseModel):
+    """One relationship between two candidate handles, cited to messages."""
 
     model_config = ConfigDict(extra="forbid")
 
-    block_id: str = Field(..., pattern=r"^b[1-9]\d*$")
-    name: str
-    type: str
-    supporting_message_id: Optional[str] = Field(
-        default=None,
-        pattern=r"^m[1-9]\d*$",
-    )
-    evidence_quote: Optional[str] = Field(default=None, max_length=300)
-
-    @field_validator("name", "type")
-    @classmethod
-    def validate_required_text(cls, value: str, info) -> str:
-        return normalize_required_text(value, field_name=info.field_name)
-
-    @field_validator("evidence_quote")
-    @classmethod
-    def validate_evidence_quote(cls, value: Optional[str]) -> Optional[str]:
-        return normalize_optional_text(value, field_name="evidence_quote")
-
-    @model_validator(mode="after")
-    def require_message_citation_pair(self):
-        if bool(self.supporting_message_id) != bool(self.evidence_quote):
-            raise ValueError(
-                "supporting_message_id and evidence_quote must be supplied together"
-            )
-        return self
-
-
-class ContextEntityExtraction(StructuredLLMOutput):
-    """Bounded Context-native output for targeted NER fallback."""
-
-    mentions: List[ContextEntityMention] = Field(default_factory=list)
-
-
-class RelationshipMention(StructuredLLMOutput):
-    """One model-returned relationship with a local message reference."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    msg_id: str = Field(..., pattern=r"^m[1-9]\d*$")
-    entity_a: str = Field(..., description="Name of the first entity")
-    entity_b: str = Field(..., description="Name of the second entity")
-    relationship: str = Field(..., description="Evidence-grounded relationship label")
-    context: Optional[str] = Field(
-        None, description="Short excerpt or paraphrase grounding the relationship"
-    )
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-
-    @field_validator("entity_a", "entity_b", "relationship")
-    @classmethod
-    def validate_required_text(cls, value: str, info) -> str:
-        return normalize_required_text(value, field_name=info.field_name)
-
-    @field_validator("context")
-    @classmethod
-    def validate_context(cls, value: Optional[str]) -> Optional[str]:
-        return normalize_optional_text(value, field_name="context")
-
-
-class IdentityRelationshipMention(StructuredLLMOutput):
-    """One model-returned identity relationship with a local message reference."""
-
-    entity_name: str
-    relationship: str
-    context: Optional[str] = None
-    msg_id: str = Field(..., pattern=r"^m[1-9]\d*$")
-
-    @field_validator("entity_name", "relationship")
-    @classmethod
-    def validate_required_text(cls, value: str, info) -> str:
-        return normalize_required_text(value, field_name=info.field_name)
-
-    @field_validator("context")
-    @classmethod
-    def validate_context(cls, value: Optional[str]) -> Optional[str]:
-        return normalize_optional_text(value, field_name="context")
-
-
-class RelationshipExtraction(StructuredLLMOutput):
-    """Top-level model response for relationship extraction."""
-
-    connections: List[RelationshipMention] = Field(default_factory=list)
-    user_connections: List[IdentityRelationshipMention] = Field(default_factory=list)
-
-
-class ContextRelationshipMention(StructuredLLMOutput):
-    """A VP-02 result grounded to one or more local Context block IDs."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    block_ids: List[str] = Field(default_factory=list)
+    messages: List[str] = Field(..., max_length=72)
     entity_a: str
     entity_b: str
     relationship: str
     context: Optional[str] = None
 
-    @field_validator("block_ids")
+    @field_validator("messages")
     @classmethod
-    def validate_block_ids(cls, value: List[str]) -> List[str]:
-        if not value or len(value) != len(set(value)):
-            raise ValueError("block_ids must contain one or more unique local block IDs")
-        if any(not re.match(r"^b[1-9]\d*$", item) for item in value):
-            raise ValueError("block_ids must contain local bN Context references")
-        return value
+    def validate_messages(cls, value: List[str]) -> List[str]:
+        return _message_handles(value)
 
     @field_validator("entity_a", "entity_b")
     @classmethod
     def validate_entity_handle(cls, value: str, info) -> str:
         value = normalize_required_text(value, field_name=info.field_name)
-        if not re.match(r"^e[1-9]\d*$", value):
+        if not _ENTITY_HANDLE.match(value):
             raise ValueError(f"{info.field_name} must be a local eN entity handle")
         return value
 
@@ -162,8 +114,15 @@ class ContextRelationshipMention(StructuredLLMOutput):
         return normalize_optional_text(value, field_name="context")
 
 
-class ContextRelationshipExtraction(StructuredLLMOutput):
-    """The Context-native VP-02 response shape."""
+_RELATIONSHIP_MENTION = TypeAdapter(EpisodeRelationshipMention)
 
-    connections: List[ContextRelationshipMention] = Field(default_factory=list)
-    unknown_endpoints: List[ContextEntityMention] = Field(default_factory=list)
+
+class EpisodeRelationshipExtraction(StructuredLLMOutput):
+    """VP-02 output for one Episode."""
+
+    connections: List[EpisodeRelationshipMention] = Field(default_factory=list)
+
+    @field_validator("connections", mode="before")
+    @classmethod
+    def keep_valid_connections(cls, values: object) -> object:
+        return _keep_valid(values, _RELATIONSHIP_MENTION, "relationship")

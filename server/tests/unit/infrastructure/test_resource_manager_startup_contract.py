@@ -20,7 +20,6 @@ from runtime import resources as resources_module
         "tokenizer",
         "embedding",
         "spacy",
-        "vp01",
         "postgres",
     ],
 )
@@ -130,18 +129,8 @@ async def test_resource_manager_cleans_every_partial_startup_stage(
             assert language == "en"
             return FakeProcessor()
 
-    class FakeGLiNER25VP01Adapter:
-        @staticmethod
-        def load(*, language, device=None):
-            if failure == "vp01":
-                raise RuntimeError("vp01 failed")
-            assert language == "en"
-            assert device == "cpu"
-            return object()
-
     config = RootConfig(
         llm=LLMSettings(
-            api_key="",
             base_url="https://llm.example/v1",
             agent_model="agent",
             extraction_model="extract",
@@ -156,7 +145,7 @@ async def test_resource_manager_cleans_every_partial_startup_stage(
         ),
     )
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
-    monkeypatch.setenv("KNOGGIN_GPU", "false")
+    monkeypatch.setenv("PREFER_GPU", "false")
     monkeypatch.setattr(
         resources_module.ConfigManager,
         "get",
@@ -169,14 +158,10 @@ async def test_resource_manager_cleans_every_partial_startup_stage(
     monkeypatch.setattr(resources_module, "EmbeddingService", FakeEmbedding)
     monkeypatch.setattr(resources_module, "KnowledgeStore", FakeKnowledgeStore)
     monkeypatch.setattr(resources_module, "PostgresClient", FakePostgres)
+    monkeypatch.setattr(resources_module, "migrate", lambda _dsn: [])
     monkeypatch.setattr(resources_module, "spacy", FakeSpacy)
-    monkeypatch.setattr(
-        resources_module,
-        "GLiNER25VP01Adapter",
-        FakeGLiNER25VP01Adapter,
-    )
     with pytest.raises(DependencyError, match=failure):
-        await resources_module.RuntimeResources.create(num_workers=2)
+        await resources_module.RuntimeResources.create(thread_workers=2)
 
     assert all(resource.shutdown_calls for resource in created.background)
     assert all(resource.shutdown_calls for resource in created.model_work)
@@ -190,7 +175,7 @@ async def test_resource_manager_cleans_every_partial_startup_stage(
 async def test_runtime_resources_preserves_startup_error_when_cleanup_also_fails(
     monkeypatch,
 ):
-    async def fail_start(self, *, num_workers):
+    async def fail_start(self, *, thread_workers):
         raise DependencyError("primary startup failure")
 
     async def fail_teardown(self, *, wait):

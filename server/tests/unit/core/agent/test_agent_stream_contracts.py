@@ -91,3 +91,29 @@ def test_engine_stream_boundary_rejects_malformed_or_uncorrelated_events():
                 },
             }
         )
+
+
+@pytest.mark.no_network
+def test_submit_answer_schema_describes_the_artifact_blocks_the_engine_accepts():
+    from common.schema.agent.tool_contracts import (
+        TOOL_SCHEMAS_BY_NAME,
+        validate_tool_arguments,
+    )
+    from common.schema.artifacts import ArtifactDraft
+
+    artifact = {
+        "kind": "research_brief", "title": "SQLite vs Postgres", "status": "complete",
+        "blocks": [
+            {"kind": "markdown", "content": "SQLite suits local storage."},
+            {"kind": "callout", "tone": "warning", "title": "Note", "content": "Check writes."},
+            {"kind": "checklist", "items": [{"label": "Read both pages", "completed": True}]},
+            {"kind": "table", "columns": ["Engine", "Best for"], "rows": [["SQLite", "Local"]]},
+        ],
+    }
+    schema = TOOL_SCHEMAS_BY_NAME["submit_answer"]
+
+    assert validate_tool_arguments(schema, {"content": "Answer", "artifact": artifact}) == []
+    ArtifactDraft.model_validate(artifact)
+    # The shape models guessed before the blocks were described.
+    guessed = {**artifact, "blocks": [{"type": "markdown", "body": "SQLite suits local storage."}]}
+    assert validate_tool_arguments(schema, {"content": "Answer", "artifact": guessed})

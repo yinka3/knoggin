@@ -35,6 +35,7 @@ _REFERENCE_PREFIXES = {
     "relationships": "R",
     "activities": "ACT",
     "episodes": "EP",
+    "events": "EV",
     "paths": "P",
     "messages": "M",
     "documents": "D",
@@ -43,6 +44,7 @@ _REFERENCE_PREFIXES = {
     "relationship": "R",
     "activity": "ACT",
     "episode": "EP",
+    "event": "EV",
     "path": "P",
     "message": "M",
     "document": "D",
@@ -53,7 +55,9 @@ _REFERENCE_PREFIXES = {
 }
 
 _SHORT_TEXT_LIMIT = 320
-_PASSAGE_TEXT_LIMIT = 1_200
+_PASSAGE_TEXT_LIMIT = 12_000
+# The cap on a stored Episode's narrative, so a recalled Episode is shown whole.
+_EPISODE_TEXT_LIMIT = 4_000
 
 NOTEBOOK_TEMPLATE = """RUN NOTEBOOK
 {% if summary.text %}Summary: {{ summary.text }}{% if summary.references %} ({{ summary.references|join(', ') }}){% endif %}
@@ -66,7 +70,8 @@ Entity pages:
 {% endfor %}{% endif %}{% if entities %}
 Entities:
 {% for item in entities %}- {{ item.reference }}{% if item.name %} {{ item.name }}{% endif %}{% if item.details %} — {{ item.details }}{% endif %}{{ '\n' }}
-{% endfor %}{% endif %}{% if relationships %}
+{% for note in item.forget_notes %}  {{ note }}
+{% endfor %}{% endfor %}{% endif %}{% if relationships %}
 Relationships:
 {% for item in relationships %}- {{ item.reference }}{% if item.endpoints %} {{ item.endpoints }}{% endif %}{% if item.label %}: {{ item.label }}{% endif %}{% if item.evidence %} (evidence: {{ item.evidence|join(', ') }}){% endif %}{{ '\n' }}
   qualification: observed evidence, not a current-state claim
@@ -77,8 +82,14 @@ Activities:
 {% for item in activities %}- {{ item.reference }}{% if item.entity %} {{ item.entity }}{% endif %}{% if item.time %} at {{ item.time }}{% endif %}{% if item.evidence %} (evidence: {{ item.evidence|join(', ') }}){% endif %}{{ '\n' }}
 {% endfor %}{% endif %}{% if episodes %}
 Episodes:
-{% for item in episodes %}- {{ item.reference }}{% if item.summary %}: {{ item.summary }}{% endif %}
-{% if item.chronology %}  chronology: {{ item.chronology }}
+{% for item in episodes %}- {{ item.reference }}{% if item.summary %}: {{ item.summary }}{% endif %}{{ '\n' }}
+{% if item.forget_note %}  {{ item.forget_note }}
+{% endif %}{% if item.context_updates %}  contributed to Context updates from: {{ item.context_updates|join(', ') }}
+{% endif %}{% if item.context_updated_by %}  related Context updated by: {{ item.context_updated_by|join(', ') }}
+{% endif %}{%- if item.chronology %}  chronology: {{ item.chronology }}
+{% endif %}{% if item.entity_names %}  entities: {{ item.entity_names|join(', ') }}
+{% endif %}{% if item.relationship_lines %}  relationships: {{ item.relationship_lines|join('; ') }}
+{% endif %}{% if item.event_lines %}  events: {{ item.event_lines|join('; ') }}
 {% endif %}{% if item.developments %}  developments: {{ item.developments|join('; ') }}
 {% endif %}{% if item.updates %}  updates: {{ item.updates|join('; ') }}
 {% endif %}{% if item.unresolved %}  unresolved: {{ item.unresolved|join('; ') }}
@@ -86,6 +97,9 @@ Episodes:
 {% endif %}{% if item.support %}  historical support:
 {% for source in item.support %}  - {{ source.label }}{% if source.locator %} [{{ source.locator }}]{% endif %}{% if source.url %}: {{ source.url }}{% endif %}{% if source.excerpt %} — {{ source.excerpt }}{% endif %}{{ '\n' }}
 {% endfor %}{% endif %}{{ '\n' }}
+{% endfor %}{% endif %}{% if events %}
+Events (one line per mention; merge duplicates before counting):
+{% for item in events %}- {{ item.reference }} {{ item.when }} [{{ item.kind }}] {{ item.what }}{% if item.episode or item.date_text %} ({% if item.episode %}from {{ item.episode }}{% endif %}{% if item.episode and item.date_text %}; {% endif %}{% if item.date_text %}said "{{ item.date_text }}"{% endif %}){% endif %}{% if item.in_range == 'overlaps' %} — may overlap the asked dates{% endif %}{{ '\n' }}
 {% endfor %}{% endif %}{% if paths %}
 Paths:
 {% for item in paths %}- {{ item.reference }}{% if item.description %}: {{ item.description }}{% endif %}{% if item.evidence %} (evidence: {{ item.evidence|join(', ') }}){% endif %}{% if item.observation_supports %} (support: {{ item.observation_supports|join(', ') }}){% endif %}{{ '\n' }}
@@ -139,8 +153,14 @@ class _ReferenceLocalizer:
         local_uuid_references: Mapping[str, str] | None = None,
     ) -> None:
         self._handles: dict[str, str] = {}
+        self._episode_short_handles = {
+            str(actual_id): str(handle)
+            for handle, actual_id in (local_uuid_references or {}).items()
+            if isinstance(handle, str) and handle.startswith("ep_")
+        }
         counters: dict[str, int] = {}
         episode_handles = self._episode_handles(snapshot, local_uuid_references)
+        self._episode_short_handles.update(episode_handles)
         for section, records in self._record_sections(snapshot):
             prefix = _REFERENCE_PREFIXES[section]
             for reference in records:
@@ -170,6 +190,7 @@ class _ReferenceLocalizer:
                 "relationships",
                 "activities",
                 "episodes",
+                "events",
                 "paths",
             )
         )
@@ -189,6 +210,12 @@ class _ReferenceLocalizer:
             reference.removeprefix("episode:")
             for reference in snapshot.get("knowledge", {}).get("episodes", {})
         ]
+        episode_ids.extend(
+            link["episode_id"]
+            for episode in snapshot.get("knowledge", {}).get("episodes", {}).values()
+            for direction in ("context_updates", "context_updated_by")
+            for link in episode.get(direction, []) if link.get("episode_id")
+        )
         fallback = register_short_uuid_references(episode_ids, "ep", {})
         known_handles = {
             str(actual_id): str(handle)
@@ -218,6 +245,15 @@ class _ReferenceLocalizer:
     def known_reference(self, value: str) -> str | None:
         return self._handles.get(value)
 
+    def episode_handle(self, episode_id: object) -> str:
+        """The handle read_episode_messages accepts, when one exists."""
+
+        if episode_id is None:
+            return ""
+        return self._handles.get(
+            f"episode:{episode_id}", self._episode_short_handles.get(str(episode_id), "")
+        )
+
 
 def _safe_text(value: object, *, limit: int = _SHORT_TEXT_LIMIT) -> str:
     if value is None:
@@ -226,13 +262,15 @@ def _safe_text(value: object, *, limit: int = _SHORT_TEXT_LIMIT) -> str:
     return text if len(text) <= limit else f"{text[: limit - 1]}…"
 
 
-def _passage_text(value: object) -> tuple[str, bool]:
+def _passage_text(
+    value: object, limit: int = _PASSAGE_TEXT_LIMIT
+) -> tuple[str, bool]:
     """Render a useful but bounded evidence passage and report display clipping."""
 
     if value is None:
         return "", False
     text = str(value).strip()
-    return _safe_text(text, limit=_PASSAGE_TEXT_LIMIT), len(text) > _PASSAGE_TEXT_LIMIT
+    return _safe_text(text, limit=limit), len(text) > limit
 
 
 def _bounded_text_items(
@@ -336,13 +374,40 @@ def _document_handle(item: Mapping[str, Any]) -> str:
     return document_id if isinstance(document_id, str) and document_id.startswith("doc_") else ""
 
 
+def _start_line(item: Mapping[str, Any]) -> int | None:
+    start = item.get("start_line")
+    if type(start) is int:
+        return start
+    locator = item.get("locator")
+    if isinstance(locator, Mapping) and type(locator.get("start_line")) is int:
+        return locator["start_line"]
+    return None
+
+
 def _source_continuation(
     item: Mapping[str, Any],
     *,
     display_clipped: bool,
+    shown: str = "",
 ) -> str:
-    """Tell the model when a bounded view should be expanded through a tool."""
+    """Tell the model when a bounded view should be expanded through a tool.
 
+    A clipped display is checked first: the source may say more text starts
+    after the read range, but the unseen part of the range comes before it.
+    The hint names the exact line to continue from, so the next read is not a
+    duplicate of this one.
+    """
+
+    if display_clipped:
+        start = _start_line(item)
+        if start is not None:
+            stop = start + shown.count("\n")
+            if stop > start:
+                return (
+                    f"the passage shown stops partway through line {stop}; "
+                    f"continue reading with start_line {stop}."
+                )
+        return "the displayed passage is clipped; reread a narrower range or use a targeted query."
     next_start_line = item.get("next_start_line")
     if type(next_start_line) is not int:
         end_line = item.get("end_line")
@@ -361,9 +426,48 @@ def _source_continuation(
         )
     if item.get("has_more") is True or item.get("truncated") is True:
         return "more source text is available; reread a narrower range or use a targeted query."
-    if display_clipped:
-        return "the displayed passage is clipped; reread a narrower range or use a targeted query."
+    total_lines = item.get("total_lines")
+    end_line = item.get("end_line")
+    if type(total_lines) is int and type(end_line) is int and end_line >= total_lines:
+        return f"end of source: this passage reaches its last line ({total_lines})."
     return ""
+
+
+def _episode_entity_names(item: dict[str, Any]) -> list[str]:
+    entities = item.get("entities")
+    return [
+        _safe_text(entity["name"], limit=80)
+        for entity in (entities if isinstance(entities, list) else [])
+        if isinstance(entity, dict) and entity.get("name")
+    ]
+
+
+def _episode_event_lines(item: dict[str, Any]) -> list[str]:
+    events = item.get("events")
+    lines = []
+    for event in events if isinstance(events, list) else []:
+        if not isinstance(event, dict) or not event.get("what"):
+            continue
+        when = _safe_text(event.get("when") or "date unknown", limit=40)
+        line = f"{when} [{_safe_text(event.get('kind') or 'other', limit=20)}] "
+        line += _safe_text(event["what"], limit=200)
+        if event.get("date_text"):
+            line += f' (said "{_safe_text(event["date_text"], limit=60)}")'
+        lines.append(line)
+    return lines
+
+
+def _episode_relationship_lines(item: dict[str, Any]) -> list[str]:
+    relationships = item.get("relationships")
+    return [
+        " ".join(
+            _safe_text(relationship[field], limit=80)
+            for field in ("source", "relationship_type", "target")
+        )
+        for relationship in (relationships if isinstance(relationships, list) else [])
+        if isinstance(relationship, dict)
+        and all(relationship.get(field) for field in ("source", "relationship_type", "target"))
+    ]
 
 
 def _observation_support(item: dict[str, Any]) -> dict[str, Any]:
@@ -472,6 +576,7 @@ def _record_list(
     localizer: _ReferenceLocalizer,
     *,
     section: str,
+    passage_limit: int = _PASSAGE_TEXT_LIMIT,
 ) -> list[dict[str, Any]]:
     values = []
     for reference, record in records.items():
@@ -484,6 +589,7 @@ def _record_list(
             if isinstance(ref, str)
         ]
         if section == "entities":
+            item["forget_notes"] = [_safe_text(note) for note in item.get("forget_notes", [])]
             item["name"] = _safe_text(
                 item.get("canonical_name") or item.get("name") or ""
             )
@@ -500,6 +606,13 @@ def _record_list(
                 or ""
             )
             item["context"] = _safe_text(item.get("context") or "")
+        elif section == "events":
+            item["episode"] = localizer.episode_handle(item.get("episode_id"))
+            for field in ("what", "date_text"):
+                item[field] = _safe_text(item.get(field) or "")
+            item["when"] = _safe_text(item.get("when") or "date unknown", limit=40)
+            item["kind"] = _safe_text(item.get("kind") or "other", limit=20)
+            item["in_range"] = item.get("in_range") or ""
         elif section == "activities":
             entity_id = item.get("entity_id")
             entity_name = _safe_text(item.get("entity") or "")
@@ -511,11 +624,25 @@ def _record_list(
             )
             item["time"] = _safe_text(item.get("time") or "", limit=80)
         elif section == "episodes":
-            item["summary"] = _safe_text(item.get("summary") or "")
+            for direction in ("context_updates", "context_updated_by"):
+                item[direction] = [localizer.episode_handle(link.get("episode_id"))
+                                   for link in item.get(direction, [])]
+            item["forget_note"] = _safe_text(item.get("forget_note") or "")
+            item["summary"] = _safe_text(item.get("summary") or "", limit=_EPISODE_TEXT_LIMIT)
             item["chronology"] = _episode_chronology(item)
-            item["developments"] = _bounded_text_items(item.get("new_developments"))
-            item["updates"] = _bounded_text_items(item.get("updates"))
-            item["unresolved"] = _bounded_text_items(item.get("unresolved"))
+            for field, source in (
+                ("developments", "new_developments"),
+                ("updates", "updates"),
+                ("unresolved", "unresolved"),
+            ):
+                item[field] = _bounded_text_items(
+                    item.get(source),
+                    max_items=_EPISODE_TEXT_LIMIT,
+                    item_limit=_EPISODE_TEXT_LIMIT,
+                )
+            item["entity_names"] = _episode_entity_names(item)
+            item["relationship_lines"] = _episode_relationship_lines(item)
+            item["event_lines"] = _episode_event_lines(item)
             item["support"] = _historical_episode_support(item)
         elif section == "paths":
             item["description"] = _path_description(item, localizer)
@@ -534,7 +661,7 @@ def _record_list(
                     for context in item["context"]
                     if isinstance(context, dict) and context.get("content")
                 )
-            item["content"], display_clipped = _passage_text(content)
+            item["content"], display_clipped = _passage_text(content, passage_limit)
             item["name"] = _safe_text(
                 item.get("document_name") or item.get("original_name") or ""
             )
@@ -544,6 +671,7 @@ def _record_list(
                 item["continuation"] = _source_continuation(
                     item,
                     display_clipped=display_clipped,
+                    shown=item["content"],
                 )
         elif section in {"web_discoveries", "web_reads"}:
             item["title"] = _safe_text(item.get("title") or "")
@@ -551,12 +679,13 @@ def _record_list(
             item["snippet"] = _safe_text(item.get("snippet") or "")
             if section == "web_reads":
                 item["content"], display_clipped = _passage_text(
-                    item.get("content") or ""
+                    item.get("content") or "", passage_limit
                 )
                 item["locator"] = _result_locator(item)
                 item["continuation"] = _source_continuation(
                     item,
                     display_clipped=display_clipped,
+                    shown=item["content"],
                 )
             else:
                 item["content"] = _safe_text(item.get("content") or "")
@@ -577,6 +706,7 @@ def _render_context(
     knowledge = snapshot["knowledge"]
     evidence = snapshot["evidence"]
     web = evidence["web"]
+    passage_limit = notebook.capacity.max_passage_chars
     observation_supports = [
         item
         for item in _record_list(
@@ -640,19 +770,33 @@ def _render_context(
             knowledge["activities"], localizer, section="activities"
         ),
         "episodes": _record_list(knowledge["episodes"], localizer, section="episodes"),
+        "events": _record_list(knowledge["events"], localizer, section="events"),
         "paths": _record_list(knowledge["paths"], localizer, section="paths"),
-        "messages": _record_list(evidence["messages"], localizer, section="messages"),
+        "messages": _record_list(
+            evidence["messages"], localizer, section="messages",
+            passage_limit=passage_limit,
+        ),
         "documents": _record_list(
-            evidence["documents"], localizer, section="documents"
+            evidence["documents"], localizer, section="documents",
+            passage_limit=passage_limit,
         ),
         "observation_supports": observation_supports,
         "web_discoveries": _record_list(
             web["discoveries"], localizer, section="web_discoveries"
         ),
-        "web_reads": _record_list(web["reads"], localizer, section="web_reads"),
+        "web_reads": _record_list(
+            web["reads"], localizer, section="web_reads", passage_limit=passage_limit,
+        ),
         "actions": actions,
         "possible_next_steps": possible_next_steps,
     }
+
+
+def rendered_handles(notebook: RunNotebook) -> dict[str, str]:
+    """Map each handle the rendered notebook shows (WR1, D2, ...) to its record."""
+
+    localizer = _ReferenceLocalizer(notebook.as_dict())
+    return {handle: reference for reference, handle in localizer._handles.items()}
 
 
 def render_notebook(

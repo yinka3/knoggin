@@ -7,17 +7,20 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 from psycopg import sql
 
-from common.schema.agent.tool_names import get_configurable_tool_names
+from common.schema.agent.tool_names import get_configurable_tool_names, tool_groups
 from common.schema.document import (
     create_document_focus,
     dump_document_focus,
     parse_document_focus,
 )
-from common.schema.public import CreateSessionRequest
+from common.schema.session_input import SessionMetadataInput
 from common.utils.json_utils import safe_json_loads
 from common.utils.time_utils import get_now_iso
 from core.knowledge.db.writers.session_deletion_writer import SessionDeletionWriter
 from core.project.project_manager import ProjectManager
+from core.session.background_tasks import BackgroundTasks
+from core.session.document_batch_notices import DocumentBatchNotices
+from core.session.tool_handoffs import ToolHandoffs
 from runtime.session_runtime import SessionRuntime
 
 
@@ -57,6 +60,21 @@ class SessionManager:
         self._closing = False
         self._closing_sessions: set[str] = set()
         self._bootstrap_cleanup: dict[str, _BootstrapCleanup] = {}
+        self.background_tasks = BackgroundTasks(self, config_manager)
+        self.document_notices = DocumentBatchNotices(self, config_manager)
+        self.tool_handoffs = ToolHandoffs(self, config_manager)
+
+    async def resume_background_work(self) -> None:
+        """Recover interrupted work before exposing resumed sessions."""
+
+        await self.resources.knowledge_store.mark_orphaned_run_steers_undelivered(
+            user_name=self.user_name,
+        )
+        for owner in (self.background_tasks, self.document_notices, self.tool_handoffs):
+            try:
+                await owner.resume()
+            except Exception:
+                logger.exception("Background work was not resumed by {}", type(owner).__name__)
 
     def attach_health_service(self, health_service: Any) -> None:
         """Attach the application-owned health service before sessions are exposed."""
@@ -107,7 +125,7 @@ class SessionManager:
             raise RuntimeError("project semantic job is not registered")
         if project_state.document_service is None:
             raise RuntimeError("project document service is unavailable")
-        return SessionRuntime(
+        runtime = SessionRuntime(
             self.user_name,
             self.resources,
             project=project_state,
@@ -115,8 +133,11 @@ class SessionManager:
             health_service=self._health_service,
             agent_orchestrator=self._agent_orchestrator,
             config_manager=self._config_manager,
+            background_tasks=self.background_tasks,
             **settings,
         )
+        runtime._tool_handoffs = self.tool_handoffs
+        return runtime
 
     async def _hard_delete_failed_session(self, session_id: str) -> None:
         """Remove a partially created session instead of preserving a tombstone."""
@@ -336,6 +357,11 @@ class SessionManager:
                 enabled_tools=enabled_tools,
                 document_focus=document_focus,
             )
+            recovered_steers = await self.resources.knowledge_store.mark_orphaned_run_steers_undelivered(
+                user_name=self.user_name, project_id=project_id, session_id=session_id,
+            )
+            if recovered_steers:
+                project_state.signal_semantic_work()
             update_query = """
                 UPDATE public.sessions
                 SET last_active_at = now()
@@ -393,6 +419,10 @@ class SessionManager:
 
     async def shutdown(self) -> None:
         """Unload every live session before global infrastructure shuts down."""
+        # Jobs unload their own chats, which needs the lifecycle lock.
+        await self.background_tasks.shutdown()
+        await self.document_notices.shutdown()
+        await self.tool_handoffs.shutdown()
         async with self._lifecycle_lock:
             if self._closed:
                 return
@@ -426,7 +456,7 @@ class SessionManager:
         """
         Tombstone a session without mutating project-owned documents.
 
-        Canonical messages and their graph projections remain as read-only
+        Canonical messages and the facts derived from them remain as read-only
         evidence for existing project memories. The durable tombstone excludes
         them from future runtime, ingestion, and episode work.
 
@@ -495,11 +525,11 @@ class SessionManager:
 
     @staticmethod
     def _normalize_metadata(values: dict) -> dict:
-        request = CreateSessionRequest(project_id="validation", **values)
+        request = SessionMetadataInput(**values)
         result = request.model_dump(include=set(values))
         names = result.get("enabled_tools")
         if names is not None:
-            unknown = set(names) - get_configurable_tool_names()
+            unknown = set(names) - get_configurable_tool_names() - set(tool_groups())
             if unknown:
                 raise ValueError("Unknown enabled tools: " + ", ".join(sorted(unknown)))
         return result

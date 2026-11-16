@@ -1,0 +1,288 @@
+"""Exact JEV identity corrections start from current, proved message occurrences."""
+
+import json
+from types import SimpleNamespace
+from uuid import uuid4
+
+import pytest
+
+from common.exceptions import MaintenanceConflictError
+from core.knowledge.db.readers.evidence_traversal_reader import EvidenceTraversalReader
+from core.knowledge.db.readers.semantic_window_reader import SemanticWindowReader
+from core.knowledge.evidence_service import EvidenceService
+from core.project.maintenance_service import ProjectMaintenanceService
+
+
+async def _seed(client, *, key, occurrences=((0, "decision"),)):
+    """Orion (2) named in message 101 by one decision-linked occurrence."""
+
+    window_id = uuid4()
+    await client.execute(
+        """INSERT INTO public.entities (entity_id, user_name, canonical_name)
+           VALUES (2, 'ada', 'Orion'), (3, 'ada', 'Other Orion')"""
+    )
+    await client.execute(
+        """INSERT INTO public.project_entity_contexts
+           (project_id, entity_id, user_name, entity_type, topic)
+           VALUES ('project-1', 2, 'ada', 'Concept', 'General'),
+                  ('project-1', 3, 'ada', 'Concept', 'General')"""
+    )
+    await client.execute(
+        """INSERT INTO public.project_semantic_windows
+           (window_id, user_name, project_id, origin, stage, domain_version,
+            policy_snapshot, source_token_count, token_estimator, token_estimator_version,
+            completed_at)
+           VALUES (%s, 'ada', 'project-1', 'conversation', 'completed', 1,
+                   '{}'::jsonb, 0, 'test', 'v1', now())""",
+        (window_id,),
+    )
+    await client.execute(
+        """INSERT INTO public.sessions (session_id, project_id, user_name)
+           VALUES ('identity-session', 'project-1', 'ada')"""
+    )
+    await client.execute(
+        """INSERT INTO public.messages
+           (user_name, session_id, project_id, message_id, role, content,
+            timestamp_ms, exchange_state, exchange_outcome, exchange_closed_at_ms)
+           VALUES ('ada', 'identity-session', 'project-1', 101, 'user',
+                   'Orion met Orion.', 1000, 'closed', 'user_only', 1000)"""
+    )
+    await client.execute(
+        """INSERT INTO public.message_entity_refs
+           (message_id, entity_id, occurrence_provenance_complete)
+           VALUES (101, 2, true)"""
+    )
+    for index, kind in occurrences:
+        await client.execute(
+            """INSERT INTO public.message_entity_occurrences
+               (window_id, project_id, pass_number, occurrence_index, message_id,
+                resolved_entity_id, mention_text, identity_decision_key)
+               VALUES (%s, 'project-1', 1, %s, 101, 2, 'Orion', %s)""",
+            (window_id, index, key if kind == "decision" else None),
+        )
+    await client.execute(
+        """INSERT INTO public.project_jev_identity_decisions
+           (window_id, project_id, pass_number, occurrence_key, decision,
+            eligible_candidate_count, offered_candidate_count,
+            candidate_set_truncated)
+           VALUES (%s, 'project-1', 1, %s, %s::jsonb, 1, 1, false)""",
+        (window_id, key, json.dumps({
+            "operational_entity_id": 2, "mention_text": "Orion",
+            "record": {"evidence_message_ids": [101]},
+        })),
+    )
+    return window_id
+
+
+def _service(client):
+    class Store:
+        async def get_jev_decision(self, *args, **kwargs):
+            return await SemanticWindowReader(client).get_jev_decision(*args, **kwargs)
+
+        async def get_message_evidence(self, message_id, **kwargs):
+            return await EvidenceService(EvidenceTraversalReader(client)).for_message(
+                message_id, **kwargs,
+            )
+
+    async def project_lookup(project_id):
+        return {"status": "active"} if project_id == "project-1" else None
+
+    return ProjectMaintenanceService(
+        resources=SimpleNamespace(postgres=client, knowledge_store=Store()),
+        user_name="ada", project_lookup=project_lookup,
+        active_projects={}, project_leases={},
+    )
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_identity_review_requires_complete_current_occurrence(real_postgres_client, monkeypatch):
+    client = real_postgres_client
+    key = "0:101"
+    window_id = await _seed(client, key=key)
+    await client.execute(
+        """INSERT INTO public.episodes (episode_id, project_id, summary)
+           VALUES ('identity-episode', 'project-1', 'Orion is a concept.')"""
+    )
+    await client.execute(
+        """INSERT INTO public.episode_messages
+           (episode_id, project_id, session_id, message_id, message_position)
+           VALUES ('identity-episode', 'project-1', 'identity-session', 101, 0)"""
+    )
+    await client.execute(
+        """INSERT INTO public.episode_entities
+           (episode_id, project_id, entity_id, source_message_count,
+            occurrence_provenance_complete)
+           VALUES ('identity-episode', 'project-1', 2, 1, true)"""
+    )
+    await client.execute(
+        """INSERT INTO public.episode_entity_occurrences
+           (episode_id, project_id, window_id, pass_number, occurrence_index,
+            message_id, resolved_entity_id)
+           VALUES ('identity-episode', 'project-1', %s, 1, 0, 101, 2)""",
+        (window_id,),
+    )
+    await client.execute(
+        """INSERT INTO public.entities (entity_id, user_name, canonical_name)
+           VALUES (4, 'ada', 'Atlas')"""
+    )
+    await client.execute(
+        """INSERT INTO public.project_entity_contexts
+           (project_id, entity_id, user_name, entity_type, topic)
+           VALUES ('project-1', 4, 'ada', 'Concept', 'General')"""
+    )
+    await client.execute(
+        """INSERT INTO public.relationships
+           (relationship_id, user_name, project_id, entity_a_id, entity_b_id,
+            relationship_type)
+           VALUES ('project-1:2:4:links', 'ada', 'project-1', 2, 4, 'LINKS')"""
+    )
+    observation_row = await client.fetch_one(
+        """INSERT INTO public.relationship_observations
+           (relationship_id, project_id, user_name, semantic_window_id,
+            source_entity_id, target_entity_id, observed_relationship_label,
+            support_key, observed_at_ms)
+           VALUES ('project-1:2:4:links', 'project-1', 'ada', %s,
+                   2, 4, 'LINKS', %s, 1000)
+           RETURNING observation_id""",
+        (window_id, "f" * 32),
+    )
+    await client.execute(
+        """INSERT INTO public.relationship_observation_messages
+           (observation_id, project_id, message_id) VALUES (%s, 'project-1', 101)""",
+        (observation_row["observation_id"],),
+    )
+    service = _service(client)
+    inputs = dict(
+        window_id=str(window_id), pass_number=1, occurrence_key=key,
+        source_entity_id=2, target_entity_id=3, new_entity_name=None,
+        entity_type=None, topic=None, reasoning="This mention is the other Orion.",
+    )
+
+    review = await service.flag_jev_identity_decision("project-1", **inputs)
+
+    assert review.status == "open"
+    assert review.proposed_plan.target_entity_id == 3
+    assert review.proposed_plan.message_ids == (101,)
+    detail, impact = await service.preview_maintenance_review("project-1", review.review_id)
+    assert detail.evidence_state == "current"
+    by_kind = {item.kind: item for item in impact.impacts}
+    assert by_kind["message_entity_ref"].identifiers == ("101",)
+    assert by_kind["episode_entity_link"].identifiers == ("identity-episode",)
+    assert by_kind["relationship_observation"].total_count == 1
+    new_review = await service.flag_jev_identity_decision("project-1", **{
+        **inputs, "target_entity_id": None, "new_entity_name": "Orion Two",
+        "entity_type": "Concept", "topic": "General",
+    })
+    assert new_review.review_id != review.review_id
+
+    # A message reference that no longer proves its occurrences blocks the review.
+    await client.execute(
+        "UPDATE public.message_entity_refs SET occurrence_provenance_complete = false"
+    )
+    with pytest.raises(MaintenanceConflictError):
+        await service.flag_jev_identity_decision("project-1", **inputs)
+    with pytest.raises(MaintenanceConflictError):
+        await service.preview_maintenance_review("project-1", review.review_id)
+    await client.execute(
+        "UPDATE public.message_entity_refs SET occurrence_provenance_complete = true"
+    )
+
+    async def fail_late(*_args, **_kwargs):
+        raise RuntimeError("late write failed")
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(
+            "core.knowledge.entity.identity_reassignment_writer."
+            "IdentityReassignmentWriter._reconcile_episodes",
+            fail_late,
+        )
+        with pytest.raises(RuntimeError, match="late write failed"):
+            await service.apply_jev_identity_review(
+                "project-1", review.review_id, expected_state=review.expected_state,
+            )
+    assert (await client.fetch_one(
+        "SELECT status FROM public.maintenance_reviews WHERE review_id = %s",
+        (review.review_id,),
+    ))["status"] == "open"
+    assert await client.fetch_all(
+        "SELECT entity_id FROM public.message_entity_refs WHERE message_id = 101"
+    ) == [{"entity_id": 2}]
+
+    applied = await service.apply_jev_identity_review(
+        "project-1", review.review_id, expected_state=review.expected_state,
+    )
+
+    assert applied["review"].status == "applied"
+    assert applied["target_entity_id"] == 3
+    assert await client.fetch_one(
+        """SELECT corrected_entity_id, human_correction_review_id
+           FROM public.message_entity_occurrences WHERE message_id = 101"""
+    ) == {"corrected_entity_id": 3, "human_correction_review_id": review.review_id}
+    assert await client.fetch_all(
+        "SELECT entity_id FROM public.message_entity_refs WHERE message_id = 101"
+    ) == [{"entity_id": 3}]
+    assert await client.fetch_all(
+        "SELECT entity_id FROM public.episode_entities WHERE episode_id = 'identity-episode'"
+    ) == [{"entity_id": 3}]
+    assert (await client.fetch_one(
+        "SELECT retired_reason FROM public.relationship_observations WHERE observation_id = %s",
+        (observation_row["observation_id"],),
+    ))["retired_reason"] == "human_identity_correction"
+    assert await client.fetch_one(
+        "SELECT relationship_id FROM public.relationships "
+        "WHERE relationship_id = 'project-1:2:4:links'"
+    ) is None
+    with pytest.raises(ValueError):
+        await service.apply_jev_identity_review(
+            "project-1", review.review_id, expected_state=review.expected_state,
+        )
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_a_new_identity_keeps_another_mention_on_the_old_entity(real_postgres_client):
+    client = real_postgres_client
+    key = "0:101"
+    window_id = await _seed(client, key=key, occurrences=((0, "decision"), (1, "other")))
+    await client.execute("SELECT setval('public.entity_id_seq', 3, true)")
+    service = _service(client)
+
+    review = await service.flag_jev_identity_decision(
+        "project-1", window_id=str(window_id), pass_number=1,
+        occurrence_key=key, source_entity_id=2, target_entity_id=None,
+        new_entity_name="Another Orion", entity_type="Concept", topic="General",
+        reasoning="The first Orion is a different concept.",
+    )
+    applied = await service.apply_jev_identity_review(
+        "project-1", review.review_id, expected_state=review.expected_state,
+    )
+
+    target_id = applied["target_entity_id"]
+    assert target_id not in (2, 3)
+    # The second "Orion" in the same message still names the old entity.
+    assert await client.fetch_all(
+        "SELECT entity_id FROM public.message_entity_refs WHERE message_id = 101 "
+        "ORDER BY entity_id"
+    ) == [{"entity_id": 2}, {"entity_id": target_id}]
+    assert await client.fetch_all(
+        """SELECT occurrence_index, corrected_entity_id
+           FROM public.message_entity_occurrences ORDER BY occurrence_index"""
+    ) == [
+        {"occurrence_index": 0, "corrected_entity_id": target_id},
+        {"occurrence_index": 1, "corrected_entity_id": None},
+    ]
+    with pytest.raises(MaintenanceConflictError):
+        await service.reopen_jev_identity_correction(
+            "project-1", review.review_id, expected_target_entity_id=target_id + 1,
+        )
+    reopened = await service.reopen_jev_identity_correction(
+        "project-1", review.review_id, expected_target_entity_id=target_id,
+    )
+    assert reopened["human_correction_active"] is False
+    assert await client.fetch_one(
+        "SELECT count(*) AS count FROM public.message_entity_occurrences "
+        "WHERE human_correction_review_id IS NOT NULL"
+    ) == {"count": 0}

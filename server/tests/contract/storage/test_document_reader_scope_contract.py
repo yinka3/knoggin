@@ -250,3 +250,104 @@ async def test_retained_parse_snapshot_remains_readable_after_a_document_tombsto
     assert historical is not None
     assert historical["document_status"] == "deleted"
     assert historical["snapshot"]["text"] == "retained evidence"
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_documents_awaiting_index_are_listed_by_scope(real_postgres_client):
+    for path, status in (
+        ("docs/queued.md", "queued"), ("docs/running.md", "indexing"),
+        ("docs/done.md", "indexed"), ("docs/broken.md", "failed"),
+        ("other/queued.md", "queued"),
+    ):
+        await real_postgres_client.execute(
+            """INSERT INTO public.project_documents (
+                   document_id, project_id, original_name, relative_path,
+                   extension, size_bytes, content_hash, status
+               ) VALUES (%s, 'project-1', 'x.md', %s, '.md', 1, 'hash', %s)""",
+            (str(uuid4()), path, status),
+        )
+    reader = DocumentReader(real_postgres_client, "project-1")
+
+    assert set(await reader.list_documents_awaiting_index(path_prefix="docs")) == {
+        "docs/queued.md", "docs/running.md",
+    }
+    assert len(await reader.list_documents_awaiting_index()) == 3
+    assert await reader.list_documents_awaiting_index(path_prefix="docs/done.md") == []
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_marking_a_document_as_derived_from_the_web_stays_in_its_project(
+    real_postgres_client,
+):
+    from core.knowledge.db.writers.document_writer import DocumentWriter
+
+    for project_id in ("project-1", "project-2"):
+        await real_postgres_client.execute(
+            """INSERT INTO public.project_documents (
+                   document_id, project_id, original_name, relative_path,
+                   extension, size_bytes, content_hash, status
+               ) VALUES (%s, %s, 'f.md', 'research/f.md', '.md', 1, 'hash', 'indexed')""",
+            (str(uuid4()), project_id),
+        )
+    writer = DocumentWriter(real_postgres_client, "project-1")
+    await writer.mark_derived_from_web(["research/f.md"])
+    await writer.mark_derived_from_web([])  # nothing to mark
+
+    rows = await real_postgres_client.fetch_all(
+        "SELECT project_id, derived_from_web FROM public.project_documents ORDER BY project_id"
+    )
+    assert [(row["project_id"], row["derived_from_web"]) for row in rows] == [
+        ("project-1", True), ("project-2", False),
+    ]
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_code_in_a_workspace_is_skipped_until_the_workspace_is_removed(
+    real_postgres_client,
+):
+    from core.knowledge.db.writers.document_writer import DocumentWriter
+    from core.knowledge.documents.constants import READ_DIRECTLY_EXTENSIONS
+
+    await real_postgres_client.execute(
+        """UPDATE public.projects SET workspaces = '{"api": {"read_only": false}}'::jsonb
+           WHERE project_id = 'project-1'"""
+    )
+    files = {
+        "api/main.py": "queued", "api/deep/data.json": "indexed", "api/README.md": "queued",
+        "notes/script.py": "queued", "api.py": "queued",
+    }
+    for path, status in files.items():
+        await real_postgres_client.execute(
+            """INSERT INTO public.project_documents (
+                   document_id, project_id, original_name, relative_path,
+                   extension, size_bytes, content_hash, status
+               ) VALUES (%s, 'project-1', 'f', %s, %s, 1, 'hash', %s)""",
+            (str(uuid4()), path, "." + path.rsplit(".", 1)[1], status),
+        )
+    writer = DocumentWriter(real_postgres_client, "project-1")
+
+    async def statuses():
+        rows = await real_postgres_client.fetch_all(
+            "SELECT relative_path, status FROM public.project_documents WHERE project_id = 'project-1'"
+        )
+        return {row["relative_path"]: row["status"] for row in rows}
+
+    assert await writer.apply_workspace_index_rule(extensions=READ_DIRECTLY_EXTENSIONS) == 0
+    assert await statuses() == {
+        "api/main.py": "skipped", "api/deep/data.json": "skipped",  # code and data
+        "api/README.md": "queued",  # prose stays indexed
+        "notes/script.py": "queued", "api.py": "queued",  # outside any workspace
+    }
+
+    await real_postgres_client.execute(
+        "UPDATE public.projects SET workspaces = '{}'::jsonb WHERE project_id = 'project-1'"
+    )
+    assert await writer.apply_workspace_index_rule(extensions=READ_DIRECTLY_EXTENSIONS) == 2
+    # Both skipped files are queued again, to be indexed now.
+    assert set((await statuses()).values()) == {"queued"}

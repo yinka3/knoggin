@@ -234,7 +234,7 @@ async def test_user_exchange_discards_invalid_user_metadata():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-def test_message_rows_strip_database_string_wrappers_and_keep_timestamps():
+def test_message_rows_preserve_content_quotes_and_keep_timestamps():
     reader = MessageReader(RecordingPostgresClient())
     parsed = reader._parse_message_row(
         {
@@ -252,7 +252,7 @@ def test_message_rows_strip_database_string_wrappers_and_keep_timestamps():
         "user_name": "ada",
         "session_id": "session-1",
         "role": "user",
-        "content": "hello",
+        "content": '"hello"',
         "timestamp": 123,
     }
     assert reader._clean_string(123) == 123

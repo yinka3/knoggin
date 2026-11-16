@@ -8,8 +8,9 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Any, Iterable
 
+from loguru import logger
+
 from common.schema.evidence import EvidencePointer, EvidenceSnapshot
-from core.knowledge.db.projection_rebuilder import GraphBuilder
 from core.knowledge.db.readers.semantic_window_reader import SemanticWindowReader
 from core.knowledge.db.writers.global_entity_merge_writer import (
     EntityMergeConflict,
@@ -47,7 +48,6 @@ class EntityMaintenanceService:
         self.user_name = user_name.strip()
         self.writer = GlobalEntityMergeWriter(postgres)
         self.review_writer = MaintenanceReviewWriter(postgres)
-        self.projection_rebuilder = GraphBuilder(postgres)
         self.semantic_window_reader = SemanticWindowReader(postgres)
         self.merge_advisor = (
             EntityMergeAdvisor(postgres, llm, self.user_name) if llm is not None else None
@@ -157,6 +157,11 @@ class EntityMaintenanceService:
             raise ValueError("both active entities must exist in the user's scope")
         if any(row["status"] != "active" for row in entities.values()):
             raise ValueError("only active entities can be merged")
+        if any(
+            context["human_correction_review_id"] is not None
+            for context in snapshot["contexts"]
+        ):
+            raise ValueError("Reopen active human context corrections before merging")
         choices: dict[str, dict[str, str]] = {}
         for raw_choice in context_choices:
             choice = (
@@ -173,14 +178,6 @@ class EntityMaintenanceService:
             by_project.setdefault(context["project_id"], {})[
                 int(context["entity_id"])
             ] = context
-        association_counts: dict[str, int] = {}
-        for association in snapshot["context_block_entities"]:
-            project_id = str(association["project_id"])
-            by_project.setdefault(project_id, {})
-            if int(association["entity_id"]) == retired_entity_id:
-                association_counts[project_id] = (
-                    association_counts.get(project_id, 0) + 1
-                )
         conflicts = []
         for project_id, contexts in by_project.items():
             primary = contexts.get(survivor_entity_id)
@@ -222,7 +219,6 @@ class EntityMaintenanceService:
                 for project_id, frontier in sorted(frontiers.items())
             },
             definition_versions=definition_versions,
-            context_block_association_counts=dict(sorted(association_counts.items())),
             expected_state_hash=self.state_hash(snapshot),
         )
         return {
@@ -342,6 +338,153 @@ class EntityMaintenanceService:
             dedupe_key=f"{survivor_entity_id}:{retired_entity_id}",
         )
 
+    async def review_duplicates(self, *, max_pairs: int) -> dict[str, Any]:
+        """Ask the merge model about up to `max_pairs` duplicate candidates and
+        open a merge review for each one it confirms. Nothing is merged: the
+        user approves each review.
+
+        A pair is checked again only once its entities change, and never while
+        it has an open or dismissed review, so a pair the user rejected is
+        not proposed again and an unchanged pair costs nothing.
+        """
+
+        result = {"checked": 0, "proposed": 0, "blocked": 0, "failed": 0}
+        if self.merge_advisor is None:
+            return {**result, "reason": "no merge model configured"}
+        candidates = await self.discover_duplicate_candidates(limit=100)
+        if not candidates:
+            return result
+        pairs = [(c["entity_a_id"], c["entity_b_id"]) for c in candidates]
+        reviewed = {
+            row["dedupe_key"] for row in await self.postgres.fetch_all(
+                """SELECT dedupe_key FROM public.maintenance_reviews
+                   WHERE user_name = %s AND kind = 'entity_merge'
+                     AND status IN ('open', 'dismissed') AND dedupe_key = ANY(%s)""",
+                (self.user_name, [f"{a}:{b}" for a, b in pairs] + [f"{b}:{a}" for a, b in pairs]),
+            )
+        }
+        checked = {
+            (int(row["entity_a_id"]), int(row["entity_b_id"])): row
+            for row in await self.postgres.fetch_all(
+                """SELECT entity_a_id, entity_b_id, state_hash, verdict
+                   FROM public.entity_duplicate_checks WHERE user_name = %s""",
+                (self.user_name,),
+            )
+        }
+        for a, b in pairs:
+            if result["checked"] >= max_pairs:
+                break
+            if (
+                f"{a}:{b}" in reviewed or f"{b}:{a}" in reviewed
+                or (checked.get((a, b)) or {}).get("verdict") == "dismissed"
+            ):
+                continue
+            try:
+                preview = await self.preview_merge(survivor_entity_id=a, retired_entity_id=b)
+            except (ValueError, RuntimeError):
+                # Not mergeable yet (recent messages not yet in memory, or a
+                # human correction to reopen); try again next run.
+                continue
+            if (checked.get((a, b)) or {}).get("state_hash") == preview["state_hash"]:
+                continue
+            result["checked"] += 1
+            try:
+                advice = await self.advise_merge(survivor_entity_id=a, retired_entity_id=b)
+            except Exception:
+                # Not recorded, so a provider outage does not hide the pair.
+                logger.exception("Duplicate check failed for entities {} and {}", a, b)
+                result["failed"] += 1
+                continue
+            verdict = advice["verdict"]
+            if verdict == "merge":
+                survivor = advice.get("preferred_survivor_id") or a
+                try:
+                    await self.propose(
+                        survivor_entity_id=survivor,
+                        retired_entity_id=b if survivor == a else a,
+                        reasoning=advice["reasoning"],
+                        evidence_refs=[
+                            *({"kind": "message", "identifier": str(message_id)}
+                              for message_id in advice["evidence_message_ids"]),
+                            *({"kind": "episode", "identifier": str(episode_id)}
+                              for episode_id in advice["evidence_episode_ids"]),
+                        ],
+                    )
+                    result["proposed"] += 1
+                except ValueError:
+                    # Differing types or topics in a project need a choice the
+                    # model cannot make; the pair waits in the user's inbox.
+                    verdict = "blocked"
+                    result["blocked"] += 1
+            await self._record_duplicate_check(a, b, preview["state_hash"], verdict, advice)
+        return result
+
+    async def _record_duplicate_check(
+        self, a: int, b: int, state_hash: str, verdict: str, advice: dict[str, Any],
+    ) -> None:
+        kept = {key: advice.get(key) for key in (
+            "preferred_survivor_id", "reasoning", "evidence_message_ids", "evidence_episode_ids",
+        )}
+        await self.postgres.execute(
+            """INSERT INTO public.entity_duplicate_checks
+                   (user_name, entity_a_id, entity_b_id, state_hash, verdict, advice)
+               VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+               ON CONFLICT (user_name, entity_a_id, entity_b_id) DO UPDATE
+               SET state_hash = EXCLUDED.state_hash, verdict = EXCLUDED.verdict,
+                   advice = EXCLUDED.advice, checked_at = now()""",
+            (self.user_name, a, b, state_hash, verdict, json.dumps(kept)),
+        )
+
+    async def list_blocked_duplicates(self) -> list[dict[str, Any]]:
+        """Pairs the merge model confirmed but that need the user to pick a
+        type or topic per project. Preview a pair with its choices, then
+        propose it, through the ordinary merge routes."""
+
+        rows = await self.postgres.fetch_all(
+            """SELECT check_row.entity_a_id, check_row.entity_b_id, check_row.advice,
+                      check_row.checked_at, a.canonical_name AS name_a, b.canonical_name AS name_b
+               FROM public.entity_duplicate_checks check_row
+               JOIN public.entities a ON a.entity_id = check_row.entity_a_id AND a.status = 'active'
+               JOIN public.entities b ON b.entity_id = check_row.entity_b_id AND b.status = 'active'
+               WHERE check_row.user_name = %s AND check_row.verdict = 'blocked'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM public.maintenance_reviews review
+                     WHERE review.user_name = check_row.user_name AND review.kind = 'entity_merge'
+                       AND review.status IN ('open', 'dismissed', 'applied')
+                       AND review.dedupe_key IN (
+                           check_row.entity_a_id || ':' || check_row.entity_b_id,
+                           check_row.entity_b_id || ':' || check_row.entity_a_id))
+               ORDER BY check_row.checked_at DESC""",
+            (self.user_name,),
+        )
+        items = []
+        for row in rows:
+            a, b, advice = int(row["entity_a_id"]), int(row["entity_b_id"]), row["advice"] or {}
+            survivor = advice.get("preferred_survivor_id") or a
+            names = {a: row["name_a"], b: row["name_b"]}
+            items.append({
+                "survivor_entity_id": survivor, "survivor_name": names[survivor],
+                "retired_entity_id": b if survivor == a else a,
+                "retired_name": names[b if survivor == a else a],
+                "reasoning": advice.get("reasoning"),
+                "evidence_refs": [
+                    *({"kind": "message", "identifier": str(i)} for i in advice.get("evidence_message_ids") or ()),
+                    *({"kind": "episode", "identifier": str(i)} for i in advice.get("evidence_episode_ids") or ()),
+                ],
+                "checked_at": row["checked_at"],
+            })
+        return items
+
+    async def dismiss_duplicate(self, entity_id: int, other_entity_id: int) -> bool:
+        """The user says these are not the same: never check the pair again."""
+
+        a, b = sorted((entity_id, other_entity_id))
+        return bool(await self.postgres.execute(
+            """UPDATE public.entity_duplicate_checks SET verdict = 'dismissed', checked_at = now()
+               WHERE user_name = %s AND entity_a_id = %s AND entity_b_id = %s""",
+            (self.user_name, a, b),
+        ))
+
     async def merge(
         self,
         plan: EntityMergePlan | dict[str, Any],
@@ -429,14 +572,6 @@ class EntityMaintenanceService:
                     reason="Confirmed global entity merge applied",
                     cur=cur,
                 )
-        result["projection_errors"] = await self._rebuild_projections(
-            result["affected_project_ids"],
-            actor,
-        )
-        await self._record_projection_repair_state(
-            merge_id,
-            result["projection_errors"],
-        )
         return result
 
     async def apply_merge_review(
@@ -526,17 +661,6 @@ class EntityMaintenanceService:
             safe_mutation_ids=requested_ids,
             force_mutation_ids=approved_ids,
         )
-        if result["applied_mutation_ids"]:
-            result["projection_errors"] = await self._rebuild_projections(
-                result["affected_project_ids"],
-                actor,
-            )
-            await self._record_projection_repair_state(
-                merge_id,
-                result["projection_errors"],
-            )
-        else:
-            result["projection_errors"] = []
         conflicts = [
             item
             for item in plan["conflicting_mutations"]
@@ -583,69 +707,6 @@ class EntityMaintenanceService:
             result["policy_result"] = "rolled_back"
         return result
 
-    async def repair_merge_projections(
-        self,
-        merge_id: str,
-        *,
-        user_name: str | None = None,
-    ) -> dict[str, Any]:
-        """Retry only derived projection work for one durable merge audit."""
-
-        actor = user_name or self.user_name
-        if not actor:
-            raise ValueError("user_name is required for global maintenance")
-        audit = await self.writer.get_audit(merge_id)
-        if audit is None or audit["user_name"] != actor:
-            raise ValueError("Unknown entity merge audit")
-        if audit["status"] == "failed":
-            raise ValueError("Cannot repair projections for an invalidated merge")
-        project_ids = sorted(
-            {str(value) for value in (audit.get("affected_project_ids") or [])}
-        )
-        errors = await self._rebuild_projections(project_ids, actor)
-        await self._record_projection_repair_state(merge_id, errors)
-        return {
-            "merge_id": merge_id,
-            "canonical_status": audit["status"],
-            "affected_project_ids": project_ids,
-            "projection_repaired": not errors,
-            "projection_errors": errors,
-            "survivor_entity_id": int(audit["survivor_entity_id"]),
-            "retired_entity_id": int(audit["retired_entity_id"]),
-        }
-
-    async def projection_repair_health(self, *, limit: int = 100) -> dict[str, Any]:
-        """Return bounded repair counts without evidence or failure contents."""
-
-        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
-            raise ValueError("projection repair health limit must be between 1 and 100")
-        row = await self.postgres.fetch_one(
-            """
-            SELECT count(*) AS pending_count
-            FROM (
-                SELECT merge_id
-                FROM public.entity_global_merge_audits
-                WHERE user_name = %s AND failure_reason = 'projection_repair_pending'
-                LIMIT %s
-            ) AS pending
-            """,
-            (self.user_name, limit),
-        )
-        return {
-            "pending_count": int((row or {}).get("pending_count") or 0),
-            "truncated": int((row or {}).get("pending_count") or 0) == limit,
-        }
-
-    async def _record_projection_repair_state(
-        self,
-        merge_id: str,
-        errors: list[dict[str, str]],
-    ) -> None:
-        await self.writer.record_projection_repair_state(
-            merge_id,
-            repair_pending=bool(errors),
-        )
-
     async def dismiss_review(
         self,
         review_id: str,
@@ -681,22 +742,6 @@ class EntityMaintenanceService:
             user_name=actor,
             scope="user-global",
         )
-
-    async def _rebuild_projections(
-        self,
-        project_ids: Iterable[str],
-        user_name: str,
-    ) -> list[dict[str, str]]:
-        errors = []
-        for project_id in sorted(set(project_ids)):
-            try:
-                await self.projection_rebuilder.rebuild_project_projection(
-                    project_id,
-                    user_name,
-                )
-            except Exception as exc:  # relational mutation remains durable/auditable
-                errors.append({"project_id": project_id, "error": str(exc)})
-        return errors
 
     async def capture_frontier(
         self,

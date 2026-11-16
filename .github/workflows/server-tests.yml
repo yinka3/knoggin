@@ -5,10 +5,12 @@ on:
     branches:
       - main
       - aadedewe/refactor
+      - aadedewe/api
   pull_request:
     paths:
       - "server/**"
-      - "docker/**"
+      - "api/**"
+      - "Dockerfile"
       - "docker-compose.yml"
       - "pyproject.toml"
       - "uv.lock"
@@ -30,9 +32,6 @@ concurrency:
   group: server-ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  KNOGGIN_TEST_DATABASE_URL: postgresql://knoggin:knoggin@localhost:5432/knoggin_db
-
 jobs:
   package:
     name: Build server package
@@ -40,15 +39,15 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           enable-cache: true
 
@@ -81,7 +80,7 @@ jobs:
           PY
 
       - name: Upload server distributions
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: server-distributions
           path: dist/*
@@ -95,15 +94,15 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           enable-cache: true
 
@@ -137,11 +136,41 @@ jobs:
 
       - name: Upload fast coverage report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: server-coverage-fast
           path: server/coverage-fast.xml
           if-no-files-found: ignore
+
+  # The API tests use fake runtimes, so they need no database or models.
+  api:
+    name: API tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          enable-cache: true
+
+      - name: Install workspace dependencies
+        run: uv sync --frozen --dev
+
+      - name: Run API tests
+        working-directory: api
+        run: uv run pytest -q
+
+      - name: Run API Ruff
+        working-directory: api
+        run: uv run ruff check src tests
 
   # Run the same service-free contracts on Windows so handle-based filesystem
   # behavior contributes coverage and receives its own test gate.
@@ -151,15 +180,15 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           enable-cache: true
 
@@ -179,7 +208,7 @@ jobs:
 
       - name: Upload Windows coverage report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: server-coverage-windows
           path: server/coverage-windows.xml
@@ -194,20 +223,32 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           enable-cache: true
 
       - name: Install workspace dependencies
         run: uv sync --frozen --dev
+
+      - name: Restore Docling models
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/knoggin/docling
+          key: docling-models-${{ hashFiles('server/src/common/docling_models.json') }}
+
+      - name: Download and verify Docling models
+        run: |
+          uv run docling-tools models download --output-dir ~/.cache/knoggin/docling \
+            layout tableformer rapidocr --quiet
+          uv run python -c "import sys; sys.path.insert(0, 'server/src'); from common import docling_models as d; d.verify(d.artifacts_path())"
 
       - name: Start PostgreSQL
         run: docker compose up -d --build --wait postgres
@@ -224,7 +265,7 @@ jobs:
 
       - name: Upload service coverage report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: server-coverage-services
           path: server/coverage-services.xml
@@ -249,17 +290,17 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           enable-cache: true
 
@@ -267,7 +308,7 @@ jobs:
         run: uv sync --frozen --dev
 
       - name: Download lane coverage reports
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: server-coverage-*
           path: server
@@ -300,23 +341,21 @@ jobs:
       KNOGGIN_SEMANTIC_SMOKE_MODEL_REVISION: 7817065102fd9e1b031fe874e910c01f40b2f001
       KNOGGIN_SEMANTIC_SMOKE_RERANKER_MODEL: BAAI/bge-reranker-large
       KNOGGIN_SEMANTIC_SMOKE_RERANKER_REVISION: 55611d7bca2a7133960a6d3b71e083071bbfc312
-      KNOGGIN_VP01_MODEL: fastino/gliner2.5-base-v1
-      KNOGGIN_VP01_REVISION: 1a8bc24e00dc7300b9017c81d63e3dcdabb26596
       KNOGGIN_EMBEDDING_BACKEND: onnx
       KNOGGIN_ONNX_PROVIDER: CPUExecutionProvider
       KNOGGIN_SEMANTIC_SMOKE_EXPECTED_PROVIDER: CPUExecutionProvider
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           enable-cache: true
 
@@ -324,10 +363,10 @@ jobs:
         run: uv sync --frozen --dev
 
       - name: Restore model cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .hf-cache
-          key: knoggin-models-${{ runner.os }}-stella-v5-bge-reranker-large-vp01-v1
+          key: knoggin-models-${{ runner.os }}-stella-v5-bge-reranker-large-v2
 
       - name: Provision configured model artifacts
         working-directory: server
@@ -339,7 +378,6 @@ jobs:
           artifacts = (
               ("KNOGGIN_SEMANTIC_SMOKE_MODEL", "KNOGGIN_SEMANTIC_SMOKE_MODEL_REVISION"),
               ("KNOGGIN_SEMANTIC_SMOKE_RERANKER_MODEL", "KNOGGIN_SEMANTIC_SMOKE_RERANKER_REVISION"),
-              ("KNOGGIN_VP01_MODEL", "KNOGGIN_VP01_REVISION"),
           )
           for model_variable, revision_variable in artifacts:
               snapshot_download(
@@ -351,7 +389,10 @@ jobs:
 
       - name: Provision Docling PDF artifacts
         working-directory: server
-        run: uv run docling-tools models download layout tableformer rapidocr --quiet
+        run: |
+          uv run docling-tools models download --output-dir ~/.cache/knoggin/docling \
+            layout tableformer rapidocr --quiet
+          uv run python -c "import sys; sys.path.insert(0, 'src'); from common import docling_models as d; d.verify(d.artifacts_path())"
 
       - name: Start PostgreSQL for runtime composition
         run: docker compose up -d --build --wait postgres

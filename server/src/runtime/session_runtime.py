@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from collections import deque
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Dict, List, Optional
+from uuid import uuid4
 
 from loguru import logger
 
@@ -17,20 +19,40 @@ from common.exceptions import (
     RequestInterruptedError,
     SessionBusyError,
 )
+from common.response_annotations import with_annotations
 from common.schema.agent.research import ResearchMode
+from common.schema.agent.settings import PromptMemoryBudget
 from common.schema.agent.stream import AgentExecutionEvent
 from common.schema.artifacts import ArtifactDraft
 from common.schema.document import DocumentFocus
-from common.schema.primitives import Message
+from common.schema.message_origins import BACKGROUND_REPORT_ORIGINS
+from common.schema.primitives import ImportedAssistantTurn, ImportedExchange, Message
 from common.schema.settings import RootConfig
 from common.schema.source.references import SourceReferenceCandidate
 from common.utils.events import emit
 from common.utils.time_utils import get_now
+from core.agent.run import AgentIdentity
+from core.agent.tool_events import (
+    DecisionBroker,
+    bind_decision_broker,
+    bind_handoffs,
+    unbind_decision_broker,
+    unbind_handoffs,
+)
 from core.knowledge.documents import DocumentService
+from core.session.chat_compaction import ChatCompaction
 from runtime.project_runtime import ProjectRuntime
 from runtime.resources import RuntimeResources
 
 _REQUEST_FINGERPRINT_METADATA_KEY = "request_fingerprint"
+
+
+class FollowUpQueueFull(ValueError):
+    pass
+
+
+class SteerQueueFull(ValueError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -41,6 +63,11 @@ class SessionRunSettings:
     enabled_tools: tuple[str, ...] | None
     document_focus: DocumentFocus | None
     readable_project_ids: tuple[str, ...]
+    resolved_identity: AgentIdentity | None = None
+    resolved_model: str | None = None
+    prompt_memory_budget: PromptMemoryBudget | None = None
+    # Extra page reads for a run given a list of links to read.
+    extra_web_reads: int = 0
 
 
 class _AdmittedAgentStream:
@@ -49,6 +76,7 @@ class _AdmittedAgentStream:
     def __init__(self, session, accepted, **kwargs):
         self.session = session
         self.accepted = accepted
+        self.run_id = kwargs["run_id"]
         self.stream = session._run_admitted_agent_stream(accepted, **kwargs)
         self.started = False
         self.closed = False
@@ -89,12 +117,14 @@ class _AdmittedAgentStream:
                 if self.started:
                     await self.stream.aclose()
                 else:
-                    await self.session._close_user_exchange(
-                        self.accepted.id,
-                        outcome="cancelled",
-                        terminal_error={"code": "run_cancelled", "retryable": False},
-                    )
-                    await self.session._release_agent_run(None)
+                    try:
+                        await self.session._close_user_exchange(
+                            self.accepted.id,
+                            outcome="cancelled",
+                            terminal_error={"code": "run_cancelled", "retryable": False},
+                        )
+                    finally:
+                        await self.session._release_agent_run(None)
                 self.closed = True
                 return
         try:
@@ -130,8 +160,10 @@ class SessionRuntime:
         health_service: Any | None = None,
         agent_orchestrator: Any | None = None,
         config_manager: ConfigManager | None = None,
+        background_tasks: Any | None = None,
     ):
         self.resources = resources
+        self.background_tasks = background_tasks
         self.health_service = health_service
         self.agent_orchestrator = agent_orchestrator
         self._config_manager = config_manager
@@ -152,10 +184,29 @@ class SessionRuntime:
         self._active_agent_task: Optional[asyncio.Task] = None
         self._active_agent_stream: _AdmittedAgentStream | None = None
         self._active_idempotency_key: str | None = None
+        self._active_decisions: DecisionBroker | None = None
+        self._run_stop_requested = False
+        # Set by the session manager; work handed off outlives this runtime.
+        self._tool_handoffs = None
         self._active_request_fingerprint: str | None = None
+        self._active_run_id: str | None = None
+        self._active_user_message_id: int | None = None
+        self._last_run_status: dict[str, Any] | None = None
+        self._active_run_state: str | None = None
+        self._active_steers: list[dict[str, Any]] = []
+        self._follow_up_queue: deque[str] = deque()
+        self._follow_ups: dict[str, dict[str, Any]] = {}
+        self._follow_up_task: asyncio.Task | None = None
+        self._follow_up_starting = False
+        self._run_idle = asyncio.Event()
+        self._run_idle.set()
         self._agent_runs_closed = False
         self._closed = False
         self._shutdown_event_emitted = False
+        # Conversation share of the last admitted run's prompt; compaction
+        # summarizes what falls outside it.
+        self._conversation_tokens: int | None = None
+        self._compaction_task: asyncio.Task | None = None
 
     @property
     def current_config(self) -> RootConfig:
@@ -169,12 +220,17 @@ class SessionRuntime:
     def llm(self):
         return self.resources.llm_service
 
-    async def cancel_active_agent_run(self) -> bool:
+    async def cancel_active_agent_run(self, *, run_id: str | None = None) -> bool:
         """Cancel only this session's active agent execution, if any."""
 
         async with self._agent_run_lock:
+            if run_id is not None and run_id != self._active_run_id:
+                return False
             task = self._active_agent_task
             stream = self._active_agent_stream
+            # The user asked to stop, so tool work stops too instead of
+            # moving to the background.
+            self._run_stop_requested = True
         if stream is not None and not stream.closed:
             await stream.aclose()
             return True
@@ -187,6 +243,242 @@ class SessionRuntime:
         except asyncio.CancelledError:
             pass
         return True
+
+    async def get_run_status(self, run_id: str) -> dict[str, Any] | None:
+        async with self._agent_run_lock:
+            if run_id == self._active_run_id:
+                return self._run_status_unlocked()
+            if self._last_run_status and run_id == self._last_run_status["run_id"]:
+                return deepcopy(self._last_run_status)
+            return None
+
+    async def list_run_statuses(self) -> dict[str, Any]:
+        """Expose the live run ID when the client missed the first stream event."""
+
+        async with self._agent_run_lock:
+            return {
+                "active": self._run_status_unlocked() if self._active_run_id else None,
+                "recent": deepcopy(self._last_run_status),
+            }
+
+    def _run_status_unlocked(self) -> dict[str, Any]:
+        return {
+            "run_id": self._active_run_id,
+            "state": self._active_run_state,
+            "steer": deepcopy(self._active_steers[-1]) if self._active_steers else None,
+            "steers": deepcopy(self._active_steers),
+        }
+
+    async def queue_follow_up(self, run_id: str, query: str, *, annotations: list[dict] | None = None) -> dict[str, Any] | None:
+        """Accept one later user turn for this live session's active run."""
+
+        query = query.strip()
+        if not query or len(query) > 100_000:
+            raise ValueError("Follow-up query must contain 1 to 100000 characters")
+        query = with_annotations(query, annotations)
+        async with self._agent_run_lock:
+            if self._agent_runs_closed or self._closed:
+                return None
+            if run_id != self._active_run_id or self._active_run_state not in {
+                "accepted", "running",
+            }:
+                return None
+            if len(self._follow_up_queue) >= 5:
+                raise FollowUpQueueFull("Follow-up queue is full")
+            if len(self._follow_ups) >= 100:
+                for old_id, old in list(self._follow_ups.items()):
+                    if old["state"] in {"completed", "clarification", "failed", "cancelled"}:
+                        del self._follow_ups[old_id]
+                        break
+            queue_id = str(uuid4())
+            item = {
+                "queue_id": queue_id, "after_run_id": run_id,
+                "run_id": str(uuid4()), "query": query,
+                "metadata": {"response_annotations": annotations or []},
+                "state": "queued", "assistant_message_id": None,
+                "error_code": None,
+            }
+            self._follow_ups[queue_id] = item
+            self._follow_up_queue.append(queue_id)
+            if self._follow_up_task is None or self._follow_up_task.done():
+                self._follow_up_task = asyncio.create_task(self._drain_follow_ups())
+            return self._public_follow_up(item)
+
+    async def queue_report(
+        self, content: str, *, origin: str, metadata: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Queue a background report (a research job, a folder import) as a
+        turn in this chat.
+
+        It runs once the chat is idle. Unlike a follow-up it needs no active
+        run and is never refused for a full queue: the background work already
+        bounds how many arrive. The turn is marked so it is not memory.
+        """
+
+        if origin not in BACKGROUND_REPORT_ORIGINS:
+            raise ValueError(f"Unknown report origin: {origin}")
+
+        async with self._agent_run_lock:
+            if self._agent_runs_closed or self._closed:
+                return None
+            queue_id = str(uuid4())
+            item = {
+                "queue_id": queue_id, "after_run_id": None,
+                "run_id": str(uuid4()), "query": content,
+                "metadata": {"origin": origin, **metadata},
+                "state": "queued", "assistant_message_id": None,
+                "error_code": None,
+            }
+            self._follow_ups[queue_id] = item
+            self._follow_up_queue.append(queue_id)
+            if self._follow_up_task is None or self._follow_up_task.done():
+                self._follow_up_task = asyncio.create_task(self._drain_follow_ups())
+            return self._public_follow_up(item)
+
+    @staticmethod
+    def _public_follow_up(item: dict[str, Any]) -> dict[str, Any]:
+        return {key: item[key] for key in (
+            "queue_id", "after_run_id", "run_id", "state", "assistant_message_id",
+            "error_code",
+        )}
+
+    async def list_follow_ups(self) -> list[dict[str, Any]]:
+        async with self._agent_run_lock:
+            return [self._public_follow_up(item) for item in self._follow_ups.values()]
+
+    async def get_follow_up(self, queue_id: str) -> dict[str, Any] | None:
+        async with self._agent_run_lock:
+            item = self._follow_ups.get(queue_id)
+            return self._public_follow_up(item) if item is not None else None
+
+    async def cancel_follow_up(self, queue_id: str) -> dict[str, Any] | None:
+        async with self._agent_run_lock:
+            item = self._follow_ups.get(queue_id)
+            if item is None:
+                return None
+            if item["state"] == "queued":
+                self._follow_up_queue.remove(queue_id)
+                item["state"] = "cancelled"
+                item.pop("query", None)
+            return self._public_follow_up(item)
+
+    async def _drain_follow_ups(self) -> None:
+        while True:
+            await self._run_idle.wait()
+            async with self._agent_run_lock:
+                if self._agent_runs_closed or not self._follow_up_queue:
+                    self._follow_up_task = None
+                    return
+                if self._agent_run_reserved:
+                    continue
+                queue_id = self._follow_up_queue.popleft()
+                item = self._follow_ups[queue_id]
+                item["state"] = "starting"
+                self._follow_up_starting = True
+                self._run_idle.clear()
+            stream = None
+            try:
+                stream = await self.open_agent_run_stream(
+                    Message(content=item["query"], metadata=item.get("metadata", {})),
+                    run_id=item["run_id"],
+                    _from_follow_up=True,
+                )
+                async with self._agent_run_lock:
+                    self._follow_up_starting = False
+                    item["state"] = "running"
+                async for event in stream:
+                    if event["event"] == "response":
+                        item["assistant_message_id"] = event["data"].get("assistant_message_id")
+                        item["state"] = "completed"
+                    elif event["event"] == "clarification":
+                        item["assistant_message_id"] = event["data"].get("assistant_message_id")
+                        item["state"] = "clarification"
+                    elif event["event"] == "error":
+                        item["state"] = "failed"
+                        code = event["data"].get("code")
+                        item["error_code"] = (
+                            code if code in {"llm_budget_exhausted", "workspace_conflict"}
+                            else "run_failed"
+                        )
+                if item["state"] == "running":
+                    item["state"] = "failed"
+                    item["error_code"] = "run_failed"
+            except asyncio.CancelledError:
+                item["state"] = "cancelled"
+                raise
+            except Exception:
+                logger.exception("Queued follow-up failed for session {}", self.session_id)
+                item["state"] = "failed"
+                item["error_code"] = "run_failed"
+            finally:
+                item.pop("query", None)
+                if stream is not None:
+                    await stream.aclose()
+                async with self._agent_run_lock:
+                    self._follow_up_starting = False
+                    if not self._agent_run_reserved:
+                        self._run_idle.set()
+
+    async def submit_steer(
+        self, run_id: str, instruction: str, *, annotations: list[dict] | None = None
+    ) -> dict[str, str] | None:
+        if not instruction or not instruction.strip() or len(instruction) > 4000:
+            raise ValueError("Steer instruction must contain 1 to 4000 characters")
+        async with self._agent_run_lock:
+            if run_id != self._active_run_id or self._active_run_state != "running":
+                return None
+            if (sum(item["state"] == "pending" for item in self._active_steers) >= 5
+                    or len(self._active_steers) >= 100):
+                raise SteerQueueFull("Steer queue is full")
+            steer_id = str(uuid4())
+            steer = {
+                "steer_id": steer_id, "instruction": instruction.strip(),
+                "response_annotations": annotations or [], "state": "pending",
+            }
+            at = get_now()
+            accepted = await self.knowledge_store.create_closed_standalone_message(
+                user_name=self.user_name, project_id=self.project_id,
+                session_id=self.session_id,
+                message_id=await self.knowledge_store.allocate_message_id(),
+                role="user", content=steer["instruction"],
+                timestamp_ms=int(at.timestamp() * 1000),
+                acceptance_key=f"steer:{steer_id}",
+                metadata={"origin": "steer", "run_id": run_id, "run_steer": steer},
+            )
+            steer["message_id"] = accepted.message_id
+            self._active_steers.append(steer)
+            self._signal_exchange_closed()
+            return {"steer_id": steer_id, "state": "pending"}
+
+    def answer_decision(self, run_id: str, decision_id: str, choice: str) -> bool:
+        """Deliver the user's choice to a tool waiting in the active run;
+        False when that run or question is no longer waiting. Raises
+        ValueError for a choice that was not offered."""
+        if run_id != self._active_run_id or self._active_decisions is None:
+            return False
+        return self._active_decisions.answer(decision_id, choice)
+
+    async def _take_steer(self) -> dict[str, str] | None:
+        async with self._agent_run_lock:
+            steer = next(
+                (item for item in self._active_steers if item["state"] == "pending"),
+                None,
+            )
+            if steer is None:
+                return None
+            if not await self.knowledge_store.record_run_steer(
+                user_name=self.user_name, project_id=self.project_id,
+                session_id=self.session_id, message_id=steer["message_id"],
+                steer={**steer, "state": "applied"}, expected_state="pending",
+            ):
+                raise RuntimeError("Steer could not be recorded before delivery")
+            steer["state"] = "applied"
+            return {
+                "steer_id": steer["steer_id"],
+                "instruction": with_annotations(
+                    steer["instruction"], steer.get("response_annotations")
+                ),
+            }
 
     async def open_agent_run_stream(
         self,
@@ -201,6 +493,10 @@ class SessionRuntime:
         pasted_text_spans: Optional[List[Dict]] = None,
         idempotency_key: Optional[str] = None,
         research_mode: ResearchMode = "normal",
+        selected_notebook: dict | None = None,
+        run_id: str | None = None,
+        extra_web_reads: int = 0,
+        _from_follow_up: bool = False,
     ) -> AsyncGenerator[AgentExecutionEvent, None]:
         """Admit and persist a run before returning its event stream.
 
@@ -232,6 +528,7 @@ class SessionRuntime:
                 document_focus=document_focus,
                 pasted_text_spans=pasted_text_spans,
                 research_mode=research_mode,
+                selected_notebook=selected_notebook,
             )
             if normalized_idempotency_key is not None
             else None
@@ -241,6 +538,14 @@ class SessionRuntime:
                 **message.metadata,
                 "idempotency_key": normalized_idempotency_key,
                 _REQUEST_FINGERPRINT_METADATA_KEY: request_fingerprint,
+            }
+        if selected_notebook is not None:
+            message.metadata = {
+                **message.metadata,
+                "selected_notebook": {
+                    "notebook_id": selected_notebook["notebook_id"],
+                    "revision": selected_notebook["revision"],
+                },
             }
 
         async with self._agent_run_lock:
@@ -256,6 +561,8 @@ class SessionRuntime:
                         raise IdempotencyConflictError()
                     raise RequestInProgressError()
                 raise SessionBusyError()
+            if (self._follow_up_queue or self._follow_up_starting) and not _from_follow_up:
+                raise SessionBusyError()
             run_settings = SessionRunSettings(
                 config=deepcopy(self.current_config),
                 model=self.model,
@@ -265,14 +572,44 @@ class SessionRuntime:
                 else None,
                 document_focus=deepcopy(self.document_focus),
                 readable_project_ids=tuple(self.project.readable_project_ids),
+                extra_web_reads=extra_web_reads,
             )
             enabled_tools = list(enabled_tools) if enabled_tools is not None else None
             document_focus = deepcopy(document_focus)
             pasted_text_spans = deepcopy(pasted_text_spans)
+            selected_notebook = deepcopy(selected_notebook)
             self._agent_run_reserved = True
+            self._run_idle.clear()
+            self._active_run_id = run_id or str(uuid4())
+            self._active_run_state = "admitting"
+            self._active_steers = []
+            self._active_user_message_id = None
             self._active_idempotency_key = normalized_idempotency_key
             self._active_request_fingerprint = request_fingerprint
             self._active_agent_task = asyncio.current_task()
+
+        selected_orchestrator = orchestrator or self.agent_orchestrator
+        if selected_orchestrator is not None and hasattr(selected_orchestrator, "resolve_run_policy"):
+            try:
+                identity, selected_model, budget = await selected_orchestrator.resolve_run_policy(
+                    config=run_settings.config,
+                    requested_agent_id=agent_id,
+                    session_agent_id=run_settings.agent_id,
+                    requested_model=model,
+                    session_model=run_settings.model,
+                    fallback_model=self.resources.llm_service.agent_model,
+                    llm=self.resources.llm_service,
+                )
+                run_settings = replace(
+                    run_settings,
+                    resolved_identity=identity,
+                    resolved_model=selected_model,
+                    prompt_memory_budget=budget,
+                )
+                self._conversation_tokens = budget.conversation_tokens
+            except BaseException:
+                await self._release_agent_run(None)
+                raise
 
         acceptance_task = asyncio.create_task(
             self._accept_user_message(
@@ -330,10 +667,14 @@ class SessionRuntime:
             document_focus=document_focus,
             pasted_text_spans=pasted_text_spans,
             research_mode=research_mode,
+            selected_notebook=selected_notebook,
             run_settings=run_settings,
+            run_id=self._active_run_id,
         )
         self._active_agent_stream = stream
         self._active_agent_task = None
+        self._active_run_state = "accepted"
+        self._active_user_message_id = accepted.id
         return stream
 
     def _require_message_ingestion_ready(self) -> None:
@@ -355,7 +696,9 @@ class SessionRuntime:
         document_focus: Optional[DocumentFocus],
         pasted_text_spans: Optional[List[Dict]],
         research_mode: ResearchMode,
+        selected_notebook: dict | None,
         run_settings: SessionRunSettings,
+        run_id: str,
     ) -> AsyncGenerator[AgentExecutionEvent, None]:
         """Execute one already-persisted, exclusively admitted run."""
 
@@ -376,90 +719,121 @@ class SessionRuntime:
         async with self._agent_run_lock:
             shutting_down = self._agent_runs_closed
             self._active_agent_task = task
+            self._active_run_state = "running"
 
         try:
             if shutting_down:
                 raise asyncio.CancelledError
-            history = await self.get_conversation_context(
-                run_settings.config.developer_settings.limits.conversation_context_turns,
-                up_to_msg_id=accepted.id - 1,
+            prompt_memory = run_settings.config.developer_settings.prompt_memory
+            # Fetch against the largest admitted budget; the chosen run budget
+            # makes the final selection at prompt assembly.
+            history_budget_tokens = (
+                run_settings.prompt_memory_budget.input_tokens
+                if run_settings.prompt_memory_budget is not None
+                else max([
+                    prompt_memory.default.input_tokens,
+                    *(row.budget.input_tokens for row in prompt_memory.overrides),
+                ])
             )
+            history = await self._recent_history_within(
+                history_budget_tokens, up_to_msg_id=accepted.id - 1,
+            )
+            history_summary = await self._chat_summary()
             orchestrator = orchestrator or self.agent_orchestrator
             if orchestrator is None:
                 raise RuntimeError("Session has no application-owned AgentOrchestrator")
 
             response_seen = False
-            async for event in orchestrator.run_stream(
-                user_query=accepted.content.strip(),
-                context=self,
-                user_timezone=user_timezone,
-                model=model,
-                agent_id=agent_id,
-                enabled_tools=enabled_tools,
-                request_document_focus=document_focus,
-                conversation_history=history,
-                user_message_id=accepted.id,
-                pasted_text_spans=pasted_text_spans,
-                research_mode=research_mode,
-                run_settings=run_settings,
-            ):
-                if event["event"] == "response":
-                    if response_seen:
-                        raise RuntimeError(
-                            "Agent stream emitted multiple final responses"
+            # Tools in this run can ask the user something and wait for it.
+            decisions = self._active_decisions = DecisionBroker()
+            decision_binding = bind_decision_broker(decisions)
+            self._run_stop_requested = False
+            handoff_binding = bind_handoffs(
+                self._tool_handoffs, project_id=self.project_id, session_id=self.session_id,
+                may_hand_off=lambda: not self._run_stop_requested and not self._closed,
+            ) if self._tool_handoffs is not None else None
+            try:
+                async for event in orchestrator.run_stream(
+                    user_query=accepted.content.strip(),
+                    context=self,
+                    user_timezone=user_timezone,
+                    model=model,
+                    agent_id=agent_id,
+                    enabled_tools=enabled_tools,
+                    request_document_focus=document_focus,
+                    conversation_history=history,
+                    history_summary=history_summary,
+                    user_message_id=accepted.id,
+                    pasted_text_spans=pasted_text_spans,
+                    research_mode=research_mode,
+                    selected_notebook=selected_notebook,
+                    run_settings=run_settings,
+                    run_id=run_id,
+                    take_steer=self._take_steer,
+                ):
+                    if event["event"] == "response":
+                        if response_seen:
+                            raise RuntimeError(
+                                "Agent stream emitted multiple final responses"
+                            )
+                        response_seen = True
+                        response = event["data"]
+                        resolved_agent_id = response.get("resolved_agent_id")
+                        commit = await self.add_assistant_turn(
+                            content=response["content"],
+                            timestamp=get_now(),
+                            metadata=self._assistant_response_metadata(response),
+                            user_msg_id=accepted.id,
+                            source_candidates=self._response_source_candidates(response),
+                            artifact=self._response_artifact(response),
+                            readable_project_ids=captured_readable_project_ids,
                         )
-                    response_seen = True
-                    response = event["data"]
-                    resolved_agent_id = response.get("resolved_agent_id")
-                    commit = await self.add_assistant_turn(
-                        content=response["content"],
-                        timestamp=get_now(),
-                        metadata=self._assistant_response_metadata(response),
-                        user_msg_id=accepted.id,
-                        source_candidates=self._response_source_candidates(response),
-                        artifact=self._response_artifact(response),
-                        readable_project_ids=captured_readable_project_ids,
-                    )
-                    exchange_outcome = "assistant_final"
-                    await self._record_durable_agent_turn(
-                        orchestrator,
-                        agent_id=(
-                            resolved_agent_id
-                            if isinstance(resolved_agent_id, str)
-                            and resolved_agent_id.strip()
-                            else agent_id or run_settings.agent_id
-                        ),
-                    )
-                    response = dict(response)
-                    response.pop("resolved_agent_id", None)
-                    response["assistant_message_id"] = commit["message_id"]
-                    response["source_ref_ids"] = commit["source_ref_ids"]
-                    event = {"event": "response", "data": response}
-                    exchange_outcome = "assistant_final"
-                elif event["event"] == "clarification":
-                    clarification = dict(event["data"])
-                    commit = await self.add_assistant_turn(
-                        content=str(clarification["question"]),
-                        timestamp=get_now(),
-                        metadata=self._assistant_clarification_metadata(clarification),
-                        user_msg_id=accepted.id,
-                        source_candidates=self._response_source_candidates(
-                            clarification
-                        ),
-                        readable_project_ids=captured_readable_project_ids,
-                        outcome="clarification",
-                    )
-                    clarification["assistant_message_id"] = commit["message_id"]
-                    clarification["source_ref_ids"] = commit["source_ref_ids"]
-                    event = {"event": "clarification", "data": clarification}
-                    exchange_outcome = "clarification"
-                elif event["event"] == "error":
-                    exchange_outcome = "failed"
-                    terminal_error = self._terminal_error_record(event.get("data"))
-                yield event
-                if event["event"] in {"response", "clarification", "error"}:
-                    return
+                        exchange_outcome = "assistant_final"
+                        await self._record_durable_agent_turn(
+                            orchestrator,
+                            agent_id=(
+                                resolved_agent_id
+                                if isinstance(resolved_agent_id, str)
+                                and resolved_agent_id.strip()
+                                else agent_id or run_settings.agent_id
+                            ),
+                        )
+                        response = dict(response)
+                        response.pop("resolved_agent_id", None)
+                        response["assistant_message_id"] = commit["message_id"]
+                        response["source_ref_ids"] = commit["source_ref_ids"]
+                        event = {"event": "response", "data": response}
+                        exchange_outcome = "assistant_final"
+                    elif event["event"] == "clarification":
+                        clarification = dict(event["data"])
+                        commit = await self.add_assistant_turn(
+                            content=str(clarification["question"]),
+                            timestamp=get_now(),
+                            metadata=self._assistant_clarification_metadata(clarification),
+                            user_msg_id=accepted.id,
+                            source_candidates=self._response_source_candidates(
+                                clarification
+                            ),
+                            readable_project_ids=captured_readable_project_ids,
+                            outcome="clarification",
+                        )
+                        clarification["assistant_message_id"] = commit["message_id"]
+                        clarification["source_ref_ids"] = commit["source_ref_ids"]
+                        event = {"event": "clarification", "data": clarification}
+                        exchange_outcome = "clarification"
+                    elif event["event"] == "error":
+                        exchange_outcome = "failed"
+                        terminal_error = self._terminal_error_record(event.get("data"))
+                    yield event
+                    if event["event"] in {"response", "clarification", "error"}:
+                        return
 
+            finally:
+                if handoff_binding is not None:
+                    unbind_handoffs(handoff_binding)
+                unbind_decision_broker(decision_binding)
+                decisions.close()
+                self._active_decisions = None
             if not response_seen and exchange_outcome == "failed":
                 logger.error(
                     "Agent stream ended without a final response for session {}",
@@ -488,6 +862,8 @@ class SessionRuntime:
                 },
             }
         finally:
+            async with self._agent_run_lock:
+                self._active_run_state = exchange_outcome
             try:
                 if exchange_outcome not in {"assistant_final", "clarification"}:
                     await self._close_user_exchange(
@@ -513,7 +889,29 @@ class SessionRuntime:
                 return
             if task is None or self._active_agent_task is task:
                 self._active_agent_task = None
+            if self._active_run_id is not None:
+                for steer in self._active_steers:
+                    if steer["state"] != "pending":
+                        continue
+                    try:
+                        if await self.knowledge_store.record_run_steer(
+                            user_name=self.user_name, project_id=self.project_id,
+                            session_id=self.session_id, message_id=steer["message_id"],
+                            steer={**steer, "state": "undelivered"},
+                            expected_state="pending",
+                        ):
+                            steer["state"] = "undelivered"
+                    except Exception:
+                        logger.exception("Failed to record undelivered steer for {}", self.session_id)
+                if self._active_run_state in {"admitting", "accepted", "running"}:
+                    self._active_run_state = "cancelled"
+                self._last_run_status = self._run_status_unlocked()
             self._agent_run_reserved = False
+            self._run_idle.set()
+            self._active_run_id = None
+            self._active_user_message_id = None
+            self._active_run_state = None
+            self._active_steers = []
             self._active_idempotency_key = None
             self._active_request_fingerprint = None
             self._active_agent_stream = None
@@ -661,6 +1059,7 @@ class SessionRuntime:
         document_focus: DocumentFocus | None,
         pasted_text_spans: list[dict] | None,
         research_mode: ResearchMode,
+        selected_notebook: dict | None = None,
     ) -> str:
         """Hash the caller-controlled inputs for one logical submission."""
 
@@ -691,6 +1090,11 @@ class SessionRuntime:
             "document_focus": focus,
             "pasted_text_spans": pasted_text_spans,
             "research_mode": research_mode,
+            "selected_notebook": (
+                {"notebook_id": selected_notebook["notebook_id"],
+                 "revision": selected_notebook["revision"]}
+                if selected_notebook is not None else None
+            ),
         }
         encoded = json.dumps(
             payload,
@@ -842,6 +1246,7 @@ class SessionRuntime:
             outcome=outcome,
         )
         self._signal_exchange_closed()
+        self._schedule_chat_compaction()
         return {
             "message_id": persisted_message_id,
             "source_ref_ids": source_ref_ids,
@@ -922,18 +1327,117 @@ class SessionRuntime:
 
         await self._close_user_exchange(user_message_id, outcome="user_only")
 
+    async def import_exchanges(
+        self, exchanges: List[ImportedExchange | ImportedAssistantTurn]
+    ) -> list[dict[str, Any]]:
+        """Store recorded exchanges at their original times without running the agent.
+
+        Each exchange closes like a normal turn, at its last message's time,
+        so it becomes memory (Episodes, Context, knowledge) like any chat.
+        Importing the same exchange again (same content and time) returns
+        the stored IDs and writes nothing, so a stopped import can be rerun.
+        New agent runs on this session wait until the import finishes.
+        """
+
+        async with self._agent_run_lock:
+            if self._closed or self._agent_runs_closed:
+                raise RuntimeError("Session is shutting down")
+            self._require_message_ingestion_ready()
+            if self._agent_run_reserved:
+                raise SessionBusyError()
+            results = []
+            for exchange in exchanges:
+                if isinstance(exchange, ImportedAssistantTurn):
+                    results.append(await self._import_assistant_turn(exchange))
+                else:
+                    results.append(await self._import_exchange(exchange))
+            return results
+
+    async def _import_assistant_turn(
+        self, turn: ImportedAssistantTurn
+    ) -> dict[str, Any]:
+        timestamp_ms = int(turn.assistant_timestamp.timestamp() * 1000)
+        key = hashlib.sha256(
+            f"assistant:{self.session_id}:{turn.assistant_content}:{turn.assistant_timestamp.isoformat()}".encode()
+        ).hexdigest()
+        accepted = await self.knowledge_store.create_closed_standalone_message(
+            user_name=self.user_name, project_id=self.project_id,
+            session_id=self.session_id,
+            message_id=await self.knowledge_store.allocate_message_id(),
+            role="assistant", content=turn.assistant_content,
+            timestamp_ms=timestamp_ms, acceptance_key=f"import:{key}",
+            metadata={"origin": "import"},
+        )
+        if accepted.created:
+            self._signal_exchange_closed()
+        return {
+            "user_message_id": None,
+            "assistant_message_id": accepted.message_id,
+            "created": accepted.created,
+        }
+
+    async def _import_exchange(self, exchange: ImportedExchange) -> dict[str, Any]:
+        accepted, created = await self._accept_user_message(
+            Message(
+                content=exchange.user_content,
+                timestamp=exchange.user_timestamp,
+                metadata={"origin": "import"},
+            )
+        )
+        if not created:
+            stored = await self.knowledge_store.get_user_agent_exchange(
+                accepted.id,
+                user_name=self.user_name,
+                project_id=self.project_id,
+                session_id=self.session_id,
+            )
+            if stored is None:
+                raise RuntimeError("Accepted user message could not be reloaded")
+            if stored.exchange_state != "open":
+                return {
+                    "user_message_id": accepted.id,
+                    "assistant_message_id": stored.assistant_message_id,
+                    "created": False,
+                }
+            # An earlier import stopped before closing this exchange; imports
+            # have no side effects to repeat, so finish it.
+
+        assistant_message_id = None
+        if exchange.assistant_content is None:
+            await self._close_user_exchange(
+                accepted.id,
+                outcome="user_only",
+                closed_at_ms=int(exchange.user_timestamp.timestamp() * 1000),
+            )
+        else:
+            assistant_message_id, _ = await self._persist_assistant_message_log(
+                await self.knowledge_store.allocate_message_id(),
+                exchange.assistant_content,
+                exchange.assistant_timestamp,
+                metadata={"origin": "import"},
+                user_msg_id=accepted.id,
+            )
+            self._signal_exchange_closed()
+        return {
+            "user_message_id": accepted.id,
+            "assistant_message_id": assistant_message_id,
+            "created": True,
+        }
+
     async def _close_user_exchange(
         self,
         user_message_id: int,
         *,
         outcome: str,
         terminal_error: dict[str, object] | None = None,
+        closed_at_ms: int | None = None,
     ) -> None:
         """Close one terminal non-assistant path before waking its project owner."""
 
         if not isinstance(user_message_id, int) or user_message_id <= 0:
             raise ValueError("user_message_id must be positive")
-        closed_at_ms = int(get_now().timestamp() * 1000)
+        if closed_at_ms is None:
+            closed_at_ms = int(get_now().timestamp() * 1000)
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -967,6 +1471,89 @@ class SessionRuntime:
                     "Failed to signal semantic work for {}", self.session_id
                 )
 
+    _HISTORY_PAGE = 200
+    _HISTORY_MAX_TURNS = 10_000
+
+    def _chat_compaction(self) -> ChatCompaction | None:
+        postgres = getattr(self.resources, "postgres", None)
+        if postgres is None:
+            return None
+        return ChatCompaction(
+            postgres, self.llm, user_name=self.user_name, session_id=self.session_id,
+            count_tokens=getattr(self.llm, "count_tokens", None),
+        )
+
+    async def _chat_summary(self) -> str:
+        """The summary of turns that no longer fit the prompt, if any."""
+
+        compaction = self._chat_compaction()
+        if compaction is None:
+            return ""
+        try:
+            return (await compaction.load())[0]
+        except Exception:
+            logger.exception("Chat summary unavailable for {}", self.session_id)
+            return ""
+
+    def _schedule_chat_compaction(self) -> None:
+        """Start one background summary pass; never fails the finished turn."""
+
+        try:
+            settings = self.current_config.developer_settings.chat_compaction
+        except Exception:
+            logger.exception("Chat compaction settings unavailable for {}", self.session_id)
+            return
+        if (
+            not settings.enabled or self._closed or self._conversation_tokens is None
+            or (self._compaction_task is not None and not self._compaction_task.done())
+        ):
+            return
+        self._compaction_task = asyncio.create_task(
+            self._compact_chat(self._conversation_tokens, settings)
+        )
+
+    async def _compact_chat(self, conversation_tokens: int, settings) -> None:
+        compaction = self._chat_compaction()
+        if compaction is None:
+            return
+        try:
+            history = await self._recent_history_within(
+                conversation_tokens + settings.max_input_tokens, up_to_msg_id=None,
+            )
+            await compaction.extend(
+                history, conversation_tokens=conversation_tokens, settings=settings
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # The next finished turn tries again; the prompt still has the
+            # recent turns and message search finds the rest.
+            logger.exception("Chat compaction failed for {}", self.session_id)
+
+    async def _recent_history_within(
+        self, budget_tokens: int, *, up_to_msg_id: int
+    ) -> List[Dict]:
+        """Fetch newest-first pages until they could fill the prompt budget.
+
+        Prompt assembly makes the exact cut. Text at or under four characters
+        per token (English, code, CJK) cannot fill the budget with fewer
+        characters than this, so older pages could never be used.
+        """
+
+        collected: List[Dict] = []
+        characters = 0
+        cursor = up_to_msg_id
+        while len(collected) < self._HISTORY_MAX_TURNS:
+            page = await self.get_conversation_context(self._HISTORY_PAGE, up_to_msg_id=cursor)
+            if not page:
+                break
+            collected = page + collected
+            characters += sum(len(str(turn.get("content") or "")) for turn in page)
+            if len(page) < self._HISTORY_PAGE or characters >= budget_tokens * 4:
+                break
+            cursor = int(page[0]["message_id"]) - 1
+        return collected
+
     async def get_conversation_context(
         self, num_turns: int, up_to_msg_id: Optional[int] = None
     ) -> List[Dict]:
@@ -978,14 +1565,30 @@ class SessionRuntime:
 
         results = []
         for turn in turns:
+            metadata = turn.get("metadata") or {}
+            if metadata.get("origin") == "steer" and (
+                metadata.get("run_steer") or {}
+            ).get("state") != "applied":
+                continue
+            content = turn["content"]
+            steer = (turn.get("metadata") or {}).get("run_steer")
+            if (turn["role"] == "user" and (turn.get("metadata") or {}).get("origin") != "steer"
+                    and isinstance(steer, dict)
+                    and steer.get("state") == "applied"
+                    and isinstance(steer.get("instruction"), str)):
+                instruction = with_annotations(
+                    steer["instruction"], steer.get("response_annotations")
+                )
+                content = f"{content}\n\nUser instruction during this run: {instruction}"
             role_label = "USER" if turn["role"] == "user" else "AGENT"
             ts = datetime.fromtimestamp(turn["timestamp"] / 1000, tz=timezone.utc)
             date_str = ts.strftime("%Y-%m-%d %H:%M")
             results.append(
                 {
                     **turn,
+                    "content": content,
                     "timestamp": ts.isoformat(),
-                    "message": turn["content"],
+                    "message": content,
                     "role_label": role_label,
                     "relative": f"[{date_str}]",
                 }
@@ -1003,6 +1606,11 @@ class SessionRuntime:
             failures: list[Exception] = []
             async with self._agent_run_lock:
                 self._agent_runs_closed = True
+                for queue_id in self._follow_up_queue:
+                    self._follow_ups[queue_id]["state"] = "cancelled"
+                    self._follow_ups[queue_id].pop("query", None)
+                self._follow_up_queue.clear()
+                follow_up_task = self._follow_up_task
 
             try:
                 await self.cancel_active_agent_run()
@@ -1011,6 +1619,26 @@ class SessionRuntime:
                     "Failed to cancel agent run for session {}", self.session_id
                 )
                 failures.append(exc)
+
+            compaction_task = self._compaction_task
+            if compaction_task is not None and not compaction_task.done():
+                compaction_task.cancel()
+                try:
+                    await compaction_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logger.exception("Chat compaction stopped with an error for {}", self.session_id)
+
+            if follow_up_task is not None and not follow_up_task.done():
+                follow_up_task.cancel()
+                try:
+                    await follow_up_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception as exc:
+                    logger.exception("Failed to stop follow-up queue for session {}", self.session_id)
+                    failures.append(exc)
 
             if not self._shutdown_event_emitted:
                 try:

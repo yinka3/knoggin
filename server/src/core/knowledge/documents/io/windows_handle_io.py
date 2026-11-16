@@ -14,7 +14,9 @@ import stat
 import time
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
-from typing import Iterator
+from typing import Callable, Iterator
+
+from common.document_limits import MAX_DOCUMENT_SIZE
 
 
 class _UnicodeString(ctypes.Structure):
@@ -342,7 +344,7 @@ def write_project_file(root: Path, relative_path: str, content: bytes, *, overwr
                 try:
                     if not overwrite:
                         raise FileExistsError(f"project file already exists: {relative_path}")
-                    if expected_hash is not None and hashlib.sha256(_read(existing, 50 * 1024 * 1024)).hexdigest() != expected_hash:
+                    if expected_hash is not None and hashlib.sha256(_read(existing, MAX_DOCUMENT_SIZE)).hexdigest() != expected_hash:
                         raise WindowsFileConflictError("project file changed")
                 finally:
                     _close(existing)
@@ -379,7 +381,7 @@ def delete_project_file(root: Path, relative_path: str, *, expected_hash: str | 
                 _assert_handle_at_path(
                     parent, root.joinpath(*PurePosixPath(relative_path).parts[:-1])
                 )
-                content = _read(target, 50 * 1024 * 1024)
+                content = _read(target, MAX_DOCUMENT_SIZE)
                 if expected_hash is not None and hashlib.sha256(content).hexdigest() != expected_hash:
                     raise WindowsFileConflictError("project file changed")
                 _assert_handle_at_path(
@@ -406,7 +408,7 @@ def move_project_file(
                 _assert_handle_at_path(
                     source_parent, root.joinpath(*PurePosixPath(source_path).parts[:-1])
                 )
-                content = _read(source, 50 * 1024 * 1024)
+                content = _read(source, MAX_DOCUMENT_SIZE)
                 if expected_hash is not None and hashlib.sha256(content).hexdigest() != expected_hash:
                     raise WindowsFileConflictError("project file changed")
                 with open_relative_parent(project, destination_path, create=True) as (target_parent, target_name):
@@ -633,7 +635,9 @@ def delete_pending_markers_for_project(library_root: Path, prefix: str) -> None:
         return
 
 
-def iter_project_paths(root: Path) -> Iterator[tuple[str, int, int]]:
+def iter_project_paths(
+    root: Path, skip_directory: Callable[[str], bool] | None = None
+) -> Iterator[tuple[str, int, int]]:
     """List regular files by opened directory identity, skipping links."""
 
     def walk(directory: int, prefix: str) -> Iterator[tuple[str, int, int]]:
@@ -661,6 +665,8 @@ def iter_project_paths(root: Path) -> Iterator[tuple[str, int, int]]:
                     continue
                 relative_path = f"{prefix}{name}"
                 if attributes[0] & _DIRECTORY_ATTRIBUTE:
+                    if skip_directory is not None and skip_directory(relative_path):
+                        continue
                     yield from walk(child, relative_path + "/")
                 else:
                     size, mtime_ns = _handle_size_and_mtime_ns(child)

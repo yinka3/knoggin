@@ -11,11 +11,13 @@ from loguru import logger
 from common.conf.domain_config import DomainConfig
 from common.conf.manager import ConfigManager
 from common.exceptions import WorkspaceConflictError
+from common.schema.document import FolderScanSettings
 from common.scoping import build_readable_project_ids
 from common.utils.lifecycle import settle_owned_task
 from core.knowledge.db.writers.artifact_retention_writer import ArtifactRetentionWriter
 from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
-from core.knowledge.documents.filesystem import ProjectFilesystemFactory
+from core.knowledge.documents import DocumentService, ProjectFilesystemFactory
+from core.knowledge.documents.read_service import DocumentReadService
 from core.knowledge.entity.maintenance_service import EntityMaintenanceService
 from core.knowledge.jobs.application_maintenance_scheduler import (
     ApplicationMaintenanceScheduler,
@@ -36,11 +38,25 @@ from core.project.domain_config_store import (
     DomainActivation,
     DomainConfigStore,
 )
+from core.project.evidence_board_service import EvidenceBoardService
 from core.project.maintenance_service import ProjectMaintenanceService
-from core.project.project_files import PROJECT_FILE_PATH, build_project_markdown
+from core.project.notebook_store import ProjectNotebookStore
+from core.project.project_files import (
+    PROJECT_FILE_PATH,
+    WorkspaceSettings,
+    build_project_markdown,
+    parse_workspaces,
+    workspace_name,
+)
+from core.sandbox.manager import SandboxManager
 from runtime.project_factory import ProjectRuntimeFactory
 from runtime.project_runtime import ProjectRuntime
 from runtime.resources import RuntimeResources
+
+
+def _workspace_dicts(stored) -> dict[str, dict]:
+    """Workspaces ordered by name, each with every setting filled in."""
+    return {name: settings.model_dump() for name, settings in parse_workspaces(stored).items()}
 
 
 class ProjectStatus(str, Enum):
@@ -97,9 +113,15 @@ class ProjectManager:
         self.pg = resources.postgres
         self._filesystem_factory = filesystem_factory
         self._config_manager = config_manager
+        self._sandbox_manager: SandboxManager | None = None
         self._project_deletion_writer = ProjectDeletionWriter(self.pg)
+        self.notebooks = ProjectNotebookStore(self.pg, user_name)
+        self.evidence_boards = EvidenceBoardService(
+            self.notebooks, getattr(resources, "jev_client", None), config_manager,
+        )
         self.active_projects: Dict[str, ProjectRuntime] = {}
         self._project_leases: Dict[str, set[str]] = {}
+        self._project_shutdown_tasks: Dict[str, asyncio.Task[None]] = {}
         self.maintenance_service = ProjectMaintenanceService(
             resources=resources,
             user_name=user_name,
@@ -113,6 +135,7 @@ class ProjectManager:
             maintenance_service=self.maintenance_service,
             config_manager=config_manager,
             filesystem_factory=filesystem_factory,
+            invalidate_reading_entity_caches=self._invalidate_reading_entity_caches,
         )
         # Entity identity maintenance is user-global and must not be tied to a
         # loaded ProjectRuntime.  ProjectManager exposes the application-owned
@@ -133,8 +156,32 @@ class ProjectManager:
                 else None
             ),
             background_work=getattr(resources, "background_work", None),
+            config_manager=config_manager,
         )
         self._closed = False
+
+    def attach_sandbox_manager(self, manager: SandboxManager) -> None:
+        self._sandbox_manager = manager
+
+    async def _remove_project_sandbox(self, project_id: str) -> None:
+        if self._sandbox_manager is None:
+            return
+        try:
+            await self._sandbox_manager.remove_project(project_id)
+        except Exception:
+            logger.exception("Sandbox cleanup failed for deleted project {}", project_id)
+
+    def _invalidate_reading_entity_caches(
+        self, source_project_id: str, entity_ids: tuple[int, ...],
+    ) -> None:
+        self._invalidate_entity_caches({
+            "affected_entity_ids": entity_ids,
+            "cache_project_ids": [
+                project_id for project_id, runtime in self.active_projects.items()
+                if project_id != source_project_id
+                and source_project_id in runtime.entities.readable_project_ids
+            ],
+        })
 
     def _invalidate_entity_caches(self, result: dict) -> dict[str, int]:
         explicit_entity_ids = result.get("affected_entity_ids")
@@ -220,18 +267,6 @@ class ProjectManager:
             result = await self.entity_maintenance_service.rollback(
                 merge_id,
                 approved_mutation_ids=approved_mutation_ids,
-            )
-            result["runtime_cache_invalidations"] = self._invalidate_entity_caches(
-                result
-            )
-            return result
-
-    async def repair_global_entity_merge_projections(self, merge_id: str) -> dict:
-        """Retry merge-derived projections without repeating canonical writes."""
-
-        async with self.maintenance_service.lock:
-            result = await self.entity_maintenance_service.repair_merge_projections(
-                merge_id
             )
             result["runtime_cache_invalidations"] = self._invalidate_entity_caches(
                 result
@@ -377,7 +412,6 @@ class ProjectManager:
         )
         if self._filesystem_factory is None:
             raise RuntimeError("Project filesystem is not configured")
-        await self._prepare_vp01(active_domain)
         project_query = """
             INSERT INTO public.projects (
                 project_id, user_name, name, description, status,
@@ -468,6 +502,7 @@ class ProjectManager:
             meta = dict(row)
             meta["id"] = meta.pop("project_id")
             meta["allowed_projects"] = meta["allowed_projects"] or []
+            meta["workspaces"] = _workspace_dicts(meta.get("workspaces"))
             meta.pop("domain_config", None)
             projects.append(meta)
 
@@ -491,6 +526,7 @@ class ProjectManager:
         meta = dict(rows[0])
         meta["id"] = meta.pop("project_id")
         meta["allowed_projects"] = meta["allowed_projects"] or []
+        meta["workspaces"] = _workspace_dicts(meta.get("workspaces"))
         meta.pop("domain_config", None)
         return meta
 
@@ -498,13 +534,6 @@ class ProjectManager:
         """Validate a complete candidate without touching project state."""
 
         return validate_domain_candidate(candidate)
-
-    async def _prepare_vp01(self, candidate: DomainConfig) -> None:
-        """Fail before durable writes if the selected extraction model cannot load."""
-
-        adapter = await self.resources.get_vp01(candidate.vp01_language)
-        if not callable(getattr(adapter, "extract_entities", None)):
-            raise TypeError("VP-01 adapter must expose extract_entities")
 
     async def get_domain_config(self, project_id: str) -> DomainConfig:
         """Read the durable active domain configuration for one project."""
@@ -569,12 +598,13 @@ class ProjectManager:
             raise RuntimeError("ProjectManager is shutting down")
         parsed = parse_candidate(candidate)
         await self._require_domain_project(project_id, allow_archived=False)
-        # Model loading can be slow. Finish it before locking project lifecycle
-        # work, then recheck status and revision under the lock and store CAS.
-        await self._prepare_vp01(parsed)
         async with self.maintenance_service.lock:
             if self._closed:
                 raise RuntimeError("ProjectManager is shutting down")
+            if project_id in self._project_shutdown_tasks:
+                raise WorkspaceConflictError(
+                    f"Project '{project_id}' is finishing runtime shutdown"
+                )
             await self._require_domain_project(project_id, allow_archived=False)
             active_state = self.active_projects.get(project_id)
             if active_state is not None:
@@ -589,6 +619,53 @@ class ProjectManager:
                 candidate=parsed,
                 expected_version=expected_version,
             )
+
+    async def _scan_settings_service(self, project_id: str) -> DocumentService:
+        if project_id in self._project_shutdown_tasks:
+            raise WorkspaceConflictError(
+                f"Project '{project_id}' is finishing runtime shutdown"
+            )
+        project = await self.get_project(project_id)
+        if project is None or project["status"] != ProjectStatus.ACTIVE.value:
+            raise ValueError("Scan settings require an active project")
+        active = self.active_projects.get(project_id)
+        if active is not None:
+            return active.document_service
+        # Scan settings need storage, not a running indexer or project scheduler.
+        return DocumentService(project_id, self.pg, self.resources.embedding)
+
+    async def archived_document_reader(self, project_id: str) -> DocumentReadService:
+        """Read archived knowledge without starting a project runtime."""
+        project = await self.get_project(project_id)
+        if project is None or project["status"] != ProjectStatus.ARCHIVED.value:
+            raise ValueError("Project is not archived")
+        readable_ids = await self.get_readable_project_ids(
+            project_id, project_metadata=project
+        )
+        return DocumentReadService(
+            DocumentService(
+                project_id, self.pg, self.resources.embedding,
+                readable_project_ids=readable_ids,
+                filesystem_factory=self._filesystem_factory,
+            )
+        )
+
+    async def get_document_scan_settings(self, project_id: str) -> FolderScanSettings:
+        async with self.maintenance_service.lock:
+            service = await self._scan_settings_service(project_id)
+            return await service.get_scan_settings()
+
+    async def save_document_scan_settings(
+        self, project_id: str, settings: FolderScanSettings
+    ) -> FolderScanSettings:
+        async with self.maintenance_service.lock:
+            service = await self._scan_settings_service(project_id)
+            return await service.save_scan_settings(settings)
+
+    async def reset_document_scan_settings(self, project_id: str) -> FolderScanSettings:
+        async with self.maintenance_service.lock:
+            service = await self._scan_settings_service(project_id)
+            return await service.reset_scan_settings()
 
     async def get_readable_project_ids(
         self,
@@ -671,6 +748,17 @@ class ProjectManager:
 
         selected = {session_id for session_id in session_ids if session_id}
         async with self.pg.transaction() as cur:
+            await cur.execute(
+                """
+                SELECT status FROM public.projects
+                WHERE user_name = %s AND project_id = %s
+                FOR UPDATE
+                """,
+                (self.user_name, project_id),
+            )
+            project = await cur.fetchone()
+            if project is None or project["status"] != ProjectStatus.ACTIVE.value:
+                raise ValueError("Semantic participation requires an active project")
             await cur.execute(
                 """
                 SELECT session_id, semantic_participation_enabled
@@ -773,6 +861,84 @@ class ProjectManager:
             self._update_project_locked, project_id,
             name=name, description=description, allowed_projects=allowed_projects,
         )
+
+    async def add_workspace(
+        self, project_id: str, name: str, *, read_only: bool = False
+    ) -> dict[str, WorkspaceSettings]:
+        """Name a top-level folder as a workspace; raises ValueError for a bad
+        name, a duplicate, or a project already at the workspace limit."""
+        name = workspace_name(name)
+        settings = WorkspaceSettings(read_only=read_only)
+        limit = (
+            self._config_manager or ConfigManager.get()
+        ).config.developer_settings.documents.max_workspaces_per_project
+        row = await self.pg.fetch_one(
+            """UPDATE public.projects
+               SET workspaces = workspaces || jsonb_build_object(%(name)s, %(settings)s::jsonb),
+                   updated_at = now()
+               WHERE user_name = %(user_name)s AND project_id = %(project_id)s
+                 AND NOT workspaces ? %(name)s
+                 AND (SELECT count(*) FROM jsonb_object_keys(workspaces)) < %(limit)s
+               RETURNING workspaces""",
+            {"user_name": self.user_name, "project_id": project_id, "name": name,
+             "settings": settings.model_dump_json(), "limit": limit},
+        )
+        if row is None:
+            raise ValueError(f"Workspace exists or the project has {limit} already")
+        return parse_workspaces(row["workspaces"])
+
+    async def update_workspace(
+        self, project_id: str, name: str, changes: dict
+    ) -> dict[str, WorkspaceSettings] | None:
+        """Change some of a workspace's settings; None when it does not exist.
+        Raises ValueError for an unknown setting or a bad value."""
+        current = (await self._workspaces(project_id)).get(name)
+        if current is None:
+            return None
+        settings = WorkspaceSettings.model_validate({**current.model_dump(), **changes})
+        row = await self.pg.fetch_one(
+            """UPDATE public.projects
+               SET workspaces = jsonb_set(workspaces, ARRAY[%(name)s], %(settings)s::jsonb),
+                   updated_at = now()
+               WHERE user_name = %(user_name)s AND project_id = %(project_id)s
+                 AND workspaces ? %(name)s
+               RETURNING workspaces""",
+            {"user_name": self.user_name, "project_id": project_id, "name": name,
+             "settings": settings.model_dump_json()},
+        )
+        return None if row is None else parse_workspaces(row["workspaces"])
+
+    async def _workspaces(self, project_id: str) -> dict[str, WorkspaceSettings]:
+        row = await self.pg.fetch_one(
+            "SELECT workspaces FROM public.projects WHERE user_name = %s AND project_id = %s",
+            (self.user_name, project_id),
+        )
+        return {} if row is None else parse_workspaces(row["workspaces"])
+
+    async def remove_workspace(
+        self, project_id: str, name: str
+    ) -> dict[str, WorkspaceSettings] | None:
+        """Forget a workspace whose folder holds no documents; None when the
+        project has no workspace by that name. The folder itself stays."""
+        row = await self.pg.fetch_one(
+            """SELECT EXISTS (
+                   SELECT 1 FROM public.project_documents
+                   WHERE project_id = %(project_id)s AND status <> 'deleted'
+                     AND starts_with(relative_path, %(name)s || '/')
+               ) AS has_documents""",
+            {"project_id": project_id, "name": name},
+        )
+        if row["has_documents"]:
+            raise WorkspaceConflictError(f"Workspace '{name}' still has documents")
+        row = await self.pg.fetch_one(
+            """UPDATE public.projects
+               SET workspaces = workspaces - %(name)s, updated_at = now()
+               WHERE user_name = %(user_name)s AND project_id = %(project_id)s
+                 AND workspaces ? %(name)s
+               RETURNING workspaces""",
+            {"user_name": self.user_name, "project_id": project_id, "name": name},
+        )
+        return None if row is None else parse_workspaces(row["workspaces"])
 
     async def _mutate_project(self, operation, *args, **kwargs):
         """Keep admission excluded until an already-started mutation settles."""
@@ -925,12 +1091,12 @@ class ProjectManager:
                     project_id=project_id,
                 ):
                     return None
+                file_cleanup_status = await self._finish_project_file_cleanup(project_id)
+                await self._remove_project_sandbox(project_id)
                 return {
                     "id": project_id,
                     "status": ProjectStatus.DELETED.value,
-                    "file_cleanup_status": await self._finish_project_file_cleanup(
-                        project_id
-                    ),
+                    "file_cleanup_status": file_cleanup_status,
                 }
 
             active_state = self.active_projects.get(project_id)
@@ -958,6 +1124,8 @@ class ProjectManager:
                     project_id, lease=lease
                 )
 
+            await self._remove_project_sandbox(project_id)
+
             logger.info(
                 "Hard deleted project {} database state: {}; file cleanup: {}; "
                 "invalidated resolver caches: {}",
@@ -974,13 +1142,18 @@ class ProjectManager:
         self, project_id: str, session_id: str
     ) -> ProjectRuntime:
         """Acquire one exact session lease on a live project runtime."""
-        async with self.maintenance_service.lock:
-            if self._closed:
-                raise RuntimeError("ProjectManager is shutting down")
-            return await self._acquire_project_for_session(
-                project_id,
-                session_id,
-            )
+        while True:
+            async with self.maintenance_service.lock:
+                if self._closed:
+                    raise RuntimeError("ProjectManager is shutting down")
+                stopping = self._project_shutdown_tasks.get(project_id)
+                if stopping is None:
+                    return await self._acquire_project_for_session(
+                        project_id, session_id,
+                    )
+            # The last lease is settling outside the maintenance lock so jobs
+            # can finish their own maintenance work before scheduler shutdown.
+            await asyncio.shield(stopping)
 
     async def _acquire_project_for_session(
         self, project_id: str, session_id: str
@@ -1041,17 +1214,43 @@ class ProjectManager:
                 raise RuntimeError(
                     f"Session '{session_id}' does not hold a lease for project '{project_id}'"
                 )
-            if len(leases) > 1:
+            stopping = self._project_shutdown_tasks.get(project_id)
+            if stopping is None and len(leases) > 1:
                 leases.remove(session_id)
                 return
+            if stopping is None:
+                state = self.active_projects.get(project_id)
+                if state is None:
+                    leases.remove(session_id)
+                    self._project_leases.pop(project_id, None)
+                    return
+                stopping = asyncio.create_task(
+                    self._finish_final_project_release(project_id, session_id, state)
+                )
+                self._project_shutdown_tasks[project_id] = stopping
+        try:
+            await asyncio.shield(stopping)
+        except asyncio.CancelledError:
+            await settle_owned_task(stopping)
+            raise
 
-            state = self.active_projects.get(project_id)
-            if state is not None:
-                await state.shutdown()
-                self.active_projects.pop(project_id, None)
-                logger.info(f"Released ProjectRuntime for project_id: {project_id}")
-            leases.remove(session_id)
-            self._project_leases.pop(project_id, None)
+    async def _finish_final_project_release(
+        self, project_id: str, session_id: str, state: ProjectRuntime
+    ) -> None:
+        completed = False
+        try:
+            await state.shutdown()
+            completed = True
+        finally:
+            async with self.maintenance_service.lock:
+                if completed:
+                    if self.active_projects.get(project_id) is state:
+                        self.active_projects.pop(project_id, None)
+                    leases = self._project_leases[project_id]
+                    leases.remove(session_id)
+                    self._project_leases.pop(project_id, None)
+                    logger.info(f"Released ProjectRuntime for project_id: {project_id}")
+                self._project_shutdown_tasks.pop(project_id, None)
 
     async def shutdown(self) -> None:
         """Stop every remaining project runtime before shared resources close."""
@@ -1062,6 +1261,12 @@ class ProjectManager:
             if self._closed and not self.active_projects:
                 return
             self._closed = True
+            pending_releases = tuple(self._project_shutdown_tasks.values())
+
+        if pending_releases:
+            await asyncio.gather(*pending_releases, return_exceptions=True)
+
+        async with self.maintenance_service.lock:
             states = list(self.active_projects.items())
 
         results = await asyncio.gather(

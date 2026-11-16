@@ -3,6 +3,76 @@
 import math
 import re
 
+_OPTIONAL_TITLE = {"type": "string", "maxLength": 200}
+_BLOCK_CONTENT = {"type": "string", "minLength": 1, "maxLength": 20_000}
+# Mirrors common.schema.artifacts; without these shapes models guessed
+# {"type": ..., "body": ...} and every artifact was rejected.
+_ARTIFACT_BLOCK_SCHEMAS = [
+    {
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "enum": ["markdown"]},
+            "content": _BLOCK_CONTENT,
+        },
+        "required": ["kind", "content"],
+        "additionalProperties": False,
+    },
+    {
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "enum": ["callout"]},
+            "tone": {"type": "string", "enum": ["info", "success", "warning", "critical"]},
+            "title": _OPTIONAL_TITLE,
+            "content": _BLOCK_CONTENT,
+        },
+        "required": ["kind", "content"],
+        "additionalProperties": False,
+    },
+    {
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "enum": ["checklist"]},
+            "title": _OPTIONAL_TITLE,
+            "items": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 100,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "minLength": 1, "maxLength": 2_000},
+                        "completed": {"type": "boolean"},
+                    },
+                    "required": ["label"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["kind", "items"],
+        "additionalProperties": False,
+    },
+    {
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "enum": ["table"]},
+            "title": _OPTIONAL_TITLE,
+            "columns": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 20,
+                "items": {"type": "string"},
+            },
+            "rows": {
+                "type": "array",
+                "maxItems": 100,
+                "items": {"type": "array", "items": {"type": "string"}},
+            },
+        },
+        "required": ["kind", "columns"],
+        "additionalProperties": False,
+    },
+]
+
 TOOL_SCHEMAS = [
     {
         "type": "function",
@@ -309,10 +379,11 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "search_episodes",
             "description": (
-                "Retrieve contextual episodic memory about a specific entity, including "
-                "compact summaries and provenance references. Use read_episode_messages when the "
-                "original source messages are needed. Results are contextual memory, not "
-                "atomic claims."
+                "Search episodic memory by topic, optionally narrowed to one entity. Returns "
+                "compact summaries with their dates, entities, relationships and events; "
+                "the words of those events are searched too. Summaries "
+                "can omit details: use read_episode_messages to read an Episode's original "
+                "source messages. Results are contextual memory, not atomic claims."
             ),
             "parameters": {
                 "type": "object",
@@ -326,6 +397,45 @@ TOOL_SCHEMAS = [
                         "minLength": 1,
                         "description": "A natural language hint describing what you're looking for.",
                     },
+                    "alternate_queries": {
+                        "type": "array",
+                        "items": {"type": "string", "minLength": 1},
+                        "maxItems": 3,
+                        "description": (
+                            "Optional rewordings searched together with query, with one merged "
+                            "result. Use other words the original chat may have used: synonyms, "
+                            "specific names or things, or a broader topic. For example, for "
+                            "'what did I buy for the kitchen' also try 'new kitchen gadget' and "
+                            "'air fryer blender purchase'. These only help find memories; they "
+                            "are not evidence."
+                        ),
+                    },
+                    "after": {
+                        "type": "string",
+                        "description": (
+                            "Optional earliest date, such as 2023-05-20. Use with before only "
+                            "when the question names a time. Work relative times out from the "
+                            "current time, and allow a day either side when they are vague."
+                        ),
+                    },
+                    "before": {
+                        "type": "string",
+                        "description": "Optional latest date, inclusive, such as 2023-05-27.",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "default": 0,
+                        "description": (
+                            "Matches to skip, for the next page of a count or complete list; "
+                            "use next_offset from the last result with the same query."
+                        ),
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Optional smaller page; the page size setting is the most.",
+                    },
                 },
                 "required": ["query"],
             },
@@ -338,7 +448,8 @@ TOOL_SCHEMAS = [
             "name": "read_episode_messages",
             "description": (
                 "Expand a retrieved episode into all of its original source messages. "
-                "Use this to verify, quote, or reconcile an episode's details."
+                "Use this to verify, quote, or reconcile an episode's details, and "
+                "before saying a summary cannot confirm something."
             ),
             "parameters": {
                 "type": "object",
@@ -359,11 +470,107 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "grep_project_files",
+            "description": (
+                "Find lines containing some exact text in the project's files, read "
+                "straight from disk. Use for code, config and data in workspaces, which "
+                "are not in document search, or to find every use of a name. Returns "
+                "paths with line numbers; read more with read_project_file."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Exact text to find (not a regex)."},
+                    "path_prefix": {
+                        "type": "string",
+                        "description": "Optional folder to search in, such as a workspace name.",
+                    },
+                    "case_sensitive": {"type": "boolean", "default": False},
+                    "max_results": {"type": "integer", "minimum": 1, "maximum": 100, "default": 30},
+                },
+                "required": ["text"],
+            },
+            "tags": ["core"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_answer_sources",
+            "description": (
+                "List the sources saved with an earlier answer in this chat: documents, "
+                "web pages, and search results it cited, with short excerpts. Use when the "
+                "user asks where an answer came from or what it was based on."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "answers_back": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "default": 1,
+                        "description": "1 for the latest answer, 2 for the one before it, and so on.",
+                    }
+                },
+                "required": [],
+            },
+            "tags": ["core"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_events",
+            "description": (
+                "List things the user reported doing, by when they happened: trips, "
+                "purchases, things received, events attended, things started or "
+                "finished, moves, meetings. Each line is one mention with a date or "
+                "date range and its Episode. Use for 'what did I do last month', "
+                "'which came first', and 'how many X in a time span'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "after": {
+                        "type": "string",
+                        "description": "Optional earliest date, such as 2023-03-01.",
+                    },
+                    "before": {
+                        "type": "string",
+                        "description": "Optional latest date, inclusive, such as 2023-03-31.",
+                    },
+                    "kind": {
+                        "type": "string",
+                        "enum": [
+                            "trip", "purchase", "received", "attended", "started",
+                            "finished", "moved", "met", "other",
+                        ],
+                        "description": "Optional kind; also returns events labeled other. Leave out to see every kind.",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Optional words to match in the event description; the best matches come first.",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "default": 0,
+                        "description": "Events to skip; use next_offset from the last result.",
+                    },
+                },
+                "required": [],
+            },
+            "tags": ["graph:read", "core"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "read_recent_episodes",
             "description": (
-                "Return the most recent episode summaries by source chronology from "
-                "readable project memory without searching or requiring an episode ID. Use for "
-                "requests such as 'what was the last episode?' or 'show the last few memories'."
+                "Browse episodes newest first without searching or requiring an episode ID, "
+                "optionally within a date range. Use for requests such as 'what was the last "
+                "episode?', 'show the last few memories' or 'what happened on May 20?'."
             ),
             "parameters": {
                 "type": "object",
@@ -376,7 +583,21 @@ TOOL_SCHEMAS = [
                             "Optional number of recent episodes to return; defaults to 2 "
                             "and is bounded by the configured episode retrieval limit."
                         ),
-                    }
+                    },
+                    "after": {
+                        "type": "string",
+                        "description": "Optional earliest date, such as 2023-05-20.",
+                    },
+                    "before": {
+                        "type": "string",
+                        "description": "Optional latest date, inclusive, such as 2023-05-27.",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "default": 0,
+                        "description": "Episodes to skip; use next_offset from the last result.",
+                    },
                 },
                 "required": [],
             },
@@ -746,7 +967,9 @@ TOOL_SCHEMAS = [
             "description": (
                 "Read a bounded range of canonical text from one public web page "
                 "or one page of an external PDF. "
-                "Use a URL supplied by the user or returned by a web search. "
+                "Only URLs from the user's messages, a web search or a page read in "
+                "this run, or the project's saved links can be read, exactly as given; "
+                "for any other link, ask the user to send it. "
                 "For a large page, provide query to locate one relevant bounded "
                 "section instead of choosing start_line; for a PDF, provide "
                 "page_number instead. "
@@ -804,6 +1027,174 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "start_background_task",
+            "description": (
+                "Start a task that runs in the background in its own chat, so the "
+                "user can keep talking. Its report arrives in this chat when it "
+                "finishes. Use mode normal for ordinary work (it has this chat's "
+                "tools), research or deep_research for research needing many "
+                "searches or page reads, or a long list of links."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 4000,
+                        "description": (
+                            "The complete request, with any context from this "
+                            "chat it needs; the task cannot see this chat. If "
+                            "the user wants results saved, give the project "
+                            "file path to write them to."
+                        ),
+                    },
+                    "links": {
+                        "type": "array",
+                        "items": {"type": "string", "minLength": 1},
+                        "description": "Links the task must read, if the user gave any.",
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["normal", "research", "deep_research"],
+                        "default": "normal",
+                        "description": (
+                            "normal for ordinary work; research and deep_research "
+                            "plan the work and read more sources, deep_research most."
+                        ),
+                    },
+                },
+                "required": ["question"],
+                "additionalProperties": False,
+            },
+            "tags": ["jobs", "external:read"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_background_tasks",
+            "description": (
+                "List the background tasks started from this chat and their "
+                "states. An interrupted task was cut off by a restart; running it "
+                "again starts over and costs a full task, so ask the user before "
+                "starting it again."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+            "tags": ["jobs"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cancel_background_task",
+            "description": "Stop one background task started from this chat.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "string", "minLength": 1, "maxLength": 64},
+                },
+                "required": ["job_id"],
+                "additionalProperties": False,
+            },
+            "tags": ["jobs"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "record_finding",
+            "description": (
+                "Record one research finding as soon as a source you read supports "
+                "it. Each source needs its notebook reference (such as WR1) and a "
+                "short exact quote from what you read there. Recorded findings are "
+                "shown on every step and fill research_coverage."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "subquestion": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "The planned subquestion this answers: its exact text or number.",
+                    },
+                    "claim": {"type": "string", "minLength": 1, "maxLength": 600},
+                    "sources": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 3,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "reference": {"type": "string", "minLength": 1},
+                                "quote": {"type": "string", "minLength": 1, "maxLength": 500},
+                            },
+                            "required": ["reference", "quote"],
+                            "additionalProperties": False,
+                        },
+                    },
+                    "reference": {
+                        "type": "string",
+                        "description": "For a single source, its reference instead of sources.",
+                    },
+                    "quote": {
+                        "type": "string",
+                        "maxLength": 500,
+                        "description": "For a single source, its quote instead of sources.",
+                    },
+                    "strength": {
+                        "type": "string",
+                        "enum": ["supported", "partial", "contested"],
+                        "default": "supported",
+                        "description": "contested when sources disagree.",
+                    },
+                    "gap": {
+                        "type": "string",
+                        "maxLength": 600,
+                        "description": "What remains unknown about this, if anything.",
+                    },
+                },
+                "required": ["subquestion", "claim"],
+                # Models often repeat a quote at the top level; it is ignored
+                # rather than failing the whole finding.
+                "additionalProperties": True,
+            },
+            "tags": ["research"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_findings",
+            "description": (
+                "Save this run's recorded findings, with their quotes and sources, "
+                "to a new project file, and list the file in the project's "
+                "'Research findings' notebook. Use it when the user asked for the "
+                "findings to be saved."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 512,
+                        "description": "New project file path, such as research/topic.md.",
+                    },
+                },
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+            "tags": ["research", "project-files:write"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "set_research_plan",
             "description": (
                 "Set the material subquestions for this research run before "
@@ -855,10 +1246,14 @@ TOOL_SCHEMAS = [
                                 "type": "array",
                                 "minItems": 1,
                                 "maxItems": 50,
-                                "items": {
-                                    "type": "object",
-                                    "additionalProperties": True,
-                                },
+                                "description": (
+                                    "Ordered blocks. Each has a kind: markdown "
+                                    "{kind, content}, callout {kind, tone, title, "
+                                    "content}, checklist {kind, title, items: "
+                                    "[{label, completed}]}, or table {kind, title, "
+                                    "columns, rows}."
+                                ),
+                                "items": {"anyOf": _ARTIFACT_BLOCK_SCHEMAS},
                             },
                             "status": {
                                 "type": "string",
@@ -974,12 +1369,12 @@ TOOL_SCHEMAS = [
                     "evidence_message_ids": {
                         "type": "array",
                         "items": {"type": "integer", "minimum": 1},
-                        "description": "Numeric message IDs that support the proposal."
+                        "description": "Numeric message IDs that support the proposal. Provide this, evidence_episode_ids, or both."
                     },
                     "evidence_episode_ids": {
                         "type": "array",
                         "items": {"type": "string", "minLength": 4},
-                        "description": "Episode IDs (for example ep_a3f91c) that support the proposal."
+                        "description": "Episode IDs (for example ep_a3f91c) that support the proposal. Provide this, evidence_message_ids, or both."
                     },
                     "expected_state_hash": {
                         "type": "string",
@@ -990,14 +1385,12 @@ TOOL_SCHEMAS = [
                         ),
                     }
                 },
+                # At least one evidence list is required; the merge service
+                # enforces it. Top-level anyOf is rejected by OpenAI models.
                 "required": [
                     "primary_id",
                     "duplicate_id",
                     "reasoning"
-                ],
-                "anyOf": [
-                    {"required": ["evidence_message_ids"]},
-                    {"required": ["evidence_episode_ids"]}
                 ]
             },
             "tags": ["graph", "core"]
@@ -1129,6 +1522,61 @@ TOOL_SCHEMAS = [
                 "additionalProperties": False,
             },
             "tags": ["project-files:read", "project", "core"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_command_workspaces",
+            "description": "List the current project's workspaces and show which are read-only for commands.",
+            "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+            "tags": ["project", "core", "workspace:command"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "install_python_package",
+            "description": (
+                "Ask the user to approve installing one exact-version Python package "
+                "through a temporary networked container. Install into the project's "
+                "persistent home volume; the normal command container stays offline."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "package": {"type": "string", "minLength": 4, "maxLength": 260,
+                                "description": "Exact package and version, e.g. colorama==0.4.6."},
+                    "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 900},
+                },
+                "required": ["package"],
+                "additionalProperties": False,
+            },
+            "tags": ["project", "core", "workspace:install"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_workspace_command",
+            "description": (
+                "Run a non-interactive shell command in one configured project workspace. "
+                "The container has no network by default. Output is bounded and the "
+                "command has a hard time limit. Choose the workspace explicitly."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "workspace": {"type": "string", "minLength": 1, "maxLength": 100},
+                    "command": {"type": "string", "minLength": 1, "maxLength": 20000},
+                    "cwd": {"type": "string", "minLength": 1, "maxLength": 512,
+                            "description": "Existing directory relative to the workspace root (default .)."},
+                    "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 900},
+                },
+                "required": ["workspace", "command"],
+                "additionalProperties": False,
+            },
+            "tags": ["project", "core", "workspace:command"],
         },
     },
     {
@@ -1310,11 +1758,14 @@ _TOOL_CAPABILITIES = {
     "propose_entity_merge": REVERSIBLE_WRITE_CAPABILITY,
     "report_relationship_conflict": REVERSIBLE_WRITE_CAPABILITY,
     "create_project_file": REVERSIBLE_WRITE_CAPABILITY,
+    "run_workspace_command": REVERSIBLE_WRITE_CAPABILITY,
+    "install_python_package": REVERSIBLE_WRITE_CAPABILITY,
     "update_project_file": REVERSIBLE_WRITE_CAPABILITY,
     "append_project_file": REVERSIBLE_WRITE_CAPABILITY,
     "move_project_file": REVERSIBLE_WRITE_CAPABILITY,
     "delete_project_file": REVERSIBLE_WRITE_CAPABILITY,
     "create_project_folder": REVERSIBLE_WRITE_CAPABILITY,
+    "save_findings": REVERSIBLE_WRITE_CAPABILITY,
 }
 
 for _schema in TOOL_SCHEMAS:

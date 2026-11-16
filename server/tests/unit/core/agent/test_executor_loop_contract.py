@@ -17,6 +17,7 @@ from core.agent.prompt_context import build_evidence_context
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 from core.agent.sources.document_selection import build_document_selection_candidate
 from core.agent.sources.pasted_text import build_pasted_text_candidates
+from infrastructure.llm_client import system_text
 
 
 def make_run(
@@ -64,7 +65,8 @@ class ScriptedLLM:
         self.calls = []
 
     async def stream_with_tools(self, **kwargs):
-        self.calls.append(kwargs)
+        # Record the joined system prompt; the executor sends cacheable parts.
+        self.calls.append({**kwargs, "system": system_text(kwargs["system"])})
         for event in self.steps.pop(0):
             yield event
 
@@ -73,6 +75,35 @@ class ScriptedLLM:
 
     async def generate_text(self, **_kwargs):
         return "A concise evidence summary."
+
+
+@pytest.mark.no_network
+async def test_steer_enters_the_next_model_prompt_after_an_active_step():
+    llm = ScriptedLLM([
+        [{"event": "step_error", "data": {"kind": "provider", "message": "retry"}}],
+        [tool_call_event("submit_answer", '{"content":"done"}', "submit-1"), completed_event()],
+    ])
+    run = make_run(user_query="Original request")
+    calls = 0
+
+    async def take_steer():
+        nonlocal calls
+        calls += 1
+        return {
+            2: {"steer_id": "steer-1", "instruction": "Focus on recovery"},
+            3: {"steer_id": "steer-2", "instruction": "Check the timeline"},
+        }.get(calls)
+
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None), take_steer=take_steer)
+    events = [event async for event in executor._execute_run()]
+
+    assert len(llm.calls) == 2
+    assert "Focus on recovery" not in llm.calls[0]["user"]
+    assert "Focus on recovery" in llm.calls[1]["user"]
+    assert "Check the timeline" in llm.calls[1]["user"]
+    assert [event["event"] for event in events][-3:] == [
+        "steer_applied", "steer_applied", "response"
+    ]
 
 
 def tool_call_event(name, arguments, call_id):
@@ -559,21 +590,16 @@ async def test_executor_loop_accumulates_context_across_reasoning_attempts(
     assert events[-1]["event"] == "response"
     assert events[-1]["data"]["content"] == "Both facts are retained."
     assert len(llm.calls) == 4
-    assert [call["model"] for call in llm.calls] == [
-        "architect",
-        "librarian",
-        "librarian",
-        "architect",
-    ]
+    assert [call["model"] for call in llm.calls] == ["architect"] * 4
     assert [call["reasoning"] for call in llm.calls] == [
         "high",
         "medium",
         "medium",
         "high",
     ]
-    assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[0]["system"]
-    assert "CURRENT EXECUTION PHASE: EXECUTE" in llm.calls[1]["system"]
-    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[-1]["system"]
+    assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[0]["user"]
+    assert "CURRENT EXECUTION PHASE: EXECUTE" in llm.calls[1]["user"]
+    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[-1]["user"]
     assert [schema["function"]["name"] for schema in llm.calls[-1]["tools"]] == [
         "request_clarification",
         "submit_answer",
@@ -730,7 +756,7 @@ async def test_final_synthesis_receives_each_admitted_evidence_kind(monkeypatch)
 
     assert events[-1]["data"]["content"] == "Final answer from all admitted evidence."
     assert len(llm.calls) == 7
-    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[-1]["system"]
+    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[-1]["user"]
     final_prompt = llm.calls[-1]["user"]
     assert "ep_a3f91c: EPISODE_A" in final_prompt
     assert (
@@ -826,11 +852,11 @@ async def test_final_synthesis_receives_episode_reversal_chronology(monkeypatch)
     assert "chronology: 2026-01-01T10:00:00+00:00" in final_prompt
     assert "chronology: 2026-02-01T10:00:00+00:00" in final_prompt
     assert (
-        "When multiple retrieved Episodes describe a change or reversal"
+        "Interpret changes using event chronology and explicit corrections"
         in llm.calls[-1]["system"]
     )
     assert (
-        "A later, supported state is the best available current state"
+        "A newer statement replaces an earlier state only\nwhen it establishes a change to the same subject"
         in llm.calls[-1]["system"]
     )
 
@@ -970,7 +996,7 @@ async def test_capacity_rejection_records_no_sources_and_allows_a_narrow_retry(
     assert "Wide result one" not in llm.calls[1]["user"]
     assert "WIDE_RESULT_ONE" not in llm.calls[1]["user"]
     assert "Found 2 items" not in llm.calls[1]["user"]
-    assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[1]["system"]
+    assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[1]["user"]
     assert calls == [
         ("search_web", {"query": "wide release history"}),
         ("search_web", {"query": "narrow release history"}),
@@ -1081,7 +1107,39 @@ async def test_executor_automatically_replans_after_empty_evidence(monkeypatch):
 
     assert events[-1]["data"]["content"] == "Still looking."
     assert [call["model"] for call in llm.calls] == ["architect", "architect"]
-    assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[1]["system"]
+    assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[1]["user"]
+
+
+@pytest.mark.no_network
+async def test_searching_an_empty_memory_ends_in_an_answer_not_the_attempt_limit(monkeypatch):
+    searches = [
+        [tool_call_event("search_knowledge_entities", f'{{"query": "SQLite {index}"}}', f"s-{index}"),
+         completed_event()]
+        for index in range(4)
+    ]
+    llm = ScriptedLLM([
+        *searches,
+        [tool_call_event("submit_answer", '{"content": "Nothing in memory; SQLite is an embedded database."}', "answer"),
+         completed_event()],
+    ])
+    run = make_run(limits=AgentRunLimits(
+        max_attempts=15, max_calls=15, empty_result_replan_threshold=2,
+        empty_replans_before_answer=2,
+    ))
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+
+    async def empty_result(*_args):
+        return {"data": []}
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", empty_result)
+
+    events = [event async for event in executor._execute_run()]
+
+    assert events[-1]["event"] == "response"
+    assert events[-1]["data"]["content"].startswith("Nothing in memory")
+    # Two empty steps force a replan; two more empty steps go straight to answering.
+    assert len(llm.calls) == 5
+    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[4]["user"]
 
 
 @pytest.mark.no_network
@@ -1127,7 +1185,7 @@ async def test_research_modes_reject_ungrounded_terminal_answers(mode):
     ]
     assert run.call_count == 0
     assert len(llm.calls) == 2
-    assert all("CURRENT EXECUTION PHASE: PLAN" in call["system"] for call in llm.calls)
+    assert all("CURRENT EXECUTION PHASE: PLAN" in call["user"] for call in llm.calls)
     assert (
         "Research mode requires grounded investigation evidence before submit_answer."
         in llm.calls[1]["user"]
@@ -1368,6 +1426,34 @@ async def test_research_accepts_validated_supplied_evidence_without_dispatch(
 
 
 @pytest.mark.no_network
+async def test_research_coverage_nested_in_the_artifact_is_accepted():
+    llm = ScriptedLLM(
+        [
+            [
+                tool_call_event(
+                    "submit_answer",
+                    '{"content": "Answer from supplied evidence.", "artifact": {"kind": "research_brief", "title": "Brief", "blocks": [{"kind": "markdown", "content": "Answer."}], "research_coverage": [{"subquestion": "What changed?", "supporting_references": [], "unresolved_gap": "Evidence was supplied outside the run notebook."}]}}',
+                    "submit-nested",
+                ),
+                completed_event(),
+            ]
+        ]
+    )
+    run = make_run(
+        limits=AgentRunLimits(max_attempts=1, max_calls=1),
+        research_profile=resolve_research_profile("research"),
+        initial_source_candidates=_validated_initial_source_candidates("pasted_text"),
+    )
+    assert run.set_research_plan(["What changed?"]) is None
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+
+    events = [event async for event in executor._execute_run()]
+
+    assert events[-1]["event"] == "response"
+    assert events[-1]["data"]["artifact"]["title"] == "Brief"
+
+
+@pytest.mark.no_network
 async def test_research_plan_is_frozen_before_completion():
     llm = ScriptedLLM(
         [
@@ -1524,10 +1610,10 @@ async def test_deep_research_performs_one_gap_review_before_synthesis(monkeypatc
         "architect",
     ]
     assert [call["reasoning"] for call in llm.calls] == ["high", "high", "high"]
-    assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[0]["system"]
-    assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[1]["system"]
-    assert "<deep_research_gap_review>" in llm.calls[1]["system"]
-    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[2]["system"]
+    assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[0]["user"]
+    assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[1]["user"]
+    assert "<deep_research_gap_review>" in llm.calls[1]["user"]
+    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[2]["user"]
 
 
 @pytest.mark.no_network
@@ -1575,12 +1661,13 @@ async def test_executor_reserves_one_synthesis_attempt_after_normal_budget(
     events = [event async for event in executor._execute_run()]
 
     assert events[-1]["data"]["content"] == "Final answer."
+    # One model per run keeps the provider prompt cache warm across steps.
     assert [call["model"] for call in llm.calls] == [
         "architect",
-        "librarian",
+        "architect",
         "architect",
     ]
-    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[-1]["system"]
+    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[-1]["user"]
     assert run.attempt_count == 3
     assert run.synthesis_attempt_count == 1
 
@@ -1637,7 +1724,7 @@ async def test_executor_replans_after_mixed_terminal_batch_without_dispatch(
     assert run.call_count == 0
     assert run.tool_call_counts == {}
     assert len(llm.calls) == 2
-    assert all("CURRENT EXECUTION PHASE: PLAN" in call["system"] for call in llm.calls)
+    assert all("CURRENT EXECUTION PHASE: PLAN" in call["user"] for call in llm.calls)
     assert "Terminal protocol tools must be called alone." in llm.calls[1]["user"]
     assert secret not in llm.calls[1]["user"]
 
@@ -1734,21 +1821,21 @@ async def test_executor_rejects_hidden_synthesis_write_without_dispatch(monkeypa
 
     events = [event async for event in executor._execute_run()]
 
-    assert events[-1]["event"] == "clarification"
+    # The rejected synthesis falls back to the answer submitted before it.
+    assert events[-1]["event"] == "response"
+    assert events[-1]["data"]["content"] == "Draft answer."
+    assert secret not in str(events[-1]["data"])
     assert [
         event["data"]["tool"] for event in events if event["event"] == "tool_start"
     ] == ["search_knowledge_messages"]
     assert dispatched == [("search_knowledge_messages", {"query": "profile", "limit": 3})]
     assert run.call_count == 1
-    assert len(llm.calls) == 4
-    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[2]["system"]
+    assert len(llm.calls) == 3
+    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[2]["user"]
     assert [schema["function"]["name"] for schema in llm.calls[2]["tools"]] == [
         "request_clarification",
         "submit_answer",
     ]
-    assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[3]["system"]
-    assert "Returned tool is not allowed during SYNTHESIZE." in llm.calls[3]["user"]
-    assert secret not in llm.calls[3]["user"]
 
 
 @pytest.mark.no_network
@@ -1807,7 +1894,7 @@ async def test_topic_context_evidence_triggers_final_synthesis(monkeypatch):
     assert "load_project_topic_context" in [
         schema["function"]["name"] for schema in llm.calls[0]["tools"]
     ]
-    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[-1]["system"]
+    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[-1]["user"]
     messages = run.notebook.section_items("messages")
     assert messages[0]["id"] == "msg_7"
     assert messages[0]["context"][0]["content"] == ("The offer changes compensation.")
@@ -2330,7 +2417,11 @@ async def test_parallel_read_reports_notebook_capacity_rejection(monkeypatch):
     executor = AgentExecutor(run, ScriptedLLM([]), SimpleNamespace(document_service=None))
 
     async def result_for_query(_tools, name, args):
-        return {"data": [{"id": args["query"], "message": name}]}
+        return {
+            "data": [
+                {"id": query, "message": name} for query in args["query"].split(",")
+            ]
+        }
 
     monkeypatch.setattr("core.agent.executor.execute_tool", result_for_query)
     results = []
@@ -2339,7 +2430,11 @@ async def test_parallel_read_reports_notebook_capacity_rejection(monkeypatch):
         async for event in executor._execute_tools(
             [
                 ToolCall("search_knowledge_messages", {"query": "first"}, call_id="first"),
-                ToolCall("search_knowledge_messages", {"query": "second"}, call_id="second"),
+                ToolCall(
+                    "search_knowledge_messages",
+                    {"query": "second,third"},
+                    call_id="second",
+                ),
             ],
             results,
         )
@@ -2438,3 +2533,53 @@ async def test_parallel_batch_propagates_process_level_failures_and_cleans_up(
         await task
 
     assert sibling_finished is True
+
+
+@pytest.mark.no_network
+async def test_feedback_errors_reach_the_model_without_ending_the_run(monkeypatch):
+    run = make_run(limits=AgentRunLimits(max_consecutive_errors=1))
+    executor = AgentExecutor(run, ScriptedLLM([]), SimpleNamespace())
+
+    async def reject(_tools, name, _args):
+        raise ToolExecutionError(name, "The quote for WR1 is not in what was read from it", {"nonfatal": True})
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", reject)
+    results = []
+    events = [
+        event
+        async for event in executor._execute_tools(
+            [ToolCall("search_knowledge_messages", {"query": "q"}, call_id="c1")],
+            results,
+        )
+    ]
+
+    assert events[-1]["event"] == "tool_error"
+    assert "not in what was read" in results[-1]["error"]
+    assert run.consecutive_errors == 0
+    assert "not in what was read" in run.last_error
+
+
+@pytest.mark.no_network
+async def test_events_a_tool_sends_while_running_reach_the_run_stream(monkeypatch):
+    from core.agent.tool_events import emit_tool_event
+
+    run = make_run(limits=AgentRunLimits(max_calls=3))
+    executor = AgentExecutor(run, ScriptedLLM([]), SimpleNamespace())
+
+    async def fake_execute(_tools, name, _args):
+        emit_tool_event("command_output", {"text": "building..."})
+        return {"data": [{"id": "ok", "message": "done"}]}
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", fake_execute)
+
+    events = [
+        event
+        async for event in executor._execute_tools(
+            [ToolCall("search_knowledge_entities", {"query": "Ada"}, call_id="c1")], []
+        )
+    ]
+
+    assert [event["event"] for event in events] == ["tool_start", "command_output", "tool_end"]
+    assert events[1]["data"] == {
+        "text": "building...", "call_id": "c1", "tool": "search_knowledge_entities",
+    }

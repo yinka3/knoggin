@@ -1,10 +1,8 @@
-import asyncio
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 
-from core.knowledge.db.readers.entity_reader import EntityReader
 from core.knowledge.db.writers.episode_writer import EpisodeWriter
 from core.knowledge.db.writers.graph_writer import GraphWriter
 from core.knowledge.entity.maintenance_service import EntityMaintenanceService
@@ -104,28 +102,36 @@ async def test_duplicate_candidate_limit_keeps_the_strongest_pair(
     assert candidates[0]["message_ref_count"] == 4
 
 
-async def _seed_context_block(client, associations, *, project_id="project-1"):
-    block_id = uuid4()
+async def _seed_message_refs(client, refs, *, message_id=901, project_id="project-1"):
+    """One message in ``project_id`` naming each entity in ``refs``."""
+
+    session_id = f"session-{project_id}"
     await client.execute(
-        """
-        INSERT INTO public.project_context_blocks (
-            block_id, project_id, section_key, markdown, content_hash,
-            assertion_kind
-        ) VALUES (%s, %s, 'current_state', 'Ada identity evidence.',
-                  %s, 'source_grounded')
-        """,
-        (block_id, project_id, "a" * 64),
+        "INSERT INTO public.sessions (session_id, user_name, project_id) "
+        "VALUES (%s, 'ada', %s) ON CONFLICT DO NOTHING",
+        (session_id, project_id),
     )
-    for entity_id, mention_text in associations:
+    await client.execute(
+        """INSERT INTO public.messages
+           (user_name, session_id, message_id, project_id, role, content, timestamp_ms)
+           VALUES ('ada', %s, %s, %s, 'user', 'Ada identity evidence.', 1000)""",
+        (session_id, message_id, project_id),
+    )
+    for entity_id in refs:
         await client.execute(
-            """
-            INSERT INTO public.context_block_entities (
-                block_id, project_id, entity_id, mention_text
-            ) VALUES (%s, %s, %s, %s)
-            """,
-            (block_id, project_id, entity_id, mention_text),
+            "INSERT INTO public.message_entity_refs (message_id, entity_id) VALUES (%s, %s)",
+            (message_id, entity_id),
         )
-    return block_id
+    return message_id
+
+
+async def _refs(client, message_id):
+    rows = await client.fetch_all(
+        "SELECT entity_id FROM public.message_entity_refs WHERE message_id = %s "
+        "ORDER BY entity_id",
+        (message_id,),
+    )
+    return [row["entity_id"] for row in rows]
 
 
 async def _seed_semantic_window(
@@ -170,10 +176,7 @@ async def test_confirmed_global_merge_and_rollback_repair_durable_state(
     real_postgres_client,
 ):
     await _seed_entities(real_postgres_client)
-    block_id = await _seed_context_block(
-        real_postgres_client,
-        [(3, "Augusta Ada King")],
-    )
+    message_id = await _seed_message_refs(real_postgres_client, [3])
     service = EntityMaintenanceService(
         postgres=real_postgres_client,
         user_name="ada",
@@ -201,7 +204,6 @@ async def test_confirmed_global_merge_and_rollback_repair_durable_state(
         expected_state=review.expected_state,
     )
 
-    assert merged["projection_errors"] == []
     assert await real_postgres_client.fetch_one(
         """
         SELECT status, redirect_entity_id
@@ -221,19 +223,11 @@ async def test_confirmed_global_merge_and_rollback_repair_durable_state(
         ORDER BY entity_id
         """
     ) == [{"entity_id": 2}]
-    assert await real_postgres_client.fetch_all(
-        """
-        SELECT entity_id, mention_text
-        FROM public.context_block_entities
-        WHERE block_id = %s
-        """,
-        (block_id,),
-    ) == [{"entity_id": 2, "mention_text": "Augusta Ada King"}]
+    assert await _refs(real_postgres_client, message_id) == [2]
 
     rolled_back = await service.rollback(merged["merge_id"])
 
     assert rolled_back["rolled_back"] is True, rolled_back
-    assert rolled_back["projection_errors"] == []
     assert await real_postgres_client.fetch_one(
         """
         SELECT status, redirect_entity_id
@@ -249,26 +243,17 @@ async def test_confirmed_global_merge_and_rollback_repair_durable_state(
         ORDER BY entity_id
         """
     ) == [{"entity_id": 2}, {"entity_id": 3}]
-    assert await real_postgres_client.fetch_all(
-        """
-        SELECT entity_id, mention_text
-        FROM public.context_block_entities
-        WHERE block_id = %s
-        """,
-        (block_id,),
-    ) == [{"entity_id": 3, "mention_text": "Augusta Ada King"}]
+    assert await _refs(real_postgres_client, message_id) == [3]
 
 
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
-async def test_cancelled_merge_projection_repair_is_durable_and_retries_from_audit(
+async def test_global_merge_rejects_a_preview_when_entity_evidence_changes(
     real_postgres_client,
-    monkeypatch,
 ):
-    """A post-commit interruption must not lose the projection-repair obligation."""
-
     await _seed_entities(real_postgres_client)
+    await _seed_message_refs(real_postgres_client, [3])
     service = EntityMaintenanceService(
         postgres=real_postgres_client,
         user_name="ada",
@@ -277,395 +262,7 @@ async def test_cancelled_merge_projection_repair_is_durable_and_retries_from_aud
         survivor_entity_id=2,
         retired_entity_id=3,
     )
-
-    async def cancel_before_rebuild(*_args, **_kwargs):
-        raise asyncio.CancelledError()
-
-    monkeypatch.setattr(
-        service.projection_rebuilder,
-        "rebuild_project_projection",
-        cancel_before_rebuild,
-    )
-
-    with pytest.raises(asyncio.CancelledError):
-        await service.merge(preview["plan"])
-
-    audit = await real_postgres_client.fetch_one(
-        """
-        SELECT merge_id, status, failure_reason
-        FROM public.entity_global_merge_audits
-        WHERE user_name = 'ada' AND survivor_entity_id = 2 AND retired_entity_id = 3
-        """
-    )
-    assert audit is not None
-    assert audit["status"] == "executed"
-    assert audit["failure_reason"] == "projection_repair_pending"
-    assert await service.projection_repair_health() == {
-        "pending_count": 1,
-        "truncated": False,
-    }
-    mutation_count = await real_postgres_client.fetch_one(
-        """
-        SELECT count(*) AS count
-        FROM public.entity_global_merge_mutations
-        WHERE merge_id = %s
-        """,
-        (audit["merge_id"],),
-    )
-    assert mutation_count is not None
-
-    restarted_service = EntityMaintenanceService(
-        postgres=real_postgres_client,
-        user_name="ada",
-    )
-    repaired = await restarted_service.repair_merge_projections(audit["merge_id"])
-
-    assert repaired["canonical_status"] == "executed"
-    assert repaired["projection_repaired"] is True
-    assert await restarted_service.projection_repair_health() == {
-        "pending_count": 0,
-        "truncated": False,
-    }
-    assert await real_postgres_client.fetch_one(
-        """
-        SELECT status, redirect_entity_id
-        FROM public.entities
-        WHERE entity_id = 3
-        """
-    ) == {"status": "redirected", "redirect_entity_id": 2}
-    assert await real_postgres_client.fetch_one(
-        """
-        SELECT count(*) AS count
-        FROM public.entity_global_merge_mutations
-        WHERE merge_id = %s
-        """,
-        (audit["merge_id"],),
-    ) == mutation_count
-
-
-@pytest.mark.storage
-@pytest.mark.requires_postgres
-@pytest.mark.no_network
-async def test_cancellation_after_merge_projection_rebuild_keeps_durable_marker(
-    real_postgres_client,
-    monkeypatch,
-):
-    """Cancellation between successful rebuild and marker clearing is recoverable."""
-
-    await _seed_entities(real_postgres_client)
-    service = EntityMaintenanceService(
-        postgres=real_postgres_client,
-        user_name="ada",
-    )
-    preview = await service.preview_merge(
-        survivor_entity_id=2,
-        retired_entity_id=3,
-    )
-    rebuilt = False
-    rebuild = service.projection_rebuilder.rebuild_project_projection
-
-    async def rebuild_then_continue(*args, **kwargs):
-        nonlocal rebuilt
-        result = await rebuild(*args, **kwargs)
-        rebuilt = True
-        return result
-
-    async def cancel_before_clearing_marker(*_args, **_kwargs):
-        raise asyncio.CancelledError()
-
-    monkeypatch.setattr(
-        service.projection_rebuilder,
-        "rebuild_project_projection",
-        rebuild_then_continue,
-    )
-    monkeypatch.setattr(
-        service,
-        "_record_projection_repair_state",
-        cancel_before_clearing_marker,
-    )
-
-    with pytest.raises(asyncio.CancelledError):
-        await service.merge(preview["plan"])
-
-    assert rebuilt is True
-    audit = await real_postgres_client.fetch_one(
-        """
-        SELECT merge_id, failure_reason
-        FROM public.entity_global_merge_audits
-        WHERE user_name = 'ada' AND survivor_entity_id = 2 AND retired_entity_id = 3
-        """
-    )
-    assert audit is not None
-    assert audit["failure_reason"] == "projection_repair_pending"
-
-    repaired = await EntityMaintenanceService(
-        postgres=real_postgres_client,
-        user_name="ada",
-    ).repair_merge_projections(audit["merge_id"])
-
-    assert repaired["projection_repaired"] is True
-    assert await real_postgres_client.fetch_one(
-        "SELECT failure_reason FROM public.entity_global_merge_audits WHERE merge_id = %s",
-        (audit["merge_id"],),
-    ) == {"failure_reason": None}
-
-
-@pytest.mark.storage
-@pytest.mark.requires_postgres
-@pytest.mark.no_network
-async def test_cancelled_rollback_projection_repair_is_durable_and_retries_from_audit(
-    real_postgres_client,
-    monkeypatch,
-):
-    """Rollback records the same durable repair obligation before rebuilding."""
-
-    await _seed_entities(real_postgres_client)
-    service = EntityMaintenanceService(
-        postgres=real_postgres_client,
-        user_name="ada",
-    )
-    preview = await service.preview_merge(
-        survivor_entity_id=2,
-        retired_entity_id=3,
-    )
-    merged = await service.merge(preview["plan"])
-
-    async def cancel_before_rebuild(*_args, **_kwargs):
-        raise asyncio.CancelledError()
-
-    monkeypatch.setattr(
-        service.projection_rebuilder,
-        "rebuild_project_projection",
-        cancel_before_rebuild,
-    )
-
-    with pytest.raises(asyncio.CancelledError):
-        await service.rollback(merged["merge_id"])
-
-    audit = await real_postgres_client.fetch_one(
-        """
-        SELECT status, failure_reason
-        FROM public.entity_global_merge_audits
-        WHERE merge_id = %s
-        """,
-        (merged["merge_id"],),
-    )
-    assert audit == {
-        "status": "rolled_back",
-        "failure_reason": "projection_repair_pending",
-    }
-    assert await real_postgres_client.fetch_one(
-        "SELECT status, redirect_entity_id FROM public.entities WHERE entity_id = 3"
-    ) == {"status": "active", "redirect_entity_id": None}
-
-    restarted_service = EntityMaintenanceService(
-        postgres=real_postgres_client,
-        user_name="ada",
-    )
-    repaired = await restarted_service.repair_merge_projections(merged["merge_id"])
-
-    assert repaired["canonical_status"] == "rolled_back"
-    assert repaired["projection_repaired"] is True
-    assert await restarted_service.projection_repair_health() == {
-        "pending_count": 0,
-        "truncated": False,
-    }
-
-
-@pytest.mark.storage
-@pytest.mark.requires_postgres
-@pytest.mark.no_network
-async def test_partial_multi_project_projection_repair_stays_pending_until_retry(
-    real_postgres_client,
-    monkeypatch,
-):
-    await _seed_entities(real_postgres_client)
-    await real_postgres_client.execute(
-        """
-        INSERT INTO public.project_entity_contexts (
-            project_id, entity_id, user_name, entity_type, topic
-        ) VALUES
-            ('project-2', 2, 'ada', 'Concept', 'General'),
-            ('project-2', 3, 'ada', 'Concept', 'General')
-        """
-    )
-    service = EntityMaintenanceService(
-        postgres=real_postgres_client,
-        user_name="ada",
-    )
-    preview = await service.preview_merge(
-        survivor_entity_id=2,
-        retired_entity_id=3,
-    )
-    rebuild = service.projection_rebuilder.rebuild_project_projection
-
-    async def fail_project_two(project_id, user_name):
-        if project_id == "project-2":
-            raise RuntimeError("project-2 projection unavailable")
-        return await rebuild(project_id, user_name)
-
-    monkeypatch.setattr(
-        service.projection_rebuilder,
-        "rebuild_project_projection",
-        fail_project_two,
-    )
-
-    merged = await service.merge(preview["plan"])
-
-    assert merged["projection_errors"] == [
-        {"project_id": "project-2", "error": "project-2 projection unavailable"}
-    ]
-    assert await service.projection_repair_health() == {
-        "pending_count": 1,
-        "truncated": False,
-    }
-
-    restarted_service = EntityMaintenanceService(
-        postgres=real_postgres_client,
-        user_name="ada",
-    )
-    repaired = await restarted_service.repair_merge_projections(merged["merge_id"])
-
-    assert repaired["affected_project_ids"] == ["project-1", "project-2"]
-    assert repaired["projection_repaired"] is True
-    assert await restarted_service.projection_repair_health() == {
-        "pending_count": 0,
-        "truncated": False,
-    }
-
-
-@pytest.mark.storage
-@pytest.mark.requires_postgres
-@pytest.mark.no_network
-async def test_global_merge_deduplicates_context_associations_and_preserves_changed_residue(
-    real_postgres_client,
-):
-    await _seed_entities(real_postgres_client)
-    moved_block_id = await _seed_context_block(
-        real_postgres_client,
-        [(3, "Augusta")],
-    )
-    collision_block_id = await _seed_context_block(
-        real_postgres_client,
-        [(2, "Ada Lovelace"), (3, "Ada")],
-    )
-    service = EntityMaintenanceService(
-        postgres=real_postgres_client,
-        user_name="ada",
-    )
-    preview = await service.preview_merge(
-        survivor_entity_id=2,
-        retired_entity_id=3,
-    )
-
-    assert preview["plan"].context_block_association_counts == {"project-1": 2}
-    merged = await service.merge(preview["plan"])
-
-    assert await real_postgres_client.fetch_all(
-        """
-        SELECT entity_id, mention_text
-        FROM public.context_block_entities
-        WHERE block_id = %s
-        ORDER BY entity_id
-        """,
-        (moved_block_id,),
-    ) == [{"entity_id": 2, "mention_text": "Augusta"}]
-    assert await real_postgres_client.fetch_all(
-        """
-        SELECT entity_id, mention_text
-        FROM public.context_block_entities
-        WHERE block_id = %s
-        ORDER BY entity_id
-        """,
-        (collision_block_id,),
-    ) == [{"entity_id": 2, "mention_text": "Ada Lovelace"}]
-    mutations = await real_postgres_client.fetch_all(
-        """
-        SELECT object_kind, object_key
-        FROM public.entity_global_merge_mutations
-        WHERE merge_id = %s AND object_kind = 'context_block_entity'
-        ORDER BY object_key
-        """,
-        (merged["merge_id"],),
-    )
-    assert {item["object_key"] for item in mutations} == {
-        str(moved_block_id),
-        str(collision_block_id),
-    }
-
-    await real_postgres_client.execute(
-        """
-        UPDATE public.context_block_entities
-        SET mention_text = 'Changed after merge'
-        WHERE block_id = %s AND entity_id = 2
-        """,
-        (moved_block_id,),
-    )
-    rollback_plan = await service.plan_rollback(merged["merge_id"])
-    association_conflicts = [
-        item
-        for item in rollback_plan["conflicting_mutations"]
-        if item["object_kind"] == "context_block_entity"
-    ]
-    assert [item["object_key"] for item in association_conflicts] == [
-        str(moved_block_id)
-    ]
-
-    rolled_back = await service.rollback(merged["merge_id"])
-
-    assert rolled_back["rolled_back"] is False
-    assert any(
-        item["object_kind"] == "context_block_entity"
-        and item["object_key"] == str(moved_block_id)
-        for item in rolled_back["conflicts"]
-    )
-    assert await real_postgres_client.fetch_all(
-        """
-        SELECT entity_id, mention_text
-        FROM public.context_block_entities
-        WHERE block_id = %s
-        ORDER BY entity_id
-        """,
-        (moved_block_id,),
-    ) == [{"entity_id": 2, "mention_text": "Changed after merge"}]
-    assert await real_postgres_client.fetch_all(
-        """
-        SELECT entity_id, mention_text
-        FROM public.context_block_entities
-        WHERE block_id = %s
-        ORDER BY entity_id
-        """,
-        (collision_block_id,),
-    ) == [
-        {"entity_id": 2, "mention_text": "Ada Lovelace"},
-        {"entity_id": 3, "mention_text": "Ada"},
-    ]
-
-
-@pytest.mark.storage
-@pytest.mark.requires_postgres
-@pytest.mark.no_network
-async def test_global_merge_rejects_a_preview_when_context_association_changes(
-    real_postgres_client,
-):
-    await _seed_entities(real_postgres_client)
-    block_id = await _seed_context_block(real_postgres_client, [(3, "Augusta")])
-    service = EntityMaintenanceService(
-        postgres=real_postgres_client,
-        user_name="ada",
-    )
-    preview = await service.preview_merge(
-        survivor_entity_id=2,
-        retired_entity_id=3,
-    )
-    await real_postgres_client.execute(
-        """
-        UPDATE public.context_block_entities
-        SET mention_text = 'Updated before merge'
-        WHERE block_id = %s AND entity_id = 3
-        """,
-        (block_id,),
-    )
+    await _seed_message_refs(real_postgres_client, [3], message_id=902)
 
     with pytest.raises(ValueError, match="entity evidence changed"):
         await service.merge(preview["plan"])
@@ -873,7 +470,7 @@ async def test_failed_and_cancelled_exchanges_do_not_block_merge_frontier(
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
-async def test_project_cleanup_removes_context_associations_without_reintroducing_episode_links(
+async def test_project_cleanup_removes_occurrences_without_reintroducing_episode_links(
     real_postgres_client,
 ):
     await _seed_entities(real_postgres_client)
@@ -884,85 +481,32 @@ async def test_project_cleanup_removes_context_associations_without_reintroducin
         ) VALUES ('project-2', 2, 'ada', 'Concept', 'General')
         """
     )
-    block_id = await _seed_context_block(real_postgres_client, [(2, "Ada")])
-    other_project_block_id = await _seed_context_block(
-        real_postgres_client,
-        [(2, "Ada")],
-        project_id="project-2",
+    await _seed_message_refs(real_postgres_client, [2], message_id=901)
+    await _seed_message_refs(
+        real_postgres_client, [2], message_id=902, project_id="project-2",
     )
-    preview = await EntityReader(
-        real_postgres_client
-    ).preview_project_entity_cleanup(
-        user_name="ada",
-        project_id="project-1",
-    )
-    assert next(
-        item["context_block_association_count"]
-        for item in preview
-        if item["entity_id"] == 2
-    ) == 1
-
-    revision_id = uuid4()
     window_id = uuid4()
     await real_postgres_client.execute(
         """
-        INSERT INTO public.sessions (session_id, user_name, project_id)
-        VALUES ('cleanup-session', 'ada', 'project-1')
-        """
-    )
-    await real_postgres_client.execute(
-        """
-        INSERT INTO public.messages (
-            user_name, session_id, message_id, project_id, role, content,
-            timestamp_ms
-        ) VALUES (
-            'ada', 'cleanup-session', 901, 'project-1', 'user',
-            'Ada is part of the current project.', 1000
-        )
-        """
-    )
-    await real_postgres_client.execute(
-        """
         INSERT INTO public.episodes (episode_id, project_id, summary)
-        VALUES ('cleanup-episode', 'project-1', 'Ada is current project context.')
-        """
-    )
-    await real_postgres_client.execute(
-        """
+        VALUES ('cleanup-episode', 'project-1', 'Ada is current project context.');
         INSERT INTO public.episode_messages (
             episode_id, project_id, session_id, message_id, message_position
-        ) VALUES ('cleanup-episode', 'project-1', 'cleanup-session', 901, 0)
+        ) VALUES ('cleanup-episode', 'project-1', 'session-project-1', 901, 0)
         """
-    )
-    await real_postgres_client.execute(
-        """
-        INSERT INTO public.project_context_revisions (
-            revision_id, project_id, revision_number, origin, domain_version,
-            content_hash
-        ) VALUES (%s, 'project-1', 1, 'conversation', 1, %s)
-        """,
-        (revision_id, "a" * 64),
-    )
-    await real_postgres_client.execute(
-        """
-        INSERT INTO public.project_context_revision_blocks (
-            revision_id, project_id, block_id, ordinal
-        ) VALUES (%s, 'project-1', %s, 0)
-        """,
-        (revision_id, block_id),
     )
     await real_postgres_client.execute(
         """
         INSERT INTO public.project_semantic_windows (
             window_id, user_name, project_id, origin, stage, domain_version,
             policy_snapshot, source_token_count, token_estimator,
-            token_estimator_version, context_revision_id
+            token_estimator_version
         ) VALUES (
             %s, 'ada', 'project-1', 'conversation', 'knowledge_committed', 1,
-            '{}'::jsonb, 0, 'test', 'v1', %s
+            '{}'::jsonb, 0, 'test', 'v1'
         )
         """,
-        (window_id, revision_id),
+        (window_id,),
     )
     await real_postgres_client.execute(
         """
@@ -974,76 +518,36 @@ async def test_project_cleanup_removes_context_associations_without_reintroducin
     )
     await real_postgres_client.execute(
         """
-        INSERT INTO public.project_context_block_supports (
-            block_id, project_id, message_id, session_id, support_kind
-        ) VALUES (%s, 'project-1', 901, 'cleanup-session', 'user_message')
+        INSERT INTO public.message_entity_occurrences (
+            window_id, project_id, pass_number, occurrence_index, message_id,
+            resolved_entity_id, mention_text
+        ) VALUES (%s, 'project-1', 1, 0, 901, 2, 'Ada')
         """,
-        (block_id,),
+        (window_id,),
     )
 
     episode_writer = EpisodeWriter(real_postgres_client)
     assert await episode_writer.enrich_project_semantic_window_episodes(
-        window_id=str(window_id),
-        user_name="ada",
-        project_id="project-1",
+        window_id=str(window_id), user_name="ada", project_id="project-1",
     ) == {"entities": 1, "relationships": 0}
-    assert await real_postgres_client.fetch_all(
-        """
-        SELECT entity_id
-        FROM public.episode_entities
-        WHERE project_id = 'project-1' AND episode_id = 'cleanup-episode'
-        """
-    ) == [{"entity_id": 2}]
 
     assert await GraphWriter(real_postgres_client).delete_selected_project_entities(
-        [2],
-        user_name="ada",
-        project_id="project-1",
+        [2], user_name="ada", project_id="project-1",
     ) == [2]
 
+    assert await _refs(real_postgres_client, 901) == []
+    assert await _refs(real_postgres_client, 902) == [2]
     assert await real_postgres_client.fetch_all(
-        """
-        SELECT block_id::text AS block_id, project_id, entity_id
-        FROM public.context_block_entities
-        WHERE entity_id = 2
-        ORDER BY project_id, block_id
-        """
-    ) == [
-        {
-            "block_id": str(other_project_block_id),
-            "project_id": "project-2",
-            "entity_id": 2,
-        }
-    ]
-    assert await real_postgres_client.fetch_all(
-        """
-        SELECT project_id, entity_id
-        FROM public.project_entity_contexts
-        WHERE entity_id = 2
-        ORDER BY project_id
-        """
-    ) == [{"project_id": "project-2", "entity_id": 2}]
+        "SELECT project_id FROM public.project_entity_contexts WHERE entity_id = 2"
+    ) == [{"project_id": "project-2"}]
     assert await real_postgres_client.fetch_one(
-        "SELECT entity_id FROM public.entities WHERE entity_id = 2"
-    ) == {"entity_id": 2}
-    assert await real_postgres_client.fetch_all(
-        """
-        SELECT entity_id
-        FROM public.episode_entities
-        WHERE project_id = 'project-1' AND episode_id = 'cleanup-episode'
-        """
-    ) == []
+        "SELECT count(*) AS count FROM public.message_entity_occurrences"
+    ) == {"count": 0}
     assert await episode_writer.enrich_project_semantic_window_episodes(
-        window_id=str(window_id),
-        user_name="ada",
-        project_id="project-1",
+        window_id=str(window_id), user_name="ada", project_id="project-1",
     ) == {"entities": 0, "relationships": 0}
     assert await real_postgres_client.fetch_all(
-        """
-        SELECT entity_id
-        FROM public.episode_entities
-        WHERE project_id = 'project-1' AND episode_id = 'cleanup-episode'
-        """
+        "SELECT entity_id FROM public.episode_entities WHERE episode_id = 'cleanup-episode'"
     ) == []
 
 

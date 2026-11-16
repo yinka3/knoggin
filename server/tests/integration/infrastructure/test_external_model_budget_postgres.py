@@ -27,8 +27,8 @@ pytestmark = [pytest.mark.integration, pytest.mark.requires_postgres]
 @pytest.fixture(scope="module")
 def budget_database_url():
     configured = os.environ.get(
-        "KNOGGIN_TEST_DATABASE_URL",
-        "postgresql://knoggin:knoggin@localhost:5432/knoggin_db",
+        "TEST_DATABASE_URL",
+        "postgresql://knoggin:knoggin@localhost:5432/postgres",
     )
     params = conninfo_to_dict(configured)
     params.update(dbname="postgres", connect_timeout="2")
@@ -45,7 +45,7 @@ def budget_database_url():
     params["dbname"] = database
     target = make_conninfo(**params)
     schema = (
-        Path(__file__).resolve().parents[3] / "src/infrastructure/schema.sql"
+        Path(__file__).resolve().parents[3] / "src/infrastructure/migrations/0000_baseline.sql"
     ).read_text(encoding="utf-8")
     try:
         with psycopg.connect(target, autocommit=True) as connection:

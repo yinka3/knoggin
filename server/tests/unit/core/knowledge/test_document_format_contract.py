@@ -41,6 +41,7 @@ DOCUMENT_PROCESSING_STRATEGIES = {
         ".vue",
         ".yaml",
         ".yml",
+        ".zig",
         ".zsh",
     },
     "generic_text": {

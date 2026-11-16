@@ -83,14 +83,15 @@ def test_episode_decision_rejects_retired_or_invalid_shapes(payload):
         EpisodeDecision(**payload)
 
 
-def test_window_rejects_proposals_that_share_a_source_message():
+def test_window_schema_leaves_source_overlap_to_the_episode_build():
     proposal = LLMEpisodeDecision(
         summary="The project selected durable memory.",
         message_influences=["message:1"],
     )
 
-    with pytest.raises(ValidationError, match="cannot share source messages"):
-        LLMEpisodeWindowDecision(proposals=[proposal, proposal])
+    # ProjectEpisodeBuild drops the overlapping proposal; the schema must not
+    # fail the whole model response for it.
+    assert len(LLMEpisodeWindowDecision(proposals=[proposal, proposal]).proposals) == 2
 
 
 def test_empty_window_proposals_are_the_explicit_skip_result():
@@ -98,3 +99,27 @@ def test_empty_window_proposals_are_the_explicit_skip_result():
 
     with pytest.raises(ValidationError, match="proposals"):
         LLMEpisodeWindowDecision.model_validate({})
+
+
+def test_message_references_keep_the_handle_and_drop_the_note_after_it():
+    decision = LLMEpisodeDecision(
+        summary="A summary.",
+        message_influences=[
+            "message:1 - user opened the chat",
+            "message:4: asked a follow-up",
+            "message:1",
+            "Messages 3, 5, 7",
+        ],
+    )
+
+    assert decision.message_influences == ["message:1", "message:4"]
+
+
+def test_proposal_with_no_usable_reference_is_dropped_not_the_whole_window():
+    good = {"summary": "Kept.", "message_influences": ["message:2 - note"]}
+    bad = {"summary": "Lost.", "message_influences": ["Messages 3, 5, 7"]}
+
+    window = LLMEpisodeWindowDecision.model_validate({"proposals": [bad, good]})
+
+    assert [p.summary for p in window.proposals] == ["Kept."]
+    assert window.proposals[0].message_influences == ["message:2"]

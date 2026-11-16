@@ -6,9 +6,9 @@ from uuid import uuid4
 import pytest
 
 from common.conf.domain_config import DomainConfig
-from common.schema.ingestion.contracts import ContextBlockMention
+from common.schema.ingestion.contracts import EntityMention
 from common.schema.jev import JevPolicy, JevResponse, JevResult
-from common.schema.settings import EntityResolutionSettings, TextProcessorSettings
+from common.schema.settings import EntityResolutionSettings, ExtractionSettings
 from core.ingestion.policy import IngestionPolicy
 from core.knowledge.entity.jev_classification import accepted_classification_topic
 from core.knowledge.entity.resolver import EntityResolver
@@ -89,7 +89,7 @@ def policy(
         }
     ).compile()
     return IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(),
+        extraction=ExtractionSettings(),
         entity_resolution=EntityResolutionSettings(),
         compiled_domain=domain,
         jev=JevPolicy(
@@ -116,7 +116,7 @@ def entity(*, project_id, topic):
 
 
 async def resolve(store, jev, frozen_policy):
-    block_id = uuid4()
+    message_id = 1
 
     async def allocate():
         return 900
@@ -126,17 +126,17 @@ async def resolve(store, jev, frozen_policy):
         "project-1",
         ["project-1", "project-2"],
         jev_client=jev,
-    ).resolve_context_block_mentions(
+    ).resolve_mentions(
         [
-            ContextBlockMention(
-                block_ids=(block_id,),
+            EntityMention(
+                message_ids=(message_id,),
                 name="Acme",
                 entity_type="Company",
                 topic="Work",
                 origin="vp01",
             )
         ],
-        block_text_by_id={block_id: "Acme manages the project budget."},
+        message_text_by_id={message_id: "Acme manages the project budget."},
         policy=frozen_policy,
         allocate_entity_id=allocate,
         window_id=uuid4(),
@@ -180,7 +180,7 @@ async def test_v1_questions_cannot_enable_v2_active_override_policy():
 
 
 async def resolve_repeated(jev, frozen_policy):
-    block_ids = (uuid4(), uuid4())
+    message_ids = (1, 2)
     text = "Acme manages the project budget."
     next_id = iter((900, 901))
 
@@ -192,18 +192,18 @@ async def resolve_repeated(jev, frozen_policy):
         "project-1",
         ["project-1"],
         jev_client=jev,
-    ).resolve_context_block_mentions(
+    ).resolve_mentions(
         [
-            ContextBlockMention(
-                block_ids=(block_id,),
+            EntityMention(
+                message_ids=(message_id,),
                 name="Acme",
                 entity_type="Company",
                 topic="Work",
                 origin="vp01",
             )
-            for block_id in block_ids
+            for message_id in message_ids
         ],
-        block_text_by_id={block_id: text for block_id in block_ids},
+        message_text_by_id={message_id: text for message_id in message_ids},
         policy=frozen_policy,
         allocate_entity_id=allocate,
         window_id=uuid4(),

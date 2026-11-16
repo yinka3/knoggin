@@ -1,5 +1,11 @@
-"""Download, export, and validate Knoggin's complete local model set."""
+"""Download, export, and validate Knoggin's complete local model set.
 
+Normal starts load cached models without asking the Hub. Run this to fetch
+missing models: the versions pinned in common.model_cache, or the ones a
+*_MODEL_REVISION setting names.
+"""
+
+import argparse
 import asyncio
 import os
 import subprocess
@@ -8,39 +14,52 @@ from pathlib import Path
 
 import torch
 from dotenv import load_dotenv
+from huggingface_hub import snapshot_download
 from loguru import logger
 
 SERVER_ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = SERVER_ROOT.parent
 sys.path.insert(0, str(SERVER_ROOT / "src"))
 
-from core.ingestion.vp01 import GLiNER25VP01Adapter  # noqa: E402
-from core.knowledge.services.embedding_service import EmbeddingService  # noqa: E402
+from common import docling_models  # noqa: E402
+from common.embedding_contract import (  # noqa: E402
+    DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_RERANKER_MODEL,
+)
+from common.model_cache import model_revision  # noqa: E402
+from core.knowledge.embedding_service import EmbeddingService  # noqa: E402
 from infrastructure.model_work import ModelWorkPriority  # noqa: E402
 from infrastructure.resource_profile import ResourceProfile  # noqa: E402
 
 
 def _device() -> torch.device:
-    use_gpu = os.getenv("KNOGGIN_GPU", "false").lower() == "true"
-    if use_gpu and torch.cuda.is_available():
+    prefer_gpu = os.getenv("PREFER_GPU", "false").lower() == "true"
+    if prefer_gpu and torch.cuda.is_available():
         return torch.device("cuda")
-    if use_gpu and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+    if prefer_gpu and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
 
 
-async def prefetch_models() -> None:
+async def prefetch_models(*, update_docling_manifest: bool = False) -> None:
     """Prepare every local model without starting the server or data services."""
     load_dotenv(REPOSITORY_ROOT / ".env")
     profile = ResourceProfile.from_environment()
     device = _device()
+    embedding_model = os.getenv("EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
+    reranker_model = os.getenv("RERANKER_MODEL", DEFAULT_RERANKER_MODEL)
+    models = [
+        (embedding_model, "EMBEDDING_MODEL_REVISION"),
+        (reranker_model, "RERANKER_MODEL_REVISION"),
+    ]
+    for model, revision_variable in models:
+        logger.info(f"Fetching {model}")
+        await asyncio.to_thread(
+            snapshot_download, model, revision=model_revision(model, revision_variable)
+        )
     embedding = EmbeddingService(
-        embedding_model=os.getenv(
-            "KNOGGIN_EMBEDDING_MODEL", "dunzhang/stella_en_1.5B_v5"
-        ),
-        reranker_model=os.getenv(
-            "KNOGGIN_RERANKER_MODEL", "BAAI/bge-reranker-large"
-        ),
+        embedding_model=embedding_model,
+        reranker_model=reranker_model,
         device=device,
         batch_size=profile.embedding_batch_size,
     )
@@ -52,29 +71,32 @@ async def prefetch_models() -> None:
         )
         await embedding.load_models()
         await embedding.load_reranker(priority=ModelWorkPriority.BACKGROUND)
-        await asyncio.to_thread(
-            GLiNER25VP01Adapter.load,
-            language="en",
-            device=str(device),
-        )
-        logger.info("Prefetching Docling PDF layout, table, and OCR artifacts")
+        folder = docling_models.artifacts_path()
+        logger.info(f"Prefetching Docling PDF layout, table, and OCR artifacts into {folder}")
         await asyncio.to_thread(
             subprocess.run,
             [
-                "docling-tools",
-                "models",
-                "download",
-                "layout",
-                "tableformer",
-                "rapidocr",
-                "--quiet",
+                "docling-tools", "models", "download", "--output-dir", str(folder),
+                "layout", "tableformer", "rapidocr", "--quiet",
             ],
             check=True,
         )
+        if update_docling_manifest:
+            docling_models.write_manifest(folder)
+            logger.info(f"Wrote {docling_models.MANIFEST}; test, then commit it")
+        else:
+            docling_models.verify(folder)
         logger.info("All local models are ready in the local cache")
     finally:
         embedding.cleanup()
 
 
 if __name__ == "__main__":
-    asyncio.run(prefetch_models())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--update-docling-manifest", action="store_true",
+        help="Record the downloaded Docling files as trusted (after upgrading Docling).",
+    )
+    asyncio.run(prefetch_models(
+        update_docling_manifest=parser.parse_args().update_docling_manifest
+    ))

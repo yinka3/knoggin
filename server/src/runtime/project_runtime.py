@@ -1,15 +1,14 @@
 import asyncio
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Optional
 
 from loguru import logger
 
 from common.conf.domain_config import CompiledDomain, DomainConfig
 from common.conf.manager import ConfigManager
-from common.schema.settings import TextProcessorSettings
+from common.schema.context import ContextRevisionRecord
 from common.scoping import require_scope_value, require_visible_project_ids
 from core.ingestion.policy import IngestionPolicy
 from core.ingestion.text_processor import TextProcessor
-from core.ingestion.vp01 import VP01EntityExtractor
 from core.knowledge.documents import DocumentService
 from core.knowledge.entity.resolver import EntityResolver
 from core.project.domain_config_store import DomainActivation, DomainConfigStore
@@ -37,7 +36,6 @@ class ProjectRuntime:
         domain_config_store: DomainConfigStore,
         config_manager: ConfigManager,
         background_work: Optional[BackgroundWorkCoordinator] = None,
-        get_vp01: Callable[[str], Awaitable[VP01EntityExtractor]] | None = None,
     ):
         self.project_id = require_scope_value(
             project_id,
@@ -58,9 +56,6 @@ class ProjectRuntime:
         self.scheduler = scheduler
         self.user_name = user_name
         self.background_work = background_work
-        if get_vp01 is not None and not callable(get_vp01):
-            raise TypeError("ProjectRuntime get_vp01 must be callable")
-        self._get_vp01 = get_vp01
         self.domain_config_store = domain_config_store
         self._config_manager = config_manager
         self.domain_config = domain_config
@@ -84,6 +79,59 @@ class ProjectRuntime:
         if self.project_semantic_processor is None:
             return False
         return self.scheduler.wake_job(self.project_semantic_processor.name)
+
+    def flush_semantic_work(self) -> bool:
+        """Ask the semantic owner to close pending conversation now."""
+
+        if self.project_semantic_processor is None:
+            return False
+        self.project_semantic_processor.request_flush()
+        return self.signal_semantic_work()
+
+    async def wait_for_semantic_idle(
+        self, *, timeout_s: float, poll_interval_s: float = 0.5
+    ) -> ContextRevisionRecord | None:
+        """Flush finished conversation, wait until memory is built, and return
+        the Context revision it produced.
+
+        Settled means the flush request was used up (a run found nothing left
+        to claim) and no window is in progress. A window waiting to retry (a
+        rate limit, say) is still in progress; raises on a window with no retry
+        left, or on timeout. For evals and tools that need memory built first.
+        """
+
+        processor = self.project_semantic_processor
+        if processor is None or not self.flush_semantic_work():
+            raise RuntimeError("Project semantic work is not running")
+        store = processor.knowledge_store
+        scope = {"user_name": self.user_name, "project_id": self.project_id}
+        deadline = asyncio.get_running_loop().time() + timeout_s
+        while True:
+            failed = [
+                window
+                for window in await store.list_failed_project_semantic_windows(**scope)
+                if window.next_retry_at_ms is None
+            ]
+            if failed:
+                details = ", ".join(
+                    f"{window.window_id} ({window.stage.value}: "
+                    f"{window.last_failure_stage}/{window.last_failure_code})"
+                    for window in failed
+                )
+                raise RuntimeError(f"Semantic windows failed: {details}")
+            if (
+                not processor.flush_pending
+                and await store.get_active_project_semantic_window(**scope) is None
+            ):
+                return await store.get_current_project_context_revision(**scope)
+            if asyncio.get_running_loop().time() >= deadline:
+                raise TimeoutError(
+                    f"Semantic work for {self.project_id} did not settle "
+                    f"within {timeout_s}s"
+                )
+            # Each run claims at most one window; wake the next one.
+            self.signal_semantic_work()
+            await asyncio.sleep(poll_interval_s)
 
     async def shutdown(self):
         """Stop admission, then release every project-owned runtime resource."""
@@ -150,10 +198,7 @@ class ProjectRuntime:
         async with self._domain_config_lock:
             settings = self._config_manager.config.developer_settings
             return IngestionPolicy.capture(
-                text_processor=TextProcessorSettings(
-                    gliner_threshold=self.text_processor.gliner_threshold,
-                    llm_ner_mode=self.text_processor.llm_ner_mode,
-                ),
+                extraction=settings.extraction,
                 entity_resolution=settings.entity_resolution,
                 compiled_domain=self.compiled_domain,
                 jev=self._config_manager.config.jev.capture_policy(),
@@ -175,17 +220,6 @@ class ProjectRuntime:
 
         candidate = parse_candidate(candidate)
         async with self._domain_config_lock:
-            # Resolve the selected model before the durable activation. No
-            # fallible model load should occur after the store commits.
-            selected_vp01 = (
-                await self._get_vp01(candidate.vp01_language)
-                if self._get_vp01 is not None
-                else None
-            )
-            if self._get_vp01 is not None and not callable(
-                getattr(selected_vp01, "extract_entities", None)
-            ):
-                raise TypeError("VP-01 adapter must expose extract_entities")
             activation = await self.domain_config_store.activate(
                 user_name=self.user_name,
                 project_id=self.project_id,
@@ -194,6 +228,4 @@ class ProjectRuntime:
             )
             self.domain_config = activation.config
             self.compiled_domain = activation.compiled
-            if selected_vp01 is not None:
-                self.text_processor.set_vp01(selected_vp01)
             return activation

@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 
 import pytest
@@ -19,7 +20,7 @@ from tests.fixtures.documents import (
 
 class DeterministicDocumentEmbedding:
     async def encode(self, values):
-        return [[float(index % 7) / 7 for index in range(1024)] for _ in values]
+        return [[float(index % 7) / 7 for index in range(768)] for _ in values]
 
 
 class TokenBoundDocumentEmbedding(DeterministicDocumentEmbedding):
@@ -33,6 +34,16 @@ class TokenBoundDocumentEmbedding(DeterministicDocumentEmbedding):
         assert all(len(value) <= 80 for value in values)
         self.encoded_parts.extend(values)
         return await super().encode(values)
+
+
+def _document_service(real_postgres_client, tmp_path):
+    return DocumentService(
+        project_id="project-1",
+        postgres_client=real_postgres_client,
+        embedding_service=DeterministicDocumentEmbedding(),
+        document_rerank_enabled=False,
+        filesystem_factory=ProjectFilesystemFactory(tmp_path / "projects"),
+    )
 
 
 def _document_samples():
@@ -145,14 +156,15 @@ def _document_samples():
             ),
             [
                 {
-                    "content": "# Overview\n\nAlpha paragraph.",
+                    # Docling renders Word "Heading 1" as "##" ("#" is the title).
+                    "content": "## Overview\n\nAlpha paragraph.",
                     "chunk_kind": "text",
                     "section_path": ["Overview"],
                     "start_line": 1,
                     "end_line": 3,
                 },
                 {
-                    "content": "## Risks\n\nBeta paragraph.",
+                    "content": "### Risks\n\nBeta paragraph.",
                     "chunk_kind": "text",
                     "section_path": ["Overview", "Risks"],
                     "start_line": 5,
@@ -371,4 +383,141 @@ async def test_long_document_chunk_indexes_all_embedding_parts(
     )
     assert len(embedding.encoded_parts) > 1
     assert "".join(embedding.encoded_parts) == row["content"]
-    assert row["dimensions"] == 1024
+    assert row["dimensions"] == 768
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.requires_pgvector
+@pytest.mark.no_network
+async def test_concurrent_same_path_upload_keeps_postgres_and_source_consistent(
+    real_postgres_client,
+    tmp_path,
+    monkeypatch,
+):
+    service = _document_service(real_postgres_client, tmp_path)
+    insert_started = asyncio.Event()
+    release_insert = asyncio.Event()
+    real_insert = service._writer.insert_document
+
+    async def delayed_insert(**kwargs):
+        insert_started.set()
+        await release_insert.wait()
+        return await real_insert(**kwargs)
+
+    monkeypatch.setattr(service._writer, "insert_document", delayed_insert)
+    first = asyncio.create_task(
+        service.submit_document(content=b"first version", original_name="same.md")
+    )
+    await asyncio.wait_for(insert_started.wait(), 5)
+    second = asyncio.create_task(
+        service.submit_document(content=b"second version", original_name="same.md")
+    )
+    await asyncio.sleep(0.05)
+    assert not second.done()
+    release_insert.set()
+
+    accepted = await first
+    with pytest.raises(FileExistsError):
+        await second
+
+    rows = await real_postgres_client.fetch_all(
+        """
+        SELECT document_id, content_hash, status
+        FROM public.project_documents
+        WHERE project_id = 'project-1' AND relative_path = 'same.md'
+          AND deleted_at IS NULL
+        """
+    )
+    assert len(rows) == 1
+    assert str(rows[0]["document_id"]) == accepted["document_id"]
+    assert rows[0]["content_hash"] == hashlib.sha256(b"first version").hexdigest()
+    assert rows[0]["status"] == "indexed"
+    assert service._filesystem.read_bytes("same.md") == b"first version"
+    reconciled = await service.reconcile_project_files()
+    assert reconciled["created"] == 0
+    assert reconciled["changed"] == 0
+    assert reconciled["deleted"] == 0
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.requires_pgvector
+@pytest.mark.no_network
+async def test_cancelled_upload_tombstones_postgres_before_removing_source(
+    real_postgres_client,
+    tmp_path,
+    monkeypatch,
+):
+    service = _document_service(real_postgres_client, tmp_path)
+    insert_started = asyncio.Event()
+    release_insert = asyncio.Event()
+    real_insert = service._writer.insert_document
+
+    async def delayed_insert(**kwargs):
+        insert_started.set()
+        await release_insert.wait()
+        return await real_insert(**kwargs)
+
+    monkeypatch.setattr(service._writer, "insert_document", delayed_insert)
+    upload = asyncio.create_task(
+        service.submit_document(content=b"cancelled", original_name="cancel.md")
+    )
+    await asyncio.wait_for(insert_started.wait(), 5)
+    upload.cancel()
+    release_insert.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await upload
+
+    row = await real_postgres_client.fetch_one(
+        """
+        SELECT status, deleted_at IS NOT NULL AS deleted
+        FROM public.project_documents
+        WHERE project_id = 'project-1' AND relative_path = 'cancel.md'
+        """
+    )
+    assert row == {"status": "deleted", "deleted": True}
+    assert not service._filesystem.root.joinpath("cancel.md").exists()
+    reconciled = await service.reconcile_project_files()
+    assert reconciled["created"] == 0
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.requires_pgvector
+@pytest.mark.no_network
+async def test_code_in_a_workspace_is_kept_and_grepped_but_not_indexed(
+    real_postgres_client, tmp_path
+):
+    await real_postgres_client.execute(
+        """UPDATE public.projects SET workspaces = '{"api": {"read_only": false}}'::jsonb
+           WHERE project_id = 'project-1'"""
+    )
+    service = _document_service(real_postgres_client, tmp_path)
+
+    code = await service.submit_document(
+        content=b"def rotate_api_token():\n    return 'rotated'\n",
+        original_name="tokens.py", relative_path="api/tokens.py",
+    )
+    note = await service.submit_document(
+        content=b"How we rotate the api token each quarter.\n",
+        original_name="rotation.md", relative_path="api/rotation.md",
+    )
+
+    assert code["status"] == "skipped" and note["status"] == "indexed"
+    chunks = await real_postgres_client.fetch_all(
+        "SELECT document_id FROM public.document_chunks WHERE document_id = %s",
+        (code["document_id"],),
+    )
+    assert chunks == []
+    assert service._filesystem.read_bytes("api/tokens.py").startswith(b"def rotate")
+
+    service._filesystem.write_bytes("api/.env", b"rotate_api_token=secret\n")
+    service._filesystem.write_bytes(
+        "api/node_modules/pkg/index.js", b"rotate_api_token()\n"
+    )
+    found = await service.grep_project_files("ROTATE_API_TOKEN", path_prefix="api")
+    assert [(match["path"], match["line"]) for match in found["matches"]] == [
+        ("api/tokens.py", 1)
+    ]

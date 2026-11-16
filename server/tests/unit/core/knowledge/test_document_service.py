@@ -1,5 +1,4 @@
 import asyncio
-import base64
 import hashlib
 import json
 import math
@@ -11,7 +10,6 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
@@ -22,7 +20,6 @@ from common.schema.document import (
     FolderScanSettings,
     FolderUploadEntry,
 )
-from common.schema.public import BatchSourceRequest, UploadDocumentRequest
 from common.utils.time_utils import frozen_time
 from core.health.service import RuntimeHealthService
 from core.knowledge.documents import (
@@ -38,13 +35,38 @@ from core.knowledge.documents.filesystem import (
     ProjectFilesystem,
     ProjectFilesystemConflictError,
 )
+from core.knowledge.documents.scanning import normalize_relative_path
 from core.project.project_files import CONTEXT_FILE_PATH
 from infrastructure.background_work import BackgroundWorkRejected
-from runtime.api_port import ApplicationRuntimePort
 
 if os.name == "nt":
     from core.knowledge.documents.io import (
         windows_handle_io as windows_handle_io_module,
+    )
+
+
+@pytest.fixture(autouse=True)
+def keep_service_unit_docling_fakes_in_process(monkeypatch):
+    """Service tests fake parsers in-process; subprocess behavior has its own tests."""
+
+    from core.knowledge.documents import indexer as indexer_module
+
+    async def extract_in_process(
+        content,
+        extension,
+        extraction_mode="standard",
+        extraction_strategy="auto",
+    ):
+        return extraction_module.extract_and_split_document(
+            content,
+            extension,
+            extraction_mode,
+        )
+
+    monkeypatch.setattr(
+        indexer_module,
+        "extract_and_split_docling_document",
+        extract_in_process,
     )
 
 
@@ -493,10 +515,20 @@ class MemoryCursor:
         normalized = " ".join(query.split())
 
         if normalized.startswith("UPDATE public.project_documents AS document") and "snapshot.parser_fingerprint" in normalized:
-            project_id, pdf_fingerprint, notebook_fingerprint = params
+            (
+                project_id,
+                ocr_pdf_fingerprint,
+                standard_pdf_fingerprint,
+                notebook_fingerprint,
+            ) = params
             updated = []
             for row in self.postgres.rows:
                 snapshot = self.postgres.parse_snapshots.get(row.get("current_snapshot_id"))
+                pdf_fingerprint = (
+                    ocr_pdf_fingerprint
+                    if row.get("extraction_mode") == "ocr"
+                    else standard_pdf_fingerprint
+                )
                 if (
                     row["project_id"] == project_id
                     and row["status"] == "indexed"
@@ -769,17 +801,34 @@ class MemoryCursor:
 
         if normalized.startswith("INSERT INTO public.project_documents"):
             if "'queued'" in normalized:
-                (
-                    document_id,
-                    project_id,
-                    original_name,
-                    relative_path,
-                    extension,
-                    size_bytes,
-                    content_hash,
-                    created_at,
-                    updated_at,
-                ) = params
+                if len(params) == 11:
+                    (
+                        document_id,
+                        project_id,
+                        original_name,
+                        relative_path,
+                        extension,
+                        size_bytes,
+                        content_hash,
+                        extraction_mode,
+                        extraction_strategy,
+                        created_at,
+                        updated_at,
+                    ) = params
+                else:
+                    (
+                        document_id,
+                        project_id,
+                        original_name,
+                        relative_path,
+                        extension,
+                        size_bytes,
+                        content_hash,
+                        created_at,
+                        updated_at,
+                    ) = params
+                    extraction_mode = "standard"
+                    extraction_strategy = "auto"
                 self.postgres.rows.append(
                     {
                         "document_id": document_id,
@@ -789,6 +838,8 @@ class MemoryCursor:
                         "extension": extension,
                         "size_bytes": size_bytes,
                         "content_hash": content_hash,
+                        "extraction_mode": extraction_mode,
+                        "extraction_strategy": extraction_strategy,
                         "scan_managed": "true, 'queued'" in normalized.lower(),
                         "current_snapshot_id": None,
                         "status": "queued",
@@ -936,14 +987,14 @@ class FakeEmbeddingService:
         self.calls = []
         self.single_calls = []
         self.embeddings = None
-        self.single_embedding = [0.1] * 1024
+        self.single_embedding = [0.1] * 768
         self.rerank_calls = []
 
     async def encode(self, values):
         self.calls.append(list(values))
         if self.embeddings is not None:
             return self.embeddings
-        return [[0.1] * 1024 for _ in values]
+        return [[0.1] * 768 for _ in values]
 
     async def encode_single(self, value):
         self.single_calls.append(value)
@@ -1234,6 +1285,51 @@ async def test_add_document_writes_project_file_and_persists_metadata(document_h
     assert service._filesystem.read_bytes("docs/Notes.MD") == content
     assert postgres.rows[0]["original_name"] == "Notes.MD"
     assert postgres.transaction_count == 1
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_pdf_upload_persists_requested_extraction_mode(document_harness):
+    service, postgres = document_harness
+
+    metadata = await service.add_document(
+        content=b"pdf",
+        original_name="scan.pdf",
+        extraction_mode="ocr",
+    )
+
+    assert metadata["extraction_mode"] == "ocr"
+    assert postgres.rows[0]["extraction_mode"] == "ocr"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_pdf_upload_persists_requested_extraction_strategy(document_harness):
+    service, postgres = document_harness
+
+    metadata = await service.add_document(
+        content=b"pdf",
+        original_name="book.pdf",
+        extraction_strategy="full",
+    )
+
+    assert metadata["extraction_strategy"] == "full"
+    assert postgres.rows[0]["extraction_strategy"] == "full"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_ocr_mode_rejects_non_pdf_documents(document_harness):
+    service, postgres = document_harness
+
+    with pytest.raises(ValueError, match="only supported for PDF"):
+        await service.add_document(
+            content=b"notes",
+            original_name="notes.md",
+            extraction_mode="ocr",
+        )
+
+    assert postgres.rows == []
 
 
 @pytest.mark.storage
@@ -2601,11 +2697,8 @@ async def test_add_document_rejects_invalid_content_scope_and_size(
     with pytest.raises(ValueError, match="Unsupported file type"):
         await service.add_document(content=b"data", original_name="archive.zip")
 
-    monkeypatch.setattr(
-        "core.knowledge.documents.service.MAX_DOCUMENT_SIZE",
-        3,
-    )
-    with pytest.raises(ValueError, match="50 MB"):
+    monkeypatch.setattr(service, "_document_upload_limit", 3)
+    with pytest.raises(ValueError, match="configured upload size limit"):
         await service.add_document(content=b"four", original_name="notes.md")
 
     assert postgres.rows == []
@@ -3309,7 +3402,7 @@ async def test_document_service_search_embeds_query_with_project_scope(
     assert "1.0 / (60 + sc.semantic_rank)" in sql
     assert params[0:3] == (
         "alpha question",
-        json.dumps([0.1] * 1024),
+        json.dumps([0.1] * 768),
         ["project-1"],
     )
     assert params[-1] == 3
@@ -3440,7 +3533,7 @@ async def test_document_service_search_validates_embedding_dimension(document_ha
     service, postgres = document_harness
     service._embedding.single_embedding = [0.1] * 3
 
-    with pytest.raises(ValueError, match="exactly 1024 dimensions"):
+    with pytest.raises(ValueError, match="exactly 768 dimensions"):
         await service.search("alpha")
 
     assert not any(
@@ -3486,7 +3579,7 @@ async def test_index_document_embeds_every_part_of_an_overlong_chunk(document_ha
         assert all(len(value) <= 80 for value in values)
         encoded_parts.extend(values)
         return [
-            [float(index + 1), 1.0] + [0.0] * 1022
+            [float(index + 1), 1.0] + [0.0] * 766
             for index, _ in enumerate(values)
         ]
 
@@ -3498,7 +3591,7 @@ async def test_index_document_embeds_every_part_of_an_overlong_chunk(document_ha
     assert indexed["chunk_count"] == 1
     assert "".join(encoded_parts) == postgres.chunks[0]["content"]
     vector = json.loads(postgres.chunks[0]["embedding"])
-    assert len(vector) == 1024
+    assert len(vector) == 768
     assert math.isclose(math.sqrt(sum(value * value for value in vector)), 1.0)
 
 
@@ -3642,7 +3735,7 @@ async def test_malformed_later_embedding_batch_does_not_publish_partial_index(
     async def encode(values):
         nonlocal calls
         calls += 1
-        return [[0.1] * 1024] if calls == 1 else None
+        return [[0.1] * 768] if calls == 1 else None
 
     service._embedding.encode = encode
 
@@ -3966,7 +4059,7 @@ async def test_index_document_records_document_parser_errors(
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_upload_api_returns_saved_identity_after_inline_index_failure(
+async def test_submit_document_returns_saved_identity_after_inline_index_failure(
     monkeypatch, document_harness
 ):
     service, postgres = document_harness
@@ -3975,46 +4068,21 @@ async def test_upload_api_returns_saved_identity_after_inline_index_failure(
         raise ValueError("private damaged PDF detail")
 
     monkeypatch.setattr(extraction_module, "_extract_docling_snapshot", fail_pdf_parse)
-    projects = SimpleNamespace(
-        acquire_project_for_session=AsyncMock(
-            return_value=SimpleNamespace(document_service=service)
-        ),
-        release_project_for_session=AsyncMock(),
+    uploaded = await service.submit_document(
+        original_name="invalid.pdf", content=b"invalid PDF",
     )
-    port = ApplicationRuntimePort(
-        SimpleNamespace(sessions=SimpleNamespace(user_name="ada"), projects=projects)
+    second = await service.submit_document(
+        original_name="invalid-batch.pdf", content=b"another invalid PDF",
     )
 
-    uploaded = await port.upload_document(
-        user_name="ada",
-        project_id="project-1",
-        request=UploadDocumentRequest(
-            original_name="invalid.pdf",
-            content_base64=base64.b64encode(b"invalid PDF").decode(),
-        ),
-    )
-    batch = await port.admit_sources_batch(
-        user_name="ada",
-        project_id="project-1",
-        request=BatchSourceRequest(
-            items=[
-                {
-                    "source_type": "document",
-                    "original_name": "invalid-batch.pdf",
-                    "content_base64": base64.b64encode(b"another invalid PDF").decode(),
-                }
-            ]
-        ),
-    )
-
-    assert uploaded.status == "failed"
-    assert uploaded.document_id == postgres.rows[0]["document_id"]
+    assert uploaded["status"] == "failed"
+    assert uploaded["document_id"] == postgres.rows[0]["document_id"]
     assert service._filesystem.read_bytes("invalid.pdf") == b"invalid PDF"
-    assert batch.results[0].status == "accepted_document"
-    assert batch.results[0].document.status == "failed"
-    assert batch.results[0].document.document_id == postgres.rows[1]["document_id"]
-    assert "private damaged PDF detail" not in uploaded.model_dump_json()
-    assert "private damaged PDF detail" not in batch.model_dump_json()
+    assert second["status"] == "failed"
+    assert second["document_id"] == postgres.rows[1]["document_id"]
+    # The engine keeps the parser detail for diagnostics; the API field
+    # allowlist owns redaction (api/tests/test_document_batch.py).
+    assert uploaded["last_index_failure_kind"] is not None
 
 
 @pytest.mark.storage
@@ -4238,9 +4306,9 @@ async def test_index_document_does_not_publish_after_catalog_changes_during_deri
     ("embeddings", "detail"),
     [
         ([], "Embedding count"),
-        ([[0.1] * 3], "exactly 1024 dimensions"),
-        ([[float("nan")] + [0.1] * 1023], "non-finite"),
-        ([[Decimal("0.1")] + [0.1] * 1023], "non-JSON-native"),
+        ([[0.1] * 3], "exactly 768 dimensions"),
+        ([[float("nan")] + [0.1] * 767], "non-finite"),
+        ([[Decimal("0.1")] + [0.1] * 767], "non-JSON-native"),
         (None, "malformed batch"),
         ("not-vectors", "malformed batch"),
         ([None], "malformed vector"),
@@ -4363,3 +4431,198 @@ async def test_preview_uses_saved_settings_and_explicit_settings_do_not_persist(
     }
     assert (await service.get_scan_settings()).blocked_extensions == {".foo"}
 
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_discovered_folder_keeps_nested_files_separate_through_indexing(
+    document_harness,
+):
+    service, postgres = document_harness
+    filesystem = service._filesystem
+    assert filesystem is not None
+    files = {
+        "sample/.gitignore": b"scratch/\n",
+        "sample/README.md": b"# Sample\nProject overview.\n",
+        "sample/src/notes.md": b"# Implementation\nSource-specific detail.\n",
+        "sample/tests/notes.md": b"# Verification\nTest-specific detail.\n",
+        "sample/scratch/draft.md": b"Should be ignored.\n",
+        "sample/.private.md": b"Should stay hidden.\n",
+    }
+    preview = await service.preview_folder(
+        folder_name="sample",
+        entries=[
+            FolderUploadEntry(relative_path=path, content=content)
+            for path, content in files.items()
+        ],
+    )
+    included_paths = {entry.relative_path for entry in preview.included}
+    assert included_paths == {
+        "sample/README.md",
+        "sample/src/notes.md",
+        "sample/tests/notes.md",
+    }
+    assert {entry.relative_path for entry in preview.excluded} == set(files) - included_paths
+
+    # Simulate a folder arriving on disk; reconciliation is the server's
+    # folder admission path, distinct from explicit single-file uploads.
+    for path, content in files.items():
+        filesystem.write_bytes(path, content)
+    assert (await service.reconcile_project_files())["created"] == 3
+    live = {row["relative_path"]: row for row in postgres.rows if row["status"] != "deleted"}
+    assert set(live) == included_paths
+    assert all(row["scan_managed"] for row in live.values())
+    assert len({row["document_id"] for row in live.values()}) == 3
+
+    for path in sorted(included_paths):
+        row = live[path]
+        assert (await service.get_document_info(relative_path=path))["document_id"] == row["document_id"]
+        indexed = await service.index_document(document_id=row["document_id"])
+        assert indexed["status"] == "indexed"
+        read = await service.read_document(relative_path=path)
+        assert all(line in read["content"] for line in files[path].decode().splitlines())
+        if path == "sample/src/notes.md":
+            assert "Test-specific detail" not in read["content"]
+        if path == "sample/tests/notes.md":
+            assert "Source-specific detail" not in read["content"]
+        chunks = [chunk for chunk in postgres.chunks if chunk["document_id"] == row["document_id"]]
+        assert chunks
+        assert all(chunk["relative_path"] == path for chunk in chunks)
+
+    assert live["sample/src/notes.md"]["document_id"] != live["sample/tests/notes.md"]["document_id"]
+    assert (await service.reconcile_project_files())["created"] == 0
+    assert len([row for row in postgres.rows if row["status"] != "deleted"]) == 3
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_virtual_folder_preview_then_upload_preserves_each_relative_path(
+    document_harness,
+):
+    service, postgres = document_harness
+    entries = [
+        FolderUploadEntry(relative_path=r"repo\src\config.md", content=b"Source configuration"),
+        FolderUploadEntry(relative_path="repo/tests/config.md", content=b"Test configuration"),
+        FolderUploadEntry(relative_path="repo/.secret.md", content=b"Do not upload"),
+    ]
+    preview = await service.preview_folder(folder_name="repo", entries=entries)
+    included = {item.relative_path for item in preview.included}
+    assert included == {"repo/src/config.md", "repo/tests/config.md"}
+    assert [item.relative_path for item in preview.excluded] == ["repo/.secret.md"]
+
+    contents_by_path = {
+        normalize_relative_path(entry.relative_path, entry.relative_path): entry.content
+        for entry in entries
+    }
+    accepted = {}
+    for item in preview.included:
+        accepted[item.relative_path] = await service.submit_document(
+            content=contents_by_path[item.relative_path],
+            original_name=item.original_name,
+            relative_path=item.relative_path,
+        )
+
+    assert len({document["document_id"] for document in accepted.values()}) == 2
+    assert {row["relative_path"] for row in postgres.rows} == included
+    assert all(not row["scan_managed"] for row in postgres.rows)
+    for item in preview.included:
+        document = accepted[item.relative_path]
+        assert document["status"] == "indexed"
+        assert (
+            await service.get_document_info(relative_path=item.relative_path)
+        )["document_id"] == document["document_id"]
+        assert contents_by_path[item.relative_path].decode() in (
+            await service.read_document(document_id=document["document_id"])
+        )["content"]
+    with pytest.raises(FileNotFoundError):
+        service._filesystem.read_bytes("repo/.secret.md")
+
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_project_brief_is_not_cut_at_the_file_read_line_window(document_harness):
+    service, _postgres = document_harness
+    lines = [f"Goal {index}: keep this.\n" for index in range(1, 301)]
+    service._filesystem.write_bytes("PROJECT.md", "".join(lines).encode(), overwrite=True)
+
+    brief = await service.read_project_brief()
+
+    assert "Goal 300: keep this." in brief
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_oversized_project_brief_tells_the_agent_it_was_truncated(document_harness):
+    service, _postgres = document_harness
+    service._filesystem.write_bytes("PROJECT.md", b"x" * 30_000, overwrite=True)
+
+    brief = await service.read_project_brief()
+
+    assert brief.startswith("x" * 1_000)
+    assert "PROJECT.md was truncated" in brief
+    assert len(brief) < 21_000
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_a_package_install_does_not_push_reconciliation_past_its_file_limit(
+    document_harness,
+):
+    service, postgres = document_harness
+    filesystem = service._filesystem
+    assert filesystem is not None
+    # A document uploaded into a normally excluded folder must stay visible.
+    kept = await service.add_document(
+        content=b"release notes", original_name="notes.md", relative_path="build/notes.md"
+    )
+    filesystem.write_bytes("app/main.md", b"the app")
+    packages = filesystem._root / "app" / "node_modules" / "pkg"
+    packages.mkdir(parents=True)
+    for index in range(10_001):
+        (packages / f"f{index}.js").write_text("x")
+
+    result = await service.reconcile_project_files()
+
+    assert result["created"] == 1  # app/main.md; node_modules was never walked
+    live = {row["relative_path"]: row for row in postgres.rows if row["status"] != "deleted"}
+    assert "build/notes.md" in live and live["build/notes.md"]["document_id"] == kept["document_id"]
+    assert not any("node_modules" in path for path in live)
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_only_writes_flagged_as_web_derived_mark_their_document(document_harness):
+    service, postgres = document_harness
+
+    await service.create_project_file("notes/plan.md", "my plan")
+    await service.create_project_file(
+        "research/findings.md", "quoted from a page", derived_from_web=True
+    )
+
+    marks = [
+        params for kind, query, params in postgres.calls
+        if kind == "execute" and "derived_from_web = true" in query
+    ]
+    assert marks == [("project-1", ["research/findings.md"])]
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_the_scan_file_limit_is_a_live_setting(tmp_path):
+    limit = {"files": 5}
+    service = DocumentService(
+        project_id="project-1",
+        postgres_client=MemoryPostgres(),
+        embedding_service=FakeEmbeddingService(),
+        blocking_runner=run_inline,
+        document_rerank_enabled=False,
+        filesystem_factory=ProjectFilesystemFactory(tmp_path / "projects"),
+        max_reconciled_files=lambda: limit["files"],
+    )
+    for index in range(8):
+        service._filesystem.write_bytes(f"notes/{index}.md", b"note")
+
+    with pytest.raises(RuntimeError, match="max_reconciled_files"):
+        await service.reconcile_project_files()
+    limit["files"] = 100
+    assert (await service.reconcile_project_files())["created"] == 8

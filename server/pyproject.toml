@@ -13,7 +13,7 @@ dependencies = [
     "python-dotenv>=1.2.1",
     "rapidfuzz>=3.14.3",
     "sentence-transformers[onnx]>=5.2.0",
-    "tree-sitter>=0.25.0",
+    "tree-sitter==0.25.2",
     "tree-sitter-javascript>=0.25.0",
     "tree-sitter-python>=0.25.0",
     "tree-sitter-rust>=0.24.2",
@@ -23,7 +23,6 @@ dependencies = [
     "transformers>=4.44.0,<5",
     "xformers>=0.0.29.post3",
     "scikit-learn>=1.8.0",
-    "gliner2[local]>=2.0.0",
     "spacy>=3.8.11",
     "wordfreq>=3.1.1",
     "huggingface-hub[cli]>=0.36.0",
@@ -51,10 +50,11 @@ dependencies = [
     "tree-sitter-cpp>=0.23.4",
     "tree-sitter-c-sharp>=0.23.5",
     "tree-sitter-dockerfile>=0.2.0; sys_platform != 'win32'",
-    "tree-sitter-go>=0.25.0",
+    "tree-sitter-go==0.25.0",
     "tree-sitter-java>=0.23.5",
     "tree-sitter-sql>=0.3.11",
     "tree-sitter-yaml>=0.7.2",
+    "tree-sitter-zig==1.1.2",
 ]
 
 [project.optional-dependencies]
@@ -74,7 +74,8 @@ where = ["src"]
 include = ["common*", "core*", "infrastructure*", "log*", "runtime*"]
 
 [tool.setuptools.package-data]
-common = ["templates/*.md", "templates/*.yaml", "templates/prompts/*.md"]
+common = ["templates/*.md", "templates/*.yaml", "templates/prompts/*.md", "docling_models.json"]
+infrastructure = ["migrations/*.sql"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src", "."]
@@ -96,6 +97,7 @@ markers = [
     "requires_postgres: requires a real Postgres service",
     "requires_pgvector: requires pgvector support",
     "requires_async_psycopg: requires psycopg async support in this OS/event loop",
+    "requires_container: requires a reachable Podman or Docker socket",
     "model: requires local model assets and may perform model inference",
     "no_network: test is expected to make no external network calls",
 ]

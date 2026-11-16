@@ -19,12 +19,11 @@ _MAX_ENTITY_LIST_OFFSET = 10_000
 
 
 class EntityReader:
-    def __init__(self, client: PostgresClient, graph_name: str = "knoggin_graph"):
+    def __init__(self, client: PostgresClient):
         self.client = client
-        self.graph_name = graph_name
 
-    def _parse_agtype(self, val):
-        """Unwrap agtype returned by psycopg when needed."""
+    def _parse_json_value(self, val):
+        """Decode a JSON string value; other values pass through unchanged."""
         if not val:
             return val
         if isinstance(val, str):
@@ -84,7 +83,7 @@ class EntityReader:
         return days
 
     def _parse_aliases(self, value) -> List[str]:
-        aliases = self._parse_agtype(value) or []
+        aliases = self._parse_json_value(value) or []
         if isinstance(aliases, str):
             cleaned = self._clean_string(aliases)
             return [cleaned] if cleaned else []
@@ -114,7 +113,7 @@ class EntityReader:
         return entity
 
     def _parse_contexts(self, value) -> List[Dict]:
-        contexts = self._parse_agtype(value) or []
+        contexts = self._parse_json_value(value) or []
         if isinstance(contexts, dict):
             contexts = [contexts]
         if not isinstance(contexts, (list, tuple)):
@@ -122,7 +121,7 @@ class EntityReader:
 
         parsed_contexts = []
         for context in contexts:
-            context = self._parse_agtype(context)
+            context = self._parse_json_value(context)
             if not isinstance(context, dict):
                 continue
             parsed_contexts.append(
@@ -624,8 +623,7 @@ class EntityReader:
             context.last_mentioned_ms,
             COUNT(DISTINCT mer.message_id) AS message_reference_count,
             COUNT(DISTINCT relationship.relationship_id) AS relationship_count,
-            COUNT(DISTINCT episode_entity.episode_id) AS episode_reference_count,
-            COUNT(DISTINCT block_entity.block_id) AS context_block_association_count
+            COUNT(DISTINCT episode_entity.episode_id) AS episode_reference_count
         FROM public.entities e
         JOIN public.project_entity_contexts context
             ON context.entity_id = e.entity_id
@@ -642,9 +640,6 @@ class EntityReader:
         LEFT JOIN public.episode_entities episode_entity
             ON episode_entity.project_id = context.project_id
            AND episode_entity.entity_id = e.entity_id
-        LEFT JOIN public.context_block_entities block_entity
-            ON block_entity.project_id = context.project_id
-           AND block_entity.entity_id = e.entity_id
         WHERE e.user_name = %s
           AND context.project_id = %s
           AND e.entity_id <> %s
@@ -839,12 +834,11 @@ class EntityReader:
           ON observation.relationship_id = relationship.relationship_id
          AND observation.project_id = relationship.project_id
          AND observation.retired_at IS NULL
-        LEFT JOIN relationship_observation_blocks observation_block
-          ON observation_block.observation_id = observation.observation_id
-         AND observation_block.project_id = observation.project_id
-        LEFT JOIN project_context_block_supports support
-          ON support.block_id = observation_block.block_id
-         AND support.project_id = observation_block.project_id
+        LEFT JOIN relationship_observation_messages observation_message
+          ON observation_message.observation_id = observation.observation_id
+         AND observation_message.project_id = observation.project_id
+        LEFT JOIN messages support
+          ON support.message_id = observation_message.message_id
         WHERE (
               relationship.entity_a_id = ANY(%s)
               OR relationship.entity_b_id = ANY(%s)

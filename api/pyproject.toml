@@ -1,0 +1,24 @@
+[project]
+name = "api"
+version = "0.1.0"
+description = "Local HTTP bridge for the Knoggin engine"
+requires-python = ">=3.12"
+dependencies = [
+    "server",
+    "starlette>=0.52.1,<1",
+    "uvicorn>=0.41.0,<1",
+]
+
+[tool.uv.sources]
+server = { workspace = true }
+
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["app", "errors", "folder_staging", "local_access", "project_lease", "run_events"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["contracts*", "routes*"]

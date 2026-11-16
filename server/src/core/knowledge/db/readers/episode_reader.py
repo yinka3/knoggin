@@ -1,5 +1,6 @@
 import json
 import math
+from datetime import datetime
 from typing import Dict, List, Optional
 
 from common.schema.episode.models import (
@@ -7,11 +8,15 @@ from common.schema.episode.models import (
     EntityEpisode,
     Episode,
     EpisodeCard,
+    EpisodeEvent,
     MessageEpisode,
     RelationshipEpisode,
 )
 from common.scoping import require_scope_value, require_visible_project_ids
 from infrastructure.postgres_client import PostgresClient
+
+# Event text as searched: what happened plus the wording about when.
+_EVENT_TSVECTOR = "to_tsvector('english', ev.what || ' ' || coalesce(ev.date_text, ''))"
 
 
 class EpisodeReader:
@@ -55,6 +60,9 @@ class EpisodeReader:
         project_id: str,
         limit: int,
         visible_project_ids: Optional[List[str]] = None,
+        after: Optional[datetime] = None,
+        before: Optional[datetime] = None,
+        offset: int = 0,
     ) -> List[EpisodeCard]:
         if limit <= 0:
             return []
@@ -64,13 +72,14 @@ class EpisodeReader:
             visible_project_ids,
             "get_recent_project_episodes",
         )
+        date_sql, date_params = self._date_range(after, before)
         rows = await self.client.fetch_all(
-            """
+            f"""
             SELECT e.* FROM episodes e JOIN projects p ON p.project_id = e.project_id
-            WHERE e.project_id = ANY(%s) AND p.user_name = %s
-            ORDER BY e.last_message_at DESC NULLS LAST, e.episode_id DESC LIMIT %s
+            WHERE e.project_id = ANY(%s) AND p.user_name = %s {date_sql}
+            ORDER BY e.last_message_at DESC NULLS LAST, e.episode_id DESC LIMIT %s OFFSET %s
             """,
-            (visible_project_ids, user_name, limit),
+            (visible_project_ids, user_name, *date_params, limit, offset),
         )
         return [await self._hydrate_episode_card(row) for row in rows]
 
@@ -82,6 +91,8 @@ class EpisodeReader:
         project_id: str,
         limit: int,
         visible_project_ids: Optional[List[str]] = None,
+        after: Optional[datetime] = None,
+        before: Optional[datetime] = None,
     ) -> List[EpisodeCard]:
         query = query.strip()
         if not query or limit <= 0:
@@ -92,19 +103,146 @@ class EpisodeReader:
             visible_project_ids,
             "search_project_episodes",
         )
+        date_sql, date_params = self._date_range(after, before)
         rows = await self.client.fetch_all(
-            """
-            WITH terms AS (SELECT websearch_to_tsquery('simple', %s) AS query)
+            f"""
+            -- Any important word may match; ranking favors Episodes with more.
+            WITH terms AS (
+                SELECT replace(plainto_tsquery('english', %s)::text, '&', '|')::tsquery AS query
+            )
             SELECT e.* FROM episodes e
             JOIN projects p ON p.project_id = e.project_id CROSS JOIN terms
             WHERE e.project_id = ANY(%s) AND p.user_name = %s
-              AND e.search_tsvector @@ terms.query
+              AND e.search_tsvector @@ terms.query {date_sql}
             ORDER BY ts_rank_cd(e.search_tsvector, terms.query) DESC,
                      e.last_message_at DESC NULLS LAST, e.episode_id DESC LIMIT %s
             """,
-            (query, visible_project_ids, user_name, limit),
+            (query, visible_project_ids, user_name, *date_params, limit),
         )
         return [await self._hydrate_episode_card(row) for row in rows]
+
+    async def search_project_episodes_by_events(
+        self,
+        query: str,
+        *,
+        user_name: str,
+        project_id: str,
+        limit: int,
+        visible_project_ids: Optional[List[str]] = None,
+        after: Optional[datetime] = None,
+        before: Optional[datetime] = None,
+    ) -> List[EpisodeCard]:
+        """Episodes whose event lines match, best-matching event first.
+
+        An event keeps a passing mention the Episode summary may bury.
+        """
+
+        query = query.strip()
+        if not query or limit <= 0:
+            return []
+        user_name, visible_project_ids = self._project_scope(
+            user_name, project_id, visible_project_ids, "search_project_episodes_by_events"
+        )
+        date_sql, date_params = self._date_range(after, before)
+        rows = await self.client.fetch_all(
+            f"""
+            WITH terms AS (
+                SELECT replace(plainto_tsquery('english', %s)::text, '&', '|')::tsquery AS query
+            ),
+            hits AS (
+                SELECT ev.episode_id, max(ts_rank_cd({_EVENT_TSVECTOR}, terms.query)) AS rank
+                FROM episode_events ev
+                JOIN episodes e ON e.episode_id = ev.episode_id
+                JOIN projects p ON p.project_id = e.project_id CROSS JOIN terms
+                WHERE e.project_id = ANY(%s) AND p.user_name = %s
+                  AND {_EVENT_TSVECTOR} @@ terms.query {date_sql}
+                GROUP BY ev.episode_id
+            )
+            SELECT e.* FROM hits JOIN episodes e ON e.episode_id = hits.episode_id
+            ORDER BY hits.rank DESC, e.last_message_at DESC NULLS LAST, e.episode_id DESC
+            LIMIT %s
+            """,
+            (query, visible_project_ids, user_name, *date_params, limit),
+        )
+        return [await self._hydrate_episode_card(row) for row in rows]
+
+    async def list_project_events(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        limit: int,
+        offset: int = 0,
+        visible_project_ids: Optional[List[str]] = None,
+        after: Optional[datetime] = None,
+        before: Optional[datetime] = None,
+        kind: Optional[str] = None,
+        query: Optional[str] = None,
+    ) -> List[Dict]:
+        """List event mentions by when they happened.
+
+        With a date range, an event whose range only partly overlaps it is
+        returned as "overlaps"; undated events are left out. A kind filter
+        also returns events labeled other.
+        """
+
+        if limit <= 0:
+            return []
+        user_name, visible_project_ids = self._project_scope(
+            user_name, project_id, visible_project_ids, "list_project_events"
+        )
+        start = after.date() if after is not None else None
+        end = before.date() if before is not None else None
+        where, params = "", []
+        # With a query, the best-matching mentions come first; otherwise by date.
+        order = "ev.start_date NULLS LAST, e.first_message_at NULLS LAST"
+        order_params: list = []
+        if start is not None:
+            where += " AND ev.end_date >= %s"
+            params.append(start)
+        if end is not None:
+            where += " AND ev.start_date <= %s"
+            params.append(end)
+        if kind:
+            # A kind is the model's guess; events it labeled other may still fit.
+            where += " AND ev.kind IN (%s, 'other')"
+            params.append(kind.strip().lower())
+        if query and query.strip():
+            # Any important word may match, as in Episode keyword search.
+            where += (
+                f" AND {_EVENT_TSVECTOR}"
+                " @@ replace(plainto_tsquery('english', %s)::text, '&', '|')::tsquery"
+            )
+            params.append(query)
+            order = (
+                f"ts_rank_cd({_EVENT_TSVECTOR},"
+                " replace(plainto_tsquery('english', %s)::text, '&', '|')::tsquery) DESC, "
+                + order
+            )
+            order_params.append(query)
+        rows = await self.client.fetch_all(
+            f"""
+            SELECT ev.episode_id, ev.what, ev.kind, ev.start_date, ev.end_date,
+                   ev.precision, ev.date_text, ev.source_message_ids,
+                   CASE WHEN (%s::date IS NULL OR ev.start_date >= %s::date)
+                         AND (%s::date IS NULL OR ev.end_date <= %s::date)
+                        THEN 'inside' ELSE 'overlaps' END AS in_range
+            FROM episode_events ev
+            JOIN episodes e ON e.episode_id = ev.episode_id
+            JOIN projects p ON p.project_id = e.project_id
+            WHERE e.project_id = ANY(%s) AND p.user_name = %s {where}
+            ORDER BY {order}, ev.episode_id, ev.ordinal
+            LIMIT %s OFFSET %s
+            """,
+            (
+                start, start, end, end, visible_project_ids, user_name, *params,
+                *order_params, limit, offset,
+            ),
+        )
+        return [
+            {**row, "source_message_ids": [int(i) for i in row["source_message_ids"]]}
+            for row in rows
+        ]
 
     async def search_project_episodes_by_embedding(
         self,
@@ -113,8 +251,10 @@ class EpisodeReader:
         user_name: str,
         project_id: str,
         limit: int,
-        score_threshold: float = 0.35,
+        score_threshold: float,
         visible_project_ids: Optional[List[str]] = None,
+        after: Optional[datetime] = None,
+        before: Optional[datetime] = None,
     ) -> List[tuple[EpisodeCard, float]]:
         if limit <= 0:
             return []
@@ -127,12 +267,13 @@ class EpisodeReader:
             "search_project_episodes_by_embedding",
         )
         vector = json.dumps(self._normalize_embedding(embedding))
+        date_sql, date_params = self._date_range(after, before)
         rows = await self.client.fetch_all(
-            """
+            f"""
             SELECT e.*, 1 - (e.embedding <=> %s::vector) AS similarity
             FROM episodes e JOIN projects p ON p.project_id = e.project_id
             WHERE e.project_id = ANY(%s) AND p.user_name = %s AND e.embedding IS NOT NULL
-              AND 1 - (e.embedding <=> %s::vector) >= %s
+              AND 1 - (e.embedding <=> %s::vector) >= %s {date_sql}
             ORDER BY e.embedding <=> %s::vector ASC LIMIT %s
             """,
             (
@@ -141,6 +282,7 @@ class EpisodeReader:
                 user_name,
                 vector,
                 score_threshold,
+                *date_params,
                 vector,
                 limit,
             ),
@@ -158,6 +300,8 @@ class EpisodeReader:
         project_id: str,
         limit: int,
         visible_project_ids: Optional[List[str]] = None,
+        after: Optional[datetime] = None,
+        before: Optional[datetime] = None,
     ) -> List[EpisodeCard]:
         if not entity_ids or limit <= 0:
             return []
@@ -167,20 +311,103 @@ class EpisodeReader:
             visible_project_ids,
             "get_project_episodes_for_entities",
         )
+        date_sql, date_params = self._date_range(after, before)
         rows = await self.client.fetch_all(
-            """
+            f"""
             SELECT e.*, COUNT(DISTINCT ee.entity_id) AS entity_overlap
             FROM episodes e
             JOIN projects p ON p.project_id = e.project_id
             JOIN episode_entities ee ON ee.episode_id = e.episode_id AND ee.project_id = e.project_id
-            WHERE e.project_id = ANY(%s) AND p.user_name = %s AND ee.entity_id = ANY(%s)
+            WHERE e.project_id = ANY(%s) AND p.user_name = %s AND ee.entity_id = ANY(%s) {date_sql}
             GROUP BY e.episode_id
             ORDER BY entity_overlap DESC, e.last_message_at DESC NULLS LAST,
                      e.episode_id DESC LIMIT %s
             """,
-            (visible_project_ids, user_name, entity_ids, limit),
+            (visible_project_ids, user_name, entity_ids, *date_params, limit),
         )
         return [await self._hydrate_episode_card(row) for row in rows]
+
+    async def get_episode_context_links(
+        self, episode_ids: List[str], *, user_name: str, project_id: str,
+        visible_project_ids: Optional[List[str]] = None,
+    ) -> Dict[str, Dict[str, List[Dict]]]:
+        user_name, visible_project_ids = self._project_scope(
+            user_name, project_id, visible_project_ids, 'get_episode_context_links',
+        )
+        links = {episode_id: {'context_updates': [], 'context_updated_by': []}
+                 for episode_id in episode_ids}
+        if not episode_ids:
+            return links
+        # Only replacements carry supersedes_block_id. Adding another block
+        # creates no link. Even a replacement can be wording or added detail,
+        # so these are Context updates, not proof a previous fact became false.
+        rows = await self.client.fetch_all(
+            """SELECT DISTINCT older_episode.episode_id AS older_id,
+                               newer_episode.episode_id AS newer_id
+               FROM project_context_blocks newer
+               JOIN project_context_blocks older ON older.block_id = newer.supersedes_block_id
+                 AND older.project_id = newer.project_id
+               JOIN projects project ON project.project_id = newer.project_id
+               JOIN project_context_block_supports old_support ON old_support.block_id = older.block_id
+                 AND old_support.project_id = older.project_id
+               JOIN project_context_block_supports new_support ON new_support.block_id = newer.block_id
+                 AND new_support.project_id = newer.project_id
+               JOIN messages old_message ON old_message.message_id = old_support.message_id
+                 AND old_message.project_id = older.project_id AND old_message.lifecycle_state = 'sealed'
+               JOIN messages new_message ON new_message.message_id = new_support.message_id
+                 AND new_message.project_id = newer.project_id AND new_message.lifecycle_state = 'sealed'
+               JOIN episode_messages older_episode ON older_episode.message_id = old_message.message_id
+                 AND older_episode.project_id = older.project_id
+               JOIN episode_messages newer_episode ON newer_episode.message_id = new_message.message_id
+                 AND newer_episode.project_id = newer.project_id
+               WHERE newer.project_id = ANY(%s) AND project.user_name = %s
+                 AND older_episode.episode_id <> newer_episode.episode_id
+                 AND (older_episode.episode_id = ANY(%s) OR newer_episode.episode_id = ANY(%s))
+               ORDER BY older_id, newer_id""",
+            (visible_project_ids, user_name, episode_ids, episode_ids),
+        )
+        for row in rows:
+            if row['newer_id'] in links:
+                links[row['newer_id']]['context_updates'].append({'episode_id': row['older_id']})
+            if row['older_id'] in links:
+                links[row['older_id']]['context_updated_by'].append({'episode_id': row['newer_id']})
+        return links
+
+    async def get_episodes_with_forgotten_sources(
+        self, *, user_name: str, project_id: str
+    ) -> List[Dict]:
+        """Episodes linked to messages forgotten since their last update, with
+        those messages' text: what their rewrite must leave out."""
+
+        user_name = require_scope_value(
+            user_name, "user_name", "get_episodes_with_forgotten_sources"
+        )
+        project_id = require_scope_value(
+            project_id, "project_id", "get_episodes_with_forgotten_sources"
+        )
+        return await self.client.fetch_all(
+            """
+            SELECT e.episode_id, e.summary, e.new_developments, e.updates,
+                   e.unresolved, e.updated_at,
+                   array_agg(m.message_id ORDER BY em.message_position) AS forgotten_ids,
+                   array_agg(m.role || ': ' || m.content ORDER BY em.message_position)
+                       AS forgotten_texts
+            FROM episodes e
+            JOIN projects p ON p.project_id = e.project_id
+            JOIN episode_messages em ON em.episode_id = e.episode_id
+                                    AND em.project_id = e.project_id
+            JOIN messages m ON m.message_id = em.message_id AND m.project_id = em.project_id
+                           AND m.session_id = em.session_id
+            WHERE e.project_id = %s AND p.user_name = %s
+              AND m.lifecycle_state = 'forgotten'
+              AND m.forgotten_at > COALESCE(
+                  (e.generator_metadata ->> 'forgotten_rewritten_at')::timestamptz,
+                  e.created_at)
+            GROUP BY e.episode_id
+            ORDER BY e.episode_id
+            """,
+            (project_id, user_name),
+        )
 
     async def get_project_episode_source_messages(
         self,
@@ -189,6 +416,8 @@ class EpisodeReader:
         user_name: str,
         project_id: str,
         visible_project_ids: Optional[List[str]] = None,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> List[Dict]:
         episode_id = require_scope_value(
             episode_id,
@@ -201,8 +430,14 @@ class EpisodeReader:
             visible_project_ids,
             "get_project_episode_source_messages",
         )
+        if limit is not None and not 1 <= limit <= 101:
+            raise ValueError("episode source message limit must be between 1 and 101")
+        if offset < 0:
+            raise ValueError("episode source message offset must not be negative")
+        limit_clause = "LIMIT %s" if limit is not None else ""
+        offset_clause = "OFFSET %s" if offset else ""
         return await self.client.fetch_all(
-            """
+            f"""
             SELECT m.message_id, m.session_id, m.role, m.content, m.timestamp_ms,
                    em.message_position,
                    em.attached_at
@@ -212,9 +447,14 @@ class EpisodeReader:
             JOIN messages m ON m.message_id = em.message_id AND m.project_id = em.project_id
                            AND m.session_id = em.session_id
             WHERE e.episode_id = %s AND e.project_id = ANY(%s) AND p.user_name = %s
+              AND m.lifecycle_state <> 'forgotten'
             ORDER BY em.message_position
+            {limit_clause}
+            {offset_clause}
             """,
-            (episode_id, visible_project_ids, user_name),
+            (episode_id, visible_project_ids, user_name)
+            + ((limit,) if limit is not None else ())
+            + ((offset,) if offset else ()),
         )
 
     @staticmethod
@@ -275,6 +515,7 @@ class EpisodeReader:
             last_message_at=row.get("last_message_at"),
             entities=await self._load_entities(episode_id),
             relationships=await self._load_relationships(episode_id),
+            events=await self._load_events(episode_id),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             generator_metadata=self._json_dict(row.get("generator_metadata")),
@@ -309,22 +550,41 @@ class EpisodeReader:
         rows = await self.client.fetch_all(
             """
             SELECT
-                entity_id,
-                source_message_count,
-                first_seen_at,
-                last_seen_at
-            FROM episode_entities
-            WHERE episode_id = %s
-            ORDER BY entity_id
+                link.entity_id,
+                entity.canonical_name,
+                link.source_message_count,
+                link.first_seen_at,
+                link.last_seen_at
+            FROM episode_entities link
+            JOIN entities entity ON entity.entity_id = link.entity_id
+            WHERE link.episode_id = %s
+            ORDER BY link.entity_id
             """,
             (episode_id,),
         )
         return [
             EntityEpisode(
                 entity_id=int(row["entity_id"]),
+                name=row["canonical_name"],
                 source_message_count=int(row["source_message_count"]),
                 first_seen_at=row.get("first_seen_at"),
                 last_seen_at=row.get("last_seen_at"),
+            )
+            for row in rows
+        ]
+
+    async def _load_events(self, episode_id: str) -> List[EpisodeEvent]:
+        rows = await self.client.fetch_all(
+            """
+            SELECT what, kind, start_date, end_date, precision, date_text,
+                   source_message_ids
+            FROM episode_events WHERE episode_id = %s ORDER BY ordinal
+            """,
+            (episode_id,),
+        )
+        return [
+            EpisodeEvent(
+                **{**row, "source_message_ids": [int(i) for i in row["source_message_ids"]]}
             )
             for row in rows
         ]
@@ -333,21 +593,46 @@ class EpisodeReader:
         rows = await self.client.fetch_all(
             """
             SELECT
-                relationship_id,
-                source_message_count
-            FROM episode_relationships
-            WHERE episode_id = %s
-            ORDER BY relationship_id
+                link.relationship_id,
+                source.canonical_name AS source,
+                relationship.relationship_type,
+                target.canonical_name AS target,
+                link.source_message_count
+            FROM episode_relationships link
+            JOIN relationships relationship
+              ON relationship.relationship_id = link.relationship_id
+            JOIN entities source ON source.entity_id = relationship.entity_a_id
+            JOIN entities target ON target.entity_id = relationship.entity_b_id
+            WHERE link.episode_id = %s
+            ORDER BY link.relationship_id
             """,
             (episode_id,),
         )
         return [
             RelationshipEpisode(
                 relationship_id=str(row["relationship_id"]),
+                source=row["source"],
+                relationship_type=row["relationship_type"],
+                target=row["target"],
                 source_message_count=int(row["source_message_count"]),
             )
             for row in rows
         ]
+
+    @staticmethod
+    def _date_range(
+        after: Optional[datetime], before: Optional[datetime]
+    ) -> tuple[str, list[datetime]]:
+        """Match Episodes whose time span overlaps the range."""
+
+        sql, params = "", []
+        if after is not None:
+            sql += " AND e.last_message_at >= %s"
+            params.append(after)
+        if before is not None:
+            sql += " AND e.first_message_at <= %s"
+            params.append(before)
+        return sql, params
 
     @staticmethod
     def _json_list(value) -> List[str]:

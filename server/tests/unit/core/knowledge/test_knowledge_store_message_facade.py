@@ -73,3 +73,20 @@ async def test_message_facade_routes_scoped_reads_to_the_message_reader():
             },
         ),
     ]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_entity_search_uses_the_readers_supported_arguments():
+    class EntityReader:
+        async def search_by_name(self, query, *, visible_project_ids, limit):
+            assert (query, visible_project_ids, limit) == (
+                "Ada", ["project-1"], 7
+            )
+            return [{"entity_id": 1, "canonical_name": "Ada"}]
+
+    store = KnowledgeStore.__new__(KnowledgeStore)
+    store._entity_reader = EntityReader()
+    assert await store.search_entity(
+        "Ada", visible_project_ids=["project-1"], limit=7
+    ) == [{"entity_id": 1, "canonical_name": "Ada"}]

@@ -1,7 +1,6 @@
 import asyncio
 import os
 import sys
-from pathlib import Path
 from uuid import uuid4
 
 import psycopg
@@ -10,10 +9,11 @@ from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from infrastructure.postgres_client import PostgresClient
+from infrastructure.schema_migrations import migrate
 
 DB_URL = os.environ.get(
-    "KNOGGIN_TEST_DATABASE_URL",
-    "postgresql://knoggin:knoggin@127.0.0.1:5432/knoggin_db",
+    "TEST_DATABASE_URL",
+    "postgresql://knoggin:knoggin@127.0.0.1:5432/postgres",
 )
 
 
@@ -39,23 +39,10 @@ def storage_database_url():
     database = f"knoggin_storage_{uuid4().hex[:12]}"
     admin_url = _database_url("postgres")
     database_url = _database_url(database)
-    schema_sql = (
-        Path(__file__).resolve().parents[3]
-        / "src"
-        / "infrastructure"
-        / "schema.sql"
-    ).read_text(encoding="utf-8")
-
     with psycopg.connect(admin_url, autocommit=True) as admin:
         admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database)))
     try:
-        with psycopg.connect(database_url, autocommit=True) as connection:
-            connection.execute("CREATE EXTENSION vector")
-            connection.execute("CREATE EXTENSION age")
-            connection.execute("LOAD 'age'")
-            connection.execute('SET search_path = ag_catalog, "$user", public')
-            connection.execute(schema_sql)
-            connection.execute("SELECT ag_catalog.create_graph('knoggin_graph')")
+        migrate(database_url)
         yield database_url
     finally:
         with psycopg.connect(admin_url, autocommit=True) as admin:
@@ -83,7 +70,7 @@ async def real_postgres_client(storage_database_url):
 
 
 async def _reset_storage_db(client: PostgresClient):
-    """Truncate canonical tables, seed projects, and wipe the AGE projection."""
+    """Truncate canonical tables and seed projects."""
 
     await client.execute(
         """
@@ -94,7 +81,7 @@ async def _reset_storage_db(client: PostgresClient):
             SELECT string_agg(format('%I.%I', schemaname, tablename), ', ')
             INTO table_names
             FROM pg_tables
-            WHERE schemaname = 'public';
+            WHERE schemaname = 'public' AND tablename <> 'schema_migrations';
 
             IF table_names IS NOT NULL THEN
                 EXECUTE 'TRUNCATE TABLE ' || table_names
@@ -121,21 +108,3 @@ async def _reset_storage_db(client: PostgresClient):
         ON CONFLICT (project_id) DO NOTHING;
         """
     )
-    # Ensure the AGE graph exists before trying to wipe it
-    graph_name = "knoggin_graph"
-    row = await client.fetch_one(
-        "SELECT count(*) FROM ag_graph WHERE name = %s;",
-        (graph_name,),
-    )
-    if row["count"] == 0:
-        await client.execute(
-            f"SELECT create_graph('{graph_name}');"
-        )
-
-    # Wipe the AGE graph nodes and relationships
-    wipe_graph_sql = (
-        f"SELECT * FROM cypher('{graph_name}', "
-        "$$ MATCH (n) DETACH DELETE n RETURN n $$"
-        ") AS (n agtype);"
-    )
-    await client.execute(wipe_graph_sql)

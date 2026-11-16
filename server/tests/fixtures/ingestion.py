@@ -1,13 +1,13 @@
 """Explicit ingestion-policy builders for tests."""
 
 from common.conf.domain_config import CompiledDomain, DomainConfig
-from common.schema.settings import EntityResolutionSettings, TextProcessorSettings
+from common.schema.settings import EntityResolutionSettings, ExtractionSettings
 from core.ingestion.policy import IngestionPolicy
 
 
 def ingestion_policy(
     *,
-    text_processor: TextProcessorSettings | None = None,
+    extraction: ExtractionSettings | None = None,
     entity_resolution: EntityResolutionSettings | None = None,
     compiled_domain: CompiledDomain | None = None,
 ) -> IngestionPolicy:
@@ -29,7 +29,7 @@ def ingestion_policy(
             }
         ).compile()
     return IngestionPolicy.capture(
-        text_processor=text_processor or TextProcessorSettings(),
+        extraction=extraction or ExtractionSettings(),
         entity_resolution=entity_resolution or EntityResolutionSettings(),
         compiled_domain=compiled_domain,
     )

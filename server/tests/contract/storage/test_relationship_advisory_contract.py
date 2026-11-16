@@ -145,7 +145,7 @@ async def test_stale_advisory_refresh_creates_open_successor(real_postgres_clien
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
-async def test_context_observations_become_reviewable_advisory(real_postgres_client):
+async def test_conversation_observations_become_reviewable_advisory(real_postgres_client):
     client = real_postgres_client
     await client.execute(
         """
@@ -166,18 +166,13 @@ async def test_context_observations_become_reviewable_advisory(real_postgres_cli
                 'conversation', 'completed', 1, '{}'::jsonb, 0, 'test', 'v1', now()),
                ('22222222-2222-4222-8222-222222222222', 'ada', 'project-1',
                 'conversation', 'completed', 1, '{}'::jsonb, 0, 'test', 'v1', now());
-        INSERT INTO public.project_context_blocks
-            (block_id, project_id, section_key, markdown, content_hash,
-             assertion_kind, source_time_ms)
-        VALUES ('33333333-3333-4333-8333-333333333333', 'project-1',
-                'current_state', 'Project A deploys to Tool A.', repeat('a', 64),
-                'source_grounded', 100),
-               ('44444444-4444-4444-8444-444444444444', 'project-1',
-                'current_state', 'Project B deploys to Tool A.', repeat('b', 64),
-                'source_grounded', 200),
-               ('55555555-5555-4555-8555-555555555555', 'project-1',
-                'current_state', 'Project A deploys to Tool B.', repeat('c', 64),
-                'source_grounded', 300);
+        INSERT INTO public.sessions (session_id, user_name, project_id)
+        VALUES ('session-1', 'ada', 'project-1');
+        INSERT INTO public.messages
+            (user_name, session_id, message_id, project_id, role, content, timestamp_ms)
+        VALUES ('ada', 'session-1', 101, 'project-1', 'user', 'Project A deploys to Tool A.', 100),
+               ('ada', 'session-1', 102, 'project-1', 'user', 'Project B deploys to Tool A.', 200),
+               ('ada', 'session-1', 103, 'project-1', 'user', 'Project A deploys to Tool B.', 300);
         """
     )
     observations = await client.fetch_all(
@@ -195,19 +190,11 @@ async def test_context_observations_become_reviewable_advisory(real_postgres_cli
         RETURNING observation_id
         """
     )
-    for observation, block_id in zip(
-        observations,
-        (
-            '33333333-3333-4333-8333-333333333333',
-            '44444444-4444-4444-8444-444444444444',
-            '55555555-5555-4555-8555-555555555555',
-        ),
-        strict=True,
-    ):
+    for observation, message_id in zip(observations, (101, 102, 103), strict=True):
         await client.execute(
-            """INSERT INTO public.relationship_observation_blocks
-               (observation_id, project_id, block_id) VALUES (%s, 'project-1', %s)""",
-            (observation['observation_id'], block_id),
+            """INSERT INTO public.relationship_observation_messages
+               (observation_id, project_id, message_id) VALUES (%s, 'project-1', %s)""",
+            (observation['observation_id'], message_id),
         )
 
     reader = RelationshipObservationReader(client)
@@ -215,7 +202,7 @@ async def test_context_observations_become_reviewable_advisory(real_postgres_cli
         user_name='ada', project_id='project-1'
     )
     assert len(rows) == 3
-    assert {row['evidence_origin'] for row in rows} == {'context'}
+    assert {row['evidence_origin'] for row in rows} == {'conversation'}
 
     evidence = EvidenceService(EvidenceTraversalReader(client))
 

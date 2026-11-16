@@ -5,7 +5,7 @@ import os
 
 import pytest
 
-from core.ingestion import vp01
+from common.conf.manager import ConfigManager
 from infrastructure.model_work import ModelWorkPriority
 from runtime.resources import RuntimeResources
 
@@ -26,7 +26,7 @@ def _local_snapshot(
             **kwargs,
         )
     except Exception as exc:
-        if os.environ.get("KNOGGIN_REQUIRE_LOCAL_MODELS") == "1":
+        if os.environ.get("REQUIRE_LOCAL_MODELS") == "1":
             pytest.fail(
                 f"Required runtime model artifact {model_name!r} is unavailable: {exc}"
             )
@@ -34,51 +34,43 @@ def _local_snapshot(
 
 
 @pytest.fixture
-async def real_resource_manager(monkeypatch):
+async def real_resource_manager(monkeypatch, tmp_path, test_database_url):
     huggingface_hub = pytest.importorskip("huggingface_hub")
     embedding_model = _local_snapshot(
         huggingface_hub,
         os.environ.get(
-            "KNOGGIN_SEMANTIC_SMOKE_MODEL",
-            os.environ.get("KNOGGIN_EMBEDDING_MODEL", "dunzhang/stella_en_1.5B_v5"),
+            "SEMANTIC_SMOKE_MODEL",
+            os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5"),
         ),
-        revision_env="KNOGGIN_SEMANTIC_SMOKE_MODEL_REVISION",
+        revision_env="SEMANTIC_SMOKE_MODEL_REVISION",
     )
     reranker_model = _local_snapshot(
         huggingface_hub,
         os.environ.get(
-            "KNOGGIN_SEMANTIC_SMOKE_RERANKER_MODEL",
-            os.environ.get("KNOGGIN_RERANKER_MODEL", "BAAI/bge-reranker-large"),
+            "SEMANTIC_SMOKE_RERANKER_MODEL",
+            os.environ.get("RERANKER_MODEL", "BAAI/bge-reranker-base"),
         ),
-        revision_env="KNOGGIN_SEMANTIC_SMOKE_RERANKER_REVISION",
+        revision_env="SEMANTIC_SMOKE_RERANKER_REVISION",
     )
-    vp01_model = _local_snapshot(
-        huggingface_hub,
-        os.environ.get("KNOGGIN_VP01_MODEL", "fastino/gliner2.5-base-v1"),
-        revision_env="KNOGGIN_VP01_REVISION",
-    )
-    monkeypatch.setattr(vp01, "GLINER25_ENGLISH_MODEL", vp01_model)
 
+    monkeypatch.setenv("DATABASE_URL", test_database_url)
+    monkeypatch.setenv("EMBEDDING_MODEL", embedding_model)
+    monkeypatch.setenv("RERANKER_MODEL", reranker_model)
     monkeypatch.setenv(
-        "DATABASE_URL",
-        os.environ.get(
-            "KNOGGIN_TEST_DATABASE_URL",
-            "postgresql://knoggin:knoggin@localhost:5432/knoggin_db",
-        ),
-    )
-    monkeypatch.setenv("KNOGGIN_EMBEDDING_MODEL", embedding_model)
-    monkeypatch.setenv("KNOGGIN_RERANKER_MODEL", reranker_model)
-    monkeypatch.setenv(
-        "KNOGGIN_EMBEDDING_BACKEND",
-        os.environ.get("KNOGGIN_EMBEDDING_BACKEND", "onnx"),
+        "EMBEDDING_BACKEND",
+        os.environ.get("EMBEDDING_BACKEND", "onnx"),
     )
     monkeypatch.setenv(
-        "KNOGGIN_ONNX_PROVIDER",
-        os.environ.get("KNOGGIN_ONNX_PROVIDER", "CPUExecutionProvider"),
+        "ONNX_PROVIDER",
+        os.environ.get("ONNX_PROVIDER", "CPUExecutionProvider"),
     )
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
 
-    manager = await RuntimeResources.create(num_workers=2)
+    # Resources read live settings from an application-owned ConfigManager.
+    monkeypatch.setattr(ConfigManager, "_instance", None)
+    config_manager = ConfigManager(tmp_path)
+    config_manager.load(require_valid=True)
+    manager = await RuntimeResources.create(thread_workers=2, config_manager=config_manager)
     try:
         yield manager
     finally:
@@ -99,7 +91,6 @@ async def test_real_runtime_shutdown_cancels_background_and_drains_model_work(
     assert manager.embedding is not None
     assert manager.embedding.embedding_dim > 0
     assert manager.spacy is not None
-    assert manager.vp01 is not None
     assert manager.work_snapshot()["background_work"]["queued"] == 0
 
     ingestion_started = asyncio.Event()
@@ -137,15 +128,18 @@ async def test_real_runtime_shutdown_cancels_background_and_drains_model_work(
     await agent_tool_started.wait()
 
     shutdown_task = asyncio.create_task(manager.shutdown())
-    await asyncio.sleep(0)
-    ingestion_release.set()
+    # Model work drains; background ingestion is never released, so only
+    # shutdown cancelling it can end it (no race on event-loop ticks).
     agent_tool_release.set()
 
-    shutdown_result, ingestion_result, agent_tool_result = await asyncio.gather(
-        shutdown_task,
-        ingestion_task,
-        agent_tool_task,
-        return_exceptions=True,
+    shutdown_result, ingestion_result, agent_tool_result = await asyncio.wait_for(
+        asyncio.gather(
+            shutdown_task,
+            ingestion_task,
+            agent_tool_task,
+            return_exceptions=True,
+        ),
+        timeout=60,
     )
 
     assert shutdown_result is None

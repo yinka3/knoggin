@@ -6,6 +6,7 @@ from typing import Dict, Optional
 
 from loguru import logger
 
+from common.exceptions import StorageWriteError
 from common.utils.diagnostic_context import diagnostic_scope
 from common.utils.events import emit
 from common.utils.time_utils import get_now, get_now_unix
@@ -314,7 +315,6 @@ class Scheduler:
         *,
         policy: ScheduledJobPolicy,
     ) -> JobResult | None:
-        logger.info("Executing job: {}", job.name)
         self._mark_job_running(job.name, policy)
         deadline: asyncio.Timeout | None = None
         try:
@@ -335,7 +335,11 @@ class Scheduler:
                     "summary": result.summary,
                 },
             )
-            logger.info("Job {} finished with success={}", job.name, result.success)
+            if result.summary != "No semantic window is due":
+                logger.info(
+                    "Job {} finished with success={} summary={}",
+                    job.name, result.success, result.summary,
+                )
             return result
         except TimeoutError:
             if deadline is None or not deadline.expired():
@@ -372,7 +376,19 @@ class Scheduler:
                 "failed",
                 {"name": job.name, "error_type": type(exc).__name__},
             )
-            logger.error("Job {} execution failed: {}", job.name, type(exc).__name__)
+            cause = exc.__cause__
+            diag = getattr(cause, "diag", None)
+            logger.error(
+                "Job {} execution failed project={} error={} operation={} "
+                "cause={} sqlstate={} constraint={}",
+                job.name,
+                ctx.project_id,
+                type(exc).__name__,
+                str(exc) if isinstance(exc, StorageWriteError) else None,
+                type(cause).__name__ if cause else None,
+                getattr(cause, "sqlstate", None),
+                getattr(diag, "constraint_name", None),
+            )
         return None
 
     def _mark_job_running(

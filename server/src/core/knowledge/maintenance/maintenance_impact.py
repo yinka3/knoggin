@@ -45,7 +45,6 @@ class MaintenanceImpactPlanner:
                     cls._item("episode_entity_link", "direct_mutation", observation_ids),
                 ]
             )
-            impacts.extend(cls._project_rebuilds([review.project_id]))
         elif isinstance(plan, EntityMergePlan):
             projects = sorted(plan.frontier_tokens)
             impacts.extend(
@@ -59,22 +58,6 @@ class MaintenanceImpactPlanner:
                     cls._item("episode_entity_link", "direct_mutation", projects),
                 ]
             )
-            association_counts = {
-                project_id: count
-                for project_id, count in plan.context_block_association_counts.items()
-                if count > 0
-            }
-            if association_counts:
-                association_projects = sorted(association_counts)
-                impacts.append(
-                    MaintenanceImpactItem(
-                        kind="context_block_entity",
-                        mode="direct_mutation",
-                        identifiers=tuple(association_projects[:128]),
-                        total_count=sum(association_counts.values()),
-                        truncated=len(association_projects) > 128,
-                    )
-                )
             impacts.extend(cls._project_rebuilds(projects, include_cache=True))
         elif isinstance(plan, EntityMergeRollbackPlan):
             mutation_ids = [
@@ -85,11 +68,7 @@ class MaintenanceImpactPlanner:
         elif isinstance(plan, EntityContextChangePlan):
             key = f"{plan.project_id}:{plan.entity_id}"
             impacts.append(cls._item("project_entity_context", "direct_mutation", [key]))
-            impacts.extend(
-                cls._project_rebuilds(
-                    [plan.project_id], include_search=True, include_cache=True
-                )
-            )
+            impacts.append(cls._item("live_entity_cache", "cache_invalidation", [key]))
         elif isinstance(plan, RelationshipDomainChangePlan):
             impacts.append(
                 cls._item("domain_config", "direct_mutation", [plan.relationship_name])
@@ -129,7 +108,7 @@ class MaintenanceImpactPlanner:
         include_cache: bool = False,
     ) -> list[MaintenanceImpactItem]:
         projects = [project_id for project_id in project_ids if project_id]
-        impacts = [cls._item("age_projection", "derived_rebuild", projects)]
+        impacts = []
         if include_search:
             impacts.append(cls._item("search_projection", "derived_rebuild", projects))
         if include_cache:

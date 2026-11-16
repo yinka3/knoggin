@@ -20,7 +20,10 @@ from typing import (
 from loguru import logger
 from pydantic import TypeAdapter
 
+from common.document_limits import DEFAULT_DOCUMENT_SIZE
 from common.schema.document import (
+    DocumentExtractionMode,
+    DocumentExtractionStrategy,
     DocumentSelection,
     FolderPreview,
     FolderScanSettings,
@@ -40,7 +43,7 @@ from common.utils.lifecycle import settle_owned_task
 from common.utils.time_utils import get_now_iso
 from core.knowledge.db.readers.document_reader import DocumentReader
 from core.knowledge.db.writers.document_writer import DocumentWriter
-from core.knowledge.services.embedding_service import EmbeddingService
+from core.knowledge.embedding_service import EmbeddingService
 from core.project.project_files import (
     CONTEXT_FILE_PATH,
     PROJECT_FILE_PATH,
@@ -51,6 +54,7 @@ from infrastructure.postgres_client import PostgresClient
 
 from .constants import (
     ACCEPTED_EXTENSIONS,
+    DEFAULT_IGNORED_DIRECTORIES,
     DOCUMENT_RERANK_DEFAULT_CANDIDATES,
     EXPECTED_EMBEDDING_DIMENSION,
     HYBRID_SEARCH_CANDIDATE_MULTIPLIER,
@@ -61,6 +65,7 @@ from .constants import (
     MAX_DOCUMENT_SIZE,
     MAX_READ_CHARACTERS,
     MAX_READ_LINES,
+    SENSITIVE_FILE_PATTERNS,
     document_extension,
 )
 from .extraction import (
@@ -70,11 +75,42 @@ from .extraction import (
 from .filesystem import ProjectFilesystem, ProjectFilesystemFactory, _MutationLease
 from .indexer import DocumentIndexer
 from .policy import DocumentIndexPolicy
-from .scanning import FolderScanPathEntry, build_folder_preview, normalize_relative_path
+from .scanning import (
+    FolderScanPathEntry,
+    build_folder_preview,
+    matches_pattern,
+    normalize_relative_path,
+)
 
 BlockingRunner = Callable[..., Awaitable[Any]]
 _RECONCILIATION_MAX_FILES = 10_000
+_GREP_MAX_FILE_BYTES = 2 * 1024 * 1024
 _RECONCILIATION_FULL_HASH_INTERVAL = 10
+
+
+def _excluded_directory_check(settings, documents) -> Callable[[str], bool]:
+    """Keep the walk out of folders whose files the scan would exclude by
+    name anyway (``node_modules``, ``.venv``, hidden folders), so an install
+    cannot push a project past the file limit. A folder holding a registered
+    document is still walked, or that document would look deleted."""
+
+    occupied = {
+        PurePosixPath(*PurePosixPath(path).parts[:index]).as_posix()
+        for path in documents
+        for index in range(1, len(PurePosixPath(path).parts))
+    }
+
+    def skip(directory: str) -> bool:
+        if directory in occupied:
+            return False
+        name = PurePosixPath(directory).name.lower()
+        return (
+            name in DEFAULT_IGNORED_DIRECTORIES
+            or name in settings.blocked_directory_names
+            or (not settings.include_hidden and name.startswith("."))
+        )
+
+    return skip
 
 
 class _UnsetSavedWebLinkField:
@@ -130,8 +166,18 @@ class DocumentService:
         document_rerank_candidates: int = DOCUMENT_RERANK_DEFAULT_CANDIDATES,
         filesystem_factory: ProjectFilesystemFactory | None = None,
         reconciliation_interval_seconds: int = 60,
+        max_document_upload_bytes: int | Callable[[], int] = DEFAULT_DOCUMENT_SIZE,
+        max_reconciled_files: int | Callable[[], int] = _RECONCILIATION_MAX_FILES,
     ):
         self.project_id = project_id
+        initial_upload_limit = (
+            max_document_upload_bytes()
+            if callable(max_document_upload_bytes) else max_document_upload_bytes
+        )
+        if not 1 <= initial_upload_limit <= MAX_DOCUMENT_SIZE:
+            raise ValueError("max_document_upload_bytes is outside the supported range")
+        self._document_upload_limit = max_document_upload_bytes
+        self._reconciled_file_limit = max_reconciled_files
         self._embedding = embedding_service
         self._reader = reader or DocumentReader(
             postgres_client,
@@ -182,6 +228,14 @@ class DocumentService:
                 self.reconcile_project_files,
                 interval_seconds=reconciliation_interval_seconds,
             )
+
+    def _max_reconciled_files(self) -> int:
+        value = self._reconciled_file_limit
+        return value() if callable(value) else value
+
+    def _max_document_upload_bytes(self) -> int:
+        value = self._document_upload_limit
+        return value() if callable(value) else value
 
     @property
     def _filesystem(self) -> ProjectFilesystem | None:
@@ -240,28 +294,33 @@ class DocumentService:
             filesystem.get_mutation_generation, _lease=lease
         )
 
-        paths = await self._run_blocking(
-            lambda: list(filesystem.iter_paths(limit=_RECONCILIATION_MAX_FILES + 1))
-        )
-        if len(paths) > _RECONCILIATION_MAX_FILES:
-            raise RuntimeError(
-                "project filesystem reconciliation exceeds the "
-                f"{_RECONCILIATION_MAX_FILES}-file safety limit"
-            )
-        reserved_paths = [path for path in paths if is_controlled_context_file(path.relative_path)]
-        paths = [path for path in paths if not is_controlled_context_file(path.relative_path)]
         settings = await self.get_scan_settings()
         if settings != self._reconciliation_settings:
             self._reconciliation_fingerprints.clear()
         current_rows = await self._reader.list_documents_for_reconciliation(
-            limit=_RECONCILIATION_MAX_FILES + 1,
+            limit=self._max_reconciled_files() + 1,
         )
         current = {row["relative_path"]: row for row in current_rows}
-        if len(current) > _RECONCILIATION_MAX_FILES:
+        if len(current) > self._max_reconciled_files():
             raise RuntimeError(
                 "document catalog reconciliation exceeds the "
-                f"{_RECONCILIATION_MAX_FILES}-file safety limit"
+                f"{self._max_reconciled_files()}-file limit "
+                "(developer_settings.documents.max_reconciled_files)"
             )
+        skip_directory = _excluded_directory_check(settings, current)
+        paths = await self._run_blocking(
+            lambda: list(filesystem.iter_paths(
+                limit=self._max_reconciled_files() + 1, skip_directory=skip_directory,
+            ))
+        )
+        if len(paths) > self._max_reconciled_files():
+            raise RuntimeError(
+                "project filesystem reconciliation exceeds the "
+                f"{self._max_reconciled_files()}-file limit "
+                "(developer_settings.documents.max_reconciled_files)"
+            )
+        reserved_paths = [path for path in paths if is_controlled_context_file(path.relative_path)]
+        paths = [path for path in paths if not is_controlled_context_file(path.relative_path)]
 
         self._reconciliation_run_count += 1
         full_hash_sweep = (
@@ -507,9 +566,9 @@ class DocumentService:
 
         settings = await self.get_scan_settings()
         current_rows = await self._reader.list_documents_for_reconciliation(
-            limit=_RECONCILIATION_MAX_FILES + 1
+            limit=self._max_reconciled_files() + 1
         )
-        if len(current_rows) > _RECONCILIATION_MAX_FILES:
+        if len(current_rows) > self._max_reconciled_files():
             raise RuntimeError("document catalog reconciliation exceeds the file safety limit")
         current = {row["relative_path"]: row for row in current_rows}
 
@@ -641,6 +700,53 @@ class DocumentService:
                 ) from restore_error
             raise
 
+    async def grep_project_files(
+        self,
+        text: str,
+        *,
+        path_prefix: Optional[str] = None,
+        case_sensitive: bool = False,
+        max_matches: int = 30,
+    ) -> Dict:
+        """Find lines containing ``text`` in the project's text files, without
+        the index, for code that is read directly. Skips excluded and hidden
+        folders, files that may hold credentials, and the Context file."""
+        if not isinstance(text, str) or not text.strip() or len(text) > 200:
+            raise ValueError("text must be 1 to 200 characters")
+        if not isinstance(max_matches, int) or isinstance(max_matches, bool) or not 1 <= max_matches <= 100:
+            raise ValueError("max_matches must be between 1 and 100")
+        filesystem = self._require_filesystem()
+        prefix = None
+        if path_prefix is not None and path_prefix.strip() not in {"", "."}:
+            prefix = normalize_relative_path(path_prefix, path_prefix).rstrip("/")
+        skip = _excluded_directory_check(await self.get_scan_settings(), {})
+        needle = text if case_sensitive else text.casefold()
+
+        def search() -> Dict:
+            matches: list[Dict] = []
+            for path in filesystem.iter_paths(skip_directory=skip):
+                relative = path.relative_path
+                if prefix is not None and relative != prefix and not relative.startswith(prefix + "/"):
+                    continue
+                if (
+                    is_controlled_context_file(relative)
+                    or matches_pattern(relative.lower(), SENSITIVE_FILE_PATTERNS)
+                    or path.size_bytes > _GREP_MAX_FILE_BYTES
+                ):
+                    continue
+                try:
+                    content = filesystem.read_bytes(relative).decode("utf-8")
+                except (UnicodeDecodeError, OSError, ValueError):
+                    continue
+                for number, line in enumerate(content.splitlines(), start=1):
+                    if needle in (line if case_sensitive else line.casefold()):
+                        matches.append({"path": relative, "line": number, "text": line[:300]})
+                        if len(matches) >= max_matches:
+                            return {"matches": matches, "truncated": True}
+            return {"matches": matches, "truncated": False}
+
+        return await self._run_blocking(search)
+
     async def list_project_files(
         self,
         *,
@@ -749,13 +855,30 @@ class DocumentService:
         The engine-maintained ``CONTEXT.md`` projection is deliberately handled
         by the controlled Context component instead of this generic file API.
         """
+        filesystem = self._filesystem
+        if filesystem is None:
+            raise RuntimeError("No local project filesystem is configured")
         try:
-            return (await self.read_project_file(PROJECT_FILE_PATH))["content"]
+            content = await self._run_blocking(filesystem.read_bytes, PROJECT_FILE_PATH)
         except FileNotFoundError:
             return None
+        try:
+            text = content.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("PROJECT.md is not UTF-8 text") from exc
+        # The brief is read whole, not through the agent's line-window file
+        # reader; only an oversized brief is cut, and the agent is told so.
+        if len(text) <= MAX_READ_CHARACTERS:
+            return text
+        return (
+            text[:MAX_READ_CHARACTERS]
+            + f"\n\n[PROJECT.md was truncated to its first {MAX_READ_CHARACTERS} characters.]"
+        )
 
     @_settle_file_operation
-    async def create_project_file(self, path: str, content: str) -> Dict:
+    async def create_project_file(
+        self, path: str, content: str, *, derived_from_web: bool = False
+    ) -> Dict:
         """Create a text project file and update its document catalog row."""
         payload = self._validate_project_file_content(path, content)
         filesystem = self._require_filesystem()
@@ -766,8 +889,8 @@ class DocumentService:
                 filesystem.write_bytes, normalized_path, payload, _lease=lease
             )
             await self._rollback_file_on_catalog_failure(
-                self._reconcile_owned_file_changes(
-                    upserts={normalized_path: payload}, lease=lease
+                self._catalog_written_file(
+                    normalized_path, payload, lease=lease, derived_from_web=derived_from_web
                 ),
                 lambda: self._run_blocking(
                     filesystem.delete_file,
@@ -778,6 +901,13 @@ class DocumentService:
             )
             return await self.read_project_file(normalized_path)
 
+    async def _catalog_written_file(
+        self, path: str, payload: bytes, *, lease, derived_from_web: bool
+    ) -> None:
+        await self._reconcile_owned_file_changes(upserts={path: payload}, lease=lease)
+        if derived_from_web:
+            await self._writer.mark_derived_from_web([path])
+
     @_settle_file_operation
     async def update_project_file(
         self,
@@ -785,6 +915,7 @@ class DocumentService:
         content: str,
         *,
         expected_content_hash: str,
+        derived_from_web: bool = False,
     ) -> Dict:
         """Replace a text project file only when its caller has the current hash."""
         payload = self._validate_project_file_content(path, content)
@@ -802,8 +933,8 @@ class DocumentService:
                 _lease=lease,
             )
             await self._rollback_file_on_catalog_failure(
-                self._reconcile_owned_file_changes(
-                    upserts={normalized_path: payload}, lease=lease
+                self._catalog_written_file(
+                    normalized_path, payload, lease=lease, derived_from_web=derived_from_web
                 ),
                 lambda: self._run_blocking(
                     filesystem.write_bytes,
@@ -824,6 +955,7 @@ class DocumentService:
         content: str,
         *,
         expected_content_hash: str,
+        derived_from_web: bool = False,
     ) -> Dict:
         """Append text to a project file under the same stale-write guard."""
         if not isinstance(content, str) or not content:
@@ -844,8 +976,8 @@ class DocumentService:
                 _lease=lease,
             )
             await self._rollback_file_on_catalog_failure(
-                self._reconcile_owned_file_changes(
-                    upserts={normalized_path: payload}, lease=lease
+                self._catalog_written_file(
+                    normalized_path, payload, lease=lease, derived_from_web=derived_from_web
                 ),
                 lambda: self._run_blocking(
                     filesystem.write_bytes,
@@ -966,23 +1098,24 @@ class DocumentService:
     def _validate_project_file_bytes(self, path: str, content: bytes) -> None:
         self._require_unreserved_context_path(normalize_relative_path(path, path))
         self._validate_project_file_extension(path)
-        if len(content) > MAX_DOCUMENT_SIZE:
-            raise ValueError("document exceeds the 50 MB size limit")
+        if len(content) > self._max_document_upload_bytes():
+            raise ValueError("document exceeds the configured upload size limit")
 
     async def preview_folder(
         self,
         *,
         folder_name: str,
-        entries: List[FolderUploadEntry],
+        entries: List[FolderUploadEntry | FolderScanPathEntry],
         settings: Optional[FolderScanSettings] = None,
         force_include_paths: Optional[List[str]] = None,
+        content_loader: Callable[[str, int], bytes] | None = None,
     ) -> FolderPreview:
         """Scan a virtual folder manifest without storing or indexing content."""
         if not isinstance(folder_name, str) or not folder_name.strip():
             raise ValueError("folder_name must not be empty")
         validated_entries = [
             entry
-            if isinstance(entry, FolderUploadEntry)
+            if isinstance(entry, (FolderUploadEntry, FolderScanPathEntry))
             else FolderUploadEntry.model_validate(entry)
             for entry in entries
         ]
@@ -998,6 +1131,7 @@ class DocumentService:
             validated_entries,
             scan_settings,
             force_include_paths or [],
+            content_loader=content_loader,
         )
 
     async def get_scan_settings(self) -> FolderScanSettings:
@@ -1255,6 +1389,7 @@ class DocumentService:
         )
         if selected_page is not None:
             result["page_number"] = selected_page
+            result["total_pages"] = len(payload["pages"])
         return result
 
     async def resolve_document_selection(
@@ -1415,25 +1550,35 @@ class DocumentService:
         content: bytes,
         original_name: str,
         relative_path: Optional[str] = None,
+        extraction_mode: DocumentExtractionMode = "standard",
+        extraction_strategy: DocumentExtractionStrategy = "auto",
     ) -> Dict:
         """Store a project document as durable queued indexing work."""
         if not isinstance(content, bytes):
             raise TypeError("content must be bytes")
         if not content:
             raise ValueError("document content must not be empty")
-        if len(content) > MAX_DOCUMENT_SIZE:
-            raise ValueError("document exceeds the 50 MB size limit")
+        if len(content) > self._max_document_upload_bytes():
+            raise ValueError("document exceeds the configured upload size limit")
         original_name = original_name.strip() if original_name else original_name
         if not original_name:
             raise ValueError("original_name must not be empty")
         if "\x00" in original_name:
             raise ValueError("original_name contains an invalid null byte")
+        if extraction_mode not in {"standard", "ocr"}:
+            raise ValueError("Unsupported document extraction mode")
+        if extraction_strategy not in {"auto", "full", "bounded"}:
+            raise ValueError("Unsupported document extraction strategy")
         extension = document_extension(original_name)
         if extension not in ACCEPTED_EXTENSIONS:
             raise ValueError(
                 f"Unsupported file type '{extension}'. "
                 f"Accepted types include PDF, DOCX, plain text, source code, and images."
             )
+        if extraction_mode == "ocr" and extension != ".pdf":
+            raise ValueError("OCR extraction mode is only supported for PDF documents")
+        if extraction_strategy != "auto" and extension != ".pdf":
+            raise ValueError("Extraction strategies are only supported for PDF documents")
         normalized_path = normalize_relative_path(relative_path, original_name)
         self._require_unreserved_context_path(normalized_path)
         if document_extension(normalized_path) != extension:
@@ -1454,6 +1599,8 @@ class DocumentService:
                 extension=extension,
                 document_id=document_id,
                 content_hash=content_hash,
+                extraction_mode=extraction_mode,
+                extraction_strategy=extraction_strategy,
                 created_at=created_at,
             )
 
@@ -1468,6 +1615,8 @@ class DocumentService:
         extension: str,
         document_id: str,
         content_hash: str,
+        extraction_mode: DocumentExtractionMode,
+        extraction_strategy: DocumentExtractionStrategy,
         created_at: str,
     ) -> Dict:
         marker_task = asyncio.create_task(
@@ -1535,6 +1684,8 @@ class DocumentService:
                 extension=extension,
                 size_bytes=len(content),
                 content_hash=content_hash,
+                extraction_mode=extraction_mode,
+                extraction_strategy=extraction_strategy,
                 created_at=created_at,
             )
         )
@@ -1588,6 +1739,8 @@ class DocumentService:
             "extension": extension,
             "size_bytes": len(content),
             "content_hash": content_hash,
+            "extraction_mode": extraction_mode,
+            "extraction_strategy": extraction_strategy,
             "status": "queued",
             "deleted_at": None,
             "indexed_at": None,
@@ -1688,12 +1841,16 @@ class DocumentService:
         content: bytes,
         original_name: str,
         relative_path: Optional[str] = None,
+        extraction_mode: DocumentExtractionMode = "standard",
+        extraction_strategy: DocumentExtractionStrategy = "auto",
     ) -> Dict:
         """Persist a document, then index inline or admit durable background work."""
         document = await self.add_document(
             content=content,
             original_name=original_name,
             relative_path=relative_path,
+            extraction_mode=extraction_mode,
+            extraction_strategy=extraction_strategy,
         )
         try:
             return await self.schedule_document_index(
@@ -1742,6 +1899,8 @@ class DocumentService:
                 content=validated.content,
                 original_name=validated.original_name,
                 relative_path=validated.relative_path,
+                extraction_mode=validated.extraction_mode,
+                extraction_strategy=validated.extraction_strategy,
             )
 
         if not durable:
@@ -1856,6 +2015,7 @@ class DocumentService:
         search/read excerpt as durable document content.
         """
         from common.schema.source.references import SourceReferenceCandidate
+        from common.web_url import normalize_public_web_url
 
         candidate = (
             source
@@ -1871,16 +2031,19 @@ class DocumentService:
             raise ValueError("only assistant-observed web sources can be promoted")
         if not candidate.canonical_url:
             raise ValueError("assistant source is missing a canonical URL")
+        safe_url = normalize_public_web_url(candidate.canonical_url)
         if title is None:
             candidate_title = candidate.metadata.get("title")
             title = candidate_title if isinstance(candidate_title, str) else None
         return await self.save_web_link(
-            url=candidate.canonical_url,
+            url=safe_url,
             title=title,
             summary=summary,
         )
 
-    async def list_saved_web_links(self, *, limit: int = 50) -> List[Dict]:
+    async def list_saved_web_links(
+        self, *, limit: int = 50, before: tuple[datetime, uuid.UUID] | None = None
+    ) -> List[Dict]:
         """List this project's durable bookmarks, newest update first."""
         if (
             not isinstance(limit, int)
@@ -1888,7 +2051,7 @@ class DocumentService:
             or not 1 <= limit <= 1000
         ):
             raise ValueError("limit must be between 1 and 1000")
-        rows = await self._reader.list_saved_web_links(limit=limit)
+        rows = await self._reader.list_saved_web_links(limit=limit, before=before)
         return [self._public_saved_web_link(row) for row in rows]
 
     async def update_saved_web_link(
@@ -1947,11 +2110,19 @@ class DocumentService:
         """Normalize one database bookmark into the public service shape."""
         return SavedWebLink.model_validate(row).model_dump(mode="json")
 
+    async def list_documents_awaiting_index(
+        self, *, path_prefix: Optional[str] = None, limit: int = 5
+    ) -> List[str]:
+        return await self._reader.list_documents_awaiting_index(
+            path_prefix=path_prefix, limit=limit
+        )
+
     async def list_documents(
         self,
         *,
         path_prefix: Optional[str] = None,
         limit: int = 50,
+        before: tuple[datetime, uuid.UUID] | None = None,
     ) -> List[Dict]:
         """List documents visible to the current project context."""
         if (
@@ -1964,6 +2135,7 @@ class DocumentService:
         rows = await self._reader.list_documents(
             path_prefix=normalized_prefix,
             limit=limit,
+            before=before,
         )
         return [self._public_metadata(row) for row in rows]
 

@@ -70,7 +70,7 @@ class EvidenceTraversalReader:
         ],
         row_limit: int,
     ) -> list[dict[str, Any]]:
-        ids = self._observation_ids(observation_ids)
+        ids = self._positive_ids(observation_ids)
         row_limit = self._row_limit(row_limit)
         if not ids:
             return []
@@ -81,49 +81,68 @@ class EvidenceTraversalReader:
                 observation.observed_relationship_label,
                 observation.observed_at_ms,
                 observation.retired_at,
-                block.block_id,
-                block.content_hash AS block_content_hash,
-                block.markdown AS block_markdown,
-                support.support_kind,
-                support.message_id,
+                NULL::uuid AS block_id,
+                NULL::text AS block_content_hash,
+                NULL::text AS block_markdown,
+                NULL::text AS support_kind,
+                message.message_id,
                 message.role AS message_role,
                 message.timestamp_ms AS message_timestamp_ms,
-                support.source_ref_id,
-                source.source_kind,
-                source.content_hash AS source_content_hash,
-                source.locator AS source_locator,
-                source.excerpt AS source_excerpt
+                NULL::uuid AS source_ref_id,
+                NULL::text AS source_kind,
+                NULL::text AS source_content_hash,
+                NULL::jsonb AS source_locator,
+                NULL::text AS source_excerpt
             FROM public.relationship_observations AS observation
             JOIN public.projects AS project
               ON project.project_id = observation.project_id
              AND project.user_name = observation.user_name
-            JOIN public.relationship_observation_blocks AS observation_block
-              ON observation_block.observation_id = observation.observation_id
-             AND observation_block.project_id = observation.project_id
-            JOIN public.project_context_blocks AS block
-              ON block.block_id = observation_block.block_id
-             AND block.project_id = observation_block.project_id
-            LEFT JOIN public.project_context_block_supports AS support
-              ON support.block_id = block.block_id
-             AND support.project_id = block.project_id
-            LEFT JOIN public.messages AS message
+            JOIN public.relationship_observation_messages AS support
+              ON support.observation_id = observation.observation_id
+             AND support.project_id = observation.project_id
+            JOIN public.messages AS message
               ON message.message_id = support.message_id
-             AND message.session_id = support.session_id
-             AND message.project_id = support.project_id
-            LEFT JOIN public.message_source_refs AS source
-              ON source.source_ref_id = support.source_ref_id
-             AND source.message_id = support.message_id
-             AND source.session_id = support.session_id
-             AND source.project_id = support.project_id
             WHERE observation.user_name = %s
               AND {project_predicate}
               AND observation.observation_id = ANY(%s)
-            ORDER BY observation.observation_id, block.block_id,
-                     support.support_kind, support.message_id,
-                     support.source_ref_id
+            ORDER BY observation.observation_id, message.message_id
             LIMIT %s
             """,
             (user_name, project_scope, ids, row_limit),
+        )
+
+    async def get_message_rows(
+        self,
+        message_ids: list[int],
+        *,
+        user_name: str,
+        project_id: str,
+        row_limit: int,
+    ) -> list[dict[str, Any]]:
+        user_name, project_id = self._scope(user_name, project_id)
+        ids = self._positive_ids(message_ids)
+        row_limit = self._row_limit(row_limit)
+        if not ids:
+            return []
+        return await self.client.fetch_all(
+            """
+            SELECT
+                NULL::bigint AS observation_id,
+                NULL::uuid AS block_id,
+                message.message_id,
+                message.role AS message_role,
+                message.timestamp_ms AS message_timestamp_ms,
+                NULL::uuid AS source_ref_id
+            FROM public.messages AS message
+            JOIN public.projects AS project
+              ON project.project_id = message.project_id
+            WHERE project.user_name = %s
+              AND message.project_id = %s
+              AND message.message_id = ANY(%s)
+            ORDER BY message.message_id
+            LIMIT %s
+            """,
+            (user_name, project_id, ids, row_limit),
         )
 
     async def get_context_block_rows(
@@ -191,14 +210,14 @@ class EvidenceTraversalReader:
         )
 
     @staticmethod
-    def _observation_ids(values: list[int]) -> list[int]:
+    def _positive_ids(values: list[int]) -> list[int]:
         if len(values) > 128:
-            raise ValueError("evidence traversal accepts at most 128 observations")
+            raise ValueError("evidence traversal accepts at most 128 IDs")
         if any(
             not isinstance(value, int) or isinstance(value, bool) or value <= 0
             for value in values
         ):
-            raise ValueError("evidence observation IDs must be positive integers")
+            raise ValueError("evidence IDs must be positive integers")
         return sorted(set(values))
 
     @staticmethod

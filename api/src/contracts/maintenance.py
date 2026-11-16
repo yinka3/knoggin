@@ -1,0 +1,128 @@
+"""HTTP inputs for knowledge maintenance decisions."""
+
+from typing import Any, Literal
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from common.schema.evidence import EvidencePointer
+
+
+class Decision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["apply", "dismiss"]
+    expected_state: dict[str, Any] | None = None
+    reason: str | None = Field(default=None, max_length=2000)
+
+
+class AdvisoryDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["accept", "edit", "dismiss", "reopen", "suppress"]
+    relationship_type: str | None = Field(default=None, max_length=40)
+    note: str | None = Field(default=None, max_length=2000)
+
+
+class RollbackSelection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    approved_mutation_ids: tuple[int, ...] = Field(default=(), max_length=10000)
+
+    @field_validator("approved_mutation_ids")
+    @classmethod
+    def valid_ids(cls, values: tuple[int, ...]) -> tuple[int, ...]:
+        if any(value <= 0 for value in values) or len(set(values)) != len(values):
+            raise ValueError("Mutation IDs must be unique positive integers")
+        return values
+
+
+class FlagJevContextDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    capability: Literal["classification"]
+    window_id: UUID
+    pass_number: int = Field(ge=1, le=2)
+    occurrence_key: str = Field(min_length=1, max_length=500)
+    entity_id: int = Field(gt=0)
+    entity_type: str | None = Field(default=None, min_length=1, max_length=200)
+    topic: str | None = Field(default=None, min_length=1, max_length=200)
+    reasoning: str = Field(min_length=1, max_length=4000)
+
+    @model_validator(mode="after")
+    def target_required(self):
+        if self.entity_type is None and self.topic is None:
+            raise ValueError("Provide an entity type or topic correction")
+        return self
+
+
+class ReopenJevContextCorrection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_review_id: str = Field(min_length=1, max_length=200)
+
+
+class FlagJevIdentityDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    window_id: UUID
+    pass_number: int = Field(ge=1, le=2)
+    occurrence_key: str = Field(min_length=1, max_length=500)
+    source_entity_id: int = Field(gt=0)
+    target_entity_id: int | None = Field(default=None, gt=0)
+    new_entity_name: str | None = Field(default=None, min_length=1, max_length=200)
+    entity_type: str | None = Field(default=None, min_length=1, max_length=200)
+    topic: str | None = Field(default=None, min_length=1, max_length=200)
+    reasoning: str = Field(min_length=1, max_length=4000)
+
+    @model_validator(mode="after")
+    def valid_target(self):
+        if (self.target_entity_id is None) == (self.new_entity_name is None):
+            raise ValueError("Choose an existing or new identity")
+        if self.target_entity_id == self.source_entity_id:
+            raise ValueError("Target and source identities must differ")
+        if self.new_entity_name is not None and (self.entity_type is None or self.topic is None):
+            raise ValueError("A new identity needs a type and topic")
+        if self.target_entity_id is not None and (self.entity_type is not None or self.topic is not None):
+            raise ValueError("Existing identities keep their project classification")
+        return self
+
+
+class ApplyJevIdentityDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_state: dict[str, Any]
+
+
+class ReopenJevIdentityCorrection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_target_entity_id: int = Field(gt=0)
+
+
+class MergeContextChoice(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str = Field(min_length=1, max_length=200)
+    entity_type: str = Field(min_length=1, max_length=200)
+    topic: str = Field(min_length=1, max_length=200)
+
+
+class MergeCandidates(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    survivor_entity_id: int = Field(gt=0)
+    retired_entity_id: int = Field(gt=0)
+    context_choices: tuple[MergeContextChoice, ...] = Field(default=(), max_length=100)
+
+    @model_validator(mode="after")
+    def distinct_candidates(self):
+        if self.survivor_entity_id == self.retired_entity_id:
+            raise ValueError("Merge candidates must be different entities")
+        return self
+
+
+class MergeProposal(MergeCandidates):
+    reasoning: str = Field(min_length=1, max_length=4000)
+    evidence_refs: tuple[EvidencePointer, ...] = Field(min_length=1, max_length=100)
+    expected_state_hash: str = Field(pattern=r"^[0-9a-f]{64}$")

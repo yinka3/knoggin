@@ -69,7 +69,6 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
         def __init__(self):
             self.config = RootConfig(
                 llm=LLMSettings(
-                    api_key="key",
                     base_url="https://llm.example/v1",
                     agent_model="agent",
                     extraction_model="extract",
@@ -146,19 +145,13 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
             assert language == "en"
             return FakeProcessor()
 
-    class FakeGLiNER25VP01Adapter:
-        @staticmethod
-        def load(*, language, device=None):
-            assert language == "en"
-            assert device == "cpu"
-            return object()
 
     fake_config = FakeConfigManager()
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
-    monkeypatch.setenv("KNOGGIN_GPU", "false")
-    monkeypatch.setenv("KNOGGIN_EMBEDDING_MODEL", "custom/embedder")
-    monkeypatch.setenv("KNOGGIN_RERANKER_MODEL", "custom/reranker")
-    monkeypatch.delenv("KNOGGIN_LLM_TRACE", raising=False)
+    monkeypatch.setenv("PREFER_GPU", "false")
+    monkeypatch.setenv("EMBEDDING_MODEL", "custom/embedder")
+    monkeypatch.setenv("RERANKER_MODEL", "custom/reranker")
+    monkeypatch.delenv("TRACE_LLM_CALLS", raising=False)
     monkeypatch.setattr(
         resources_module.ConfigManager, "get", staticmethod(lambda: fake_config)
     )
@@ -166,6 +159,7 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
     monkeypatch.setattr(resources_module, "load_dotenv", load_dotenv)
     monkeypatch.setattr(resources_module, "KnowledgeStore", FakeKnowledgeStore)
     monkeypatch.setattr(resources_module, "PostgresClient", FakePostgresClient)
+    monkeypatch.setattr(resources_module, "migrate", lambda _dsn: [])
     monkeypatch.setattr(
         resources_module,
         "configure_coordination_log",
@@ -174,9 +168,6 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
     monkeypatch.setattr(resources_module, "LLMService", FakeLLMService)
     monkeypatch.setattr(resources_module, "EmbeddingService", FakeEmbeddingService)
     monkeypatch.setattr(resources_module, "spacy", FakeSpacy)
-    monkeypatch.setattr(
-        resources_module, "GLiNER25VP01Adapter", FakeGLiNER25VP01Adapter
-    )
     manager = await resources_module.RuntimeResources.create()
 
     load_dotenv.assert_called_once_with()
@@ -228,7 +219,6 @@ async def test_resource_manager_cleans_up_when_postgres_startup_fails(monkeypatc
         def __init__(self):
             self.config = RootConfig(
                 llm=LLMSettings(
-                    api_key="key",
                     base_url="https://llm.example/v1",
                     agent_model="agent",
                     extraction_model="extract",
@@ -292,12 +282,6 @@ async def test_resource_manager_cleans_up_when_postgres_startup_fails(monkeypatc
             assert language == "en"
             return FakeProcessor()
 
-    class FakeGLiNER25VP01Adapter:
-        @staticmethod
-        def load(*, language, device=None):
-            assert language == "en"
-            assert device == "cpu"
-            return object()
 
     class FakeExecutor:
         def __init__(self, max_workers):
@@ -317,7 +301,7 @@ async def test_resource_manager_cleans_up_when_postgres_startup_fails(monkeypatc
 
     fake_config = FakeConfigManager()
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
-    monkeypatch.setenv("KNOGGIN_GPU", "false")
+    monkeypatch.setenv("PREFER_GPU", "false")
     monkeypatch.setattr(
         resources_module.ConfigManager,
         "get",
@@ -329,12 +313,10 @@ async def test_resource_manager_cleans_up_when_postgres_startup_fails(monkeypatc
         "PostgresClient",
         FailingPostgresClient,
     )
+    monkeypatch.setattr(resources_module, "migrate", lambda _dsn: [])
     monkeypatch.setattr(resources_module, "LLMService", FakeLLMService)
     monkeypatch.setattr(resources_module, "EmbeddingService", FakeEmbeddingService)
     monkeypatch.setattr(resources_module, "spacy", FakeSpacy)
-    monkeypatch.setattr(
-        resources_module, "GLiNER25VP01Adapter", FakeGLiNER25VP01Adapter
-    )
     monkeypatch.setattr(resources_module, "ThreadPoolExecutor", FakeExecutor)
     with pytest.raises(DependencyError, match="Postgres unavailable"):
         await resources_module.RuntimeResources.create()
@@ -388,15 +370,9 @@ async def test_resource_manager_resolves_gpu_cuda(monkeypatch, tmp_path):
             assert language == "en"
             return MagicMock()
 
-    class FakeGLiNER25VP01Adapter:
-        @staticmethod
-        def load(*, language, device=None):
-            assert language == "en"
-            assert device == "cuda"
-            return MagicMock()
 
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
-    monkeypatch.setenv("KNOGGIN_GPU", "true")
+    monkeypatch.setenv("PREFER_GPU", "true")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
 
     monkeypatch.setattr(
@@ -404,12 +380,10 @@ async def test_resource_manager_resolves_gpu_cuda(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(resources_module, "KnowledgeStore", FakeKnowledgeStore)
     monkeypatch.setattr(resources_module, "PostgresClient", FakePostgresClient)
+    monkeypatch.setattr(resources_module, "migrate", lambda _dsn: [])
     monkeypatch.setattr(resources_module, "LLMService", FakeLLMService)
     monkeypatch.setattr(resources_module, "EmbeddingService", FakeEmbeddingService)
     monkeypatch.setattr(resources_module, "spacy", FakeSpacy)
-    monkeypatch.setattr(
-        resources_module, "GLiNER25VP01Adapter", FakeGLiNER25VP01Adapter
-    )
 
     manager = await resources_module.RuntimeResources.create()
     assert manager.embedding.device.type == "cuda"
@@ -459,15 +433,9 @@ async def test_resource_manager_resolves_gpu_mps(monkeypatch, tmp_path):
             assert language == "en"
             return MagicMock()
 
-    class FakeGLiNER25VP01Adapter:
-        @staticmethod
-        def load(*, language, device=None):
-            assert language == "en"
-            assert device == "mps"
-            return MagicMock()
 
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
-    monkeypatch.setenv("KNOGGIN_GPU", "true")
+    monkeypatch.setenv("PREFER_GPU", "true")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
 
     # Mock torch.backends.mps.is_available
@@ -493,12 +461,10 @@ async def test_resource_manager_resolves_gpu_mps(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(resources_module, "KnowledgeStore", FakeKnowledgeStore)
     monkeypatch.setattr(resources_module, "PostgresClient", FakePostgresClient)
+    monkeypatch.setattr(resources_module, "migrate", lambda _dsn: [])
     monkeypatch.setattr(resources_module, "LLMService", FakeLLMService)
     monkeypatch.setattr(resources_module, "EmbeddingService", FakeEmbeddingService)
     monkeypatch.setattr(resources_module, "spacy", FakeSpacy)
-    monkeypatch.setattr(
-        resources_module, "GLiNER25VP01Adapter", FakeGLiNER25VP01Adapter
-    )
 
     manager = await resources_module.RuntimeResources.create()
     assert manager.embedding.device.type == "mps"
@@ -547,15 +513,9 @@ async def test_resource_manager_resolves_cpu_when_gpu_false(monkeypatch, tmp_pat
             assert language == "en"
             return MagicMock()
 
-    class FakeGLiNER25VP01Adapter:
-        @staticmethod
-        def load(*, language, device=None):
-            assert language == "en"
-            assert device == "cpu"
-            return MagicMock()
 
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
-    monkeypatch.setenv("KNOGGIN_GPU", "false")
+    monkeypatch.setenv("PREFER_GPU", "false")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)  # Should ignore this
 
     monkeypatch.setattr(
@@ -563,12 +523,10 @@ async def test_resource_manager_resolves_cpu_when_gpu_false(monkeypatch, tmp_pat
     )
     monkeypatch.setattr(resources_module, "KnowledgeStore", FakeKnowledgeStore)
     monkeypatch.setattr(resources_module, "PostgresClient", FakePostgresClient)
+    monkeypatch.setattr(resources_module, "migrate", lambda _dsn: [])
     monkeypatch.setattr(resources_module, "LLMService", FakeLLMService)
     monkeypatch.setattr(resources_module, "EmbeddingService", FakeEmbeddingService)
     monkeypatch.setattr(resources_module, "spacy", FakeSpacy)
-    monkeypatch.setattr(
-        resources_module, "GLiNER25VP01Adapter", FakeGLiNER25VP01Adapter
-    )
 
     manager = await resources_module.RuntimeResources.create()
     assert manager.embedding.device.type == "cpu"

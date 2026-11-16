@@ -13,11 +13,21 @@ from common.schema.agent.tool_contracts import (
 from core.agent.tools.search import (
     _WEB_PAGE_MAX_RESPONSE_BYTES,
     SearchTools,
+    _canonical_search_url,
     _normalize_web_url,
     _PinnedPublicNetworkBackend,
     _require_public_addresses,
     create_web_page_http_client,
 )
+
+
+@pytest.fixture(autouse=True)
+def _every_url_is_known(monkeypatch):
+    # These tests cover fetching; which URLs may be read is tested separately.
+    async def known(self, url):
+        return True
+
+    monkeypatch.setattr(SearchTools, "web_url_is_known", known)
 
 
 def _web_tool(handler) -> SearchTools:
@@ -415,6 +425,9 @@ async def test_read_web_page_rejects_unsafe_or_invalid_urls_before_fetch(url):
 
 @pytest.mark.no_network
 def test_web_url_normalization_uses_idna_and_rejects_non_public_dns_answers():
+    assert _canonical_search_url("http://127.0.0.1/private") is None
+    assert _canonical_search_url("https://user:pass@example.com/") is None
+    assert _canonical_search_url("https://example.com/article") == "https://example.com/article"
     assert _normalize_web_url("HTTPS://Bücher.example/report") == (
         "https://xn--bcher-kva.example/report"
     )

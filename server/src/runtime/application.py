@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -10,14 +11,16 @@ from pathlib import Path
 from loguru import logger
 
 from common.conf.manager import ConfigManager
+from common.schema.settings import RootConfig
 from common.utils.lifecycle import settle_owned_task
 from common.utils.time_utils import get_now
+from core.agent.agent_manager import AgentManager
 from core.agent.orchestrator import AgentOrchestrator
-from core.agent.services.agent_manager import AgentManager
 from core.community.runtime import AACRuntime
 from core.health.service import RuntimeHealthService
 from core.knowledge.documents import ProjectFilesystemFactory
 from core.project.project_manager import ProjectManager
+from core.sandbox.manager import SandboxManager
 from core.session.session_manager import SessionManager
 from runtime.resources import RuntimeResources
 
@@ -49,13 +52,15 @@ class _StartupCleanup:
     async def shutdown(self):
         async with self._lock:
             failures = []
-            for phase in ("aac", "sessions", "projects", "resources"):
+            for phase in ("aac", "sessions", "sandbox", "projects", "resources"):
                 if phase not in self.owners:
                     continue
-                if phase == "projects" and "sessions" in self.owners:
+                if phase == "projects" and any(
+                    name in self.owners for name in ("sessions", "sandbox")
+                ):
                     continue
                 if phase == "resources" and any(
-                    name in self.owners for name in ("aac", "sessions", "projects")
+                    name in self.owners for name in ("aac", "sessions", "sandbox", "projects")
                 ):
                     continue
                 try:
@@ -79,6 +84,8 @@ class ApplicationRuntime:
     agent_manager: AgentManager
     agent_orchestrator: AgentOrchestrator
     aac_runtime: AACRuntime
+    startup_config: RootConfig | None = None
+    sandbox: SandboxManager | None = None
     health_service: RuntimeHealthService = field(init=False)
     started_at: datetime = field(init=False)
     _shutdown_complete: bool = field(init=False, default=False, repr=False)
@@ -96,6 +103,7 @@ class ApplicationRuntime:
             resources=self.resources,
             projects=self.projects,
             sessions=self.sessions,
+            sandbox=self.sandbox,
             started_at=self.started_at,
         )
         self.sessions.attach_health_service(self.health_service)
@@ -106,12 +114,13 @@ class ApplicationRuntime:
         *,
         user_name: str,
         config_dir: str | Path,
-        num_workers: int | None = None,
+        thread_workers: int | None = None,
     ) -> "ApplicationRuntime":
         """Build the canonical runtime whose shutdown owns every live layer."""
 
         config_manager = ConfigManager.initialize(config_dir)
-        resources = await RuntimeResources.create(num_workers=num_workers, config_manager=config_manager)
+        startup_config = config_manager.config
+        resources = await RuntimeResources.create(thread_workers=thread_workers, config_manager=config_manager)
         startup_cleanup = _StartupCleanup(resources)
         try:
             knowledge_store = resources.knowledge_store
@@ -121,25 +130,57 @@ class ApplicationRuntime:
                 user_name,
                 config_manager.config.user_aliases,
             )
+            # No session exists yet, so any open exchange belongs to a run
+            # that died with an earlier process; left open, it would block its
+            # session's semantic FIFO until manual repair.
+            orphaned = await knowledge_store.close_orphaned_open_exchanges(
+                user_name=user_name
+            )
+            if orphaned:
+                logger.warning(
+                    "Closed {} exchange(s) left open by a previous process", orphaned
+                )
+            filesystem_factory = ProjectFilesystemFactory(
+                config_manager.resolve_path(
+                    config_manager.config.developer_settings.documents.project_library_root
+                )
+            )
             projects = ProjectManager(
                 resources=resources,
                 user_name=user_name,
-                filesystem_factory=ProjectFilesystemFactory(
-                    config_manager.resolve_path(
-                        config_manager.config.developer_settings.documents.project_library_root
-                    )
-                ),
+                filesystem_factory=filesystem_factory,
                 config_manager=config_manager,
             )
             startup_cleanup.owners["projects"] = projects
             await projects.start()
+            settings = config_manager.config.developer_settings
+            runtime_settings = settings.container_runtime
+            host_library_root = os.environ.get("KNOGGIN_HOST_LIBRARY_ROOT")
+            if host_library_root:
+                if not Path(host_library_root).is_absolute():
+                    raise ValueError("KNOGGIN_HOST_LIBRARY_ROOT must be an absolute path")
+                runtime_settings = runtime_settings.model_copy(
+                    update={"host_library_root": host_library_root}
+                )
+            sandbox = SandboxManager(
+                user_name=user_name,
+                runtime_settings=runtime_settings,
+                command_settings=settings.workspace_commands,
+                project_manager=projects,
+                library_root=filesystem_factory.library_root,
+            )
+            projects.attach_sandbox_manager(sandbox)
+            startup_cleanup.owners["sandbox"] = sandbox
+            await sandbox.start()
             agent_manager = AgentManager(resources, user_name)
             await agent_manager.ensure_default_agent()
+            await agent_manager.ensure_maintenance_agent()
             agent_orchestrator = AgentOrchestrator(
                 agent_manager,
                 config_manager=config_manager,
                 entity_maintenance_service=projects.entity_maintenance_service,
                 project_maintenance_service=projects.maintenance_service,
+                sandbox=sandbox,
             )
             sessions = SessionManager(
                 resources=resources,
@@ -157,6 +198,7 @@ class ApplicationRuntime:
             )
             startup_cleanup.owners["aac"] = aac_runtime
             await aac_runtime.start()
+            await sessions.resume_background_work()
             return cls(
                 config_manager=config_manager,
                 resources=resources,
@@ -165,6 +207,8 @@ class ApplicationRuntime:
                 agent_manager=agent_manager,
                 agent_orchestrator=agent_orchestrator,
                 aac_runtime=aac_runtime,
+                startup_config=startup_config,
+                sandbox=sandbox,
             )
         except BaseException as exc:
             cleanup = asyncio.create_task(startup_cleanup.shutdown())
@@ -199,16 +243,23 @@ class ApplicationRuntime:
         for phase, owner in (
             ("aac", self.aac_runtime),
             ("sessions", self.sessions),
+            ("sandbox", self.sandbox),
             ("projects", self.projects),
             ("resources", self.resources),
         ):
+            if owner is None:
+                continue
             if phase in self._completed_shutdown_phases:
                 continue
-            if phase == "projects" and "sessions" not in self._completed_shutdown_phases:
-                continue
-            if phase == "resources" and not {"aac", "sessions", "projects"}.issubset(
-                self._completed_shutdown_phases
+            if phase == "projects" and (
+                "sessions" not in self._completed_shutdown_phases
+                or (self.sandbox is not None and "sandbox" not in self._completed_shutdown_phases)
             ):
+                continue
+            required = {"aac", "sessions", "projects"}
+            if self.sandbox is not None:
+                required.add("sandbox")
+            if phase == "resources" and not required.issubset(self._completed_shutdown_phases):
                 continue
             try:
                 logger.info(f"Application shutdown phase started: {phase}")
@@ -225,13 +276,3 @@ class ApplicationRuntime:
             raise error from failures[0].error
         self._shutdown_error = None
         self._shutdown_complete = True
-
-    def application_port(self, *, default_domain_config=None):
-        """Return the public application adapter for this live runtime."""
-
-        from runtime.api_port import ApplicationRuntimePort
-
-        return ApplicationRuntimePort(
-            self,
-            default_domain_config=default_domain_config,
-        )

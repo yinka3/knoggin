@@ -27,19 +27,9 @@ PIPELINE_PROMPTS: Dict[str, PromptDefinition] = {
         "Extract Entities",
         frozenset({"user_name"}),
     ),
-    "extract_context_entities": PromptDefinition(
-        "prompts/extraction.md",
-        "Extract Context Entities",
-        frozenset({"user_name"}),
-    ),
     "extract_relationships": PromptDefinition(
         "prompts/extraction.md",
         "Extract Relationships",
-        frozenset({"user_name"}),
-    ),
-    "extract_context_relationships": PromptDefinition(
-        "prompts/extraction.md",
-        "Extract Context Relationships",
         frozenset({"user_name"}),
     ),
     "generate_episode": PromptDefinition(
@@ -60,9 +50,19 @@ PIPELINE_PROMPTS: Dict[str, PromptDefinition] = {
         "Repair Episode Narrative",
         frozenset({"user_name", "max_narrative_chars"}),
     ),
+    "forget_episode_content": PromptDefinition(
+        "prompts/episode.md",
+        "Forget Episode Content",
+        frozenset({"user_name"}),
+    ),
     "update_context": PromptDefinition(
         "prompts/context.md",
         "Update Context",
+        frozenset({"user_name"}),
+    ),
+    "maintain_context": PromptDefinition(
+        "prompts/context.md",
+        "Maintain Context",
         frozenset({"user_name"}),
     ),
 }
@@ -255,14 +255,17 @@ def validate_prompt_library() -> None:
             )
 
 
+_AGENT_SEEDS = frozenset({"AGENT_IDENTITY", "MAINTENANCE_AGENT"})
+
+
 def load_agent_file(agent_id: str) -> tuple[dict, str]:
     """Load the packaged default identity seed."""
-    if agent_id != "AGENT_IDENTITY":
+    if agent_id not in _AGENT_SEEDS:
         raise FileNotFoundError(
             "Packaged agent files are seeds only; runtime agents live in Postgres"
         )
 
-    file_path = _template_path("AGENT_IDENTITY.md")
+    file_path = _template_path(f"{agent_id}.md")
     content = file_path.read_text(encoding="utf-8")
     if content.startswith("---"):
         parts = content.split("---", 2)

@@ -26,7 +26,7 @@ def _review(plan, *, project_id="project-1"):
 
 @pytest.mark.unit
 @pytest.mark.no_network
-def test_relationship_preview_separates_direct_rows_from_age_rebuild():
+def test_relationship_preview_lists_only_direct_row_impacts():
     preview = MaintenanceImpactPlanner.preview(
         _review(
             RelationshipInterpretationPlan(
@@ -45,20 +45,20 @@ def test_relationship_preview_separates_direct_rows_from_age_rebuild():
     by_kind = {item.kind: item for item in preview.impacts}
     assert by_kind["relationship_observation"].mode == "direct_mutation"
     assert by_kind["relationship_observation"].identifiers == ("7",)
-    assert by_kind["age_projection"].mode == "derived_rebuild"
+    # The graph is read from the relationship rows, so there is no derived rebuild.
+    assert all(item.mode == "direct_mutation" for item in preview.impacts)
     assert "search_projection" not in by_kind
 
 
 @pytest.mark.unit
 @pytest.mark.no_network
-def test_merge_preview_lists_context_scopes_projection_and_cache_impacts():
+def test_merge_preview_lists_entity_scopes_and_cache_impacts():
     preview = MaintenanceImpactPlanner.preview(
         _review(
             EntityMergePlan(
                 survivor_entity_id=2,
                 retired_entity_id=3,
                 frontier_tokens={"project-2": "token-2", "project-1": "token-1"},
-                context_block_association_counts={"project-1": 2, "project-2": 1},
             ),
             project_id=None,
         )
@@ -69,13 +69,8 @@ def test_merge_preview_lists_context_scopes_projection_and_cache_impacts():
         "project-1",
         "project-2",
     )
-    assert by_kind["age_projection"].mode == "derived_rebuild"
     assert by_kind["live_entity_cache"].mode == "cache_invalidation"
-    assert by_kind["context_block_entity"].identifiers == (
-        "project-1",
-        "project-2",
-    )
-    assert by_kind["context_block_entity"].total_count == 3
+    assert "context_block_entity" not in by_kind
 
 
 @pytest.mark.unit

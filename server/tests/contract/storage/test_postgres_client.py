@@ -1,19 +1,16 @@
+import asyncio
+import logging
 import os
+import random
 
-import psycopg
 import pytest
-from psycopg.rows import dict_row
 
 from infrastructure import postgres_client as postgres_client_module
-from infrastructure.postgres_client import (
-    PostgresClient,
-    _AgtypeLoader,
-    _configure_async_conn,
-)
+from infrastructure.postgres_client import PostgresClient
 
 DB_URL = os.environ.get(
-    "KNOGGIN_TEST_DATABASE_URL",
-    "postgresql://knoggin:knoggin@localhost:5432/knoggin_db",
+    "TEST_DATABASE_URL",
+    "postgresql://knoggin:knoggin@localhost:5432/postgres",
 )
 
 
@@ -28,8 +25,7 @@ class RecordingAsyncPool:
         self.close_calls = 0
         self.connection_enters = 0
         self.connection_exits = 0
-        self.transaction_enters = 0
-        self.transaction_exits = []
+        self.endings = []
         self.cursor_enters = 0
         self.cursor_exits = 0
         self.execute_calls = []
@@ -81,19 +77,6 @@ class RecordingCursor:
         return self.pool.fetch_all_results.pop(0)
 
 
-class RecordingTransaction:
-    def __init__(self, pool):
-        self.pool = pool
-
-    async def __aenter__(self):
-        self.pool.transaction_enters += 1
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        self.pool.transaction_exits.append(exc_type)
-        return False
-
-
 class RecordingConnection:
     def __init__(self, pool):
         self.pool = pool
@@ -106,8 +89,11 @@ class RecordingConnection:
         self.pool.connection_exits += 1
         return False
 
-    def transaction(self):
-        return RecordingTransaction(self.pool)
+    async def commit(self):
+        self.pool.endings.append("commit")
+
+    async def rollback(self):
+        self.pool.endings.append("rollback")
 
     def cursor(self):
         return RecordingCursor(self.pool)
@@ -124,73 +110,6 @@ def recording_pool(monkeypatch):
         RecordingAsyncPool,
     )
     return RecordingAsyncPool
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-def test_build_cypher_wraps_query_with_graph_and_return_types():
-    query = PostgresClient.build_cypher(
-        "MATCH (n) RETURN n.id",
-        return_types="id agtype",
-        graph_name="test_graph",
-    )
-
-    assert "cypher('test_graph'" in query
-    assert "MATCH (n) RETURN n.id" in query
-    assert "AS (id agtype)" in query
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-def test_agtype_loader_decodes_age_json_values():
-    loader = _AgtypeLoader(0)
-
-    assert loader.load(b"true") is True
-    assert loader.load(b"false") is False
-    assert loader.load(b'[1, "two"]') == [1, "two"]
-    assert loader.load(b'{"answer": 42}') == {"answer": 42}
-    assert loader.load(b'{"id": 1}::vertex') == {"id": 1}
-    assert loader.load(b"unsupported::custom") == "unsupported::custom"
-
-
-@pytest.mark.storage
-@pytest.mark.requires_postgres
-@pytest.mark.requires_pgvector
-@pytest.mark.no_network
-async def test_age_connection_configuration_registers_the_agtype_loader():
-    conn = await psycopg.AsyncConnection.connect(DB_URL, row_factory=dict_row)
-    try:
-        await _configure_async_conn(conn)
-        cursor = await conn.execute("SELECT 'false'::agtype AS value;")
-        assert (await cursor.fetchone()) == {"value": False}
-    finally:
-        await conn.close()
-
-
-@pytest.mark.storage
-@pytest.mark.requires_postgres
-@pytest.mark.requires_pgvector
-@pytest.mark.no_network
-async def test_postgres_client_decodes_real_age_agtype_values(real_postgres_client):
-    row = await real_postgres_client.fetch_one(
-        real_postgres_client.build_cypher(
-            """
-            RETURN true AS truth,
-                   false AS falsity,
-                   [1, 'two'] AS values,
-                   {answer: 42} AS mapping
-            """,
-            "truth agtype, falsity agtype, values agtype, mapping agtype",
-        ),
-        ("{}",),
-    )
-
-    assert row == {
-        "truth": True,
-        "falsity": False,
-        "values": [1, "two"],
-        "mapping": {"answer": 42},
-    }
 
 
 @pytest.mark.storage
@@ -387,7 +306,7 @@ async def test_transaction_requires_connected_client():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_transaction_manages_connection_transaction_and_cursor(recording_pool):
+async def test_transaction_commits_on_its_connection_and_cursor(recording_pool):
     client = PostgresClient("postgresql://example")
     await client.connect()
     pool = recording_pool.instances[0]
@@ -398,8 +317,7 @@ async def test_transaction_manages_connection_transaction_and_cursor(recording_p
     assert pool.execute_calls == [("SELECT 1", None)]
     assert pool.connection_enters == 1
     assert pool.connection_exits == 1
-    assert pool.transaction_enters == 1
-    assert pool.transaction_exits == [None]
+    assert pool.endings == ["commit"]
     assert pool.cursor_enters == 1
     assert pool.cursor_exits == 1
 
@@ -415,7 +333,7 @@ async def test_transaction_rolls_back_when_exception_escapes(recording_pool):
         async with client.transaction():
             raise ValueError("abort")
 
-    assert pool.transaction_exits == [ValueError]
+    assert pool.endings == ["rollback"]
     assert pool.connection_exits == 1
     assert pool.cursor_exits == 1
 
@@ -447,9 +365,11 @@ async def test_explicit_query_helpers_preserve_params_and_result_shapes(recordin
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
 @pytest.mark.slow
-async def test_postgres_client_connects_when_test_database_is_configured():
+async def test_postgres_client_connects_when_test_database_is_configured(
+    test_database_url,
+):
     client = PostgresClient(
-        DB_URL,
+        test_database_url,
         min_size=1,
         max_size=2,
     )
@@ -459,3 +379,22 @@ async def test_postgres_client_connects_when_test_database_is_configured():
         assert client._pool is not None
     finally:
         await client.close()
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_a_cancelled_query_returns_its_connection_cleanly(real_postgres_client, caplog):
+    """Cancelling a task mid-query (a chat closing) used to cut a commit off
+    halfway; the pool then logged "rollback failed" and threw the connection away."""
+
+    caplog.set_level(logging.WARNING, logger="psycopg")
+    random.seed(7)
+    for _ in range(300):
+        task = asyncio.create_task(real_postgres_client.execute("SELECT 1"))
+        await asyncio.sleep(random.random() * 0.002)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert await real_postgres_client.fetch_one("SELECT 42 AS v") == {"v": 42}
+    assert [r.getMessage() for r in caplog.records if r.name.startswith("psycopg")] == []

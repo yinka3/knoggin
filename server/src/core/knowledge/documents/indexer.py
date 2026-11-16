@@ -23,16 +23,18 @@ from core.knowledge.db.writers.document_writer import DocumentWriter
 from core.knowledge.documents.constants import (
     EXPECTED_EMBEDDING_DIMENSION,
     MAX_ERROR_MESSAGE_LENGTH,
+    READ_DIRECTLY_EXTENSIONS,
 )
 from core.knowledge.documents.extraction import (
     DocumentChunk,
     embedding_text,
+    extract_and_split_docling_document,
     extract_and_split_document,
     locator_repair_fingerprints,
 )
 from core.knowledge.documents.filesystem import ProjectFilesystem
 from core.knowledge.documents.policy import DocumentIndexPolicy
-from core.knowledge.services.embedding_service import EmbeddingService
+from core.knowledge.embedding_service import EmbeddingService
 from infrastructure.background_work import (
     BackgroundWorkCoordinator,
     BackgroundWorkRejected,
@@ -122,6 +124,16 @@ class DocumentIndexer:
         metadata = rows[0] if rows else None
         if metadata is None or metadata["project_id"] != self.project_id:
             raise FileNotFoundError("Document not found")
+        if metadata["extension"] in READ_DIRECTLY_EXTENSIONS:
+            # Code in a workspace is read directly; skip it before any embedding.
+            await self._writer.apply_workspace_index_rule(
+                extensions=READ_DIRECTLY_EXTENSIONS, document_id=document_id
+            )
+            metadata = (await self._reader.fetch_documents_by_reference(
+                document_id=document_id, relative_path=None,
+            ))[0]
+            if metadata["status"] == "skipped":
+                return metadata
         if metadata["status"] == "indexed" and not force:
             return metadata
 
@@ -152,11 +164,20 @@ class DocumentIndexer:
                 read_content_hash = hashlib.sha256(raw_bytes).hexdigest()
                 if read_content_hash != claimed["content_hash"]:
                     return await self._reconcile_stale_claim(claimed)
-                extraction = await self._run_blocking(
-                    extract_and_split_document,
-                    raw_bytes,
-                    claimed["extension"],
-                )
+                if claimed["extension"] in {".pdf", ".docx"}:
+                    extraction = await extract_and_split_docling_document(
+                        raw_bytes,
+                        claimed["extension"],
+                        claimed["extraction_mode"],
+                        claimed["extraction_strategy"],
+                    )
+                else:
+                    extraction = await self._run_blocking(
+                        extract_and_split_document,
+                        raw_bytes,
+                        claimed["extension"],
+                        claimed["extraction_mode"],
+                    )
                 chunks = extraction.chunks
                 embeddings = await self._encode_embeddings(
                     [
@@ -567,9 +588,15 @@ class DocumentIndexer:
             return
         try:
             result = await callback()
+            # Also catches workspaces added or removed since the last pass.
+            requeued = await self._writer.apply_workspace_index_rule(
+                extensions=READ_DIRECTLY_EXTENSIONS
+            )
         except Exception:
             logger.exception("Document filesystem reconciliation failed for {}", self.project_id)
             return
+        if requeued:
+            self._request_drain()
         if any(result.get(key, 0) for key in ("created", "changed", "deleted")):
             logger.info(
                 "Document filesystem reconciliation for {}: created={}, changed={}, deleted={}",
@@ -605,7 +632,8 @@ class DocumentIndexer:
         """Resume durable queued work and repair claims left by a stopped runtime."""
         fingerprints = locator_repair_fingerprints()
         await self._writer.queue_legacy_locator_reindex(
-            pdf_fingerprint=fingerprints[".pdf"],
+            standard_pdf_fingerprint=fingerprints[".pdf"],
+            ocr_pdf_fingerprint=fingerprints[".pdf:ocr"],
             notebook_fingerprint=fingerprints[".ipynb"],
         )
         self._last_recovery_requeued = await self._writer.requeue_interrupted_indexes(

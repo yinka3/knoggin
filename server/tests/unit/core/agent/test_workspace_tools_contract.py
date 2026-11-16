@@ -1,4 +1,5 @@
 import hashlib
+from types import SimpleNamespace
 
 import pytest
 
@@ -34,21 +35,28 @@ class FakeDocumentService:
             return self.registered_documents[relative_path]
         raise FileNotFoundError("Document not found")
 
-    async def create_project_file(self, path, content):
+    async def create_project_file(self, path, content, *, derived_from_web=False):
+        self.derived_from_web = derived_from_web
         self.calls.append(("create", path, content))
         return {
             "relative_path": path,
             "content_hash": hashlib.sha256(content.encode()).hexdigest(),
         }
 
-    async def update_project_file(self, path, content, *, expected_content_hash):
+    async def update_project_file(
+        self, path, content, *, expected_content_hash, derived_from_web=False
+    ):
+        self.derived_from_web = derived_from_web
         self.calls.append(("update", path, content, expected_content_hash))
         return {
             "relative_path": path,
             "content_hash": hashlib.sha256(content.encode()).hexdigest(),
         }
 
-    async def append_project_file(self, path, content, *, expected_content_hash):
+    async def append_project_file(
+        self, path, content, *, expected_content_hash, derived_from_web=False
+    ):
+        self.derived_from_web = derived_from_web
         self.calls.append(("append", path, content, expected_content_hash))
         return {"relative_path": path, "content_hash": expected_content_hash}
 
@@ -106,6 +114,20 @@ async def test_registered_evidence_document_cannot_bypass_provenance_aware_read(
         await tools.read_project_file("docs/evidence.md")
 
     assert service.calls == [("document_info", "docs/evidence.md", None)]
+
+
+@pytest.mark.no_network
+async def test_a_document_waiting_to_be_reindexed_is_read_from_disk():
+    service = FakeDocumentService()
+    service.registered_documents["docs/evidence.md"] = {
+        "document_id": "document-1", "project_id": "project-1", "status": "queued",
+    }
+    tools = ProjectFileHarness(service)
+
+    result = await tools.read_project_file("docs/evidence.md")
+
+    assert result["indexed"] is False and "cannot be cited" in result["note"]
+    assert service.calls[-1][0] == "read"
 
 
 @pytest.mark.no_network
@@ -224,3 +246,62 @@ async def test_project_file_schema_registry_limits_and_bounds():
         schema,
         {"path": "notes.md", "content": ""},
     )
+
+
+@pytest.mark.no_network
+async def test_files_written_after_a_web_read_are_marked():
+    service = FakeDocumentService()
+    tools = ProjectFileHarness(service)
+
+    tools.agent_run = SimpleNamespace(read_web=False)
+    await tools.create_project_file("notes/plan.md", "my plan")
+    assert service.derived_from_web is False
+
+    tools.agent_run = SimpleNamespace(read_web=True)
+    await tools.create_project_file("research/findings.md", "quoted from a page")
+    assert service.derived_from_web is True
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize("path", [".env", "api/.env.local", "certs/server.pem", "id_rsa"])
+async def test_agents_cannot_open_files_that_may_hold_credentials(path):
+    tools = ProjectFileHarness(FakeDocumentService())
+    with pytest.raises(PermissionError, match="keys or credentials"):
+        await tools.read_project_file(path)
+    with pytest.raises(PermissionError, match="keys or credentials"):
+        await tools.create_project_file(path, "SECRET=1")
+
+
+@pytest.mark.no_network
+async def test_agents_cannot_change_files_in_a_read_only_workspace():
+    service = FakeDocumentService()
+    tools = ProjectFileHarness(service)
+    tools.user_name, tools.project_id = "ada", "project-1"
+
+    async def fetch_one(query, params):
+        return {"workspaces": {"docs": {"read_only": True}, "api": {"read_only": False}}}
+
+    tools.postgres = SimpleNamespace(fetch_one=fetch_one)
+    content_hash = "a" * 64
+
+    async def recorded(*args, **kwargs):
+        service.calls.append(("other", args))
+
+    service.delete_project_file = service.create_project_folder = recorded
+    service.move_project_file = recorded
+
+    for attempt in (
+        tools.create_project_file("docs/new.md", "text"),
+        tools.update_project_file("docs/a.md", "text", content_hash),
+        tools.append_project_file("docs/a.md", "more", content_hash),
+        tools.delete_project_file("docs/a.md", content_hash),
+        tools.create_project_folder("docs/sub"),
+        tools.move_project_file("api/a.md", "docs/a.md", content_hash),
+        tools.move_project_file("docs/a.md", "api/a.md", content_hash),
+    ):
+        with pytest.raises(PermissionError, match="docs workspace is read-only"):
+            await attempt
+
+    await tools.create_project_file("api/new.md", "text")  # a writable workspace
+    await tools.create_project_file("notes.md", "text")  # outside every workspace
+    assert [call[0] for call in service.calls] == ["create", "create"]

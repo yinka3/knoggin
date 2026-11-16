@@ -9,12 +9,15 @@ from common.exceptions import (
     RequestInterruptedError,
     SessionBusyError,
 )
+from common.schema.agent.identity import AgentConfig
+from common.schema.agent.settings import PromptMemoryBudget
 from common.schema.artifacts import ArtifactDraft, MarkdownArtifactBlock
 from common.schema.document import create_document_focus
 from common.schema.primitives import Message
 from common.schema.source.references import SourceReferenceCandidate
+from core.agent.run import AgentIdentity
 from core.knowledge.db.readers.message_reader import MessageReader, UserAgentExchange
-from runtime.session_runtime import SessionRuntime
+from runtime.session_runtime import FollowUpQueueFull, SessionRuntime
 from tests.fixtures.factories import make_project_state
 from tests.fixtures.fakes import FakeConfigValue, FakeResources
 
@@ -81,6 +84,143 @@ async def _collect_turn(ctx, message, orchestrator):
     ]
 
 
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_follow_up_queue_runs_after_active_turn_and_skips_cancelled_item(context):
+    ctx, _ = context
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def handler(kwargs):
+        if kwargs["user_query"] == "first":
+            started.set()
+            await release.wait()
+        if kwargs["user_query"] == "second":
+            yield {"event": "error", "data": {"message": "Unavailable"}}
+            return
+        yield _response_event(f"Answer to {kwargs['user_query']}")
+
+    orchestrator = _FakeTurnOrchestrator(handler)
+    ctx.agent_orchestrator = orchestrator
+    stream = await ctx.open_agent_run_stream(Message(content="first"))
+    active = asyncio.create_task(_collect_stream(stream))
+    await asyncio.wait_for(started.wait(), 2)
+    queued = await ctx.queue_follow_up(stream.run_id, "second")
+    third = await ctx.queue_follow_up(stream.run_id, "third")
+    cancelled = await ctx.queue_follow_up(stream.run_id, "fourth")
+    assert (await ctx.get_follow_up(queued["queue_id"]))["state"] == "queued"
+    assert (await ctx.cancel_follow_up(cancelled["queue_id"]))["state"] == "cancelled"
+    assert [call["user_query"] for call in orchestrator.calls] == ["first"]
+    release.set()
+    await active
+    async def completed():
+        while (await ctx.get_follow_up(third["queue_id"]))["state"] != "completed":
+            await asyncio.sleep(0.01)
+    await asyncio.wait_for(completed(), 2)
+    assert [call["user_query"] for call in orchestrator.calls] == ["first", "second", "third"]
+    assert (await ctx.get_follow_up(queued["queue_id"]))["state"] == "failed"
+    assert (await ctx.get_follow_up(queued["queue_id"]))["error_code"] == "run_failed"
+    assert (await ctx.get_follow_up(third["queue_id"]))["assistant_message_id"] is not None
+    assert (await ctx.get_follow_up(cancelled["queue_id"]))["state"] == "cancelled"
+
+
+async def _collect_stream(stream):
+    return [event async for event in stream]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_follow_up_queue_is_bounded_and_shutdown_cancels_pending(context):
+    ctx, _ = context
+    stream = await ctx.open_agent_run_stream(Message(content="first"))
+    assert await ctx.queue_follow_up("stale", "wrong") is None
+    items = [await ctx.queue_follow_up(stream.run_id, f"later {index}") for index in range(5)]
+    with pytest.raises(FollowUpQueueFull):
+        await ctx.queue_follow_up(stream.run_id, "one more")
+    await ctx.shutdown()
+    for item in items:
+        assert (await ctx.get_follow_up(item["queue_id"]))["state"] == "cancelled"
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_shutdown_cancels_running_follow_up(context):
+    ctx, _ = context
+    started = asyncio.Event()
+
+    async def handler(kwargs):
+        if kwargs["user_query"] == "later":
+            started.set()
+            await asyncio.Event().wait()
+        yield _response_event("Done")
+
+    ctx.agent_orchestrator = _FakeTurnOrchestrator(handler)
+    first = await ctx.open_agent_run_stream(Message(content="first"))
+    queued = await ctx.queue_follow_up(first.run_id, "later")
+    await _collect_stream(first)
+    await asyncio.wait_for(started.wait(), 2)
+    assert (await ctx.get_follow_up(queued["queue_id"]))["state"] == "running"
+    await asyncio.wait_for(ctx.shutdown(), 2)
+    assert (await ctx.get_follow_up(queued["queue_id"]))["state"] == "cancelled"
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_a_full_length_follow_up_can_quote_an_excerpt(context):
+    ctx, _ = context
+    queries = []
+    done = asyncio.Event()
+    query = "y" * 100_000
+
+    async def handler(kwargs):
+        queries.append(kwargs["user_query"])
+        if len(queries) == 2:
+            done.set()
+        yield _response_event("Done")
+
+    ctx.agent_orchestrator = _FakeTurnOrchestrator(handler)
+    first = await ctx.open_agent_run_stream(Message(content="first"))
+    excerpt = {"message_id": 7, "start": 0, "end": 3, "quote": "two"}
+    assert await ctx.queue_follow_up(first.run_id, query, annotations=[excerpt])
+    await _collect_stream(first)
+    await asyncio.wait_for(done.wait(), 2)
+    assert queries[1].startswith(query) and "selected text: two" in queries[1]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_follow_up_cannot_be_removed_once_admission_starts(context):
+    ctx, _ = context
+    starting = asyncio.Event()
+    resume = asyncio.Event()
+    original_accept = ctx._accept_user_message
+
+    async def slow_accept(message, **kwargs):
+        if message.content == "later":
+            starting.set()
+            await resume.wait()
+        return await original_accept(message, **kwargs)
+
+    ctx._accept_user_message = slow_accept
+
+    async def handler(_kwargs):
+        yield _response_event("Done")
+
+    ctx.agent_orchestrator = _FakeTurnOrchestrator(handler)
+    first = await ctx.open_agent_run_stream(Message(content="first"))
+    queued = await ctx.queue_follow_up(first.run_id, "later")
+    await _collect_stream(first)
+    await asyncio.wait_for(starting.wait(), 2)
+    assert (await ctx.cancel_follow_up(queued["queue_id"]))["state"] == "starting"
+    resume.set()
+
+    async def completed():
+        while (await ctx.get_follow_up(queued["queue_id"]))["state"] != "completed":
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(completed(), 2)
+
+
 def _runtime(resources, *, session_id="session-1", project_id="project-1"):
     runtime = SessionRuntime(
         "ada",
@@ -107,6 +247,7 @@ async def test_unconsumed_admission_has_an_explicit_cleanup_owner(
     ctx, resources = context
     stream = await ctx.open_agent_run_stream(Message(content="never consumed"))
     assert ctx._agent_run_reserved
+    assert (await ctx.get_run_status(stream.run_id))["state"] == "accepted"
 
     if close_method == "aclose":
         await stream.aclose()
@@ -118,6 +259,21 @@ async def test_unconsumed_admission_has_an_explicit_cleanup_owner(
     assert not ctx._agent_run_reserved
     assert resources.knowledge_store.closed_exchanges[-1]["outcome"] == "cancelled"
     assert [event async for event in stream] == []
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_unconsumed_close_releases_run_when_exchange_close_fails(context):
+    ctx, _ = context
+    stream = await ctx.open_agent_run_stream(Message(content="first"))
+
+    async def fail_close(*_args, **_kwargs):
+        raise RuntimeError("database unavailable")
+
+    ctx._close_user_exchange = fail_close
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        await stream.aclose()
+    assert not ctx._agent_run_reserved
 
 
 @pytest.mark.runtime
@@ -154,7 +310,7 @@ def context(monkeypatch):
     monkeypatch.setattr(
         SessionRuntime,
         "current_config",
-        property(lambda self: FakeConfigValue(conversation_context_turns=100)),
+        property(lambda self: FakeConfigValue()),
     )
     return ctx, resources
 
@@ -183,6 +339,242 @@ async def test_admitted_defaults_do_not_change_before_stream_iteration(context):
     )
     ctx.model, ctx.agent_id, ctx.enabled_tools = "new-model", "new-agent", []
     assert [event["event"] async for event in stream] == ["response"]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_admission_freezes_agent_model_and_budget_before_stream_iteration(context):
+    ctx, _ = context
+    ctx.model = "old-model"
+    chosen_budget = PromptMemoryBudget(input_tokens=2_048)
+
+    class PolicyOrchestrator(_FakeTurnOrchestrator):
+        async def resolve_run_policy(self, **kwargs):
+            assert kwargs["session_model"] == "old-model"
+            return (
+                AgentIdentity(
+                    config=AgentConfig(id="agent-1", name="Researcher", persona="Careful"),
+                    name="Researcher", persona="Careful",
+                ),
+                "old-model", chosen_budget,
+            )
+
+    async def handler(kwargs):
+        admitted = kwargs["run_settings"]
+        assert admitted.resolved_model == "old-model"
+        assert admitted.resolved_identity.config.id == "agent-1"
+        assert admitted.prompt_memory_budget == chosen_budget
+        yield _response_event("Answer")
+
+    stream = await ctx.open_agent_run_stream(
+        Message(content="Question"), orchestrator=PolicyOrchestrator(handler)
+    )
+    ctx.model = "later-model"
+    assert [event["event"] async for event in stream] == ["response"]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_run_steer_applies_to_active_run_and_reports_completion(context):
+    ctx, resources = context
+    waiting = asyncio.Event()
+    resume = asyncio.Event()
+
+    async def handler(kwargs):
+        yield {"event": "token", "data": {"content": "working"}}
+        waiting.set()
+        await resume.wait()
+        steer = await kwargs["take_steer"]()
+        assert steer["instruction"] == "Focus on recovery"
+        yield {"event": "steer_applied", "data": {"steer_id": steer["steer_id"]}}
+        yield _response_event("Answer")
+
+    stream = await ctx.open_agent_run_stream(
+        Message(content="Question"), orchestrator=_FakeTurnOrchestrator(handler), run_id="run-1"
+    )
+    events = []
+
+    async def consume():
+        async for event in stream:
+            events.append(event)
+
+    task = asyncio.create_task(consume())
+    await waiting.wait()
+    pending = await ctx.submit_steer("run-1", "Focus on recovery")
+    assert pending["state"] == "pending"
+    assert (await ctx.get_run_status("run-1"))["steer"]["state"] == "pending"
+    resume.set()
+    await task
+    assert [event["event"] for event in events] == ["token", "steer_applied", "response"]
+    assert (await ctx.get_run_status("run-1"))["steer"]["state"] == "applied"
+    assert (await ctx.get_run_status("run-1"))["state"] == "assistant_final"
+    assert next(iter(resources.knowledge_store.run_steers.values()))["state"] == "applied"
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_a_full_length_steer_can_quote_a_long_excerpt(context):
+    ctx, resources = context
+    waiting = asyncio.Event()
+    resume = asyncio.Event()
+    delivered = []
+    instruction = "x" * 4000
+    excerpt = {"message_id": 7, "start": 0, "end": 3990, "quote": "q" * 3990}
+
+    async def handler(kwargs):
+        yield {"event": "token", "data": {"content": "working"}}
+        waiting.set()
+        await resume.wait()
+        delivered.append(await kwargs["take_steer"]())
+        yield _response_event("Answer")
+
+    stream = await ctx.open_agent_run_stream(
+        Message(content="Question"), orchestrator=_FakeTurnOrchestrator(handler), run_id="run-1"
+    )
+    task = asyncio.create_task(_consume(stream))
+    await waiting.wait()
+    assert (await ctx.submit_steer("run-1", instruction, annotations=[excerpt]))["state"] == "pending"
+    resume.set()
+    await task
+    # The model gets the excerpt; the record keeps the user's own words.
+    assert delivered[0]["instruction"].startswith(instruction)
+    assert "selected text: " + "q" * 3990 in delivered[0]["instruction"]
+    assert next(iter(resources.knowledge_store.run_steers.values()))["instruction"] == instruction
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_run_steer_is_undelivered_if_run_finishes_first(context):
+    ctx, resources = context
+    waiting = asyncio.Event()
+    resume = asyncio.Event()
+
+    async def handler(_kwargs):
+        yield {"event": "token", "data": {"content": "working"}}
+        waiting.set()
+        await resume.wait()
+        yield _response_event("Answer")
+
+    stream = await ctx.open_agent_run_stream(
+        Message(content="Question"), orchestrator=_FakeTurnOrchestrator(handler), run_id="run-1"
+    )
+    task = asyncio.create_task(_consume(stream))
+    await waiting.wait()
+    await ctx.submit_steer("run-1", "Too late")
+    await ctx.submit_steer("run-1", "Also too late")
+    resume.set()
+    await task
+    assert (await ctx.get_run_status("run-1"))["steer"]["state"] == "undelivered"
+    assert [item["state"] for item in (await ctx.get_run_status("run-1"))["steers"]] == [
+        "undelivered", "undelivered"
+    ]
+    assert [item["state"] for item in resources.knowledge_store.run_steers.values()] == [
+        "undelivered", "undelivered"
+    ]
+    assert await ctx.submit_steer("run-1", "Another") is None
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_pending_steer_becomes_undelivered_on_disconnect(context):
+    ctx, resources = context
+    waiting = asyncio.Event()
+
+    async def handler(_kwargs):
+        yield {"event": "token", "data": {"content": "working"}}
+        waiting.set()
+        await asyncio.sleep(100)
+
+    stream = await ctx.open_agent_run_stream(
+        Message(content="Question"), orchestrator=_FakeTurnOrchestrator(handler), run_id="run-1"
+    )
+    task = asyncio.create_task(_consume(stream))
+    await waiting.wait()
+    await ctx.submit_steer("run-1", "Use another source")
+    await stream.aclose()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    status = await ctx.get_run_status("run-1")
+    assert status["state"] == "cancelled"
+    assert status["steer"]["state"] == "undelivered"
+    assert resources.knowledge_store.closed_exchanges[-1]["outcome"] == "cancelled"
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_multiple_steers_reach_one_run_in_order(context):
+    ctx, resources = context
+    waiting = asyncio.Event()
+    resume = asyncio.Event()
+    delivered = []
+
+    async def handler(kwargs):
+        waiting.set()
+        await resume.wait()
+        for _ in range(2):
+            steer = await kwargs["take_steer"]()
+            delivered.append(steer["instruction"])
+            yield {"event": "steer_applied", "data": {"steer_id": steer["steer_id"]}}
+        yield _response_event("Answer")
+
+    stream = await ctx.open_agent_run_stream(
+        Message(content="Question"), orchestrator=_FakeTurnOrchestrator(handler),
+        run_id="run-1",
+    )
+    task = asyncio.create_task(_consume(stream))
+    await waiting.wait()
+    first = await ctx.submit_steer("run-1", "Use the first source")
+    second = await ctx.submit_steer("run-1", "Also check the date")
+    resume.set()
+    events = await task
+
+    assert delivered == ["Use the first source", "Also check the date"]
+    assert [event["data"]["steer_id"] for event in events
+            if event["event"] == "steer_applied"] == [
+        first["steer_id"], second["steer_id"]
+    ]
+    assert [item["state"] for item in
+            (await ctx.get_run_status("run-1"))["steers"]] == ["applied", "applied"]
+    assert [row["content"] for row in resources.knowledge_store.saved_message_logs
+            if isinstance(row, dict) and row["metadata"].get("origin") == "steer"] == delivered
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_multiple_concurrent_steers_are_accepted_in_order(context):
+    ctx, _ = context
+    waiting = asyncio.Event()
+
+    async def handler(_kwargs):
+        yield {"event": "token", "data": {"content": "working"}}
+        waiting.set()
+        await asyncio.sleep(100)
+
+    stream = await ctx.open_agent_run_stream(
+        Message(content="Question"), orchestrator=_FakeTurnOrchestrator(handler), run_id="run-1"
+    )
+    task = asyncio.create_task(_consume(stream))
+    await waiting.wait()
+    outcomes = await asyncio.gather(
+        ctx.submit_steer("run-1", "First"),
+        ctx.submit_steer("run-1", "Second"),
+        return_exceptions=True,
+    )
+    assert all(isinstance(item, dict) for item in outcomes)
+    assert len({item["steer_id"] for item in outcomes}) == 2
+    assert (await ctx.get_run_status("run-1"))["steers"] == [
+        {**item, "instruction": text, "response_annotations": [], "message_id": index}
+        for index, (item, text) in enumerate(
+            zip(outcomes, ("First", "Second")), start=2
+        )
+    ]
+    await stream.aclose()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def _consume(stream):
+    return [event async for event in stream]
 
 
 @pytest.mark.runtime
@@ -256,6 +648,25 @@ async def test_conversation_history_can_exclude_the_current_first_message():
     _, query, params = resources.postgres.calls[-1]
     assert "message_id <= %(up_to_msg_id)s" in query
     assert params["up_to_msg_id"] == 0
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_applied_steer_is_visible_to_later_agent_context(context):
+    ctx, resources = context
+
+    async def history(**kwargs):
+        del kwargs
+        return [{"role": "user", "content": "Original request", "timestamp": 1000,
+                 "metadata": {"run_steer": {"state": "applied", "instruction": "Focus on recovery"}}},
+                {"role": "user", "content": "Next request", "timestamp": 2000,
+                 "metadata": {"run_steer": {"state": "undelivered", "instruction": "Ignore"}}}]
+
+    resources.knowledge_store.get_session_history = history
+    turns = await ctx.get_conversation_context(2)
+    assert turns[0]["message"] == "Original request\n\nUser instruction during this run: Focus on recovery"
+    assert turns[0]["content"] == turns[0]["message"]
+    assert turns[1]["message"] == "Next request"
 
 
 @pytest.mark.runtime
@@ -611,7 +1022,8 @@ async def test_run_agent_stream_persists_the_final_answer_and_sources_before_res
         events.append(event)
 
     assert [event["event"] for event in events] == ["token", "response"]
-    assert history_calls == [(100, 0)]
+    # History is read in pages, newest first, only as far as the budget needs.
+    assert history_calls == [(200, 0)]
     assert orchestrator.calls[0]["user_query"] == "What did we decide?"
     assert orchestrator.calls[0]["conversation_history"] == [
         {"role": "assistant", "content": "A prior durable answer."}
@@ -1075,6 +1487,25 @@ def test_focus_resolution_timestamp_is_not_part_of_request_identity():
 
 @pytest.mark.runtime
 @pytest.mark.no_network
+def test_selected_notebook_identity_is_part_of_request_identity():
+    inputs = dict(
+        message=Message(content="Summarize"), user_timezone=None, model=None,
+        agent_id=None, enabled_tools=None, document_focus=None,
+        pasted_text_spans=None, research_mode="normal",
+    )
+    first = {"notebook_id": "nb-1", "revision": 1, "context": "First passage"}
+    updated_source = {**first, "context": "Changed passage"}
+    changed_revision = {**first, "revision": 2}
+    assert SessionRuntime._request_fingerprint(selected_notebook=first, **inputs) == (
+        SessionRuntime._request_fingerprint(selected_notebook=updated_source, **inputs)
+    )
+    assert SessionRuntime._request_fingerprint(selected_notebook=first, **inputs) != (
+        SessionRuntime._request_fingerprint(selected_notebook=changed_revision, **inputs)
+    )
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
 async def test_failed_request_replay_preserves_safe_terminal_error(context):
     ctx, resources = context
     resources.knowledge_store.accepted_message_ids["request:budget-1"] = 81
@@ -1455,3 +1886,151 @@ async def test_cancelling_one_session_run_does_not_cancel_another(context):
     second_events = await second
 
     assert second_events[-1]["data"]["content"] == "second session answer"
+
+
+async def test_history_pages_stop_once_they_could_fill_the_budget():
+    ctx = object.__new__(SessionRuntime)
+    calls = []
+
+    async def history(limit, up_to_msg_id=None):
+        calls.append(up_to_msg_id)
+        newest = up_to_msg_id
+        return [
+            {"message_id": message_id, "content": "x" * 100}
+            for message_id in range(newest - limit + 1, newest + 1)
+        ]
+
+    ctx.get_conversation_context = history
+
+    # 1,000 tokens is about 4,000 characters, so one 200-message page of
+    # 100 characters each already could fill it.
+    turns = await ctx._recent_history_within(1_000, up_to_msg_id=5_000)
+    assert calls == [5_000]
+    assert len(turns) == 200
+
+    calls.clear()
+    turns = await ctx._recent_history_within(40_000, up_to_msg_id=5_000)
+    assert calls == [5_000, 4_800, 4_600, 4_400, 4_200, 4_000, 3_800, 3_600]
+    assert [turn["message_id"] for turn in turns][:2] == [3_401, 3_402]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_research_report_runs_on_an_idle_chat_and_is_marked(context):
+    ctx, resources = context
+
+    async def handler(kwargs):
+        yield _response_event("Here is what the research found.")
+
+    orchestrator = _FakeTurnOrchestrator(handler)
+    ctx.agent_orchestrator = orchestrator
+
+    # No run is active: a follow-up would be refused, a report is not.
+    queued = await ctx.queue_report(
+        "Background research job-1 finished.",
+        origin="background_task_report", metadata={"job_id": "job-1"},
+    )
+    assert queued is not None
+
+    async def completed():
+        while (await ctx.get_follow_up(queued["queue_id"]))["state"] != "completed":
+            await asyncio.sleep(0.01)
+    await asyncio.wait_for(completed(), 2)
+
+    assert [call["user_query"] for call in orchestrator.calls] == [
+        "Background research job-1 finished."
+    ]
+    user_rows = [
+        row for batch in resources.knowledge_store.saved_message_logs
+        for row in batch if row.get("role") == "user"
+    ]
+    assert user_rows[-1]["metadata"] == {"origin": "background_task_report", "job_id": "job-1"}
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_a_tool_in_a_live_run_waits_for_the_users_answer(context):
+    from core.agent.tool_events import RESULTS, ask_user, stream_tool_calls
+
+    ctx, _ = context
+    answers = []
+
+    async def tool():
+        return await ask_user("Allow network?", ("approve", "deny"), timeout_seconds=5, default="deny")
+
+    async def handler(_kwargs):
+        async for item in stream_tool_calls([("c1", "run_command", tool)]):
+            if item["event"] == RESULTS:
+                answers.append(item["data"][0])
+            else:
+                yield item
+        yield _response_event("Done")
+
+    stream = await ctx.open_agent_run_stream(
+        Message(content="Install it"), orchestrator=_FakeTurnOrchestrator(handler), run_id="run-1"
+    )
+    async for event in stream:
+        if event["event"] == "decision_required":
+            decision_id = event["data"]["decision_id"]
+            assert ctx.answer_decision("other-run", decision_id, "approve") is False
+            assert ctx.answer_decision("run-1", decision_id, "approve") is True
+    assert answers == ["approve"]
+    # Once the run is over nothing is waiting.
+    assert ctx.answer_decision("run-1", decision_id, "approve") is False
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+@pytest.mark.parametrize("how", ["nobody_watching", "user_stop"])
+async def test_tool_work_outlives_an_unwatched_run_but_not_a_stop(context, how):
+    from types import SimpleNamespace
+
+    from common.schema.settings import RootConfig
+    from core.agent.tool_events import finish_or_hand_off
+    from core.session.tool_handoffs import ToolHandoffs
+
+    ctx, _ = context
+    reports = []
+
+    async def get_or_resume_session(_session_id):
+        return SimpleNamespace(queue_report=lambda text, **kw: reports.append(text) or asyncio.sleep(0))
+
+    handoffs = ToolHandoffs(
+        SimpleNamespace(user_name="ada", get_or_resume_session=get_or_resume_session),
+        SimpleNamespace(config=RootConfig()),
+    )
+    ctx._tool_handoffs = handoffs
+    started, release, work_cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def work():
+        started.set()
+        try:
+            await release.wait()
+            return "build finished"
+        except asyncio.CancelledError:
+            work_cancelled.set()
+            raise
+
+    async def handler(_kwargs):
+        yield {"event": "token", "data": {"content": "building"}}
+        await finish_or_hand_off(work(), tool="run_command", label="make")
+        yield _response_event("Done")
+
+    stream = await ctx.open_agent_run_stream(
+        Message(content="Build it"), orchestrator=_FakeTurnOrchestrator(handler), run_id="run-1"
+    )
+    consumer = asyncio.create_task(_consume(stream))
+    await started.wait()
+    if how == "nobody_watching":
+        consumer.cancel()  # what the unwatched-run timer does
+        await asyncio.gather(consumer, return_exceptions=True)
+        release.set()
+        await asyncio.gather(*list(handoffs._tasks.values()), return_exceptions=True)
+        assert not work_cancelled.is_set()
+        assert handoffs.list(session_id=ctx.session_id)[0]["state"] == "completed"
+        assert "build finished" in reports[0]
+    else:
+        assert await ctx.cancel_active_agent_run(run_id="run-1")
+        await asyncio.gather(consumer, return_exceptions=True)
+        assert work_cancelled.is_set()
+        assert handoffs.list(session_id=ctx.session_id) == []

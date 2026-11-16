@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from common.schema.settings import RootConfig
 from runtime import application as application_module
 from runtime.application import ApplicationRuntime, ApplicationShutdownError
 
@@ -44,6 +45,14 @@ class RecordingSessions(RecordingOwner):
 
     def active_runtime_count(self):
         return 0
+
+    async def resume_background_work(self):
+        self.calls.append("resume_background_work")
+
+
+class RecordingProjects(RecordingOwner):
+    def attach_sandbox_manager(self, sandbox):
+        self.sandbox = sandbox
 
 
 async def test_startup_cleanup_retains_dependencies_after_failure():
@@ -243,9 +252,12 @@ async def test_application_start_cleans_resources_when_composition_fails(
         async def ensure_identity_entity(self, _user_name, _aliases):
             return None
 
+        async def close_orphaned_open_exchanges(self, *, user_name):
+            return 0
+
     resources.knowledge_store = KnowledgeStore()
 
-    async def create_resources(cls, *, num_workers=None, config_manager=None):
+    async def create_resources(cls, *, thread_workers=None, config_manager=None):
         return resources
 
     def fail_project_manager(**_kwargs):
@@ -273,13 +285,16 @@ async def test_application_start_cleans_aac_and_resources_when_aac_start_fails(
 ):
     calls = []
     resources = RecordingOwner("resources", calls)
-    projects = RecordingOwner("projects", calls)
+    projects = RecordingProjects("projects", calls)
     projects.entity_maintenance_service = SimpleNamespace()
     projects.maintenance_service = SimpleNamespace()
 
     class KnowledgeStore:
         async def ensure_identity_entity(self, _user_name, _aliases):
             return None
+
+        async def close_orphaned_open_exchanges(self, *, user_name):
+            return 0
 
     class RecordingAACRuntime(RecordingOwner):
         @classmethod
@@ -291,7 +306,7 @@ async def test_application_start_cleans_aac_and_resources_when_aac_start_fails(
 
     resources.knowledge_store = KnowledgeStore()
 
-    async def create_resources(cls, *, num_workers=None, config_manager=None):
+    async def create_resources(cls, *, thread_workers=None, config_manager=None):
         return resources
 
     class RecordingAgentManager:
@@ -299,6 +314,9 @@ async def test_application_start_cleans_aac_and_resources_when_aac_start_fails(
             pass
 
         async def ensure_default_agent(self):
+            pass
+
+        async def ensure_maintenance_agent(self):
             pass
 
     monkeypatch.setattr(
@@ -324,9 +342,13 @@ async def test_application_start_cleans_aac_and_resources_when_aac_start_fails(
     )
     monkeypatch.setattr(application_module, "AACRuntime", RecordingAACRuntime)
     monkeypatch.setattr(
+        application_module, "SandboxManager",
+        lambda **_kwargs: RecordingOwner("sandbox", calls),
+    )
+    monkeypatch.setattr(
         application_module.ConfigManager,
         "get",
-        staticmethod(lambda: SimpleNamespace(config=SimpleNamespace(user_aliases=[]))),
+        staticmethod(lambda: SimpleNamespace(config=RootConfig())),
     )
 
     with pytest.raises(RuntimeError, match="AAC start failed"):
@@ -334,7 +356,10 @@ async def test_application_start_cleans_aac_and_resources_when_aac_start_fails(
             user_name="ada", config_dir=tmp_path
         )
 
-    assert calls == ["projects_start", "aac", "sessions", "projects", "resources"]
+    assert calls == [
+        "projects_start", "sandbox_start", "aac", "sessions", "sandbox",
+        "projects", "resources",
+    ]
 
 
 @pytest.mark.runtime
@@ -348,9 +373,13 @@ async def test_application_start_establishes_identity_before_managers(
         async def ensure_identity_entity(self, user_name, aliases):
             calls.append(("identity", user_name, aliases))
 
+        async def close_orphaned_open_exchanges(self, *, user_name):
+            calls.append(("close_orphans", user_name))
+            return 0
+
     resources = RecordingOwner("resources", calls)
     resources.knowledge_store = KnowledgeStore()
-    projects = RecordingOwner("projects", calls)
+    projects = RecordingProjects("projects", calls)
     projects.entity_maintenance_service = SimpleNamespace()
     projects.maintenance_service = SimpleNamespace()
     sessions = RecordingSessions("sessions", calls)
@@ -363,6 +392,9 @@ async def test_application_start_establishes_identity_before_managers(
 
         async def ensure_default_agent(self):
             calls.append("ensure_default_agent")
+
+        async def ensure_maintenance_agent(self):
+            calls.append("ensure_maintenance_agent")
 
     class RecordingAgentOrchestrator:
         def __init__(self, manager, **kwargs):
@@ -396,7 +428,7 @@ async def test_application_start_establishes_identity_before_managers(
         calls.append("sessions")
         return sessions
 
-    async def create_resources(cls, *, num_workers=None, config_manager=None):
+    async def create_resources(cls, *, thread_workers=None, config_manager=None):
         return resources
 
     monkeypatch.setattr(
@@ -409,13 +441,12 @@ async def test_application_start_establishes_identity_before_managers(
     monkeypatch.setattr(application_module, "AgentOrchestrator", RecordingAgentOrchestrator)
     monkeypatch.setattr(application_module, "SessionManager", create_sessions)
     monkeypatch.setattr(application_module, "AACRuntime", RecordingAACRuntime)
+    monkeypatch.setattr(
+        application_module, "SandboxManager",
+        lambda **_kwargs: RecordingOwner("sandbox", calls),
+    )
     config_manager = SimpleNamespace(
-        config=SimpleNamespace(
-            user_aliases=["Ada"],
-            developer_settings=SimpleNamespace(
-                documents=SimpleNamespace(project_library_root="data/projects")
-            ),
-        ),
+        config=RootConfig(user_aliases=["Ada"]),
         resolve_path=lambda path: tmp_path / path,
     )
     monkeypatch.setattr(
@@ -431,13 +462,17 @@ async def test_application_start_establishes_identity_before_managers(
     assert runtime.config_manager is config_manager
     assert calls == [
         ("identity", "ada", ["Ada"]),
+        ("close_orphans", "ada"),
         "projects_start",
+        "sandbox_start",
         "agent_manager",
         "ensure_default_agent",
+        "ensure_maintenance_agent",
         "agent_orchestrator",
         "sessions",
         "aac_create",
         "aac_start",
+        "resume_background_work",
     ]
     assert isinstance(runtime.agent_manager, RecordingAgentManager)
     assert isinstance(runtime.agent_orchestrator, RecordingAgentOrchestrator)

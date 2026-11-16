@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -6,6 +7,7 @@ import pytest
 from common.conf.domain_config import DomainConfig
 from common.exceptions import LLMProviderError, StorageReadError
 from common.schema.agent.research import resolve_research_profile
+from common.schema.agent.settings import PromptMemoryBudget
 from common.schema.artifacts import ArtifactDraft, MarkdownArtifactBlock
 from common.schema.context import (
     AssertionKind,
@@ -17,7 +19,9 @@ from common.schema.context import (
 )
 from core.agent.executor import AgentExecutor, _AgentPhase
 from core.agent.executor import _ToolCall as ToolCall
+from core.agent.prompt_budget import token_count
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
+from infrastructure.llm_client import system_text
 
 
 class StreamingLLM:
@@ -29,8 +33,13 @@ class StreamingLLM:
         self.raises = raises
         self.calls = []
 
+    async def generate_text(self, system, user, **kwargs):
+        self.calls.append({"system": system, "user": user, **kwargs})
+        return "summary"
+
     async def stream_with_tools(self, **kwargs):
-        self.calls.append(kwargs)
+        # Record the joined system prompt; the executor sends cacheable parts.
+        self.calls.append({**kwargs, "system": system_text(kwargs["system"])})
         if self.raises:
             raise self.raises
         for chunk in self.chunks:
@@ -58,6 +67,44 @@ def make_executor(llm, *, research_profile=None):
     )
     tools = SimpleNamespace(document_service=None)
     return AgentExecutor(ctx, llm, tools)
+
+
+@pytest.mark.no_network
+def test_prompt_assembly_bounds_all_memory_while_retaining_current_query():
+    executor = make_executor(StreamingLLM())
+    executor.ctx.memory_budget = PromptMemoryBudget(input_tokens=4_000)
+    executor.ctx.selected_notebook = {
+        "notebook_id": "notebook-1", "revision": 1, "context": "source " * 6_000,
+    }
+    executor.ctx.history = [
+        {"role": "user", "content": "prior " * 4_000},
+    ]
+    system, user = executor._bounded_prompt(
+        date="2026-10-26", phase=_AgentPhase.PLAN, gap_review=False,
+        documents_context="", document_focus_context="", project_brief="",
+        project_context="project " * 5_000, runtime_instructions="",
+        tool_schemas=[], last_result=None,
+    )
+
+    system = system_text(system)
+    assert token_count(system, None) + token_count(user, None) + 64 <= 4_000
+    assert executor.ctx.user_query in user
+    assert "project" in system
+    assert "prior" in user
+    assert "source" in user
+
+
+@pytest.mark.no_network
+async def test_fallback_summary_bounds_accumulated_evidence(monkeypatch):
+    llm = StreamingLLM()
+    executor = make_executor(llm)
+    executor.ctx.memory_budget = PromptMemoryBudget(input_tokens=4_000)
+    executor.ctx.user_query = "Explain the finding"
+    monkeypatch.setattr("core.agent.executor.build_evidence_context", lambda _ctx: "evidence " * 8_000)
+
+    assert await executor._generate_fallback_summary() == "summary"
+    call = llm.calls[0]
+    assert token_count(call["system"], None) + token_count(call["user"], None) + 64 <= 4_000
 
 
 @pytest.mark.no_network
@@ -204,10 +251,10 @@ async def test_step_forwards_standard_stream_events(monkeypatch):
 
     def fake_agent_prompt(*args, **kwargs):
         prompt_calls.append((args, kwargs))
-        return "SYSTEM PROMPT"
+        return ("SYSTEM PROMPT", "", "")
 
     monkeypatch.setattr(
-        "core.agent.executor.get_agent_prompt",
+        "core.agent.executor.get_agent_prompt_parts",
         fake_agent_prompt,
     )
     executor = make_executor(llm)
@@ -297,10 +344,10 @@ async def test_step_forwards_selected_research_profile_to_prompt(monkeypatch):
 
     def fake_agent_prompt(**kwargs):
         prompt_kwargs.update(kwargs)
-        return "SYSTEM PROMPT"
+        return ("SYSTEM PROMPT", "", "")
 
     monkeypatch.setattr(
-        "core.agent.executor.get_agent_prompt",
+        "core.agent.executor.get_agent_prompt_parts",
         fake_agent_prompt,
     )
     executor = make_executor(
@@ -431,28 +478,26 @@ def test_executor_rejects_duplicate_tool_call_correlation_ids():
     )
 
 
-@pytest.mark.no_network
-async def test_step_completed_without_tool_calls_yields_formatting_step_error():
+_USAGE = {
+    "prompt_tokens": 4,
+    "completion_tokens": 2,
+    "total_tokens": 6,
+    "approximate": True,
+}
+
+
+async def _plain_reply_events(content: str, finish_reason: str = "stop") -> list[dict]:
     llm = StreamingLLM(
         [
-            {"event": "token", "data": {"content": "raw answer"}},
+            {"event": "token", "data": {"content": content}},
             {
                 "event": "step_completed",
-                "data": {
-                    "content": "raw answer",
-                    "usage": {
-                        "prompt_tokens": 4,
-                        "completion_tokens": 2,
-                        "total_tokens": 6,
-                        "approximate": True,
-                    },
-                },
+                "data": {"content": content, "usage": _USAGE, "finish_reason": finish_reason},
             },
         ]
     )
     executor = make_executor(llm)
-
-    events = [
+    return [
         event
         async for event in executor._step(
             date="now",
@@ -464,6 +509,21 @@ async def test_step_completed_without_tool_calls_yields_formatting_step_error():
             last_result=None,
         )
     ]
+
+
+@pytest.mark.no_network
+async def test_plain_reply_without_tool_calls_becomes_the_submitted_answer():
+    events = await _plain_reply_events("raw answer")
+
+    calls = next(e for e in events if e["event"] == "tool_calls")["data"]["calls"]
+    assert [call["name"] for call in calls] == ["submit_answer"]
+    assert json.loads(calls[0]["arguments"]) == {"content": "raw answer"}
+    assert events[-1]["event"] == "step_completed"
+
+
+@pytest.mark.no_network
+async def test_empty_reply_without_tool_calls_yields_formatting_step_error():
+    events = await _plain_reply_events("   ")
 
     assert events[-1]["event"] == "step_error"
     assert events[-1]["data"]["kind"] == "formatting"
@@ -548,3 +608,20 @@ async def test_final_response_carries_validated_structured_artifact():
 
     assert event["data"]["artifact"]["kind"] == "research_brief"
     assert event["data"]["artifact"]["blocks"][0]["content"] == "Finding"
+
+
+@pytest.mark.no_network
+async def test_reply_cut_off_by_the_output_limit_is_reported_as_cut_off():
+    events = await _plain_reply_events("", finish_reason="length")
+
+    error = next(e for e in events if e["event"] == "step_error")["data"]
+    assert error["kind"] == "truncated"
+    assert "output limit" in error["message"]
+
+
+@pytest.mark.no_network
+async def test_empty_reply_that_finished_normally_is_still_a_formatting_error():
+    events = await _plain_reply_events("", finish_reason="stop")
+
+    error = next(e for e in events if e["event"] == "step_error")["data"]
+    assert error["kind"] == "formatting"

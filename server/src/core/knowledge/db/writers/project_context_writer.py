@@ -88,6 +88,7 @@ class ProjectContextWriter:
         materialization: ContextMaterialization,
         new_human_edit_window: SemanticWindowRecord | None = None,
         accepted_projection_hash: str | None = None,
+        maintained: bool = False,
     ) -> ContextSnapshot:
         """Publish one full snapshot while holding the project's Context root lock.
 
@@ -307,8 +308,9 @@ class ProjectContextWriter:
                     """
                     INSERT INTO public.project_context_revisions (
                         revision_id, project_id, revision_number, parent_revision_id,
-                        window_id, origin, domain_version, edit_summary, content_hash
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        window_id, origin, domain_version, edit_summary, content_hash,
+                        maintained
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING """ + _REVISION_COLUMNS,
                     (
                         revision_id,
@@ -320,6 +322,7 @@ class ProjectContextWriter:
                         domain_version,
                         edit_summary.strip(),
                         materialization.content_hash,
+                        maintained,
                     ),
                 )
                 revision_row = await cur.fetchone()
@@ -903,8 +906,24 @@ class ProjectContextWriter:
                 (int(row["message_id"]), str(row["session_id"]))
                 for row in await cur.fetchall()
             }
-            if not pairs.issubset(window_pairs):
-                raise ValueError("Context support must belong to its semantic window")
+            outside = pairs - window_pairs
+            if outside:
+                # A maintained block (merged or compressed) keeps the evidence
+                # of the blocks it replaces, which came from earlier windows.
+                await cur.execute(
+                    """
+                    SELECT DISTINCT message_id, session_id
+                    FROM public.project_context_block_supports
+                    WHERE project_id = %s AND message_id = ANY(%s)
+                    """,
+                    (project_id, [pair[0] for pair in outside]),
+                )
+                carried = {
+                    (int(row["message_id"]), str(row["session_id"]))
+                    for row in await cur.fetchall()
+                }
+                if not outside.issubset(carried):
+                    raise ValueError("Context support must belong to its semantic window")
 
     @staticmethod
     def _uuid(value: UUID | str, field: str) -> UUID:

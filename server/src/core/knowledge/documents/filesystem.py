@@ -10,7 +10,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Iterator
+from typing import Callable, Iterator
 
 from common.exceptions import WorkspaceConflictError
 from core.knowledge.documents.constants import MAX_DOCUMENT_SIZE
@@ -538,8 +538,16 @@ class ProjectFilesystem:
         for path in self.iter_paths(limit=limit):
             yield self.read_file(path.relative_path)
 
-    def iter_paths(self, *, limit: int | None = None) -> Iterator[ProjectFilePath]:
-        """Yield regular project paths in stable order without following links."""
+    def iter_paths(
+        self,
+        *,
+        limit: int | None = None,
+        skip_directory: Callable[[str], bool] | None = None,
+    ) -> Iterator[ProjectFilePath]:
+        """Yield regular project paths in stable order without following links.
+
+        ``skip_directory`` gets each folder's project-relative path and can
+        keep the walk out of it entirely (``node_modules``, ``.venv``)."""
         if limit is not None and (
             not isinstance(limit, int) or isinstance(limit, bool) or limit < 1
         ):
@@ -550,7 +558,7 @@ class ProjectFilesystem:
             if not self._root.exists():
                 return
             for index, (relative_path, size_bytes, modified_ns) in enumerate(
-                iter_project_paths(self._root), start=1
+                iter_project_paths(self._root, skip_directory), start=1
             ):
                 yield ProjectFilePath(relative_path, size_bytes, modified_ns)
                 if limit is not None and index >= limit:
@@ -561,7 +569,7 @@ class ProjectFilesystem:
         if not self._root.exists():
             return
         for index, (relative_path, size_bytes, modified_ns) in enumerate(
-            iter_project_paths(self._root), start=1
+            iter_project_paths(self._root, skip_directory), start=1
         ):
             yield ProjectFilePath(relative_path, size_bytes, modified_ns)
             if limit is not None and index >= limit:

@@ -1,50 +1,60 @@
-FROM python:3.12-slim
+# Knoggin API and engine, CPU build. docker-compose.yml runs it with Postgres.
+FROM python:3.12-slim@sha256:12316debbfb86890f6b2d825820612741ba527ad5a44e3902759141d572bfe8f
 
-WORKDIR /app
-
-# Install build dependencies
+# opencv (used by Docling's OCR) needs libGL and glib at import time.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    curl \
+        libgl1 libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install uv
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:0.8@sha256:1d31be550ff927957472b2a491dc3de1ea9b5c2d319a9cea5b6a48021e2990a6 /uv /uvx /bin/
 
-# Copy workspace configuration
-COPY pyproject.toml uv.lock ./
-COPY server/pyproject.toml ./server/
-COPY sdk/pyproject.toml ./sdk/
+# Match the host user so files written to the bind-mounted config folder stay
+# owned by them.
+ARG UID=1000
+RUN useradd --create-home --uid ${UID} knoggin
+WORKDIR /app
+RUN chown knoggin /app
+USER knoggin
 
-# Install dependencies for server
-# Using uv sync with --frozen to ensure reproducible builds from the lockfile
-RUN uv sync --frozen --no-dev --package server
+ENV UV_LINK_MODE=copy \
+    PATH="/app/.venv/bin:$PATH"
 
-# Use the virtual environment created by uv
-ENV PATH="/app/.venv/bin:$PATH"
+COPY --chown=knoggin pyproject.toml uv.lock ./
+COPY --chown=knoggin server/pyproject.toml server/
+COPY --chown=knoggin api/pyproject.toml api/
+# The uv download cache stays in a build cache, out of the image.
+RUN --mount=type=cache,target=/home/knoggin/.cache/uv,uid=${UID} \
+    uv sync --frozen --no-dev --package api --no-install-workspace
 
-# Pre-download ML models so first boot is instant
-RUN python -c "\
-from sentence_transformers import SentenceTransformer, CrossEncoder; \
-SentenceTransformer('dunzhang/stella_en_1.5B_v5', backend='onnx', trust_remote_code=True); \
-CrossEncoder('BAAI/bge-reranker-large')"
+# Bake the default local models at their pinned versions, read from the same
+# list the app uses, so the first start needs no downloads. Only this file is
+# copied here, so the layer rebuilds only when a pin changes.
+COPY --chown=knoggin server/src/common/model_cache.py /tmp/model_cache.py
+RUN python - <<'PY'
+import sys
+from huggingface_hub import snapshot_download
 
-RUN python -c "from gliner import GLiNER; GLiNER.from_pretrained('urchade/gliner_large-v2.1')"
+sys.path.insert(0, "/tmp")
+from model_cache import PINNED_REVISIONS
 
-# PDF layout, table, and OCR artifacts are local runtime dependencies. Keeping
-# them in the image prevents the first document index from reaching the network.
-RUN docling-tools models download layout tableformer rapidocr --quiet
+for repo, revision in PINNED_REVISIONS.items():
+    # The runtime loads ONNX or safetensors weights, never pytorch_model.bin.
+    snapshot_download(
+        repo, revision=revision, ignore_patterns=["*.bin", "*.h5", "*.msgpack", "*.ot"]
+    )
+PY
+# Docling's PDF models, checked file by file against the committed manifest.
+COPY --chown=knoggin server/src/common/docling_models.py server/src/common/docling_models.json /tmp/
+RUN docling-tools models download --output-dir /home/knoggin/.cache/knoggin/docling \
+        layout tableformer rapidocr --quiet \
+    && python -c "import sys; sys.path.insert(0, '/tmp'); import docling_models as d; d.verify(d.artifacts_path())"
 
-# Copy the entire workspace source
-COPY . .
+COPY --chown=knoggin . .
+RUN --mount=type=cache,target=/home/knoggin/.cache/uv,uid=${UID} \
+    uv sync --frozen --no-dev --package api
 
-# Ensure local persistence directories exist
-RUN mkdir -p /app/config /app/data/files
-
-# Use the virtual environment created by uv
-ENV PATH="/app/.venv/bin:$PATH"
-ENV PYTHONPATH="/app/server/src"
-ENV KNOGGIN_CONFIG_DIR="/app/config"
-
-# server currently ships as an engine package. An API entry point should
-# be supplied by the embedding application rather than this image.
+# RUNTIME_USER_NAME comes from .env; the API refuses to start without it.
+ENV SETTINGS_DIR=/app/config
+EXPOSE 8000
+WORKDIR /app/api/src
+CMD ["uvicorn", "app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]

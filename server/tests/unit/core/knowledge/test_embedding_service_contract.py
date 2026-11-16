@@ -7,8 +7,8 @@ import pytest
 from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
 
-import core.knowledge.services.embedding_service as embedding_module
-from core.knowledge.services.embedding_service import EmbeddingService
+import core.knowledge.embedding_service as embedding_module
+from core.knowledge.embedding_service import EmbeddingService
 
 
 class FakeCrossEncoder:
@@ -78,7 +78,7 @@ def test_embedding_service_rejects_unavailable_explicit_onnx_provider(monkeypatc
         "get_available_providers",
         lambda: ["CPUExecutionProvider"],
     )
-    monkeypatch.setenv("KNOGGIN_ONNX_PROVIDER", "CoreMLExecutionProvider")
+    monkeypatch.setenv("ONNX_PROVIDER", "CoreMLExecutionProvider")
 
     with pytest.raises(ValueError, match="is unavailable"):
         EmbeddingService(embedding_backend="onnx")
@@ -118,7 +118,6 @@ async def test_embedding_service_loads_embedder_before_lazy_onnx_reranker(
     assert sentence_transformer_calls == [
         {
             "model_name": "custom/embedder",
-            "trust_remote_code": True,
             "device": "cpu",
             "model_kwargs": {"provider": "CPUExecutionProvider"},
             "config_kwargs": {
@@ -155,7 +154,7 @@ async def test_embedding_service_runs_pooled_onnx_sentence_export_directly(
         @classmethod
         def from_pretrained(cls, model_name, **kwargs):
             assert model_name == str(model_path)
-            assert kwargs == {"trust_remote_code": True}
+            assert kwargs == {}  # never run code from the model repository
             return cls()
 
         def __call__(self, texts, **kwargs):
@@ -462,7 +461,30 @@ async def test_stella_retrieval_query_uses_document_search_instruction(monkeypat
 
 
 @pytest.mark.no_network
-async def test_non_stella_retrieval_query_remains_unprompted(monkeypatch):
+async def test_bge_retrieval_query_uses_document_search_instruction(monkeypatch):
+    service = EmbeddingService(
+        embedding_model="BAAI/bge-base-en-v1.5",
+        embedding_backend="onnx",
+        device="cpu",
+    )
+    calls = []
+
+    async def encode_single(text):
+        calls.append(text)
+        return [0.1] * 768
+
+    monkeypatch.setattr(service, "encode_single", encode_single)
+
+    await service.encode_query("How do random forests reduce variance?")
+
+    assert calls == [
+        "Represent this sentence for searching relevant passages: "
+        "How do random forests reduce variance?"
+    ]
+
+
+@pytest.mark.no_network
+async def test_unrecognized_retrieval_model_remains_unprompted(monkeypatch):
     service = EmbeddingService(
         embedding_model="local/custom-retriever",
         embedding_backend="torch",

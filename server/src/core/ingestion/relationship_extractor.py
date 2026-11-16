@@ -1,35 +1,27 @@
-"""Context-grounded VP-02 relationship extraction for semantic windows."""
+"""VP-02: find relationships in each Episode's messages after entity resolution."""
 
 from __future__ import annotations
 
-import re
+import asyncio
 from typing import Dict
-from uuid import UUID
+
+from loguru import logger
 
 from common.conf.relationship_config import normalize_relationship
-from common.exceptions import LLMBudgetExceededError, LLMResponseError
-from common.schema.ingestion.contracts import (
-    ContextRelationshipWrite,
-    UnknownEndpointDiagnostic,
-    ValidationIssue,
-)
-from common.schema.ingestion.extraction import ContextRelationshipExtraction
+from common.exceptions import LLMRefusalError
+from common.schema.ingestion.contracts import RelationshipWrite, ValidationIssue
+from common.schema.ingestion.extraction import EpisodeRelationshipExtraction
+from common.schema.settings import ExtractionSettings
 from common.scoping import IDENTITY_ENTITY_ID
-from common.utils.core_utils import format_context_vp02_input
-from common.utils.events import emit
-from common.utils.local_references import build_local_id_maps
-from core.ingestion.batch import SemanticWindowBuild
-from core.ingestion.prompts import get_context_connection_reasoning_prompt
+from core.ingestion.batch import EpisodeEvidence, SemanticWindowBuild
+from core.ingestion.prompts import relationship_prompt
+from core.ingestion.text_processor import background_lines, message_lines
 from core.knowledge.entity.resolver import EntityResolver
 from infrastructure.llm_client import LLMService
 
 
-class ContextRelationshipExtractor:
-    """Run VP-02 against immutable Context blocks after entity resolution.
-
-    This class has no message-event heuristics and never calls a GLiNER
-    relationship API.
-    """
+class RelationshipExtractor:
+    """Run VP-02 once per Episode, over the entities its messages name."""
 
     def __init__(
         self,
@@ -37,258 +29,186 @@ class ContextRelationshipExtractor:
         user_name: str,
         llm: LLMService,
         entities: EntityResolver,
+        settings: ExtractionSettings | None = None,
     ) -> None:
         self.user_name = user_name
         self.llm = llm
         self.entities = entities
+        self.update_settings(settings or ExtractionSettings())
+
+    def update_settings(self, config: ExtractionSettings) -> None:
+        self.max_parallel_episodes = config.max_parallel_episodes
 
     @staticmethod
     def _record_issue(
-        build: SemanticWindowBuild,
-        *,
-        code: str,
-        message: str,
-        item_ref: str | None = None,
-        metadata: Dict | None = None,
+        build: SemanticWindowBuild, *, code: str, message: str, item_ref: str | None = None,
     ) -> None:
-        build.issues.append(
-            ValidationIssue(
-                stage="context_connections",
-                code=code,
-                message=message,
-                item_ref=item_ref,
-                metadata=metadata or {},
-            )
-        )
+        build.issues.append(ValidationIssue(
+            stage="relationships", code=code, message=message, item_ref=item_ref,
+        ))
 
-    async def _candidates(
-        self, build: SemanticWindowBuild, block_local_ids: Dict[UUID, str]
-    ) -> tuple[list[Dict], Dict[str, tuple[int, str]]]:
-        if build.entity_result is None:
-            raise ValueError("Context VP-02 requires a resolved entity result")
+    async def _entity_details(self, build: SemanticWindowBuild) -> Dict[int, Dict]:
+        """Name, type, and aliases of every resolved entity in the window."""
 
-        source_blocks_by_entity: Dict[int, set[UUID]] = {}
-        for association in build.entity_result.block_entity_associations:
-            source_blocks_by_entity.setdefault(association.entity_id, set()).add(
-                association.block_id
-            )
-
+        result = build.entity_result
+        assert result is not None
         identity_type = build.policy.domain.canonical_entity_type("Identity") or "Identity"
-        candidate_details: Dict[int, Dict] = {
+        details: Dict[int, Dict] = {
             IDENTITY_ENTITY_ID: {
-                "canonical_name": self.user_name,
-                "type": identity_type,
-                "mentions": (),
-                "source_blocks": (),
+                "name": self.user_name, "type": identity_type, "mentions": (),
                 "is_identity": True,
             }
         }
-        for entity_id in sorted(set(build.entity_result.entity_ids)):
-            if entity_id == IDENTITY_ENTITY_ID:
-                continue
-            pending = build.entity_result.pending_entity_writes.get(entity_id)
-            classification = build.entity_result.project_classifications.get(entity_id)
+        for entity_id in sorted(set(result.entity_ids) - {IDENTITY_ENTITY_ID}):
+            pending = result.pending_entity_writes.get(entity_id)
             profile = None if pending is not None else await self.entities.get_profile(entity_id)
-            if pending is None and profile is None:
+            if pending is not None:
+                name = pending.canonical_name
+            elif profile is not None:
+                name = profile.canonical_name
+            else:
                 self._record_issue(
-                    build,
-                    code="context_connection_candidate_profile_missing",
-                    message="Context VP-02 candidate has no visible entity profile",
+                    build, code="relationship_candidate_profile_missing",
+                    message="Relationship candidate has no visible entity profile",
                     item_ref=str(entity_id),
                 )
                 continue
-            canonical_name = pending.canonical_name if pending is not None else profile.canonical_name
-            if classification is None:
-                raise ValueError(
-                    "Context VP-02 candidate lacks a project classification"
-                )
-            else:
-                entity_type = classification.entity_type
-            aliases = list(pending.aliases) if pending is not None else self.entities.get_mentions_for_id(entity_id)
-            candidate_details[entity_id] = {
-                "canonical_name": canonical_name,
-                "type": entity_type,
-                "mentions": aliases,
-                "source_blocks": sorted(
-                    block_local_ids[block_id]
-                    for block_id in source_blocks_by_entity.get(entity_id, set())
-                    if block_id in block_local_ids
+            details[entity_id] = {
+                "name": name,
+                "type": result.project_classifications[entity_id].entity_type,
+                "mentions": (
+                    list(pending.aliases) if pending
+                    else self.entities.get_mentions_for_id(entity_id)
                 ),
                 "is_identity": False,
             }
+        return details
 
-        entity_to_handle, handle_to_entity = build_local_id_maps(
-            candidate_details,
-            "e",
-        )
-        candidates = [
-            {
-                "handle": entity_to_handle[entity_id],
-                **candidate_details[entity_id],
-            }
-            for entity_id in sorted(candidate_details)
-        ]
-        handles = {
-            handle: (int(entity_id), candidate_details[int(entity_id)]["type"])
-            for handle, entity_id in handle_to_entity.items()
-        }
-        return candidates, handles
-
-    async def extract(
-        self, build: SemanticWindowBuild
-    ) -> tuple[ContextRelationshipWrite, ...]:
-        """Return validated multi-block relationship commands for one window."""
+    async def extract(self, build: SemanticWindowBuild) -> tuple[RelationshipWrite, ...]:
+        """Return validated relationship commands for every Episode of one window."""
 
         if not isinstance(build, SemanticWindowBuild):
-            raise TypeError("Context VP-02 requires a SemanticWindowBuild")
+            raise TypeError("VP-02 requires a SemanticWindowBuild")
         if build.entity_result is None or not build.entity_result.entity_ids:
             build.set_relationship_writes(())
             return ()
-
-        blocks = list(build.knowledge_input_blocks)
-        if not blocks:
-            build.set_relationship_writes(())
-            return ()
-        block_local_ids = {block.block_id: f"b{index}" for index, block in enumerate(blocks, 1)}
-        local_blocks = {local_id: block_id for block_id, local_id in block_local_ids.items()}
-        candidates, valid_handles = await self._candidates(build, block_local_ids)
-        if len(candidates) < 2:
-            build.set_relationship_writes(())
-            return ()
-
         build.trace.relationship_model = getattr(self.llm, "extraction_model", None)
-        build.trace.relationship_prompt = "VEGAPUNK-02-CONTEXT"
-        prompt = format_context_vp02_input(
-            candidates,
-            [
-                {
-                    "local_id": block_local_ids[block.block_id],
-                    "section_key": block.section_key,
-                    "markdown": block.markdown,
-                }
-                for block in blocks
-            ],
-            relationship_block=build.policy.domain.relationship_block,
+        details = await self._entity_details(build)
+        limit = asyncio.Semaphore(self.max_parallel_episodes)
+
+        async def one(index: int, episode: EpisodeEvidence) -> list[RelationshipWrite]:
+            async with limit:
+                return await self._episode_relationships(build, index, episode, details)
+
+        per_episode = await asyncio.gather(
+            *(one(index, episode) for index, episode in enumerate(build.episodes))
         )
-        await emit(
-            str(build.window_id),
-            "semantic",
-            "llm_call",
-            {"stage": "context_connections", "prompt": prompt},
-            verbose_only=True,
+        writes_by_identity: Dict[tuple, RelationshipWrite] = {}
+        for write in (write for found in per_episode for write in found):
+            identity = (
+                write.entity_a_id, write.entity_b_id, write.relationship_type,
+                write.observed_label or write.relationship_type,
+                tuple(sorted(write.support_message_ids)),
+            )
+            writes_by_identity.setdefault(identity, write)
+        writes = tuple(writes_by_identity.values())
+        build.trace.relationships_accepted = len(writes)
+        build.trace.relationships_recognized = sum(
+            write.domain_status == "recognized" for write in writes
         )
+        build.trace.relationships_unrecognized = (
+            len(writes) - build.trace.relationships_recognized
+        )
+        build.set_relationship_writes(writes)
+        return writes
+
+    async def _episode_relationships(
+        self,
+        build: SemanticWindowBuild,
+        index: int,
+        episode: EpisodeEvidence,
+        details: Dict[int, Dict],
+    ) -> list[RelationshipWrite]:
+        assert build.entity_result is not None
+        message_ids = {message.message_id for message in episode.messages}
+        present = sorted({
+            resolved.entity_id
+            for resolved in build.entity_result.resolved_mentions
+            if message_ids & set(resolved.mention.message_ids)
+            and resolved.entity_id in details
+        })
+        if not present:
+            return []
+        candidate_ids = [IDENTITY_ENTITY_ID, *(i for i in present if i != IDENTITY_ENTITY_ID)]
+        handles = {f"e{n}": entity_id for n, entity_id in enumerate(candidate_ids, start=1)}
+        candidate_lines = []
+        for handle, entity_id in handles.items():
+            item = details[entity_id]
+            identity = " (reserved user identity)" if item["is_identity"] else ""
+            candidate_lines.append(f"{handle} = {item['name']} [{item['type']}]{identity}")
+            if item["mentions"]:
+                candidate_lines.append(f"  Mentions: {', '.join(item['mentions'])}")
+        hints = list(dict.fromkeys(
+            markdown
+            for message in episode.messages
+            for markdown in build.context_hints.get(message.message_id, ())
+        ))
+        lines, message_handles = message_lines(episode)
+        prompt = "\n".join((
+            "CANDIDATE ENTITIES:",
+            *candidate_lines,
+            "",
+            "RELATIONSHIP TYPES:",
+            build.policy.domain.relationship_block,
+            "",
+            "CONTEXT (hint, not evidence):",
+            *([f"- {' '.join(hint.split())}" for hint in hints] or ["(none)"]),
+            "",
+            "EARLIER EPISODES (background, oldest first; cannot be cited):",
+            *background_lines(
+                build.background_for(index, build.policy.vp02_episode_lookback)
+            ),
+            "",
+            "MESSAGES:",
+            *lines,
+        ))
         try:
-            result: ContextRelationshipExtraction = await self.llm.generate_structured(
-                response_model=ContextRelationshipExtraction,
-                system=get_context_connection_reasoning_prompt(self.user_name),
+            result: EpisodeRelationshipExtraction = await self.llm.generate_structured(
+                response_model=EpisodeRelationshipExtraction,
+                system=relationship_prompt(self.user_name),
                 user=prompt,
                 temperature=0.0,
             )
-        except LLMBudgetExceededError:
-            raise
-        if result is None:
-            raise LLMResponseError("Context VP-02 relationship extraction returned no result")
-
-        build.trace.relationships_seen = len(result.connections)
-        diagnostics: dict[tuple[UUID, str, str], UnknownEndpointDiagnostic] = {}
-        blocks_by_id = {block.block_id: block for block in blocks}
-        for observation in result.unknown_endpoints:
-            block_id = local_blocks.get(observation.block_id)
-            entity_type = build.policy.domain.canonical_entity_type(observation.type)
-            if block_id is None or entity_type is None:
-                self._record_issue(
-                    build,
-                    code="invalid_unknown_relationship_endpoint",
-                    message="Unknown relationship endpoint has an invalid block or type",
-                    item_ref=observation.name,
-                )
-                continue
-            support_text = "\n".join(
-                build.message_text_by_id.get(support.message_id, "")
-                for support in build.block_supports.get(block_id, ())[:3]
+        except LLMRefusalError:
+            logger.warning("Relationship extraction refused Episode {}", episode.episode_id)
+            build.trace.episodes_refused += 1
+            return []
+        build.trace.relationships_seen += len(result.connections)
+        types = {entity_id: details[entity_id]["type"] for entity_id in candidate_ids}
+        writes = []
+        for found in result.connections:
+            ref = f"{found.entity_a}->{found.entity_b}"
+            a, b = handles.get(found.entity_a), handles.get(found.entity_b)
+            support = tuple(
+                message_handles[h] for h in found.messages if h in message_handles
             )
-            expression = r"(?<!\w)" + r"\s+".join(
-                re.escape(part) for part in observation.name.split()
-            ) + r"(?!\w)"
-            if re.search(
-                expression, blocks_by_id[block_id].markdown, re.IGNORECASE
-            ) is None and re.search(expression, support_text, re.IGNORECASE) is None:
-                self._record_issue(
-                    build,
-                    code="unsupported_unknown_relationship_endpoint",
-                    message="Unknown relationship endpoint lacks literal source support",
-                    item_ref=observation.name,
-                    metadata={"block_id": observation.block_id},
-                )
-                continue
-            diagnostic = UnknownEndpointDiagnostic(
-                block_id=block_id,
-                name=observation.name,
-                entity_type=entity_type,
-            )
-            diagnostics[(block_id, observation.name.casefold(), entity_type)] = diagnostic
-            self._record_issue(
-                build,
-                code="unknown_relationship_endpoint",
-                message="Relationship evidence names an unresolved endpoint",
-                item_ref=observation.name,
-                metadata={
-                    "block_id": observation.block_id,
-                    "entity_type": entity_type,
-                },
-            )
-        build.set_unknown_endpoint_diagnostics(diagnostics.values())
-        writes_by_identity: Dict[
-            tuple[int, int, str, str, tuple[UUID, ...]], ContextRelationshipWrite
-        ] = {}
-        for mention in result.connections:
-            endpoint_a = valid_handles.get(mention.entity_a)
-            endpoint_b = valid_handles.get(mention.entity_b)
-            if endpoint_a is None or endpoint_b is None:
+            if a is None or b is None or a == b or len(support) != len(found.messages):
                 build.trace.relationships_rejected += 1
                 self._record_issue(
-                    build,
-                    code="invalid_context_connection_entity",
-                    message="Context VP-02 returned an unknown local entity handle",
-                    item_ref=f"{mention.entity_a}->{mention.entity_b}",
-                    metadata={
-                        "entity_a": mention.entity_a,
-                        "entity_b": mention.entity_b,
-                    },
-                )
-                continue
-            if endpoint_a[0] == endpoint_b[0]:
-                build.trace.relationships_rejected += 1
-                self._record_issue(
-                    build,
-                    code="self_context_connection",
-                    message="Context VP-02 returned a self relationship",
-                    item_ref=mention.entity_a,
-                )
-                continue
-            try:
-                support_block_ids = tuple(local_blocks[local_id] for local_id in mention.block_ids)
-            except KeyError:
-                build.trace.relationships_rejected += 1
-                self._record_issue(
-                    build,
-                    code="invalid_context_connection_block",
-                    message="Context VP-02 cited a block outside the current impact closure",
-                    item_ref=f"{mention.entity_a}->{mention.entity_b}",
-                    metadata={"block_ids": mention.block_ids},
+                    build, code="invalid_relationship",
+                    message="VP-02 returned an unknown or self handle, or an unknown message",
+                    item_ref=ref,
                 )
                 continue
             normalization = normalize_relationship(
-                build.policy.domain,
-                mention.relationship,
-                source_type=endpoint_a[1],
-                target_type=endpoint_b[1],
+                build.policy.domain, found.relationship,
+                source_type=types[a], target_type=types[b],
             )
             try:
-                write = ContextRelationshipWrite(
-                    support_block_ids=support_block_ids,
-                    entity_a_id=endpoint_a[0],
-                    entity_b_id=endpoint_b[0],
+                writes.append(RelationshipWrite(
+                    support_message_ids=support,
+                    entity_a_id=a,
+                    entity_b_id=b,
                     relationship_type=normalization.persistence_type,
                     observed_label=normalization.observed_label,
                     canonical_type=normalization.canonical_type,
@@ -297,32 +217,11 @@ class ContextRelationshipExtractor:
                     target_type=normalization.target_type,
                     symmetric=normalization.symmetric,
                     domain_version=build.policy.domain.version,
-                    context=mention.context or mention.relationship,
-                )
+                    context=found.context or found.relationship,
+                ))
             except ValueError as exc:
                 build.trace.relationships_rejected += 1
                 self._record_issue(
-                    build,
-                    code="invalid_context_connection",
-                    message=str(exc),
-                    item_ref=f"{mention.entity_a}->{mention.entity_b}",
+                    build, code="invalid_relationship", message=str(exc), item_ref=ref,
                 )
-                continue
-            support_set = tuple(sorted(write.support_block_ids, key=str))
-            identity = (
-                write.entity_a_id,
-                write.entity_b_id,
-                write.relationship_type,
-                write.observed_label or write.relationship_type,
-                support_set,
-            )
-            writes_by_identity.setdefault(identity, write)
-
-        writes = tuple(writes_by_identity.values())
-        build.trace.relationships_accepted = len(writes)
-        build.trace.relationships_recognized = sum(
-            write.domain_status == "recognized" for write in writes
-        )
-        build.trace.relationships_unrecognized = len(writes) - build.trace.relationships_recognized
-        build.set_relationship_writes(writes)
         return writes

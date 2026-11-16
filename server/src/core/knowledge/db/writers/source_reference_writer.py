@@ -75,7 +75,7 @@ class SourceReferenceWriter:
         async with self._cursor(cursor) as cur:
             for candidate in candidates:
                 source_ref_id = str(uuid.uuid4())
-                idempotency_key = self.idempotency_key(candidate)
+                idempotency_key = self.idempotency_key(candidate, message_id)
                 await cur.execute(
                     self._insert_sql(),
                     self._insert_params(
@@ -99,7 +99,7 @@ class SourceReferenceWriter:
         return references
 
     @staticmethod
-    def idempotency_key(candidate: SourceReferenceCandidate) -> str:
+    def idempotency_key(candidate: SourceReferenceCandidate, message_id: int) -> str:
         """Return a stable retry key from the run and immutable source origin."""
 
         if candidate.tool_call_id is not None:
@@ -118,6 +118,7 @@ class SourceReferenceWriter:
             )
         raw = "|".join(
             (
+                str(message_id),
                 candidate.agent_run_id,
                 candidate.source_kind,
                 candidate.parse_snapshot_id or "",

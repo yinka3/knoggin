@@ -1,11 +1,13 @@
 import asyncio
 import math
+from datetime import datetime, timezone
 
 import pytest
 
 from common.schema.agent.identity import AgentConfig
 from common.utils.agent_identity import MAX_BRAIN_CHARS, MAX_BRAIN_SECTION_CHARS
-from core.agent.services.agent_manager import (
+from common.utils.time_utils import frozen_time
+from core.agent.agent_manager import (
     AgentBrainRevisionConflictError,
     AgentManager,
 )
@@ -121,8 +123,13 @@ async def test_agent_manager_records_completed_turn_timestamp(manager):
     agent_manager, resources = manager
     created = await agent_manager.create_agent("Researcher", "Careful")
 
-    assert await agent_manager.mark_turn_completed(created.id) is True
-    assert resources.postgres.agents[created.id]["last_turn_at"] is not None
+    # The engine's clock, not the database's: the prompt compares the two.
+    with frozen_time("2023-05-30T12:00:00Z"):
+        assert await agent_manager.mark_turn_completed(created.id) is True
+
+    assert resources.postgres.agents[created.id]["last_turn_at"] == datetime(
+        2023, 5, 30, 12, tzinfo=timezone.utc
+    )
 
 
 @pytest.mark.runtime

@@ -49,7 +49,7 @@ def test_brief_is_readable_and_preserves_source_sessions():
     brief = build.evidence_brief()
 
     assert "Session session-a:" in brief
-    assert "[message:1] source-position=1 USER: Plan launch" in brief
+    assert "[message:1] source-position=1 sent=1970-01-01 00:00:00 USER: Plan launch" in brief
     assert "paired-with message:1" in brief
     assert '"message_id"' not in brief
     assert "Prior project episodes" not in brief
@@ -63,19 +63,26 @@ def test_brief_marks_clarification_as_an_unresolved_question():
     brief = build.evidence_brief()
 
     assert (
-        "[message:2] source-position=2 "
+        "[message:2] source-position=2 sent=1970-01-01 00:00:00 "
         "ASSISTANT CLARIFICATION (UNRESOLVED QUESTION): Drafted plan" in brief
     )
 
 
-def test_window_rejects_overlapping_proposals():
+def test_overlapping_proposal_is_dropped_and_the_first_is_kept():
+    build = _build()
+    build.prepare_local_references()
     proposal = LLMEpisodeDecision(
         summary="Launch planning",
         message_influences=["message:1"],
     )
 
-    with pytest.raises(ValueError, match="cannot share source messages"):
+    decisions = build.apply_llm_output(
         LLMEpisodeWindowDecision(proposals=[proposal, proposal])
+    )
+
+    assert [decision.message_influences for decision in decisions] == [[10]]
+    assert len(build.rejected_proposals) == 1
+    assert "cannot share source messages" in build.rejected_proposals[0]
 
 
 def test_server_rejects_a_narrative_over_the_hard_character_limit():
@@ -106,8 +113,8 @@ def test_server_rejects_unknown_catalog_message_reference():
         ]
     )
 
-    with pytest.raises(ValueError, match="Unknown local ID"):
-        build.apply_llm_output(output)
+    assert build.apply_llm_output(output) == []
+    assert "Unknown local ID" in build.rejected_proposals[0]
 
 
 def test_server_assigns_source_positions_instead_of_using_llm_order():
@@ -130,38 +137,50 @@ def test_server_assigns_source_positions_instead_of_using_llm_order():
     ] == [(10, 0), (12, 1)]
 
 
-def test_over_capacity_create_proposal_fails_the_window_result():
-    build = _build(settings=EpisodeSettings(max_episode_source_messages=1))
+def test_over_capacity_multi_exchange_proposal_is_dropped_not_fatal():
+    build = _build(settings=EpisodeSettings(max_episode_source_messages=2))
     build.prepare_local_references()
 
-    with pytest.raises(ValueError, match="source message limit"):
-        build.apply_llm_output(
-            LLMEpisodeWindowDecision(
-                proposals=[
-                    LLMEpisodeDecision(
-                        summary="Two source messages do not fit.",
-                        message_influences=["message:1", "message:2"],
-                    )
-                ]
-            )
+    decisions = build.apply_llm_output(
+        LLMEpisodeWindowDecision(
+            proposals=[
+                LLMEpisodeDecision(
+                    summary="Three messages across two exchanges do not fit.",
+                    message_influences=["message:1", "message:2", "message:3"],
+                ),
+                LLMEpisodeDecision(
+                    summary="The launch plan alone fits.",
+                    message_influences=["message:1", "message:2"],
+                ),
+            ]
         )
+    )
+
+    assert [decision.message_influences for decision in decisions] == [[10, 11]]
+    assert "source message limit" in build.rejected_proposals[0]
 
 
-def test_over_token_capacity_create_proposal_fails_the_window_result():
+def test_one_oversized_exchange_is_always_a_valid_episode():
     build = _build(settings=EpisodeSettings(max_episode_source_tokens=1))
     build.prepare_local_references()
 
-    with pytest.raises(ValueError, match="source token limit"):
-        build.apply_llm_output(
-            LLMEpisodeWindowDecision(
-                proposals=[
-                    LLMEpisodeDecision(
-                        summary="The plan is over the source-token budget.",
-                        message_influences=["message:1"],
-                    )
-                ]
-            )
+    decisions = build.apply_llm_output(
+        LLMEpisodeWindowDecision(
+            proposals=[
+                LLMEpisodeDecision(
+                    summary="One exchange cannot be split further.",
+                    message_influences=["message:1", "message:2"],
+                ),
+                LLMEpisodeDecision(
+                    summary="Two exchanges over the token budget.",
+                    message_influences=["message:3", "message:1"],
+                ),
+            ]
         )
+    )
+
+    assert [decision.message_influences for decision in decisions] == [[10, 11]]
+    assert len(build.rejected_proposals) == 1
 
 
 def test_window_creates_multiple_distinct_immutable_episodes():
@@ -197,3 +216,131 @@ def test_empty_window_output_creates_no_episodes():
 
     assert build.apply_llm_output(LLMEpisodeWindowDecision(proposals=[])) == []
     assert build.create_episodes() == []
+
+
+def test_evidence_brief_shows_when_each_message_was_sent():
+    build = ProjectEpisodeBuild(
+        project_id="project-1",
+        policy=EpisodeGenerationPolicy.capture(settings=EpisodeSettings()),
+        messages=[
+            {"message_id": 1, "session_id": "s", "role": "user", "content": "Hi",
+             "timestamp_ms": 1684757400000},
+        ],
+    )
+    build.prepare_local_references()
+
+    assert "sent=2023-05-22 12:10:00 USER: Hi" in build.evidence_brief()
+
+
+def test_every_distinct_topic_in_a_window_can_get_its_own_episode():
+    # A cap here silently left two-thirds of a 10-conversation window with no
+    # Episode. Only source overlap and per-Episode limits bound the count.
+    messages = [
+        {"message_id": 100 + index, "session_id": "s", "role": "user",
+         "content": f"Topic {index}.", "timestamp_ms": 1000 + index}
+        for index in range(1, 41)
+    ]
+    build = ProjectEpisodeBuild(
+        project_id="project-1",
+        policy=EpisodeGenerationPolicy.capture(settings=EpisodeSettings()),
+        messages=messages,
+    )
+    build.prepare_local_references()
+    proposals = [
+        LLMEpisodeDecision(summary=f"Topic {index}.", message_influences=[f"message:{index}"])
+        for index in range(1, 41)
+    ]
+
+    decisions = build.apply_llm_output(LLMEpisodeWindowDecision(proposals=proposals))
+
+    assert len(decisions) == 40
+    assert build.rejected_proposals == []
+
+
+def _event(**overrides):
+    event = {
+        "what": "Ada took a day hike at Muir Woods with family",
+        "kind": "trip",
+        "start_date": "2023-03-10",
+        "precision": "day",
+        "date_text": "just got back",
+        "sources": ["message:1"],
+    }
+    event.update(overrides)
+    return event
+
+
+def _apply_events(*events, influences=("message:1", "message:2")):
+    build = _build()
+    build.prepare_local_references()
+    build.apply_llm_output(
+        LLMEpisodeWindowDecision(
+            proposals=[
+                LLMEpisodeDecision(
+                    summary="Ada asked about backpacks.",
+                    message_influences=list(influences),
+                    events=list(events),
+                )
+            ]
+        )
+    )
+    return build
+
+
+def test_episode_keeps_events_from_its_own_messages_with_resolved_sources():
+    build = _apply_events(_event())
+
+    episode = build.create_episodes()[0]
+
+    assert len(episode.events) == 1
+    event = episode.events[0]
+    assert event.what == "Ada took a day hike at Muir Woods with family"
+    assert event.kind == "trip"
+    assert str(event.start_date) == "2023-03-10" and str(event.end_date) == "2023-03-10"
+    assert event.source_message_ids == [10]
+
+
+def test_event_citing_a_message_outside_its_episode_is_dropped_not_the_episode():
+    build = _apply_events(_event(), _event(what="Budget approved", sources=["message:3"]))
+
+    episode = build.create_episodes()[0]
+
+    assert [event.what for event in episode.events] == [
+        "Ada took a day hike at Muir Woods with family"
+    ]
+    assert any("event" in reason for reason in build.rejected_proposals)
+
+
+def test_vague_dates_stay_a_range_and_unknown_kinds_become_other():
+    build = _apply_events(
+        _event(
+            kind="volunteered",
+            start_date="2023-02-01",
+            end_date="2023-02-28",
+            precision="month",
+            date_text="back in February",
+        )
+    )
+
+    event = build.create_episodes()[0].events[0]
+
+    assert event.kind == "other"
+    assert (str(event.start_date), str(event.end_date)) == ("2023-02-01", "2023-02-28")
+    assert event.precision == "month" and event.date_text == "back in February"
+
+
+def test_event_with_an_unreadable_date_keeps_no_date():
+    build = _apply_events(_event(start_date="sometime", precision="approximate"))
+
+    event = build.create_episodes()[0].events[0]
+
+    assert event.start_date is None and event.end_date is None
+    assert event.precision == "unknown"
+
+
+def test_malformed_event_is_dropped_without_losing_the_episode():
+    build = _apply_events({"kind": "trip", "sources": ["message:1"]})
+
+    episodes = build.create_episodes()
+
+    assert len(episodes) == 1 and episodes[0].events == []

@@ -319,7 +319,6 @@ async def test_observation_evidence_read_uses_a_bounded_readable_traversal():
 
 
 def _observation_bundle(observation_id: int) -> EvidenceBundle:
-    block_id = "00000000-0000-0000-0000-000000000017"
     source_ref_id = "00000000-0000-0000-0000-000000000018"
     return EvidenceBundle.model_validate(
         {
@@ -335,10 +334,6 @@ def _observation_bundle(observation_id: int) -> EvidenceBundle:
                     },
                     "label": "works at",
                     "status": "active",
-                },
-                {
-                    "pointer": {"kind": "context_block", "identifier": block_id},
-                    "excerpt": "Ade joined Acme.",
                 },
                 {
                     "pointer": {"kind": "message", "identifier": "7"},
@@ -357,17 +352,12 @@ def _observation_bundle(observation_id: int) -> EvidenceBundle:
             ],
             "edges": [
                 {
-                    "source": {"kind": "context_block", "identifier": block_id},
+                    "source": {"kind": "message", "identifier": "7"},
                     "target": {
                         "kind": "relationship_observation",
                         "identifier": str(observation_id),
                     },
                     "relation": "supports_relationship_observation",
-                },
-                {
-                    "source": {"kind": "message", "identifier": "7"},
-                    "target": {"kind": "context_block", "identifier": block_id},
-                    "relation": "supports_context_block",
                 },
                 {
                     "source": {
@@ -378,8 +368,8 @@ def _observation_bundle(observation_id: int) -> EvidenceBundle:
                     "relation": "source_owned_by_message",
                 },
             ],
-            "total_nodes": 4,
-            "total_edges": 3,
+            "total_nodes": 3,
+            "total_edges": 2,
             "nodes_truncated": False,
             "edges_truncated": False,
             "state_token": "a" * 64,

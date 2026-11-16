@@ -1,0 +1,725 @@
+import asyncio
+import json
+import uuid
+from typing import List, Mapping, Optional, Union
+
+from loguru import logger
+
+from common.schema.agent.community_tools import AAC_DEFAULT_ENABLED_TOOLS
+from common.schema.agent.identity import AgentConfig, PersonaProfile
+from common.schema.agent.tool_names import tool_groups
+from common.utils.agent_identity import (
+    build_brain_snapshot_summary,
+    normalize_agent_brain,
+    should_snapshot_brain_revision,
+)
+from common.utils.time_utils import get_now, parse_iso_time
+from core.agent.tools.registry import get_registered_tool_names
+
+_UNSET = object()
+
+
+class AgentBrainRevisionConflictError(RuntimeError):
+    """Raised when a full Brain replacement uses a stale revision."""
+
+    def __init__(
+        self,
+        *,
+        expected_revision: int,
+        current_revision: int,
+    ) -> None:
+        super().__init__("Agent Brain changed before the update could be committed")
+        self.expected_revision = expected_revision
+        self.current_revision = current_revision
+
+
+def agent_from_row(row: Mapping[str, object]) -> AgentConfig:
+    """Translate the agents-table row once at the repository boundary."""
+
+    return AgentConfig(
+        id=str(row["agent_id"]),
+        name=str(row["name"]),
+        persona=row["persona"] or "",
+        brain=normalize_agent_brain(
+            row["brain"] or "",
+            row["persona"] or "",
+        ),
+        model=row["model"],
+        # Existing rows predate the application default and may store NULL.
+        # Normalize that legacy absence before applying the strict contract.
+        temperature=row["temperature"] if row["temperature"] is not None else 0.7,
+        enabled_tools=row["enabled_tools"],
+        is_default=bool(row["is_default"]),
+        aac_enabled=bool(row.get("aac_enabled", False)),
+        spawned_by=row["spawned_by"],
+        brain_revision=int(row.get("brain_revision", 1)),
+        created_at=row["created_at"],
+        last_turn_at=(
+            parse_iso_time(row["last_turn_at"])
+            if isinstance(row.get("last_turn_at"), str)
+            else row.get("last_turn_at")
+        ),
+    )
+
+
+class AgentManager:
+    """Application-owned durable agent configuration boundary."""
+
+    def __init__(self, resources, user_name):
+        self.resources = resources
+        self.user_name = user_name
+        self.pg = resources.postgres
+        self._lifecycle_lock = asyncio.Lock()
+
+    @staticmethod
+    def _validate_enabled_tools(enabled_tools: Optional[List[str]]) -> None:
+        if enabled_tools is None:
+            return
+        unknown = sorted(
+            set(enabled_tools) - get_registered_tool_names() - set(tool_groups())
+        )
+        if unknown:
+            raise ValueError("Unknown agent tools: " + ", ".join(unknown))
+
+    @staticmethod
+    def _require_expected_brain_revision(value: object) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(
+                "Full Brain replacement requires expected_brain_revision "
+                "as an integer >= 1"
+            )
+        return value
+
+    async def list_agents(self) -> List[AgentConfig]:
+        """List all agents for the user."""
+        query = '''
+            SELECT agent_id, name, persona, brain, model, temperature,
+                   enabled_tools, is_default, aac_enabled, spawned_by,
+                   brain_revision, created_at, last_turn_at
+            FROM public.agents
+            WHERE user_name = %(user_name)s
+        '''
+        rows = await self.pg.fetch_all(query, {"user_name": self.user_name})
+
+        return [agent_from_row(row) for row in rows]
+
+    async def get_agent(self, agent_id: str) -> Optional[AgentConfig]:
+        """Get agent by ID."""
+        query = '''
+            SELECT agent_id, name, persona, brain, model, temperature,
+                   enabled_tools, is_default, aac_enabled, spawned_by,
+                   brain_revision, created_at, last_turn_at
+            FROM public.agents
+            WHERE user_name = %(user_name)s AND agent_id = %(agent_id)s
+        '''
+        rows = await self.pg.fetch_all(
+            query,
+            {"user_name": self.user_name, "agent_id": agent_id},
+        )
+        if not rows:
+            return None
+
+        return agent_from_row(rows[0])
+
+    async def get_agent_by_name(self, name: str) -> Optional[AgentConfig]:
+        """Get agent by name (case-insensitive)."""
+        query = '''
+            SELECT agent_id, name, persona, brain, model, temperature,
+                   enabled_tools, is_default, aac_enabled, spawned_by,
+                   brain_revision, created_at, last_turn_at
+            FROM public.agents
+            WHERE user_name = %(user_name)s AND LOWER(name) = LOWER(%(name)s)
+            LIMIT 1
+        '''
+        rows = await self.pg.fetch_all(
+            query,
+            {"user_name": self.user_name, "name": name},
+        )
+        if not rows:
+            return None
+
+        return agent_from_row(rows[0])
+
+    async def ensure_default_agent(self) -> str:
+        """Create or repair the durable default-agent invariant at startup."""
+        async with self._lifecycle_lock:
+            query = (
+                "SELECT agent_id FROM public.agents "
+                "WHERE user_name = %(user_name)s AND is_default = true LIMIT 1"
+            )
+            rows = await self.pg.fetch_all(query, {"user_name": self.user_name})
+            if rows:
+                return rows[0]["agent_id"]
+
+            existing = await self.pg.fetch_all(
+                """
+                SELECT agent_id
+                FROM public.agents
+                WHERE user_name = %(user_name)s
+                ORDER BY created_at ASC, agent_id ASC
+                LIMIT 1
+                """,
+                {"user_name": self.user_name},
+            )
+            if existing:
+                agent_id = existing[0]["agent_id"]
+                await self.pg.execute(
+                    """
+                    UPDATE public.agents
+                    SET is_default = true, updated_at = now()
+                    WHERE user_name = %(user_name)s AND agent_id = %(agent_id)s
+                    """,
+                    {"user_name": self.user_name, "agent_id": agent_id},
+                )
+                return agent_id
+
+            await self._seed_default_agents()
+            rows = await self.pg.fetch_all(query, {"user_name": self.user_name})
+            return rows[0]["agent_id"]
+
+    async def ensure_maintenance_agent(self) -> str:
+        """Create the user's Maintenance agent if it is missing. It owns the
+        health and memory-repair tools that ordinary chats no longer get."""
+
+        from common.utils.prompt_loader import load_agent_config
+
+        seed = load_agent_config("MAINTENANCE_AGENT")
+        agent_id = f"maintenance_{self.user_name}"
+        brain = normalize_agent_brain(seed.brain or "", seed.persona_markdown)
+        await self.pg.execute(
+            """
+            WITH inserted AS (
+                INSERT INTO public.agents (
+                    agent_id, user_name, name, persona, brain, model, temperature,
+                    enabled_tools, is_default
+                ) VALUES (
+                    %(agent_id)s, %(user_name)s, %(name)s, %(persona)s, %(brain)s,
+                    %(model)s, %(temperature)s, %(enabled_tools)s, false
+                )
+                ON CONFLICT (agent_id) DO NOTHING
+                RETURNING agent_id, user_name, brain_revision, brain
+            )
+            INSERT INTO public.agent_brain_snapshots (
+                agent_id, revision, user_name, content, edited_by,
+                change_type, change_summary
+            )
+            SELECT agent_id, brain_revision, user_name, COALESCE(brain, ''),
+                   'seed', 'initial_seed', 'Initial Brain'
+            FROM inserted
+            """,
+            {
+                "agent_id": agent_id,
+                "user_name": self.user_name,
+                "name": seed.name,
+                "persona": seed.persona_markdown,
+                "brain": brain,
+                "model": seed.model,
+                "temperature": seed.temperature,
+                "enabled_tools": json.dumps(seed.enabled_tools),
+            },
+        )
+        return agent_id
+
+    async def get_default_agent_id(self) -> str:
+        """Read the startup-initialized default agent without mutating state."""
+        rows = await self.pg.fetch_all(
+            "SELECT agent_id FROM public.agents "
+            "WHERE user_name = %(user_name)s AND is_default = true LIMIT 1",
+            {"user_name": self.user_name},
+        )
+        if not rows:
+            raise RuntimeError("Default agent has not been initialized")
+        return rows[0]["agent_id"]
+
+    async def create_agent(
+        self,
+        name: str,
+        persona: Union[PersonaProfile, Mapping[str, str]],
+        brain: Optional[str] = None,
+        model: str = None,
+        temperature: Optional[float] = 0.7,
+        enabled_tools: Optional[List[str]] = None,
+    ) -> AgentConfig:
+        """Create a new agent."""
+        agent_id = str(uuid.uuid4())
+        persona_profile = PersonaProfile.from_value(persona)
+        candidate = AgentConfig(
+            id=agent_id,
+            name=name,
+            persona=persona_profile,
+            brain=brain,
+            model=model,
+            temperature=0.7 if temperature is None else temperature,
+            enabled_tools=enabled_tools,
+        )
+        self._validate_enabled_tools(candidate.enabled_tools)
+        persona_markdown = persona_profile.to_markdown()
+        brain = normalize_agent_brain(brain or "", persona_markdown)
+        tools_json = (
+            json.dumps(candidate.enabled_tools)
+            if candidate.enabled_tools is not None
+            else None
+        )
+
+        query = '''
+            WITH inserted AS (
+                INSERT INTO public.agents (
+                agent_id, user_name, name, persona, brain,
+                model, temperature, enabled_tools, is_default, aac_enabled
+                ) VALUES (
+                    %(agent_id)s, %(user_name)s, %(name)s, %(persona)s, %(brain)s,
+                    %(model)s, %(temperature)s, %(enabled_tools)s, false, false
+                )
+                RETURNING agent_id, user_name, brain_revision, brain
+            )
+            INSERT INTO public.agent_brain_snapshots (
+                agent_id, revision, user_name, content, edited_by,
+                change_type, change_summary
+            )
+            SELECT
+                agent_id,
+                brain_revision,
+                user_name,
+                COALESCE(brain, ''),
+                'user',
+                'initial_seed',
+                'Initial Brain'
+            FROM inserted
+        '''
+        await self.pg.execute(query, {
+            "agent_id": agent_id,
+            "user_name": self.user_name,
+            "name": candidate.name,
+            "persona": persona_markdown,
+            "brain": brain,
+            "model": model,
+            "temperature": candidate.temperature,
+            "enabled_tools": tools_json
+        })
+
+        logger.info(f"Created agent: {name} ({agent_id})")
+        return await self.get_agent(agent_id)
+
+    async def create_specialist(
+        self,
+        *,
+        parent_id: str,
+        name: str,
+        persona: Union[PersonaProfile, Mapping[str, str]],
+        brain: Optional[str] = None,
+        model: Optional[str] = None,
+        enabled_tools: Optional[List[str]] = None,
+    ) -> AgentConfig:
+        """Create a user-owned specialist while preserving parent ancestry."""
+
+        parent_id = self._require_agent_id(parent_id, "parent_id")
+        parent = await self.get_agent(parent_id)
+        if parent is None:
+            raise ValueError("Parent agent does not exist for this user")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("Specialist name must not be blank")
+        if len(name.strip()) > 100:
+            raise ValueError("Specialist name must be 100 characters or fewer")
+
+        persona_profile = PersonaProfile.from_value(persona)
+        specialist_id = f"spawned_{uuid.uuid4().hex}"
+        candidate = AgentConfig(
+            id=specialist_id,
+            name=name.strip(),
+            persona=persona_profile,
+            brain=normalize_agent_brain(brain or "", persona_profile.to_markdown()),
+            model=model,
+            temperature=0.7,
+            enabled_tools=(
+                list(AAC_DEFAULT_ENABLED_TOOLS)
+                if enabled_tools is None
+                else enabled_tools
+            ),
+            aac_enabled=False,
+            spawned_by=parent_id,
+        )
+        self._validate_enabled_tools(candidate.enabled_tools)
+        await self.pg.execute(
+            """
+            WITH inserted AS (
+                INSERT INTO public.agents (
+                    agent_id, user_name, name, persona, brain,
+                    model, temperature, enabled_tools, is_default,
+                    aac_enabled, spawned_by
+                ) VALUES (
+                    %(agent_id)s, %(user_name)s, %(name)s, %(persona)s,
+                    %(brain)s, %(model)s, %(temperature)s, %(enabled_tools)s,
+                    false, false, %(spawned_by)s
+                )
+                RETURNING agent_id, user_name, brain_revision, brain
+            )
+            INSERT INTO public.agent_brain_snapshots (
+                agent_id, revision, user_name, content, edited_by,
+                change_type, change_summary
+            )
+            SELECT agent_id, brain_revision, user_name, COALESCE(brain, ''),
+                   'aac_spawn', 'specialist_spawn', %(change_summary)s
+            FROM inserted
+            """,
+            {
+                "agent_id": specialist_id,
+                "user_name": self.user_name,
+                "name": candidate.name,
+                "persona": candidate.persona_markdown,
+                "brain": candidate.brain,
+                "model": candidate.model,
+                "temperature": candidate.temperature,
+                "enabled_tools": json.dumps(candidate.enabled_tools),
+                "spawned_by": parent_id,
+                "change_summary": build_brain_snapshot_summary(
+                    "specialist_spawn"
+                ),
+            },
+        )
+        created = await self.get_agent(specialist_id)
+        if created is None:
+            raise RuntimeError("Specialist was not returned after creation")
+        return created
+
+    @staticmethod
+    def _require_agent_id(value: object, field: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{field} must not be blank")
+        return value.strip()
+
+    async def update_agent(
+        self,
+        agent_id: str,
+        name: str | object = _UNSET,
+        brain: Optional[str] | object = _UNSET,
+        expected_brain_revision: int | object = _UNSET,
+        model: Optional[str] | object = _UNSET,
+        temperature: Optional[float] | object = _UNSET,
+        enabled_tools: Optional[List[str]] | object = _UNSET,
+    ) -> Optional[AgentConfig]:
+        """Update an existing agent. Returns None if not found."""
+        config = await self.get_agent(agent_id)
+        if not config:
+            return None
+
+        if name is None:
+            raise ValueError("Agent name cannot be cleared")
+        if temperature is None:
+            raise ValueError("Agent temperature cannot be cleared")
+
+        candidate = AgentConfig(
+            id=config.id,
+            name=name if name is not _UNSET else config.name,
+            persona=config.persona,
+            brain=brain if brain is not _UNSET else config.brain,
+            model=model if model is not _UNSET else config.model,
+            temperature=(
+                temperature if temperature is not _UNSET else config.temperature
+            ),
+            enabled_tools=(
+                enabled_tools if enabled_tools is not _UNSET else config.enabled_tools
+            ),
+            is_default=config.is_default,
+            aac_enabled=config.aac_enabled,
+            spawned_by=config.spawned_by,
+            brain_revision=config.brain_revision,
+            created_at=config.created_at,
+            last_turn_at=config.last_turn_at,
+        )
+        self._validate_enabled_tools(candidate.enabled_tools)
+
+        updates = []
+        params = {"user_name": self.user_name, "agent_id": agent_id}
+        expected_revision: int | None = None
+
+        if name is not _UNSET:
+            updates.append("name = %(name)s")
+            params["name"] = candidate.name
+        if brain is not _UNSET:
+            expected_revision = self._require_expected_brain_revision(
+                expected_brain_revision
+            )
+            new_revision = int(config.brain_revision or 1) + 1
+            normalized_brain = (
+                normalize_agent_brain(brain, config.persona_markdown)
+                if brain is not None
+                else None
+            )
+            updates.append("brain = %(brain)s")
+            updates.append("brain_revision = brain_revision + 1")
+            params["brain"] = normalized_brain
+            params["expected_brain_revision"] = expected_revision
+        if model is not _UNSET:
+            updates.append("model = %(model)s")
+            params["model"] = model
+        if temperature is not _UNSET:
+            updates.append("temperature = %(temperature)s")
+            params["temperature"] = candidate.temperature
+        if enabled_tools is not _UNSET:
+            updates.append("enabled_tools = %(enabled_tools)s")
+            params["enabled_tools"] = json.dumps(candidate.enabled_tools)
+
+        if not updates:
+            return config
+
+        updates.append("updated_at = now()")
+        set_clause = ", ".join(updates)
+        where_clause = """
+                WHERE user_name = %(user_name)s
+                  AND agent_id = %(agent_id)s
+        """
+        if brain is not _UNSET:
+            where_clause += " AND brain_revision = %(expected_brain_revision)s"
+
+        if brain is not _UNSET and should_snapshot_brain_revision(new_revision):
+            params["change_summary"] = build_brain_snapshot_summary(
+                "full_user_update"
+            )
+            query = f'''
+                WITH updated AS (
+                    UPDATE public.agents
+                    SET {set_clause}
+                    {where_clause}
+                    RETURNING agent_id, user_name, brain_revision, brain
+                )
+                INSERT INTO public.agent_brain_snapshots (
+                    agent_id,
+                    revision,
+                    user_name,
+                    content,
+                    edited_by,
+                    change_type,
+                    change_summary
+                )
+                SELECT
+                    agent_id,
+                    brain_revision,
+                    user_name,
+                    COALESCE(brain, ''),
+                    'user',
+                    'full_user_update',
+                    %(change_summary)s
+                FROM updated
+            '''
+        else:
+            query = f'''
+                UPDATE public.agents
+                SET {set_clause}
+                {where_clause}
+            '''
+        updated = await self.pg.execute(query, params)
+        if brain is not _UNSET and updated != 1:
+            latest = await self.get_agent(agent_id)
+            if latest is None:
+                return None
+            assert expected_revision is not None
+            raise AgentBrainRevisionConflictError(
+                expected_revision=expected_revision,
+                current_revision=latest.brain_revision,
+            )
+        if updated != 1:
+            return None
+        logger.info(f"Updated agent: {candidate.name} ({agent_id})")
+        return await self.get_agent(agent_id)
+
+    async def update_persona(
+        self,
+        agent_id: str,
+        profile: Mapping[str, str],
+    ) -> Optional[AgentConfig]:
+        """User-settings operation for replacing an agent's stable persona."""
+        config = await self.get_agent(agent_id)
+        if not config:
+            return None
+
+        persona = PersonaProfile.from_value(profile).to_markdown()
+        await self.pg.execute(
+            """
+            UPDATE public.agents
+            SET persona = %(persona)s, updated_at = now()
+            WHERE user_name = %(user_name)s AND agent_id = %(agent_id)s
+            """,
+            {
+                "persona": persona,
+                "user_name": self.user_name,
+                "agent_id": agent_id,
+            },
+        )
+        logger.info(f"Updated agent persona from settings: {config.name} ({agent_id})")
+        return await self.get_agent(agent_id)
+
+    async def set_aac_enabled(
+        self,
+        agent_id: str,
+        enabled: bool,
+    ) -> Optional[AgentConfig]:
+        """Set whether this durable agent may be selected for AAC discussion."""
+
+        if not isinstance(enabled, bool):
+            raise ValueError("AAC participation must be a boolean")
+        config = await self.get_agent(agent_id)
+        if not config:
+            return None
+        await self.pg.execute(
+            """
+            UPDATE public.agents
+            SET aac_enabled = %(aac_enabled)s, updated_at = now()
+            WHERE user_name = %(user_name)s AND agent_id = %(agent_id)s
+            """,
+            {
+                "user_name": self.user_name,
+                "agent_id": agent_id,
+                "aac_enabled": enabled,
+            },
+        )
+        return await self.get_agent(agent_id)
+
+    async def mark_turn_completed(self, agent_id: str) -> bool:
+        """Persist one agent's most recent successful execution timestamp."""
+
+        updated = await self.pg.execute(
+            """
+            UPDATE public.agents
+            SET last_turn_at = %(last_turn_at)s, updated_at = NOW()
+            WHERE user_name = %(user_name)s AND agent_id = %(agent_id)s
+            """,
+            # The engine's clock, which the prompt compares this against.
+            {"user_name": self.user_name, "agent_id": agent_id, "last_turn_at": get_now()},
+        )
+        return bool(updated)
+
+    async def delete_agent(self, agent_id: str) -> bool:
+        """Delete an agent. Returns False if not found or is default."""
+        async with self._lifecycle_lock:
+            config = await self.get_agent(agent_id)
+            if not config or config.is_default:
+                return False
+
+            deleted = await self.pg.execute(
+                """
+                DELETE FROM public.agents
+                WHERE user_name = %(user_name)s
+                  AND agent_id = %(agent_id)s
+                  AND is_default = false
+                """,
+                {"user_name": self.user_name, "agent_id": agent_id},
+            )
+            if deleted != 1:
+                return False
+            logger.info(f"Deleted agent: {agent_id}")
+            return True
+
+    async def set_default_agent(self, agent_id: str) -> bool:
+        """Set an agent as default. Returns False if not found."""
+        async with self._lifecycle_lock:
+            async with self.pg.transaction() as cur:
+                await cur.execute(
+                    """
+                    SELECT agent_id
+                    FROM public.agents
+                    WHERE user_name = %(user_name)s
+                      AND agent_id = %(agent_id)s
+                    FOR UPDATE
+                    """,
+                    {"user_name": self.user_name, "agent_id": agent_id},
+                )
+                if await cur.fetchone() is None:
+                    return False
+                await cur.execute(
+                    """
+                    UPDATE public.agents
+                    SET is_default = false,
+                        updated_at = now()
+                    WHERE user_name = %(user_name)s AND is_default = true
+                    """,
+                    {"user_name": self.user_name},
+                )
+                await cur.execute(
+                    """
+                    UPDATE public.agents
+                    SET is_default = true,
+                        updated_at = now()
+                    WHERE user_name = %(user_name)s
+                      AND agent_id = %(agent_id)s
+                    """,
+                    {"user_name": self.user_name, "agent_id": agent_id},
+                )
+
+            logger.info(f"Set default agent: {agent_id}")
+            return True
+
+    async def _seed_default_agents(self):
+        """Seed DB with default agents from Markdown config."""
+        from common.utils.prompt_loader import load_agent_config
+
+        try:
+            default_config = load_agent_config("AGENT_IDENTITY")
+        except Exception as e:
+            logger.warning(
+                "Could not load AGENT_IDENTITY.md: "
+                f"{e}. Falling back to hardcoded defaults."
+            )
+            default_config = None
+
+        stella_id = str(uuid.uuid4())
+        name = default_config.name if default_config else "STELLA"
+        model = default_config.model if default_config else None
+        temperature = default_config.temperature if default_config else 0.7
+        tools_json = (
+            json.dumps(default_config.enabled_tools)
+            if default_config is not None
+            and default_config.enabled_tools is not None
+            else None
+        )
+
+        brain = (
+            default_config.brain
+            if default_config
+            else "Warm and direct. Match their energy. No corporate filler."
+        )
+        persona = (
+            default_config.persona_markdown
+            if default_config
+            else PersonaProfile.from_value(
+                "Warm and direct. Match their energy. No corporate filler."
+            ).to_markdown()
+        )
+        brain = normalize_agent_brain(brain, persona)
+
+        query = '''
+            WITH inserted AS (
+                INSERT INTO public.agents (
+                agent_id, user_name, name, persona, brain, model, temperature,
+                enabled_tools, is_default
+                ) VALUES (
+                    %(agent_id)s, %(user_name)s, %(name)s, %(persona)s, %(brain)s,
+                    %(model)s, %(temperature)s, %(enabled_tools)s, true
+                )
+                ON CONFLICT (user_name) WHERE is_default DO NOTHING
+                RETURNING agent_id, user_name, brain_revision, brain
+            )
+            INSERT INTO public.agent_brain_snapshots (
+                agent_id, revision, user_name, content, edited_by,
+                change_type, change_summary
+            )
+            SELECT
+                agent_id,
+                brain_revision,
+                user_name,
+                COALESCE(brain, ''),
+                'seed',
+                'initial_seed',
+                'Initial Brain'
+            FROM inserted
+        '''
+        await self.pg.execute(query, {
+            "agent_id": stella_id,
+            "user_name": self.user_name,
+            "name": name,
+            "persona": persona,
+            "brain": brain,
+            "model": model,
+            "temperature": temperature,
+            "enabled_tools": tools_json
+        })
+        logger.info(f"Seeded default agent: {name}")

@@ -20,9 +20,16 @@ from common.schema.agent.research import (
 )
 from common.schema.agent.settings import (
     ProjectBriefingMode,
+    PromptMemoryBudget,
     validate_tool_limit_overrides,
 )
 from common.schema.agent.stream import StreamUsage
+from common.schema.agent.tool_names import (
+    RESEARCH_ONLY_TOOL_NAMES,
+    WEB_CONTENT_TOOL_NAMES,
+    expand_tool_groups,
+    research_run_blocked_tool_names,
+)
 from common.schema.document import DocumentFocus
 from common.schema.source.references import SourceReferenceCandidate
 from core.agent.notebook import (
@@ -130,6 +137,53 @@ def _is_simple_conversational_turn(user_query: str) -> bool:
     )
 
 
+_FINDING_STRENGTHS = ("supported", "partial", "contested")
+_RECORD_TEXT_FIELDS = (
+    "content", "message", "excerpt", "snippet", "summary", "description", "text",
+)
+
+
+_MARKDOWN_LINK = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
+_MARKDOWN_EMPHASIS = re.compile(r"\*\*|__|`")
+
+
+def _normalized_text(value: str) -> str:
+    """Text as a reader sees it: pages are stored as markdown, and models
+    quote a link's words without its URL."""
+
+    value = _MARKDOWN_EMPHASIS.sub("", _MARKDOWN_LINK.sub(r"\1", value))
+    return " ".join(value.split()).casefold()
+
+
+def _quote_is_in(quote: str, text: str) -> bool:
+    """Whether a quote appears in text. A quote joined with an ellipsis must
+    have each of its pieces there."""
+
+    haystack = _normalized_text(text)
+    pieces = [
+        _normalized_text(piece) for piece in re.split(r"\.\.\.|…", quote)
+        if piece.strip(" .,;:")
+    ]
+    return bool(pieces) and all(piece.strip(" .,;:") in haystack for piece in pieces)
+
+
+def _record_text(record: Dict[str, Any]) -> str:
+    """The readable text of one notebook record, where a quote must appear."""
+
+    parts = [str(record[key]) for key in _RECORD_TEXT_FIELDS if isinstance(record.get(key), str)]
+    for item in record.get("context") or ():
+        if isinstance(item, dict) and isinstance(item.get("content"), str):
+            parts.append(item["content"])
+    return "\n".join(parts)
+
+
+def _record_lines(record: Dict[str, Any]) -> str:
+    start, end = record.get("start_line"), record.get("end_line")
+    if type(start) is int and type(end) is int:
+        return f"lines {start}-{end}"
+    return ""
+
+
 @dataclass(slots=True)
 class ProjectBriefing:
     """Frozen briefing decision plus one run-local cached Project projection."""
@@ -231,24 +285,30 @@ class AgentRunLimits:
     max_accumulated_profiles: int = 20
     max_accumulated_graph: int = 40
     max_accumulated_paths: int = 8
-    max_accumulated_episodes: int = 8
+    max_accumulated_episodes: int = 16
+    max_accumulated_events: int = 60
     max_accumulated_documents: int = 30
     max_accumulated_web_discoveries: int = 12
     max_accumulated_web_reads: int = 12
     max_accumulated_actions: int = 12
     max_accumulated_next_steps: int = 12
     max_accumulated_summary_chars: int = 4000
-    max_notebook_render_tokens: int = 10000
+    max_passage_chars: int = 12_000
+    max_research_findings: int = 30
+    max_notebook_render_tokens: int = 48_000
     max_consecutive_errors: int = 3
     project_briefing_mode: ProjectBriefingMode = "adaptive"
     empty_result_replan_threshold: int = 3
+    empty_replans_before_answer: int = 2
     tool_timeout: float = 30.0
     tool_limits: Tuple[Tuple[str, int], ...] = field(
         default_factory=lambda: tuple(get_default_tool_limits().items())
     )
 
     @classmethod
-    def from_settings(cls, settings: Any) -> "AgentRunLimits":
+    def from_settings(
+        cls, settings: Any, memory_budget: PromptMemoryBudget | None = None
+    ) -> "AgentRunLimits":
         """Compile mutable application settings into an execution snapshot."""
 
         defaults = get_default_tool_limits()
@@ -264,22 +324,45 @@ class AgentRunLimits:
             max_calls=settings.max_tool_calls,
             tool_timeout=settings.tool_timeout,
             max_attempts=settings.max_attempts,
-            max_history_turns=settings.agent_history_turns,
+            max_history_turns=(memory_budget or PromptMemoryBudget()).input_tokens,
             max_accumulated_messages=settings.max_accumulated_messages,
             max_accumulated_profiles=settings.max_accumulated_profiles,
             max_accumulated_graph=settings.max_accumulated_graph,
             max_accumulated_paths=settings.max_accumulated_paths,
             max_accumulated_episodes=settings.max_accumulated_episodes,
+            max_accumulated_events=settings.max_accumulated_events,
             max_accumulated_documents=settings.max_accumulated_documents,
             max_accumulated_web_discoveries=settings.max_accumulated_web_discoveries,
             max_accumulated_web_reads=settings.max_accumulated_web_reads,
             max_accumulated_actions=settings.max_accumulated_actions,
             max_accumulated_next_steps=settings.max_accumulated_next_steps,
             max_accumulated_summary_chars=settings.max_accumulated_summary_chars,
-            max_notebook_render_tokens=settings.max_notebook_render_tokens,
+            max_passage_chars=settings.max_passage_chars,
+            max_research_findings=settings.max_research_findings,
+            max_notebook_render_tokens=min(
+                settings.max_notebook_render_tokens,
+                (memory_budget or PromptMemoryBudget()).input_tokens,
+            ),
             max_consecutive_errors=settings.max_consecutive_errors,
+            empty_replans_before_answer=settings.empty_replans_before_answer,
             project_briefing_mode=briefing_mode,
             tool_limits=tuple((defaults | overrides).items()),
+        )
+
+    def with_extra_web_reads(self, count: int) -> "AgentRunLimits":
+        """Add room for a given number of page reads, one call each."""
+
+        if count <= 0:
+            return self
+        return replace(
+            self,
+            max_calls=self.max_calls + count,
+            max_attempts=self.max_attempts + count,
+            max_accumulated_web_reads=self.max_accumulated_web_reads + count,
+            tool_limits=tuple(
+                (name, limit + count if name == "read_web_page" else limit)
+                for name, limit in self.tool_limits
+            ),
         )
 
     def for_research_profile(self, profile: ResearchProfile) -> "AgentRunLimits":
@@ -328,12 +411,18 @@ class AgentRun:
     additional_tool_schemas: Tuple[Dict[str, Any], ...]
     tool_runtime: ToolRuntime
     limits: AgentRunLimits
+    memory_budget: PromptMemoryBudget = field(default_factory=PromptMemoryBudget)
     research_profile: ResearchProfile = field(
         default_factory=lambda: DEFAULT_RESEARCH_PROFILES["normal"]
     )
     history: List[Dict] = field(default_factory=list)
+    # Summary of this chat's turns that no longer fit the prompt.
+    history_summary: str = ""
+    # The last save_findings call: its requested path and result.
+    saved_findings: Optional[Dict[str, Any]] = None
     document_focus: Optional[DocumentFocus] = None
     document_selection_context: Optional[Dict[str, Any]] = None
+    selected_notebook: Optional[Dict[str, Any]] = None
     project_briefing: ProjectBriefing = field(
         default_factory=lambda: ProjectBriefing(
             mode="adaptive",
@@ -355,10 +444,15 @@ class AgentRun:
     synthesis_attempt_count: int = 0
     deep_research_gap_review_count: int = 0
     research_subquestions: Tuple[str, ...] = ()
+    findings: List[Dict[str, Any]] = field(default_factory=list)
     consecutive_errors: int = 0
     consecutive_empty_results: int = 0
+    # Forced replans in a row that found nothing new.
+    empty_replans: int = 0
     empty_retrieval_signatures: Set[Tuple[str, str]] = field(default_factory=set)
     previous_calls: Set[Tuple[str, str]] = field(default_factory=set)
+    # Episodes any search or browse has returned in this run.
+    seen_episode_ids: Set[str] = field(default_factory=set)
     last_error: Optional[str] = None
     tool_call_counts: Dict[str, int] = field(default_factory=dict)
     short_uuid_references: Dict[str, str] = field(default_factory=dict)
@@ -387,8 +481,11 @@ class AgentRun:
         audit_project_id: str | None | object = _UNSET_AUDIT_PROJECT_ID,
         research_profile: ResearchProfile | None = None,
         history: Optional[List[Dict]] = None,
+        history_summary: str = "",
         document_focus: Optional[DocumentFocus] = None,
         document_selection_context: Optional[Dict[str, Any]] = None,
+        selected_notebook: Optional[Dict[str, Any]] = None,
+        memory_budget: PromptMemoryBudget | None = None,
         notebook: Optional[RunNotebook] = None,
         is_community: bool = False,
         current_participants: Optional[List[str]] = None,
@@ -401,7 +498,7 @@ class AgentRun:
             raise ValueError("AgentRun requires user, project, and session scope")
         effective_run_id = run_id or str(uuid4())
         effective_enabled_tools = (
-            tuple(enabled_tools) if enabled_tools is not None else None
+            expand_tool_groups(enabled_tools) if enabled_tools is not None else None
         )
         effective_additional_schemas = tuple(additional_tool_schemas or ())
         effective_audit_project_id = (
@@ -422,6 +519,27 @@ class AgentRun:
             raise TypeError(
                 "initial_source_candidates must contain validated source references"
             )
+        effective_research_profile = (
+            research_profile or DEFAULT_RESEARCH_PROFILES["normal"]
+        )
+        research = effective_research_profile.mode != "normal"
+        if research and effective_enabled_tools is not None:
+            # Choosing research mode is how a chat without web tools gets them.
+            effective_enabled_tools = expand_tool_groups((*effective_enabled_tools, "web"))
+        # Research gathers and records findings; a confused measured run
+        # rewrote its own Brain, and others started jobs of themselves.
+        blocked = (
+            research_run_blocked_tool_names() if research else RESEARCH_ONLY_TOOL_NAMES
+        )
+        if blocked:
+            effective_enabled_tools = tuple(
+                name for name in (
+                    effective_enabled_tools
+                    if effective_enabled_tools is not None
+                    else sorted(get_registered_tool_names())
+                )
+                if name not in blocked
+            )
         tool_runtime = build_tool_runtime(
             enabled_tools=effective_enabled_tools,
             additional_schemas=effective_additional_schemas,
@@ -432,9 +550,6 @@ class AgentRun:
             session_id=session_id,
             run_id=effective_run_id,
             max_graph_results=limits.max_accumulated_graph,
-        )
-        effective_research_profile = (
-            research_profile or DEFAULT_RESEARCH_PROFILES["normal"]
         )
         return cls(
             run_id=effective_run_id,
@@ -450,10 +565,13 @@ class AgentRun:
             additional_tool_schemas=effective_additional_schemas,
             tool_runtime=tool_runtime,
             limits=limits,
+            memory_budget=memory_budget or PromptMemoryBudget(),
             research_profile=effective_research_profile,
             history=list(history or []),
+            history_summary=history_summary,
             document_focus=document_focus,
             document_selection_context=document_selection_context,
+            selected_notebook=selected_notebook,
             project_briefing=ProjectBriefing.for_run(
                 mode=limits.project_briefing_mode,
                 user_query=user_query,
@@ -572,6 +690,129 @@ class AgentRun:
         self.research_subquestions = normalized
         return None
 
+    def record_finding(
+        self, *, subquestion: object, claim: object, sources: object,
+        strength: object = "supported", gap: object = None,
+    ) -> Dict[str, Any] | str:
+        """Record one finding backed by quotes from sources this run read.
+
+        Returns the stored finding, or the reason it was refused. Each finding
+        copies its quotes and source details, so it stays meaningful after the
+        notebook rolls over.
+        """
+
+        if self.research_profile.mode == "normal":
+            return "record_finding is only available in research runs."
+        if not self.research_subquestions:
+            return "Set the research plan before recording findings."
+        question = self._planned_subquestion(subquestion)
+        if question is None:
+            return (
+                "subquestion must be one of the research plan's subquestions, "
+                "by its exact text or its number."
+            )
+        if not isinstance(claim, str) or not claim.strip() or len(claim) > 600:
+            return "claim must be one finding in 1 to 600 characters."
+        if strength not in _FINDING_STRENGTHS:
+            return "strength must be supported, partial, or contested."
+        if gap is not None and (not isinstance(gap, str) or len(gap) > 600):
+            return "gap must be text of at most 600 characters."
+        if not isinstance(sources, list) or not 1 <= len(sources) <= 3:
+            return "A finding needs 1 to 3 sources, each with a short exact quote."
+        if len(self.findings) >= self.limits.max_research_findings:
+            return (
+                f"This run already has {len(self.findings)} findings, its limit "
+                "(limits.max_research_findings)."
+            )
+        resolved = []
+        for source in sources:
+            reference = source.get("reference") if isinstance(source, dict) else None
+            quote = source.get("quote") if isinstance(source, dict) else None
+            if not isinstance(reference, str) or not reference.strip():
+                return "Each source needs the notebook reference it came from, such as WR1."
+            if not isinstance(quote, str) or not quote.strip() or len(quote) > 500:
+                return f"The quote for {reference} must be 1 to 500 characters."
+            # "WR2, WR3" names several read sources; the quote must be in one.
+            candidates = []
+            for name in (part.strip() for part in reference.split(",") if part.strip()):
+                candidate = self.notebook.research_record(name)
+                if candidate is None:
+                    return (
+                        f"{name} is not a page, document, or memory this run "
+                        "has read; search snippets do not count."
+                    )
+                candidates.append((name, candidate))
+            if not candidates:
+                return "Each source needs the notebook reference it came from, such as WR1."
+            match = next(
+                (pair for pair in candidates if _quote_is_in(quote, _record_text(pair[1]))),
+                None,
+            )
+            if match is None:
+                return (
+                    f"The quote for {reference} is not in what was read from it; "
+                    "copy a short exact line from the passage."
+                )
+            reference, record = match
+            resolved.append({
+                "reference": reference.strip(),
+                "title": str(
+                    record.get("title") or record.get("document_name")
+                    or record.get("original_name") or ""
+                ),
+                "location": str(
+                    record.get("url") or record.get("relative_path")
+                    or record.get("canonical_url") or ""
+                ),
+                "lines": _record_lines(record),
+                "quote": " ".join(quote.split()),
+            })
+        finding = {
+            "id": f"F{len(self.findings) + 1}",
+            "subquestion": question,
+            "claim": " ".join(claim.split()),
+            "strength": strength,
+            "sources": resolved,
+            "gap": " ".join(gap.split()) if isinstance(gap, str) and gap.strip() else None,
+        }
+        self.findings.append(finding)
+        return finding
+
+    def _planned_subquestion(self, value: object) -> str | None:
+        """Match a subquestion by number ("2"), text, or both ("2. When ...")."""
+
+        if isinstance(value, int) and not isinstance(value, bool):
+            number, text = value, ""
+        else:
+            match = re.fullmatch(r"\s*(\d+)?[.)]?\s*(.*?)\s*", str(value), re.DOTALL)
+            number = int(match.group(1)) if match and match.group(1) else None
+            text = " ".join(match.group(2).split()).casefold() if match else ""
+        if number is not None:
+            if not 1 <= number <= len(self.research_subquestions):
+                return None
+            question = self.research_subquestions[number - 1]
+            return question if not text or text == question.casefold() else None
+        return next(
+            (q for q in self.research_subquestions if q.casefold() == text), None
+        )
+
+    def coverage_from_findings(self) -> List[Dict[str, Any]]:
+        """research_coverage built from the recorded findings, one row per
+        planned subquestion; one with no finding is reported as a gap."""
+
+        coverage = []
+        for question in self.research_subquestions:
+            own = [finding for finding in self.findings if finding["subquestion"] == question]
+            references = list(dict.fromkeys(
+                source["reference"] for finding in own for source in finding["sources"]
+            ))
+            gaps = [finding["gap"] for finding in own if finding["gap"]]
+            row: Dict[str, Any] = {"subquestion": question, "supporting_references": references}
+            if gaps or not references:
+                row["unresolved_gap"] = "; ".join(gaps) or "No finding was recorded."
+            coverage.append(row)
+        return coverage
+
     def validate_research_coverage(self, coverage: object) -> str | None:
         """Validate material research questions against admitted notebook evidence."""
 
@@ -600,10 +841,13 @@ class AgentRun:
                 return "Research supporting_references must be notebook references."
             if not references and (not isinstance(gap, str) or not gap.strip()):
                 return "Every material subquestion needs evidence or an unresolved gap."
+            finding_ids = {finding["id"] for finding in self.findings}
             invalid = [
                 reference
                 for reference in references
-                if not self.notebook.validates_research_reference(reference)
+                # A recorded finding is already backed by checked quotes.
+                if reference.strip() not in finding_ids
+                and not self.notebook.validates_research_reference(reference)
             ]
             if invalid:
                 return (
@@ -667,6 +911,11 @@ class AgentRun:
             and not self.is_duplicate(tool_name, args)
         )
 
+    @property
+    def read_web(self) -> bool:
+        """Whether this run has called a tool that returns web content."""
+        return any(self.tool_call_counts.get(name) for name in WEB_CONTENT_TOOL_NAMES)
+
     def record_tool_call(self, tool_name: str, args: Dict) -> None:
         self._require_active()
         if not self.can_call_tool(tool_name, args):
@@ -723,6 +972,24 @@ class AgentRun:
         apply_result = self.notebook.apply(tool_name, result)
         self.new_evidence_gathered = self.new_evidence_gathered or apply_result.changed
         return apply_result
+
+    def note_episode_results(self, tool_name: str, result: Dict) -> int | None:
+        """Count Episodes this search returned that the run had not seen yet."""
+
+        if tool_name not in ("search_episodes", "read_recent_episodes"):
+            return None
+        data = result.get("data") if isinstance(result, dict) else None
+        groups = data.get("results", []) if isinstance(data, dict) else []
+        found = {
+            str(episode["episode_id"])
+            for group in groups
+            if isinstance(group, dict)
+            for episode in group.get("episodes", [])
+            if isinstance(episode, dict) and episode.get("episode_id") is not None
+        }
+        new = found - self.seen_episode_ids
+        self.seen_episode_ids |= found
+        return len(new)
 
     def record_empty_result(self, calls: List[Tuple[str, Dict]] | None = None) -> bool:
         """Record an empty tool turn and report whether replanning is due."""
@@ -824,6 +1091,7 @@ class AgentRun:
         self.short_uuid_references.clear()
         self.history.clear()
         self.initial_source_candidates.clear()
+        self.selected_notebook = None
         self.project_briefing.clear_content()
         self.notebook.clear()
         self.source_candidates.clear()

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from common.schema.agent.community_tools import AAC_SPECIFIC_SCHEMAS
-from core.agent.services.agent_manager import AgentManager
+from core.agent.agent_manager import AgentManager
 from core.community.aac_store import AACStore
 from core.community.tools import AACTools
 from tests.fixtures.fakes import FakeResources

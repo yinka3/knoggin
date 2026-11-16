@@ -1,17 +1,20 @@
 import asyncio
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 import tiktoken
 
+from common.exceptions import LLMRefusalError
 from common.schema.context import ContextRevisionOrigin, ContextSnapshot
 from common.schema.settings import (
     EntityResolutionSettings,
     EpisodeSettings,
+    ExtractionSettings,
     IngestionSettings,
-    TextProcessorSettings,
 )
+from common.utils.time_utils import frozen_time
 from core.ingestion.policy import IngestionPolicy
 from core.ingestion.project_semantic_processor import ProjectSemanticProcessor
 from core.ingestion.semantic_window_admission import SemanticWindowAdmission
@@ -80,7 +83,7 @@ def _admission(rows, *, target=128_000, now_ms=1_000):
 
 def _policy(domain):
     return IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(),
+        extraction=ExtractionSettings(),
         entity_resolution=EntityResolutionSettings(),
         compiled_domain=domain,
     )
@@ -280,7 +283,7 @@ async def test_selection_reuses_the_last_exact_prefix_token_count():
 async def test_admission_persists_the_exact_context_entity_policy():
     compiled_domain = make_domain_config().compile()
     frozen_policy = IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(gliner_threshold=0.42),
+        extraction=ExtractionSettings(),
         entity_resolution=EntityResolutionSettings(resolution_threshold=0.71),
         compiled_domain=compiled_domain,
     )
@@ -298,8 +301,8 @@ async def test_admission_persists_the_exact_context_entity_policy():
     assert IngestionPolicy.from_semantic_window_snapshot(ingestion_snapshot) == frozen_policy
     assert set(ingestion_snapshot) == {
         "jev_policy",
-        "gliner_threshold",
-        "llm_ner_mode",
+        "vp01_episode_lookback",
+        "vp02_episode_lookback",
         "candidate_fuzzy_threshold",
             "resolution_threshold",
             "resolution_margin",
@@ -411,6 +414,9 @@ class _SemanticEpisodeStore:
     async def get_project_semantic_window_episode_result(self, _window_id, **_kwargs):
         return self.result
 
+    async def get_recent_project_episodes(self, **_kwargs):
+        return []
+
     async def get_project_semantic_window_evidence_messages(self, _window_id, **kwargs):
         self.evidence_reads.append(kwargs)
         return [
@@ -456,6 +462,23 @@ class _SemanticEpisodeStore:
 
     async def get_project_semantic_window_assistant_source_refs(self, _window_id, **_kwargs):
         return []
+
+    async def forget_messages(self, **kwargs):
+        self.__dict__.setdefault("forget_calls", []).append(kwargs)
+        return []
+
+    async def get_episodes_with_forgotten_sources(self, **kwargs):
+        return self.__dict__.get("forgotten_episodes", [])
+
+    async def forget_graph(self, **kwargs):
+        return []
+
+    async def complete_forget_cleanup(self, **kwargs):
+        pass
+
+    async def forget_in_episode(self, **kwargs):
+        self.__dict__.setdefault("episode_forgets", []).append(kwargs)
+        return True
 
     async def commit_project_context_revision(self, **kwargs):
         self.context_snapshot = ContextSnapshot(
@@ -593,6 +616,21 @@ class _FailTwiceThenZeroEpisodeGenerator(_ZeroEpisodeGenerator):
         return SimpleNamespace(final_episodes=[])
 
 
+class _RefusingEpisodeGenerator(_ZeroEpisodeGenerator):
+    async def generate(self, **kwargs):
+        self.calls.append(kwargs)
+        raise LLMRefusalError("Gemini blocked the request: PROHIBITED_CONTENT")
+
+
+class _RefusingContextUpdater:
+    def __init__(self):
+        self.calls = 0
+
+    async def update(self, **_kwargs):
+        self.calls += 1
+        raise LLMRefusalError("I'm sorry, but I cannot assist with that request.")
+
+
 class _BlockingEpisodeGenerator(_ZeroEpisodeGenerator):
     def __init__(self):
         super().__init__()
@@ -606,7 +644,10 @@ class _BlockingEpisodeGenerator(_ZeroEpisodeGenerator):
 
 class _NoopContextUpdater:
     async def update(self, **_kwargs):
-        return SimpleNamespace(materialization=None, edit_summary="No Context change")
+        return SimpleNamespace(
+            materialization=None, edit_summary="No Context change",
+            forget_requests=(),
+        )
 
 
 class _FailingContextUpdater:
@@ -655,8 +696,8 @@ def _job(
         capture_semantic_policy=capture_semantic_policy,
         context_updater=context_updater or _NoopContextUpdater(),
         context_projection=_NoopProjection(),
-        context_entity_builder=_UnexpectedBuilder(),
-        context_relationship_extractor=_UnexpectedRelationships(),
+        entity_builder=_UnexpectedBuilder(),
+        relationship_extractor=_UnexpectedRelationships(),
         publish_committed_entity_ids=_publish_nothing,
         now_ms=now_ms,
     )
@@ -1041,3 +1082,198 @@ async def test_explicit_retry_reuses_the_exhausted_window_without_reselection():
     assert completed.success is True
     assert admission_store.claims == []
     assert store.writes[0]["window_id"] == str(selected.window.window_id)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_small_extraction_model_lowers_the_window_target():
+    rows = [
+        _row(1, user_content="x" * 5, assistant_content="x" * 5),
+        _row(2, user_content="x" * 5, assistant_content="x" * 5),
+        _row(3, user_content="x" * 5, assistant_content="x" * 5),
+    ]
+
+    async def window():
+        return 30  # 40% of 30 tokens = a 12-token window
+
+    admission = SemanticWindowAdmission(
+        RecordingStore(rows),
+        IngestionSettings(semantic_window_tokens=128_000),
+        token_counter=lambda text: text.count("x"),
+        now_ms=lambda: 1_000,
+        model_context_window=window,
+    )
+
+    selected = await admission.select(
+        user_name="ada", project_id="project-1", domain=make_domain_config().compile(),
+    )
+
+    assert selected is not None
+    assert selected.close_reason == "target_crossed"
+    assert [member.message_id for member in selected.messages] == [1, 10_001, 2, 10_002]
+    assert selected.window.policy_snapshot["admission_policy"]["semantic_window_tokens"] == 12
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_window_share_and_idle_wait_are_settings():
+    rows = [_row(1, user_content="x" * 5, assistant_content="x" * 5, closed_at_ms=0)]
+
+    async def window():
+        return 100
+
+    admission = SemanticWindowAdmission(
+        RecordingStore(rows),
+        IngestionSettings(window_share_of_model_context=0.5, idle_flush_seconds=60),
+        token_counter=lambda text: text.count("x"),
+        now_ms=lambda: 59_999,
+        model_context_window=window,
+    )
+    domain = make_domain_config().compile()
+
+    # One 10-token exchange is under the 50-token target and only 59.999 s idle.
+    assert await admission.select(user_name="ada", project_id="project-1", domain=domain) is None
+    admission._now_ms = lambda: 60_000
+    selected = await admission.select(user_name="ada", project_id="project-1", domain=domain)
+
+    assert selected is not None
+    assert selected.close_reason == "idle_flush"
+    policy = selected.window.policy_snapshot["admission_policy"]
+    assert policy["semantic_window_tokens"] == 50
+    assert policy["idle_flush_seconds"] == 60
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_research_report_turns_are_not_memory():
+    report = _row(2, user_content="x" * 5, assistant_content="x" * 5)
+    report["user_origin"] = "background_task_report"
+    rows = [_row(1, user_content="x" * 5, assistant_content="x" * 5), report]
+    admission = _admission(rows, target=1_000)
+
+    selected = await admission.select(
+        user_name="ada", project_id="project-1",
+        domain=make_domain_config().compile(), force_flush=True,
+    )
+
+    assert selected is not None
+    assert [member.message_id for member in selected.messages] == [1, 10_001]
+
+
+_REPLAY_START = datetime(2023, 5, 20, 2, 21, tzinfo=timezone.utc)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_idle_flush_follows_the_replay_clock_not_the_real_one():
+    closed_at_ms = int(_REPLAY_START.timestamp() * 1000)
+    rows = [_row(1, user_content="x", assistant_content="x", closed_at_ms=closed_at_ms)]
+    admission = SemanticWindowAdmission(
+        RecordingStore(rows),
+        IngestionSettings(semantic_window_tokens=100, idle_flush_seconds=300),
+        token_counter=lambda text: text.count("x"),
+    )
+    domain = make_domain_config().compile()
+
+    with frozen_time(_REPLAY_START) as clock:
+        assert await admission.claim_next(
+            user_name="ada", project_id="project-1", domain=domain
+        ) is None
+
+        clock.advance(seconds=300)
+        claimed = await admission.claim_next(
+            user_name="ada", project_id="project-1", domain=domain
+        )
+
+    assert claimed is not None
+    assert claimed[0].policy_snapshot["admission_policy"]["close_reason"] == "idle_flush"
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_semantic_retry_waits_on_the_replay_clock():
+    admission_store = RecordingStore([_row(1, user_content="x", assistant_content="x")])
+    settings = IngestionSettings(semantic_window_tokens=1)
+    admission = SemanticWindowAdmission(
+        admission_store, settings, token_counter=lambda text: text.count("x"),
+        episode_settings=EpisodeSettings(),
+    )
+    domain = make_domain_config().compile()
+    selected = await admission.select(
+        user_name="ada", project_id="project-1", domain=domain,
+        ingestion_policy=_policy(domain),
+    )
+    store = _SemanticEpisodeStore(selected.window)
+    generator = _FailThenZeroEpisodeGenerator()
+
+    async def capture_semantic_policy():
+        return _policy(domain)
+
+    job = _job(
+        admission, store, generator,
+        settings=settings, capture_semantic_policy=capture_semantic_policy,
+    )
+    job.enabled = True
+    context = JobContext(user_name="ada", project_id="project-1")
+
+    with frozen_time(_REPLAY_START) as clock:
+        assert (await job.execute(context)).success is False
+        assert store.window.next_retry_at_ms == int(_REPLAY_START.timestamp() * 1000) + 30_000
+        assert await job.should_run(context) is False
+
+        clock.advance(seconds=30)
+        assert await job.should_run(context) is True
+        await job.execute(context)
+
+    assert len(generator.calls) == 2
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_a_window_the_model_keeps_refusing_finishes_empty_instead_of_blocking():
+    admission_store = RecordingStore([_row(1, user_content="x", assistant_content="x")])
+    settings = IngestionSettings.model_validate(
+        {
+            "semantic_window_tokens": 1,
+            "semantic_window_retry": {
+                "max_attempts": 3,
+                "initial_backoff_seconds": 30,
+                "max_backoff_seconds": 300,
+            },
+        }
+    )
+    admission = SemanticWindowAdmission(
+        admission_store, settings, token_counter=lambda text: text.count("x"),
+    )
+    domain = make_domain_config().compile()
+    selected = await admission.select(
+        user_name="ada", project_id="project-1", domain=domain,
+        ingestion_policy=_policy(domain),
+    )
+    store = _SemanticEpisodeStore(selected.window)
+    generator = _RefusingEpisodeGenerator()
+    context_updater = _RefusingContextUpdater()
+
+    async def capture_semantic_policy():
+        return _policy(domain)
+
+    now = [1_000]
+    job = _job(
+        admission, store, generator, settings=settings,
+        capture_semantic_policy=capture_semantic_policy,
+        context_updater=context_updater, now_ms=lambda: now[0],
+    )
+    context = JobContext(user_name="ada", project_id="project-1")
+
+    results = []
+    while store.window.stage.value != "completed" and len(results) < 6:
+        results.append((await job.execute(context)).success)
+        now[0] += 1_000_000
+
+    # A refusal may be chance, so the first attempts fail and retry as usual;
+    # the last one records nothing and lets the next window run.
+    assert results[:2] == [False, False]
+    assert len(generator.calls) == 3
+    assert context_updater.calls == 3
+    assert store.writes[0]["episodes"] == []
+    assert store.window.stage.value == "completed"

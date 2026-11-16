@@ -21,6 +21,7 @@ class ExchangeOutcome(StrEnum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     USER_ONLY = "user_only"
+    ASSISTANT_ONLY = "assistant_only"
 
 
 class SemanticWindowOrigin(StrEnum):

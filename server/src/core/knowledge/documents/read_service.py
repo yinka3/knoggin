@@ -28,5 +28,20 @@ class DocumentReadService:
     async def read_document(self, **kwargs: Any) -> Dict:
         return await self._service.read_document(**kwargs)
 
+    async def list_saved_web_links(self, **kwargs: Any) -> List[Dict]:
+        return await self._service.list_saved_web_links(**kwargs)
+
     async def search(self, query: str, **kwargs: Any) -> List[Dict]:
         return await self._service.search(query, **kwargs)
+
+    async def list_documents_awaiting_index(self, **kwargs: Any) -> List[str]:
+        return await self._service.list_documents_awaiting_index(**kwargs)
+
+    async def list_project_files(self, **kwargs: Any) -> List[Dict]:
+        return await self._service.list_project_files(**kwargs)
+
+    async def grep_project_files(self, text: str, **kwargs: Any) -> Dict:
+        return await self._service.grep_project_files(text, **kwargs)
+
+    async def read_project_file(self, path: str, **kwargs: Any) -> Dict:
+        return await self._service.read_project_file(path, **kwargs)

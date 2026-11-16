@@ -11,8 +11,6 @@ from common.scoping import IDENTITY_ENTITY_ID
 from core.knowledge.db.writers.maintenance_review_writer import MaintenanceReviewWriter
 from infrastructure.postgres_client import PostgresClient
 
-_PROJECTION_REPAIR_PENDING = "projection_repair_pending"
-
 
 class EntityMergeConflict(ValueError):
     """A merge needs an explicit user decision before it can be applied."""
@@ -57,35 +55,13 @@ class GlobalEntityMergeWriter:
         row = await self._fetch_one(
             cur,
             """
-            WITH per_window AS (
-                SELECT membership.window_id,
-                       count(DISTINCT episode_message.message_id)::integer
-                           AS source_count
-                FROM public.project_semantic_window_episodes AS membership
-                JOIN public.project_semantic_windows AS semantic_window
-                  ON semantic_window.window_id = membership.window_id
-                 AND semantic_window.project_id = membership.project_id
-                JOIN public.episode_messages AS episode_message
-                  ON episode_message.episode_id = membership.episode_id
-                 AND episode_message.project_id = membership.project_id
-                JOIN public.project_context_block_supports AS support
-                  ON support.project_id = episode_message.project_id
-                 AND support.session_id = episode_message.session_id
-                 AND support.message_id = episode_message.message_id
-                JOIN public.project_context_revision_blocks AS revision_block
-                  ON revision_block.revision_id = semantic_window.context_revision_id
-                 AND revision_block.project_id = support.project_id
-                 AND revision_block.block_id = support.block_id
-                JOIN public.context_block_entities AS association
-                  ON association.project_id = support.project_id
-                 AND association.block_id = support.block_id
-                WHERE membership.project_id = %s
-                  AND membership.episode_id = %s
-                  AND association.entity_id = %s
-                GROUP BY membership.window_id
-            )
-            SELECT coalesce(max(source_count), 0)::integer AS source_count
-            FROM per_window
+            SELECT count(DISTINCT episode_message.message_id)::integer AS source_count
+            FROM public.episode_messages AS episode_message
+            JOIN public.message_entity_refs AS ref
+              ON ref.message_id = episode_message.message_id
+            WHERE episode_message.project_id = %s
+              AND episode_message.episode_id = %s
+              AND ref.entity_id = %s
             """,
             (project_id, episode_id, entity_id),
         )
@@ -97,57 +73,18 @@ class GlobalEntityMergeWriter:
         row = await self._fetch_one(
             cur,
             """
-            WITH matching_support AS (
-                SELECT membership.window_id,
-                       observation.observation_id,
-                       observation_block.block_id,
-                       episode_message.message_id
-                FROM public.project_semantic_window_episodes AS membership
-                JOIN public.project_semantic_windows AS semantic_window
-                  ON semantic_window.window_id = membership.window_id
-                 AND semantic_window.project_id = membership.project_id
-                JOIN public.episode_messages AS episode_message
-                  ON episode_message.episode_id = membership.episode_id
-                 AND episode_message.project_id = membership.project_id
-                JOIN public.project_context_block_supports AS support
-                  ON support.project_id = episode_message.project_id
-                 AND support.session_id = episode_message.session_id
-                 AND support.message_id = episode_message.message_id
-                JOIN public.project_context_revision_blocks AS revision_block
-                  ON revision_block.revision_id = semantic_window.context_revision_id
-                 AND revision_block.project_id = support.project_id
-                 AND revision_block.block_id = support.block_id
-                JOIN public.relationship_observation_blocks AS observation_block
-                  ON observation_block.project_id = support.project_id
-                 AND observation_block.block_id = support.block_id
-                JOIN public.relationship_observations AS observation
-                  ON observation.observation_id = observation_block.observation_id
-                 AND observation.project_id = observation_block.project_id
-                WHERE membership.project_id = %s
-                  AND membership.episode_id = %s
-                  AND observation.relationship_id = %s
-                  AND observation.retired_at IS NULL
-            ),
-            complete_observations AS (
-                SELECT window_id, observation_id
-                FROM matching_support
-                GROUP BY window_id, observation_id
-                HAVING count(DISTINCT block_id) = (
-                    SELECT count(*)
-                    FROM public.relationship_observation_blocks AS required_block
-                    WHERE required_block.observation_id = matching_support.observation_id
-                )
-            ), per_window AS (
-                SELECT support.window_id,
-                       count(DISTINCT support.message_id)::integer AS source_count
-                FROM matching_support AS support
-                JOIN complete_observations AS complete
-                  ON complete.window_id = support.window_id
-                 AND complete.observation_id = support.observation_id
-                GROUP BY support.window_id
-            )
-            SELECT coalesce(max(source_count), 0)::integer AS source_count
-            FROM per_window
+            SELECT count(DISTINCT episode_message.message_id)::integer AS source_count
+            FROM public.episode_messages AS episode_message
+            JOIN public.relationship_observation_messages AS support
+              ON support.message_id = episode_message.message_id
+             AND support.project_id = episode_message.project_id
+            JOIN public.relationship_observations AS observation
+              ON observation.observation_id = support.observation_id
+             AND observation.project_id = support.project_id
+            WHERE episode_message.project_id = %s
+              AND episode_message.episode_id = %s
+              AND observation.relationship_id = %s
+              AND observation.retired_at IS NULL
             """,
             (project_id, episode_id, relationship_id),
         )
@@ -204,26 +141,10 @@ class GlobalEntityMergeWriter:
                 active_cur,
                 """
                 SELECT project_id, entity_id, user_name, entity_type, topic,
-                       last_mentioned_ms
+                       last_mentioned_ms, human_correction_review_id
                 FROM public.project_entity_contexts
                 WHERE user_name = %s AND entity_id = ANY(%s)
                 ORDER BY project_id, entity_id
-                """,
-                (user_name, ids),
-            )
-            context_block_entities = await self._fetch_all(
-                active_cur,
-                """
-                SELECT association.block_id::text AS block_id,
-                       association.project_id, association.entity_id,
-                       association.mention_text, association.created_at
-                FROM public.context_block_entities AS association
-                JOIN public.projects AS project
-                  ON project.project_id = association.project_id
-                WHERE project.user_name = %s
-                  AND association.entity_id = ANY(%s)
-                ORDER BY association.project_id, association.block_id,
-                         association.entity_id
                 """,
                 (user_name, ids),
             )
@@ -301,7 +222,6 @@ class GlobalEntityMergeWriter:
             "aliases": aliases,
             "name_supports": name_supports,
             "contexts": contexts,
-            "context_block_entities": context_block_entities,
             "message_refs": message_refs,
             "episode_entities": episode_entities,
             "relationships": relationships,
@@ -358,6 +278,15 @@ class GlobalEntityMergeWriter:
                 contexts_by_project.setdefault(context["project_id"], {})[
                     int(context["entity_id"])
                 ] = context
+            protected = [
+                {"project_id": context["project_id"],
+                 "entity_id": int(context["entity_id"]),
+                 "reason": "active_human_correction"}
+                for context in before["contexts"]
+                if context["human_correction_review_id"] is not None
+            ]
+            if protected:
+                raise EntityMergeConflict(protected)
             conflicts: list[dict[str, Any]] = []
             for project_id, project_contexts in contexts_by_project.items():
                 primary = project_contexts.get(survivor_id)
@@ -386,10 +315,6 @@ class GlobalEntityMergeWriter:
 
             affected_projects = sorted(
                 {context["project_id"] for context in before["contexts"]}
-                | {
-                    association["project_id"]
-                    for association in before["context_block_entities"]
-                }
                 | {row["project_id"] for row in before["relationships"]}
                 | {
                     row["project_id"]
@@ -584,74 +509,6 @@ class GlobalEntityMergeWriter:
                         },
                     )
 
-            # Context blocks are immutable, but their identity associations
-            # are current derived usage. Move each retired association to the
-            # survivor, retaining an existing survivor association when both
-            # names occur in the same block. The journal records the complete
-            # before/after pair so rollback can leave a changed survivor row as
-            # explicit residue rather than overwriting it.
-            survivor_associations_by_block = {
-                str(association["block_id"]): association
-                for association in before["context_block_entities"]
-                if int(association["entity_id"]) == survivor_id
-            }
-            for association in before["context_block_entities"]:
-                if int(association["entity_id"]) != retired_id:
-                    continue
-                survivor_association = survivor_associations_by_block.get(
-                    str(association["block_id"])
-                )
-                await active_cur.execute(
-                    """
-                    INSERT INTO public.context_block_entities (
-                        block_id, project_id, entity_id, mention_text, created_at
-                    ) VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (block_id, entity_id) DO NOTHING
-                    RETURNING block_id::text AS block_id, project_id, entity_id,
-                              mention_text, created_at
-                    """,
-                    (
-                        association["block_id"],
-                        association["project_id"],
-                        survivor_id,
-                        association["mention_text"],
-                        association["created_at"],
-                    ),
-                )
-                inserted_survivor = await active_cur.fetchone()
-                if inserted_survivor is None:
-                    after_survivor = await self._fetch_one(
-                        active_cur,
-                        """
-                        SELECT block_id::text AS block_id, project_id, entity_id,
-                               mention_text, created_at
-                        FROM public.context_block_entities
-                        WHERE block_id = %s AND entity_id = %s
-                        """,
-                        (association["block_id"], survivor_id),
-                    )
-                else:
-                    after_survivor = dict(inserted_survivor)
-                if after_survivor is None:  # pragma: no cover - the insert is deterministic
-                    raise RuntimeError("failed to retain merged Context association")
-                await active_cur.execute(
-                    """
-                    DELETE FROM public.context_block_entities
-                    WHERE block_id = %s AND entity_id = %s
-                    """,
-                    (association["block_id"], retired_id),
-                )
-                await record(
-                    "context_block_entity",
-                    str(association["block_id"]),
-                    {"survivor": survivor_association, "retired": association},
-                    {
-                        "survivor": after_survivor,
-                        "retired": None,
-                        "created_by_merge": inserted_survivor is not None,
-                    },
-                )
-
             # Global message provenance refs.  A duplicate ref is a single
             # logical membership, so it is journaled and then removed safely.
             for ref in before["message_refs"]:
@@ -685,6 +542,17 @@ class GlobalEntityMergeWriter:
                         "entity_id": survivor_id,
                         "created": not survivor_ref_existed,
                     },
+                )
+            merged_message_ids = [
+                int(ref["message_id"]) for ref in before["message_refs"]
+                if int(ref["entity_id"]) == retired_id
+            ]
+            if merged_message_ids:
+                await active_cur.execute(
+                    """UPDATE public.message_entity_refs
+                       SET occurrence_provenance_complete = false
+                       WHERE message_id = ANY(%s) AND entity_id = %s""",
+                    (merged_message_ids, survivor_id),
                 )
 
             for row in before["episode_entities"]:
@@ -753,6 +621,18 @@ class GlobalEntityMergeWriter:
                         "created": survivor_episode is None,
                         "survivor_before": survivor_episode,
                     },
+                )
+
+            merged_episode_ids = [
+                row["episode_id"] for row in before["episode_entities"]
+                if int(row["entity_id"]) == retired_id
+            ]
+            if merged_episode_ids:
+                await active_cur.execute(
+                    """UPDATE public.episode_entities
+                       SET occurrence_provenance_complete = false
+                       WHERE episode_id = ANY(%s::text[]) AND entity_id = %s""",
+                    (merged_episode_ids, survivor_id),
                 )
 
             # Rewrite relationship evidence in place and collapse only derived
@@ -1076,10 +956,10 @@ class GlobalEntityMergeWriter:
                 UPDATE public.entity_global_merge_audits
                 SET status = 'executed',
                     completed_at = now(),
-                    failure_reason = %s
+                    failure_reason = NULL
                 WHERE merge_id = %s
                 """,
-                (_PROJECTION_REPAIR_PENDING, merge_id),
+                (merge_id,),
             )
             await active_cur.execute(
                 "SELECT count(*) AS count FROM public.entity_global_merge_mutations WHERE merge_id = %s",
@@ -1102,23 +982,6 @@ class GlobalEntityMergeWriter:
                 "SELECT * FROM public.entity_global_merge_audits WHERE merge_id = %s",
                 (merge_id,),
             )
-
-    async def record_projection_repair_state(
-        self,
-        merge_id: str,
-        *,
-        repair_pending: bool,
-    ) -> None:
-        """Persist only the bounded derived-repair marker for a merge audit."""
-
-        await self.client.execute(
-            """
-            UPDATE public.entity_global_merge_audits
-            SET failure_reason = %s
-            WHERE merge_id = %s AND status IN ('executed', 'rolled_back')
-            """,
-            (_PROJECTION_REPAIR_PENDING if repair_pending else None, merge_id),
-        )
 
     async def _mutation_rows(self, cur, merge_id: str) -> list[dict[str, Any]]:
         rows = await self._fetch_all(
@@ -1190,26 +1053,6 @@ class GlobalEntityMergeWriter:
                    WHERE project_id = %s AND entity_id = %s""",
                 (key, int(after["entity_id"])),
             )
-        if kind == "context_block_entity":
-            survivor = after["survivor"]
-            retired = before["retired"]
-            rows = await self._fetch_all(
-                cur,
-                """
-                SELECT block_id::text AS block_id, project_id, entity_id,
-                       mention_text, created_at
-                FROM public.context_block_entities
-                WHERE block_id = %s AND entity_id = ANY(%s)
-                ORDER BY entity_id
-                """,
-                (key, [int(survivor["entity_id"]), int(retired["entity_id"])]),
-            )
-            by_entity_id = {int(row["entity_id"]): row for row in rows}
-            return {
-                "survivor": by_entity_id.get(int(survivor["entity_id"])),
-                "retired": by_entity_id.get(int(retired["entity_id"])),
-                "created_by_merge": bool(after.get("created_by_merge")),
-            }
         if kind == "message_entity_ref":
             message_id = int(key.split(":", 1)[0])
             entity_id = int(after["entity_id"])
@@ -1404,8 +1247,6 @@ class GlobalEntityMergeWriter:
                             {k: current.get(k) for k in ("source_message_count", "first_seen_at", "last_seen_at")},
                             {k: expected.get(k) for k in ("source_message_count", "first_seen_at", "last_seen_at")},
                         )
-                elif mutation["object_kind"] == "context_block_entity":
-                    matches = self._json_equal(current, expected)
                 elif mutation["object_kind"] == "entity":
                     matches = self._json_equal(
                         {k: (current or {}).get(k) for k in ("entity_id", "user_name", "canonical_name", "status", "redirect_entity_id")},
@@ -1562,7 +1403,6 @@ class GlobalEntityMergeWriter:
                 "entity_aliases": 1,
                 "project_context": 2,
                 "entity_name_supports": 3,
-                "context_block_entity": 4,
                 "relationship": 5,
                 "relationship_observation": 6,
                 "episode_relationship": 7,
@@ -1594,30 +1434,9 @@ class GlobalEntityMergeWriter:
             if pending_mutation_count == 0 or (
                 selected and len(selected) == pending_mutation_count
             ):
-                if selected:
-                    await active_cur.execute(
-                        """
-                        UPDATE public.entity_global_merge_audits
-                        SET status = 'rolled_back',
-                            completed_at = now(),
-                            failure_reason = %s
-                        WHERE merge_id = %s
-                        """,
-                        (_PROJECTION_REPAIR_PENDING, merge_id),
-                    )
-                else:
-                    await active_cur.execute(
-                        "UPDATE public.entity_global_merge_audits SET status = 'rolled_back', completed_at = now() WHERE merge_id = %s",
-                        (merge_id,),
-                    )
-            elif selected:
                 await active_cur.execute(
-                    """
-                    UPDATE public.entity_global_merge_audits
-                    SET failure_reason = %s
-                    WHERE merge_id = %s
-                    """,
-                    (_PROJECTION_REPAIR_PENDING, merge_id),
+                    "UPDATE public.entity_global_merge_audits SET status = 'rolled_back', completed_at = now() WHERE merge_id = %s",
+                    (merge_id,),
                 )
             return {
                 "merge_id": merge_id,
@@ -1696,31 +1515,6 @@ class GlobalEntityMergeWriter:
                      entity_type = EXCLUDED.entity_type, topic = EXCLUDED.topic,
                      last_mentioned_ms = EXCLUDED.last_mentioned_ms""",
                 (key, retired["entity_id"], retired["user_name"], retired["entity_type"], retired["topic"], retired["last_mentioned_ms"]),
-            )
-        elif kind == "context_block_entity":
-            retired = before["retired"]
-            after_survivor = after["survivor"]
-            if after.get("created_by_merge"):
-                await cur.execute(
-                    """
-                    DELETE FROM public.context_block_entities
-                    WHERE block_id = %s AND entity_id = %s
-                    """,
-                    (retired["block_id"], after_survivor["entity_id"]),
-                )
-            await cur.execute(
-                """
-                INSERT INTO public.context_block_entities (
-                    block_id, project_id, entity_id, mention_text, created_at
-                ) VALUES (%s, %s, %s, %s, %s)
-                """,
-                (
-                    retired["block_id"],
-                    retired["project_id"],
-                    retired["entity_id"],
-                    retired["mention_text"],
-                    retired["created_at"],
-                ),
             )
         elif kind == "message_entity_ref":
             message_id = int(key.split(":", 1)[0])

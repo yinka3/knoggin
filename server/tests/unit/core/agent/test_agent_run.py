@@ -723,3 +723,128 @@ def test_agent_run_can_finish_without_a_final_response():
     assert run.final_content is None
     with pytest.raises(RuntimeError, match="finalized"):
         run.record_error("too late")
+
+
+@pytest.mark.no_network
+def test_a_list_of_links_adds_one_read_and_one_call_per_link():
+    limits = AgentRunLimits(
+        max_calls=24,
+        max_attempts=30,
+        max_accumulated_web_reads=24,
+        tool_limits=(("read_web_page", 12), ("search_web", 8)),
+    )
+
+    grown = limits.with_extra_web_reads(20)
+
+    assert grown.max_calls == 44
+    assert grown.max_attempts == 50
+    assert grown.max_accumulated_web_reads == 44
+    assert grown.get_tool_limit("read_web_page") == 32
+    assert grown.get_tool_limit("search_web") == 8
+    assert limits.with_extra_web_reads(0) is limits
+
+
+@pytest.mark.no_network
+def test_research_runs_cannot_start_background_jobs():
+    def tool_names(run):
+        return {schema["function"]["name"] for schema in run.tool_runtime.schemas}
+
+    normal = make_run()
+    research = make_run(research_profile=resolve_research_profile("research"))
+    chosen = make_run(
+        research_profile=resolve_research_profile("deep_research"),
+        enabled_tools=["read_web_page", "start_background_task"],
+    )
+
+    assert {"start_background_task", "edit_agent_brain", "delete_project_file"} <= tool_names(normal)
+    assert not tool_names(research) & {
+        "start_background_task", "list_background_tasks", "edit_agent_brain",
+        "restore_agent_brain_section", "propose_entity_merge",
+        "report_relationship_conflict", "update_project_file",
+        "move_project_file", "delete_project_file",
+    }
+    # Research still reads, and can save its findings.
+    assert {"search_web", "read_agent_brain", "create_project_file",
+            "append_project_file", "create_project_folder"} <= tool_names(research)
+    assert "read_web_page" in tool_names(chosen)
+    assert "start_background_task" not in tool_names(chosen)
+
+
+@pytest.mark.no_network
+def test_research_coverage_accepts_the_handles_the_notebook_shows():
+    run = make_run(research_profile=resolve_research_profile("research"))
+    assert run.set_research_plan(["When is SQLite better?"]) is None
+    run.accumulate_tool_result("search_web", {"data": [
+        {"title": "Search hit", "url": "https://example.test/hit", "snippet": "A snippet."},
+    ]})
+    run.accumulate_tool_result("read_web_page", {"data": [{
+        "title": "Appropriate Uses For SQLite", "url": "https://www.sqlite.org/whentouse.html",
+        "content": "SQLite works well for local storage.", "start_line": 1, "end_line": 1,
+        "total_lines": 1, "content_hash": "a" * 64, "source_kind": "web_page",
+    }]})
+    rendered = run.notebook.render()
+    assert "WR1 Appropriate Uses For SQLite" in rendered
+    assert "W1 Search hit" in rendered
+
+    def cover(*references):
+        return run.validate_research_coverage([
+            {"subquestion": "When is SQLite better?", "supporting_references": list(references)},
+        ])
+
+    assert cover("WR1") is None
+    # Models often echo the handle with its title.
+    assert cover("WR1: Appropriate Uses For SQLite") is None
+    # A discovery snippet is still not evidence, by handle or otherwise.
+    assert "discovery-only" in cover("W1")
+    assert "unknown" in cover("WR9")
+
+
+@pytest.mark.no_network
+def test_tool_groups_cover_every_tool_once():
+    from common.schema.agent.tool_contracts import TOOL_SCHEMAS
+    from common.schema.agent.tool_names import tool_groups
+
+    groups = tool_groups()
+    every = {schema["function"]["name"] for schema in TOOL_SCHEMAS}
+    assert set().union(*groups.values()) == every
+    assert sum(len(names) for names in groups.values()) == len(every)
+    assert "search_web" in groups["web"]
+    assert "get_ingestion_health" in groups["maintenance"]
+    assert "create_project_file" in groups["core"]
+
+
+@pytest.mark.no_network
+def test_core_group_has_no_web_or_maintenance_until_research_adds_web():
+    normal = make_run(enabled_tools=["core"])
+    research = make_run(
+        enabled_tools=["core"], research_profile=resolve_research_profile("research")
+    )
+
+    assert "search_knowledge_messages" in normal.enabled_tools
+    assert not {"search_web", "read_web_page", "get_engine_health"} & set(normal.enabled_tools)
+    assert {"search_web", "search_news", "read_web_page"} <= set(research.enabled_tools)
+    assert "start_background_task" not in research.enabled_tools
+    assert "get_engine_health" not in research.enabled_tools
+
+
+@pytest.mark.no_network
+def test_groups_and_single_tools_mix():
+    run = make_run(enabled_tools=["maintenance", "search_web"])
+
+    assert "get_ingestion_health" in run.enabled_tools
+    assert "search_web" in run.enabled_tools
+    assert "read_web_page" not in run.enabled_tools
+
+
+@pytest.mark.no_network
+def test_chat_summary_comes_before_recent_turns_in_the_prompt():
+    from core.agent.prompt_context import build_user_message
+
+    run = make_run(
+        history_summary="- Ada chose SQLite.",
+        history=[{"role": "user", "content": "And now?"}],
+    )
+    message = build_user_message(run)
+
+    assert message.index("- Ada chose SQLite.") < message.index("And now?")
+    assert "Earlier in this chat" not in build_user_message(make_run())

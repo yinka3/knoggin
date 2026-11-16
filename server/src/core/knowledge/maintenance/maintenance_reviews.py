@@ -9,8 +9,16 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Annotated, Any, Literal, Union
+from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    field_validator,
+    model_validator,
+)
 
 from common.schema.evidence import EvidenceBundle, EvidencePointer, EvidenceSnapshot
 from core.knowledge.conflict.conflicts import ConflictResolutionKind
@@ -94,6 +102,38 @@ class EntityContextChangePlan(BaseModel):
     topic: str | None = Field(default=None, min_length=1)
 
 
+class IdentityReassignmentPlan(BaseModel):
+    """One decision-linked mention to attach to another identity."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["identity_reassignment"] = "identity_reassignment"
+    window_id: UUID
+    occurrence_key: str = Field(min_length=1, max_length=500)
+    source_entity_id: int = Field(gt=0)
+    target_entity_id: int | None = Field(default=None, gt=0)
+    new_entity_name: str | None = Field(default=None, min_length=1, max_length=200)
+    entity_type: str | None = Field(default=None, min_length=1, max_length=200)
+    topic: str | None = Field(default=None, min_length=1, max_length=200)
+    message_ids: tuple[int, ...] = Field(min_length=1, max_length=72)
+
+    @model_validator(mode="after")
+    def validate_target(self):
+        if (self.target_entity_id is None) == (self.new_entity_name is None):
+            raise ValueError("Choose one existing entity or a new identity")
+        if self.target_entity_id == self.source_entity_id:
+            raise ValueError("Identity correction must change the entity")
+        if self.new_entity_name is not None and (self.entity_type is None or self.topic is None):
+            raise ValueError("A new identity needs an entity type and topic")
+        if self.target_entity_id is not None and (self.entity_type is not None or self.topic is not None):
+            raise ValueError("An existing identity keeps its current project classification")
+        if len(set(self.message_ids)) != len(self.message_ids) or any(
+            message_id <= 0 for message_id in self.message_ids
+        ):
+            raise ValueError("Identity correction message IDs must be unique and positive")
+        return self
+
+
 class EntityMergePlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -103,7 +143,6 @@ class EntityMergePlan(BaseModel):
     context_choices: list["EntityContextMergeChoice"] = Field(default_factory=list)
     frontier_tokens: dict[str, str] = Field(default_factory=dict)
     definition_versions: dict[str, int] = Field(default_factory=dict)
-    context_block_association_counts: dict[str, int] = Field(default_factory=dict)
     expected_state_hash: str | None = Field(default=None, min_length=1)
 
     @field_validator("retired_entity_id")
@@ -179,15 +218,33 @@ class RelationshipAdvisoryPlan(BaseModel):
     note: str | None = None
 
 
+class HypothesisEvaluationPlan(BaseModel):
+    """A user-confirmed, evidence-backed ruled-out claim."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["hypothesis_evaluation"] = "hypothesis_evaluation"
+    board_id: UUID
+    question_id: UUID
+    claim_id: UUID
+    question: str = Field(min_length=1, max_length=1000)
+    claim: str = Field(min_length=1, max_length=2000)
+    outcome: Literal["ruled_out"] = "ruled_out"
+    scope_description: str = Field(min_length=1, max_length=2000)
+    reconsider_if: str = Field(min_length=1, max_length=2000)
+
+
 MaintenancePlan = Annotated[
     Union[
         RelationshipInterpretationPlan,
         RelationshipDomainChangePlan,
         EntityContextChangePlan,
+        IdentityReassignmentPlan,
         EntityMergePlan,
         EntityMergeRollbackPlan,
         ConflictResolutionPlan,
         RelationshipAdvisoryPlan,
+        HypothesisEvaluationPlan,
     ],
     Field(discriminator="kind"),
 ]

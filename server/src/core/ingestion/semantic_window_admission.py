@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import batched
-from time import time
-from typing import Callable, Protocol
+from typing import Awaitable, Callable, Protocol
 from uuid import uuid4
 
 from common.conf.domain_config import CompiledDomain
+from common.schema.message_origins import BACKGROUND_REPORT_ORIGINS
 from common.schema.semantic_window import (
     SemanticWindowClaimResult,
     SemanticWindowMessage,
@@ -17,6 +17,7 @@ from common.schema.semantic_window import (
     SemanticWindowStage,
 )
 from common.schema.settings import EpisodeSettings, IngestionSettings
+from common.utils.time_utils import get_now_ms
 from core.ingestion.policy import IngestionPolicy
 from core.knowledge.episodes.policy import EpisodeGenerationPolicy
 
@@ -35,6 +36,7 @@ class SemanticWindowStore(Protocol):
 
 TokenCounter = Callable[[str], int]
 BatchTokenCounter = Callable[[list[str]], list[int]]
+ContextWindowLookup = Callable[[], Awaitable[int | None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,12 +65,12 @@ class _SkippedExchange:
 class SemanticWindowAdmission:
     """Select whole, FIFO-safe exchanges without becoming a semantic writer.
 
-    The 128K setting is the only size control.  A crossing exchange is included
-    whole and ends selection immediately; the retained overfill documents an
-    unavoidable boundary rather than a second configurable cap.
+    The 128K setting is the size control, lowered to fit the extraction model
+    when the provider reports a smaller context.  A crossing exchange is
+    included whole and ends selection immediately; the retained overfill
+    documents an unavoidable boundary rather than a second configurable cap.
     """
 
-    IDLE_FLUSH_SECONDS = 300
     TOKEN_ESTIMATOR = "llm.count_tokens"
     TOKEN_ESTIMATOR_VERSION = "runtime-v1"
     POLICY_VERSION = 1
@@ -83,6 +85,7 @@ class SemanticWindowAdmission:
         token_counter_batch: BatchTokenCounter | None = None,
         episode_settings: EpisodeSettings | None = None,
         now_ms: Callable[[], int] | None = None,
+        model_context_window: ContextWindowLookup | None = None,
     ) -> None:
         if not callable(token_counter):
             raise TypeError("Semantic window admission requires an LLM token counter")
@@ -91,9 +94,24 @@ class SemanticWindowAdmission:
         self.knowledge_store = knowledge_store
         self._token_counter = token_counter
         self._token_counter_batch = token_counter_batch
-        self._now_ms = now_ms or (lambda: int(time() * 1000))
+        self._now_ms = now_ms or get_now_ms
+        self._model_context_window = model_context_window
         self.update_settings(settings)
         self.update_episode_settings(episode_settings or EpisodeSettings())
+
+    async def _target_tokens(self) -> int:
+        target = self._settings.semantic_window_tokens
+        if self._model_context_window is None:
+            return target
+        window = await self._model_context_window()
+        if not window:
+            return target
+        share = self._settings.window_share_of_model_context
+        return max(1, min(target, int(window * share)))
+
+    @property
+    def idle_flush_seconds(self) -> int:
+        return self._settings.idle_flush_seconds
 
     def update_settings(self, settings: IngestionSettings) -> None:
         if not isinstance(settings, IngestionSettings):
@@ -132,7 +150,7 @@ class SemanticWindowAdmission:
             return None
 
         selected: list[_Exchange] = []
-        target = self._settings.semantic_window_tokens
+        target = await self._target_tokens()
         close_reason: str | None = None
         selected_token_count = 0
         if self._token_counter_batch is None:
@@ -190,7 +208,7 @@ class SemanticWindowAdmission:
             latest_close = max(exchange.closed_at_ms for exchange in selected)
             if force_flush:
                 close_reason = "explicit_flush"
-            elif self._now_ms() >= latest_close + (self.IDLE_FLUSH_SECONDS * 1000):
+            elif self._now_ms() >= latest_close + (self.idle_flush_seconds * 1000):
                 close_reason = "idle_flush"
             else:
                 return None
@@ -218,7 +236,7 @@ class SemanticWindowAdmission:
             "admission_policy": {
                 "version": self.POLICY_VERSION,
                 "semantic_window_tokens": target,
-                "idle_flush_seconds": self.IDLE_FLUSH_SECONDS,
+                "idle_flush_seconds": self.idle_flush_seconds,
                 "close_reason": close_reason,
                 "whole_exchange_only": True,
             },
@@ -318,9 +336,14 @@ class SemanticWindowAdmission:
             or row.get("exchange_closed_at_ms") is None
         ):
             return None
+        if row.get("user_steer_state") == "pending":
+            return None
         outcome = str(row["user_exchange_outcome"])
         assistant_id = row.get("assistant_message_id")
         if outcome in {"failed", "cancelled"}:
+            return _SkippedExchange()
+        if row.get("user_origin") in BACKGROUND_REPORT_ORIGINS:
+            # A report repeats work recorded elsewhere, such as a job's chat.
             return _SkippedExchange()
         if outcome in {"assistant_final", "clarification"}:
             if (
@@ -333,10 +356,13 @@ class SemanticWindowAdmission:
             # evidence row.  Treat corruption as a FIFO barrier until repaired.
             return None
 
+        anchor_role = str(row.get("anchor_role") or "user")
+        if anchor_role == "assistant" and outcome != "assistant_only":
+            return None
         messages = [
             {
                 "message_id": int(row["user_message_id"]),
-                "role": "user",
+                "role": anchor_role,
                 "content": str(row.get("user_content") or ""),
             }
         ]

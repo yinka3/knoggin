@@ -69,6 +69,34 @@ class MessageWriter:
         async with self.client.transaction() as transaction_cursor:
             yield transaction_cursor
 
+    @_storage_write("write_exchange_embeddings")
+    async def write_exchange_embeddings(
+        self, *, project_id: str, rows: List[Dict]
+    ) -> int:
+        """Store one search vector per closed exchange; rewrites are no-ops."""
+
+        if not rows:
+            return 0
+        written = 0
+        async with self.client.transaction() as cur:
+            for row in rows:
+                await cur.execute(
+                    """
+                    INSERT INTO public.exchange_embeddings (
+                        project_id, session_id, user_message_id, embedding
+                    ) VALUES (%s, %s, %s, %s::vector)
+                    ON CONFLICT (project_id, user_message_id) DO NOTHING
+                    """,
+                    (
+                        project_id,
+                        row["session_id"],
+                        int(row["user_message_id"]),
+                        json.dumps(list(row["embedding"])),
+                    ),
+                )
+                written += cur.rowcount
+        return written
+
     @_storage_write("save_message_logs")
     async def save_message_logs(self, messages: List[Dict], *, cur=None) -> bool:
         if not messages:

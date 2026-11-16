@@ -2,26 +2,41 @@
 
 from __future__ import annotations
 
-from time import time
+from dataclasses import replace
+from time import monotonic
 from typing import Awaitable, Callable, Protocol
+from uuid import UUID
 
 from loguru import logger
 
 from common.conf.domain_config import CompiledDomain
+from common.exceptions import (
+    LLMBudgetExceededError,
+    LLMProviderError,
+    LLMRefusalError,
+)
 from common.schema.context import ContextRevisionOrigin, ContextSnapshot
-from common.schema.episode.models import Episode
+from common.schema.episode.models import Episode, EpisodeCard
 from common.schema.semantic_window import (
     SemanticWindowOrigin,
     SemanticWindowRecord,
     SemanticWindowStage,
 )
 from common.schema.settings import EpisodeSettings, IngestionSettings
-from core.ingestion.batch import SemanticWindowBuild
-from core.ingestion.context_entity_build import ContextEntityBuildService
+from common.utils.time_utils import get_now_ms
+from core.ingestion.batch import EpisodeEvidence, EvidenceMessage, SemanticWindowBuild
+from core.ingestion.entity_build import EntityBuildService
 from core.ingestion.policy import IngestionPolicy
-from core.ingestion.relationship_extractor import ContextRelationshipExtractor
+from core.ingestion.relationship_extractor import RelationshipExtractor
 from core.ingestion.semantic_window_admission import SemanticWindowAdmission
+from core.knowledge.context.maintainer import (
+    ContextMaintainer,
+    ContextMaintenanceBuild,
+    combine_maintenance,
+    maintenance_snapshot,
+)
 from core.knowledge.context.models import (
+    ContextMaintenanceState,
     ContextMaterialization,
     ContextUserEditSynchronizationError,
 )
@@ -31,10 +46,21 @@ from core.knowledge.context.projection import (
     ContextSynchronizationStatus,
 )
 from core.knowledge.context.render import context_document_hash
-from core.knowledge.context.updater import ContextUpdater
+from core.knowledge.context.updater import ContextUpdater, ContextUpdateResult
+from core.knowledge.episodes.embedding import (
+    EpisodeEmbeddingEncoder,
+    encode_episode_embedding_texts,
+    exchange_embedding_text,
+)
 from core.knowledge.episodes.generator import EpisodeGenerator
 from core.knowledge.episodes.policy import EpisodeGenerationPolicy
 from infrastructure.job.base import BaseJob, JobContext, JobResult
+
+
+def _is_transient_failure(exc: Exception) -> bool:
+    if isinstance(exc, LLMBudgetExceededError):
+        return True
+    return isinstance(exc, LLMProviderError) and exc.transient
 
 
 class SemanticEpisodeStore(Protocol):
@@ -56,9 +82,9 @@ class SemanticEpisodeStore(Protocol):
         self, window_id: str, *, user_name: str, project_id: str
     ) -> list[dict]: ...
 
-    async def get_project_context_revision_impact_block_ids(
-        self, revision_id: str, *, user_name: str, project_id: str
-    ) -> frozenset: ...
+    async def get_recent_project_episodes(
+        self, *, user_name: str, project_id: str, limit: int
+    ) -> list[EpisodeCard]: ...
 
     async def get_project_context_block_supports(
         self, block_ids: list[str], *, user_name: str, project_id: str
@@ -87,7 +113,32 @@ class SemanticEpisodeStore(Protocol):
         domain_version: int,
         edit_summary: str,
         materialization: ContextMaterialization,
+        maintained: bool = False,
     ) -> ContextSnapshot: ...
+
+    async def forget_messages(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        values: tuple[str, ...],
+        message_ids: tuple[int, ...],
+        block_ids: tuple[UUID, ...],
+    ) -> list[int]: ...
+
+    async def get_episodes_with_forgotten_sources(
+        self, *, user_name: str, project_id: str
+    ) -> list[dict]: ...
+
+    async def forget_in_episode(self, **kwargs) -> bool: ...
+
+    async def forget_graph(self, **kwargs) -> list[int]: ...
+
+    async def complete_forget_cleanup(self, **kwargs) -> None: ...
+
+    async def get_project_context_maintenance_state(
+        self, revision_id: str, *, user_name: str, project_id: str
+    ) -> ContextMaintenanceState: ...
 
     async def advance_project_semantic_window_stage(
         self,
@@ -112,6 +163,14 @@ class SemanticEpisodeStore(Protocol):
 
     async def commit_project_semantic_knowledge(self, build: SemanticWindowBuild): ...
 
+    async def get_exchanges_without_embeddings(
+        self, *, user_name: str, project_id: str, limit: int
+    ) -> list[dict]: ...
+
+    async def write_exchange_embeddings(
+        self, *, project_id: str, rows: list[dict]
+    ) -> int: ...
+
     async def get_project_semantic_window_committed_entity_ids(
         self, window_id: str, *, user_name: str, project_id: str
     ) -> tuple[int, ...]: ...
@@ -134,6 +193,7 @@ class SemanticEpisodeStore(Protocol):
         next_retry_at_ms: int | None,
         expected_attempt_count: int | None = None,
         expected_episode_result_recorded: bool | None = None,
+        consume_attempt: bool = True,
     ) -> SemanticWindowRecord | None: ...
 
 
@@ -148,6 +208,7 @@ class ProjectSemanticProcessor(BaseJob):
 
     enabled = True
     cadence_seconds = 30
+    EXCHANGE_EMBEDDING_BATCH = 64
     run_immediately_on_first_check = True
 
     def __init__(
@@ -157,22 +218,24 @@ class ProjectSemanticProcessor(BaseJob):
         episode_generator: EpisodeGenerator,
         *,
         settings: IngestionSettings,
+        exchange_embedding_service: EpisodeEmbeddingEncoder | None = None,
         capture_semantic_policy: Callable[[], Awaitable[IngestionPolicy]],
         context_updater: ContextUpdater,
         context_projection: ContextProjection,
-        context_entity_builder: ContextEntityBuildService,
-        context_relationship_extractor: ContextRelationshipExtractor,
+        entity_builder: EntityBuildService,
+        relationship_extractor: RelationshipExtractor,
         publish_committed_entity_ids: Callable[[tuple[int, ...]], Awaitable[None]],
         signal_relationship_advisories: Callable[[], bool] | None = None,
         now_ms: Callable[[], int] | None = None,
+        context_maintainer: ContextMaintainer | None = None,
     ) -> None:
         if not callable(capture_semantic_policy):
             raise TypeError("ProjectSemanticProcessor requires a semantic policy callback")
         required_collaborators = {
             "context_updater": context_updater,
             "context_projection": context_projection,
-            "context_entity_builder": context_entity_builder,
-            "context_relationship_extractor": context_relationship_extractor,
+            "entity_builder": entity_builder,
+            "relationship_extractor": relationship_extractor,
         }
         missing = [
             name for name, collaborator in required_collaborators.items()
@@ -189,15 +252,18 @@ class ProjectSemanticProcessor(BaseJob):
         self.admission = admission
         self.knowledge_store = knowledge_store
         self.episode_generator = episode_generator
+        self._exchange_embedding_service = exchange_embedding_service
         self._context_updater = context_updater
+        self._context_maintainer = context_maintainer
         self._context_projection = context_projection
-        self._context_entity_builder = context_entity_builder
-        self._context_relationship_extractor = context_relationship_extractor
+        self._entity_builder = entity_builder
+        self._relationship_extractor = relationship_extractor
         self._publish_committed_entity_ids = publish_committed_entity_ids
         self._signal_relationship_advisories = signal_relationship_advisories
         self._capture_semantic_policy = capture_semantic_policy
-        self._now_ms = now_ms or (lambda: int(time() * 1000))
+        self._now_ms = now_ms or get_now_ms
         self._timeout_stage: tuple[SemanticWindowRecord, str] | None = None
+        self._flush_requested = False
         self.update_settings(settings)
 
     @property
@@ -212,6 +278,18 @@ class ProjectSemanticProcessor(BaseJob):
 
     def update_episode_settings(self, settings: EpisodeSettings) -> None:
         self.admission.update_episode_settings(settings)
+
+    def request_flush(self) -> None:
+        """Turn finished conversation into memory now instead of after the
+        idle wait. The request holds until no finished exchange is left."""
+
+        self._flush_requested = True
+
+    @property
+    def flush_pending(self) -> bool:
+        """True until a run finds nothing left to claim after a flush request."""
+
+        return self._flush_requested
 
     async def should_run(self, ctx: JobContext) -> bool:
         active = await self.knowledge_store.get_active_project_semantic_window(
@@ -232,6 +310,7 @@ class ProjectSemanticProcessor(BaseJob):
 
     async def execute(self, ctx: JobContext) -> JobResult:
         self._timeout_stage = None
+        await self._embed_closed_exchanges(ctx)
         window = await self.knowledge_store.get_active_project_semantic_window(
             user_name=ctx.user_name,
             project_id=ctx.project_id,
@@ -260,16 +339,62 @@ class ProjectSemanticProcessor(BaseJob):
             await self.synchronize_context_file(ctx, allow_user_edit=False)
         if window is None:
             policy = policy or await self._capture_semantic_policy()
+            force_flush = self._flush_requested
             claimed = await self.admission.claim_next(
                 user_name=ctx.user_name,
                 project_id=ctx.project_id,
                 domain=policy.domain,
                 ingestion_policy=policy,
+                force_flush=force_flush,
             )
             if claimed is None:
+                if force_flush:
+                    # Only a flushed run may consume the request; one that
+                    # started before it may have missed what it asked for.
+                    self._flush_requested = False
                 return JobResult(success=True, summary="No semantic window is due")
             window = claimed.window
+            if claimed.claimed:
+                logger.info(
+                    "Semantic window claimed project={} window={} tokens={} reason={}",
+                    ctx.project_id,
+                    window.window_id,
+                    window.source_token_count,
+                    window.policy_snapshot.get("admission_policy", {}).get("close_reason"),
+                )
         return await self._drain_window(window, ctx)
+
+    async def _embed_closed_exchanges(self, ctx: JobContext) -> None:
+        """Give each closed exchange its own search vector, ahead of windowing.
+
+        Exchange closure wakes this job, so new conversation becomes
+        semantically searchable without waiting for an Episode. Failure only
+        delays search; it never blocks semantic windows.
+        """
+
+        if self._exchange_embedding_service is None:
+            return
+        try:
+            pending = await self.knowledge_store.get_exchanges_without_embeddings(
+                user_name=ctx.user_name,
+                project_id=ctx.project_id,
+                limit=self.EXCHANGE_EMBEDDING_BATCH,
+            )
+            if not pending:
+                return
+            vectors = await encode_episode_embedding_texts(
+                self._exchange_embedding_service,
+                [exchange_embedding_text(row) for row in pending],
+            )
+            await self.knowledge_store.write_exchange_embeddings(
+                project_id=ctx.project_id,
+                rows=[
+                    {**row, "embedding": vector}
+                    for row, vector in zip(pending, vectors, strict=True)
+                ],
+            )
+        except Exception as exc:
+            logger.warning("Exchange embedding deferred: {}", exc)
 
     async def _drain_window(
         self,
@@ -300,6 +425,7 @@ class ProjectSemanticProcessor(BaseJob):
 
             stage_name, execute_stage = stage
             self._timeout_stage = (window, stage_name)
+            stage_started = monotonic()
             result = await execute_stage(window, ctx)
             self._timeout_stage = None
             if not result.success:
@@ -311,6 +437,13 @@ class ProjectSemanticProcessor(BaseJob):
                 project_id=ctx.project_id,
             )
             if reloaded is None:
+                logger.info(
+                    "Semantic stage committed project={} window={} stage={} duration_s={:.2f} "
+                    "next=completed recovered={} result={}",
+                    ctx.project_id, window.window_id, stage_name,
+                    monotonic() - stage_started,
+                    window.last_failure_code is not None, result.summary,
+                )
                 return JobResult(
                     success=True,
                     summary=(
@@ -337,6 +470,13 @@ class ProjectSemanticProcessor(BaseJob):
                     success=True,
                     summary="Semantic processor stopped without durable progress",
                 )
+            logger.info(
+                "Semantic stage committed project={} window={} stage={} duration_s={:.2f} "
+                "next={} recovered={} result={}",
+                ctx.project_id, window.window_id, stage_name,
+                monotonic() - stage_started, reloaded.stage.value,
+                window.last_failure_code is not None, result.summary,
+            )
             window = reloaded
 
     async def on_timeout(self, ctx: JobContext) -> None:
@@ -413,6 +553,25 @@ class ProjectSemanticProcessor(BaseJob):
                 status=ContextSynchronizationStatus.PROJECTION_PENDING,
             )
 
+    def read_context_file(self) -> tuple[str, str] | None:
+        return self._context_projection.read_local_file()
+
+    async def discard_context_edits(
+        self, *, user_name: str, project_id: str, expected_file_hash: str
+    ) -> str | None:
+        policy = await self._capture_semantic_policy()
+        return await self._context_projection.discard_local_edits(
+            user_name=user_name, project_id=project_id,
+            domain=policy.domain, expected_file_hash=expected_file_hash,
+        )
+
+    async def change_user_note(self, *, user_name: str, project_id: str, **change):
+        policy = await self._capture_semantic_policy()
+        return await self._context_projection.change_user_note(
+            user_name=user_name, project_id=project_id,
+            ingestion_policy=policy, **change,
+        )
+
     async def _execute_episode_stage(
         self, window: SemanticWindowRecord, ctx: JobContext
     ) -> JobResult:
@@ -446,13 +605,22 @@ class ProjectSemanticProcessor(BaseJob):
                 if not policy.enabled:
                     episodes = []
                 else:
-                    build = await self.episode_generator.generate(
-                        user_name=ctx.user_name,
-                        project_id=ctx.project_id,
-                        messages=messages,
-                        policy=policy,
-                    )
-                    episodes = build.final_episodes
+                    try:
+                        build = await self.episode_generator.generate(
+                            user_name=ctx.user_name,
+                            project_id=ctx.project_id,
+                            messages=messages,
+                            policy=policy,
+                        )
+                        episodes = build.final_episodes
+                    except LLMRefusalError:
+                        if not self._is_last_attempt(window):
+                            raise
+                        logger.warning(
+                            "The model refused window {} on its last attempt; "
+                            "recording no Episodes", window.window_id,
+                        )
+                        episodes = []
             persisted = await self.knowledge_store.write_project_semantic_window_episodes(
                 window_id=str(window.window_id),
                 episodes=episodes,
@@ -497,6 +665,7 @@ class ProjectSemanticProcessor(BaseJob):
                 project_id=ctx.project_id,
             )
             if existing is not None:
+                await self._forget_in_episodes(ctx)
                 await self._advance_context_stage(window, ctx, existing)
                 return JobResult(
                     success=True,
@@ -532,22 +701,66 @@ class ProjectSemanticProcessor(BaseJob):
             if window.origin is SemanticWindowOrigin.CONVERSATION and not messages:
                 raise ValueError("Conversation Context stage has no frozen evidence")
             domain = self._frozen_domain(window)
-            result = await self._context_updater.update(
-                user_name=ctx.user_name,
-                project_id=ctx.project_id,
-                domain=domain,
-                snapshot=snapshot,
-                messages=messages,
-                assistant_source_refs=(
-                    await self.knowledge_store.get_project_semantic_window_assistant_source_refs(
-                        str(window.window_id),
-                        user_name=ctx.user_name,
-                        project_id=ctx.project_id,
-                    )
-                ),
-                episodes=episodes,
+            context_settings = self._settings.context
+            # Only one window per project is open, so every other Episode is
+            # from an earlier window.
+            this_window = {episode.episode_id for episode in episodes}
+            recent = (
+                await self.knowledge_store.get_recent_project_episodes(
+                    user_name=ctx.user_name,
+                    project_id=ctx.project_id,
+                    limit=context_settings.earlier_episodes + len(this_window),
+                )
+                if context_settings.earlier_episodes
+                else []
             )
+            earlier = [
+                episode for episode in recent if episode.episode_id not in this_window
+            ][: context_settings.earlier_episodes]
+            try:
+                result = await self._context_updater.update(
+                    user_name=ctx.user_name,
+                    project_id=ctx.project_id,
+                    domain=domain,
+                    snapshot=snapshot,
+                    messages=messages,
+                    assistant_source_refs=(
+                        await self.knowledge_store.get_project_semantic_window_assistant_source_refs(
+                            str(window.window_id),
+                            user_name=ctx.user_name,
+                            project_id=ctx.project_id,
+                        )
+                    ),
+                    earlier_episodes=earlier[::-1],
+                    budget_tokens=context_settings.max_tokens,
+                )
+            except LLMRefusalError:
+                if not self._is_last_attempt(window):
+                    raise
+                logger.warning(
+                    "The model refused window {} on its last attempt; "
+                    "leaving Context unchanged", window.window_id,
+                )
+                result = ContextUpdateResult(
+                    materialization=None,
+                    edit_summary="The model refused this window",
+                    operation_count=0,
+                )
+            # Before the commit, so a retry that resumes the committed revision
+            # cannot skip it. Forgetting the same messages again is a no-op.
+            for request in result.forget_requests:
+                await self.knowledge_store.forget_messages(
+                    user_name=ctx.user_name,
+                    project_id=ctx.project_id,
+                    values=request.values,
+                    message_ids=request.message_ids,
+                    block_ids=request.block_ids,
+                )
             if result.materialization is not None:
+                result, maintained = await self._maintain_context(
+                    ctx, domain, snapshot, result, episodes=episodes, earlier=earlier[::-1]
+                )
+                assert result.materialization is not None
                 committed = await self.knowledge_store.commit_project_context_revision(
                     user_name=ctx.user_name,
                     project_id=ctx.project_id,
@@ -559,6 +772,7 @@ class ProjectSemanticProcessor(BaseJob):
                     domain_version=domain.version,
                     edit_summary=result.edit_summary,
                     materialization=result.materialization,
+                    maintained=maintained,
                 )
             elif snapshot is None:
                 # A no-op first window still needs an immutable, addressable
@@ -600,6 +814,7 @@ class ProjectSemanticProcessor(BaseJob):
             else:
                 committed = snapshot
 
+            await self._forget_in_episodes(ctx)
             await self._advance_context_stage(window, ctx, committed)
             return JobResult(
                 success=True,
@@ -617,6 +832,133 @@ class ProjectSemanticProcessor(BaseJob):
                 failure_stage="context_update",
             )
             return JobResult(success=False, summary="Semantic Context stage failed")
+
+    async def _forget_in_episodes(self, ctx: JobContext) -> None:
+        """Rewrite every Episode linked to a message forgotten since its last
+        update. A failed window's retry finds and finishes the rest; an
+        Episode edited meanwhile is read again on that retry.
+        """
+
+        episodes = await self.knowledge_store.get_episodes_with_forgotten_sources(
+            user_name=ctx.user_name, project_id=ctx.project_id
+        )
+        stale = 0
+        for episode in episodes:
+            rewrite, embedding = await self.episode_generator.rewrite_without(
+                user_name=ctx.user_name,
+                episode=episode,
+                forgotten_texts=list(episode["forgotten_texts"]),
+            )
+            stored = await self.knowledge_store.forget_in_episode(
+                episode_id=episode["episode_id"],
+                user_name=ctx.user_name,
+                project_id=ctx.project_id,
+                summary=rewrite.summary,
+                new_developments=rewrite.new_developments,
+                updates=rewrite.updates,
+                unresolved=rewrite.unresolved,
+                embedding=embedding,
+                forgotten_message_ids=list(episode["forgotten_ids"]),
+                expected_updated_at=episode["updated_at"],
+            )
+            stale += not stored
+        if stale:
+            raise RuntimeError(f"{stale} Episodes changed while forgetting; retrying")
+        deleted_ids = await self.knowledge_store.forget_graph(
+            user_name=ctx.user_name, project_id=ctx.project_id,
+        )
+        if deleted_ids:
+            await self._publish_committed_entity_ids(tuple(deleted_ids))
+        await self.knowledge_store.complete_forget_cleanup(
+            user_name=ctx.user_name, project_id=ctx.project_id,
+        )
+
+    async def _maintain_context(
+        self,
+        ctx: JobContext,
+        domain: CompiledDomain,
+        snapshot: ContextSnapshot | None,
+        result: ContextUpdateResult,
+        *,
+        episodes: list[Episode],
+        earlier: list[EpisodeCard],
+    ) -> tuple[ContextUpdateResult, bool]:
+        """Run the maintainer on the updated Context when it is due.
+
+        Due after maintain_every_episodes Episodes from Context-changing
+        windows, or when Context is over budget. Any failure skips it; the
+        per-window update still commits.
+        """
+
+        update = result.materialization
+        if self._context_maintainer is None or update is None:
+            return result, False
+        settings = self._settings.context
+        try:
+            state = (
+                await self.knowledge_store.get_project_context_maintenance_state(
+                    str(snapshot.revision_id),
+                    user_name=ctx.user_name,
+                    project_id=ctx.project_id,
+                )
+                if snapshot is not None
+                else ContextMaintenanceState(0, {})
+            )
+            # This window changed Context, so its Episodes age every block it
+            # did not write.
+            ages = {
+                block.block_id: (
+                    0 if block.block_id in update.new_block_ids
+                    else state.block_ages.get(block.block_id, 0) + len(episodes)
+                )
+                for block in update.blocks
+            }
+            supports: dict = {}
+            for support in update.supports:
+                supports.setdefault(support.block_id, []).append(support)
+            older = [str(b.block_id) for b in update.blocks if b.block_id not in supports]
+            supports.update(
+                await self.knowledge_store.get_project_context_block_supports(
+                    older, user_name=ctx.user_name, project_id=ctx.project_id
+                )
+            )
+            build = ContextMaintenanceBuild(
+                domain=domain,
+                snapshot=maintenance_snapshot(
+                    update, project_id=ctx.project_id, domain=domain
+                ),
+                ages=ages,
+                supports=supports,
+                budget_tokens=settings.max_tokens,
+                max_removed_share=settings.maintain_max_removed_share,
+                earlier_episodes=earlier,
+                count_tokens=self._context_maintainer.count_tokens,
+            )
+            due = state.episodes_since_maintenance + len(episodes)
+            if (
+                due < settings.maintain_every_episodes
+                and build.context_tokens() <= settings.max_tokens
+            ):
+                return result, False
+            maintenance = await self._context_maintainer.maintain(
+                user_name=ctx.user_name, build=build
+            )
+        except Exception as exc:
+            logger.warning("Context maintenance skipped: {}", exc)
+            return result, False
+        if maintenance.materialization is None:
+            return result, True
+        return replace(
+            result,
+            materialization=combine_maintenance(update, maintenance.materialization),
+            edit_summary=f"{result.edit_summary}; {maintenance.summary}"[:2_000],
+        ), True
+
+    def _is_last_attempt(self, window: SemanticWindowRecord) -> bool:
+        # A refusal can be chance, so it retries like any failure. On the last
+        # attempt the stage records nothing instead: the window's messages stay
+        # searchable and later windows are no longer blocked behind it.
+        return window.attempt_count + 1 >= self._settings.semantic_window_retry.max_attempts
 
     def _episode_is_due(self, window: SemanticWindowRecord) -> bool:
         if window.stage is not SemanticWindowStage.CLAIMED:
@@ -653,63 +995,15 @@ class ProjectSemanticProcessor(BaseJob):
     async def _execute_knowledge_stage(
         self, window: SemanticWindowRecord, ctx: JobContext
     ) -> JobResult:
-        """Rebuild one frozen Context impact closure and atomically commit it."""
+        """Extract this window's Episodes into Knowledge and commit it atomically."""
 
         try:
-            if window.context_revision_id is None:
-                raise RuntimeError("Context-committed window has no Context revision")
-            context = await self.knowledge_store.get_project_context_snapshot(
-                str(window.context_revision_id),
-                user_name=ctx.user_name,
-                project_id=ctx.project_id,
-            )
-            if context is None:
-                raise RuntimeError("Context checkpoint was not materialized")
-            # The revision-owned window is the only window allowed to replay
-            # its persisted impact.  A later no-op window checkpoints the
-            # same immutable revision with an empty effective impact; the
-            # writer rechecks that durable ownership before advancing it.
-            impact_block_ids = (
-                await self.knowledge_store.get_project_context_revision_impact_block_ids(
-                    str(context.revision_id),
-                    user_name=ctx.user_name,
-                    project_id=ctx.project_id,
-                )
-                if context.window_id == window.window_id
-                else frozenset()
-            )
-            if impact_block_ids:
-                supports = await self.knowledge_store.get_project_context_block_supports(
-                    [str(block.block_id) for block in context.blocks],
-                    user_name=ctx.user_name,
-                    project_id=ctx.project_id,
-                )
-                messages = (
-                    await self.knowledge_store.get_project_semantic_window_evidence_messages(
-                        str(window.window_id),
-                        user_name=ctx.user_name,
-                        project_id=ctx.project_id,
-                    )
-                )
-            else:
-                supports = {}
-                messages = []
             build = SemanticWindowBuild.from_committed_window(
-                window=window,
-                context=context,
-                impact_block_ids=impact_block_ids,
-                block_supports=supports,
-                message_text_by_id={
-                    int(message["message_id"]): str(message["content"])
-                    for message in messages
-                },
+                window=window, **await self._knowledge_input(window, ctx),
             )
-            if build.impact_block_ids:
-                await self._context_entity_builder.build(build)
-                await self._context_relationship_extractor.extract(build)
-                if build.unknown_endpoint_diagnostics:
-                    await self._context_entity_builder.build(build)
-                    await self._context_relationship_extractor.extract(build)
+            if build.episodes:
+                await self._entity_builder.build(build)
+                await self._relationship_extractor.extract(build)
             else:
                 build.set_empty_knowledge_result()
             summary = await self.knowledge_store.commit_project_semantic_knowledge(build)
@@ -736,6 +1030,86 @@ class ProjectSemanticProcessor(BaseJob):
                 failure_stage="knowledge_reconciliation",
             )
             return JobResult(success=False, summary="Semantic Knowledge stage failed")
+
+    async def _knowledge_input(self, window: SemanticWindowRecord, ctx: JobContext) -> dict:
+        """The window's Episodes with their messages, earlier summaries, and hints."""
+
+        scope = {"user_name": ctx.user_name, "project_id": ctx.project_id}
+        episodes = await self.knowledge_store.get_project_semantic_window_episode_result(
+            str(window.window_id), **scope
+        ) or []
+        if not episodes:
+            return {"episodes": ()}
+        # What the user asked to forget never becomes Knowledge.
+        messages = {
+            int(row["message_id"]): row
+            for row in await self.knowledge_store.get_project_semantic_window_evidence_messages(
+                str(window.window_id), **scope
+            )
+            if row.get("lifecycle_state") != "forgotten"
+        }
+        evidence = []
+        for episode in episodes:
+            covered = tuple(
+                EvidenceMessage(
+                    message_id=item.message_id,
+                    role=str(messages[item.message_id]["role"]),
+                    content=str(messages[item.message_id]["content"]),
+                    timestamp_ms=int(messages[item.message_id]["timestamp_ms"] or 0),
+                )
+                for item in sorted(episode.messages, key=lambda m: m.message_position)
+                if item.message_id in messages
+            )
+            if covered:
+                evidence.append(EpisodeEvidence(
+                    episode_id=episode.episode_id, summary=episode.summary, messages=covered,
+                ))
+        policy = self._frozen_policy(window)
+        lookback = max(policy.vp01_episode_lookback, policy.vp02_episode_lookback)
+        earlier: list[str] = []
+        if lookback:
+            own = {episode.episode_id for episode in episodes}
+            recent = await self.knowledge_store.get_recent_project_episodes(
+                limit=lookback + len(own), **scope
+            )
+            earlier = [card.summary for card in recent if card.episode_id not in own][
+                :lookback
+            ][::-1]
+        return {
+            "episodes": tuple(evidence),
+            "earlier_summaries": earlier,
+            "context_hints": await self._context_hints(window, ctx, set(messages)),
+        }
+
+    async def _context_hints(
+        self, window: SemanticWindowRecord, ctx: JobContext, message_ids: set[int]
+    ) -> dict[int, tuple[str, ...]]:
+        """For each message, the current Context blocks it supports."""
+
+        if window.context_revision_id is None:
+            return {}
+        scope = {"user_name": ctx.user_name, "project_id": ctx.project_id}
+        context = await self.knowledge_store.get_project_context_snapshot(
+            str(window.context_revision_id), **scope
+        )
+        if context is None or not context.blocks:
+            return {}
+        supports = await self.knowledge_store.get_project_context_block_supports(
+            [str(block.block_id) for block in context.blocks], **scope
+        )
+        markdown = {block.block_id: block.markdown for block in context.blocks}
+        hints: dict[int, list[str]] = {}
+        for block_id, rows in supports.items():
+            for support in rows:
+                if support.message_id in message_ids:
+                    hints.setdefault(support.message_id, []).append(markdown[block_id])
+        return {message_id: tuple(values) for message_id, values in hints.items()}
+
+    @staticmethod
+    def _frozen_policy(window: SemanticWindowRecord) -> IngestionPolicy:
+        return IngestionPolicy.from_semantic_window_snapshot(
+            window.policy_snapshot.get("ingestion_policy")
+        )
 
     async def _execute_finalization_stage(
         self, window: SemanticWindowRecord, ctx: JobContext
@@ -850,14 +1224,22 @@ class ProjectSemanticProcessor(BaseJob):
     ) -> None:
         failed_at_ms = self._now_ms()
         retry = self._settings.semantic_window_retry
+        # Provider outages and a spent budget say nothing about this window's
+        # content. Retry them at the slowest cadence without spending the
+        # bounded attempts reserved for failures that may never succeed.
+        consume_attempt = not _is_transient_failure(exc)
         attempt = window.attempt_count + 1
-        delay_seconds = min(
-            retry.initial_backoff_seconds * (2 ** max(0, attempt - 1)),
-            retry.max_backoff_seconds,
+        delay_seconds = (
+            min(
+                retry.initial_backoff_seconds * (2 ** max(0, attempt - 1)),
+                retry.max_backoff_seconds,
+            )
+            if consume_attempt
+            else retry.max_backoff_seconds
         )
         next_retry_at_ms = (
             failed_at_ms + (delay_seconds * 1000)
-            if attempt < retry.max_attempts
+            if attempt < retry.max_attempts or not consume_attempt
             else None
         )
         attempt_guard = (
@@ -880,6 +1262,14 @@ class ProjectSemanticProcessor(BaseJob):
             error_summary=str(exc)[:2_000] or type(exc).__name__,
             failed_at_ms=failed_at_ms,
             next_retry_at_ms=next_retry_at_ms,
+            consume_attempt=consume_attempt,
             **attempt_guard,
             **checkpoint_guard,
+        )
+        logger.warning(
+            "Semantic window failed project={} window={} stage={} error={} "
+            "attempt={} charged={} retry_at_ms={} terminal={}",
+            ctx.project_id, window.window_id, failure_stage,
+            type(exc).__name__, attempt, consume_attempt,
+            next_retry_at_ms, next_retry_at_ms is None,
         )

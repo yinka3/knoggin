@@ -1,13 +1,11 @@
 # Knoggin Web
 
-This directory contains the TypeScript/React frontend. The previous FastAPI
-backend has been removed so a new API integration can be built from scratch.
+This directory is for the TypeScript/React frontend. Its page, layout, API
+client, and API contract files are currently absent from the working tree.
+The local HTTP API lives in [`../api/`](../api/README.md); frontend integration
+will follow as its routes are built.
 
 ## Local development
 
-1. Run `npm install`.
-2. Run `npm run dev`.
-
-The existing API client is a starting point for the new integration. It defaults
-to `http://127.0.0.1:8000` and can be configured with
-`NEXT_PUBLIC_KNOGGIN_API_BASE_URL` in `.env.local`.
+The Next.js package configuration is present, but the frontend source must be
+restored or rebuilt before `npm run dev` can serve the app.

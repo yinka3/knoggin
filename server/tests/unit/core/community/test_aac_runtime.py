@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from common.schema.settings import SearchSettings
-from core.agent.services.agent_manager import AgentManager
+from core.agent.agent_manager import AgentManager
 from core.community.aac_store import AACStore
 from core.community.read_context import AACReadContext
 from core.community.runtime import AACAdmission, AACAdmissionOutcome, AACRuntime

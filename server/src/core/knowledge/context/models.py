@@ -72,3 +72,15 @@ class ContextMaterialization:
         for support in self.supports:
             if support.block_id not in self.new_block_ids:
                 raise ValueError("Context support may only be attached to a new block version")
+
+
+@dataclass(frozen=True, slots=True)
+class ContextMaintenanceState:
+    """What the maintainer trigger and its age rule read from durable history.
+
+    Ages count Episodes from Context-changing windows after a block version
+    was written; a window that changed nothing ages nothing.
+    """
+
+    episodes_since_maintenance: int
+    block_ages: dict[UUID, int]

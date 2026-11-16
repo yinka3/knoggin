@@ -1,8 +1,4 @@
-"""Internal agent execution-event contracts.
-
-The application facade owns the SDK contract; FastAPI owns the UI HTTP
-and SSE projection.
-"""
+"""Internal agent execution-event contracts, independent of API transport."""
 
 from typing import (
     Annotated,
@@ -81,7 +77,7 @@ class StepCompletedEvent(_StrictStreamDict):
 class StepErrorData(_StrictStreamDict):
     message: str
     kind: Literal["provider", "formatting"]
-    code: NotRequired[Literal["llm_budget_exhausted"]]
+    code: NotRequired[Literal["llm_budget_exhausted", "prompt_budget_exceeded", "provider_context_limit"]]
     retryable: NotRequired[StrictBool]
     usage: NotRequired[StreamUsage]
 
@@ -136,6 +132,30 @@ class ToolErrorEvent(_StrictStreamDict):
     data: ToolErrorData
 
 
+class CommandOutputData(_StrictStreamDict):
+    tool: NonBlankString
+    call_id: NonBlankString
+    stream: Literal["stdout", "stderr"]
+    text: str
+
+
+class CommandOutputEvent(_StrictStreamDict):
+    event: Literal["command_output"]
+    data: CommandOutputData
+
+
+class CommandStatusData(_StrictStreamDict):
+    tool: NonBlankString
+    call_id: NonBlankString
+    message: str
+    timeout_seconds: NonNegativeInt
+
+
+class CommandStatusEvent(_StrictStreamDict):
+    event: Literal["command_status"]
+    data: CommandStatusData
+
+
 class ResponseData(_StrictStreamDict):
     content: str
     usage: StreamUsage
@@ -171,7 +191,7 @@ class ClarificationEvent(_StrictStreamDict):
 
 class ErrorData(_StrictStreamDict):
     message: NonBlankString
-    code: NotRequired[Literal["llm_budget_exhausted", "workspace_conflict"]]
+    code: NotRequired[Literal["llm_budget_exhausted", "prompt_budget_exceeded", "provider_context_limit", "workspace_conflict"]]
     retryable: NotRequired[StrictBool]
 
 
@@ -180,18 +200,41 @@ class ErrorEvent(_StrictStreamDict):
     data: ErrorData
 
 
-# These events are engine-internal. The application facade wraps them in
-# SDK events, and FastAPI projects browser-safe HTTP/SSE events. Neither
-# boundary serializes this union directly.
+class SteerAppliedData(_StrictStreamDict):
+    steer_id: str
+
+
+class SteerAppliedEvent(_StrictStreamDict):
+    event: Literal["steer_applied"]
+    data: SteerAppliedData
+
+
+class PromptBudgetSelectedData(_StrictStreamDict):
+    agent_id: NonBlankString
+    model: NonBlankString
+    budget: Dict[str, Any]
+
+
+class PromptBudgetSelectedEvent(_StrictStreamDict):
+    event: Literal["prompt_budget_selected"]
+    data: PromptBudgetSelectedData
+
+
+# These events are engine-internal. API routes translate them into public
+# HTTP/SSE events rather than serializing this union directly.
 AgentExecutionEvent = Union[
     TokenEvent,
     ThinkingEvent,
     ToolStartEvent,
     ToolEndEvent,
     ToolErrorEvent,
+    CommandOutputEvent,
+    CommandStatusEvent,
     ResponseEvent,
     ClarificationEvent,
     ErrorEvent,
+    SteerAppliedEvent,
+    PromptBudgetSelectedEvent,
 ]
 
 AgentStreamEvent = Union[InternalAgentStreamEvent, AgentExecutionEvent]

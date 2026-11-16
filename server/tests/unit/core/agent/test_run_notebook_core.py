@@ -1,5 +1,16 @@
+from common.schema.agent.settings import AgentLimitSettings, PromptMemoryBudget
 from core.agent.notebook import NotebookCapacity, RunNotebook
 from core.agent.run import AgentRunLimits
+
+
+def test_configured_notebook_render_limit_cannot_exceed_input_budget():
+    settings = AgentLimitSettings(max_notebook_render_tokens=12_000)
+    assert AgentRunLimits.from_settings(
+        settings, PromptMemoryBudget(input_tokens=20_000)
+    ).max_notebook_render_tokens == 12_000
+    assert AgentRunLimits.from_settings(
+        settings, PromptMemoryBudget(input_tokens=8_000)
+    ).max_notebook_render_tokens == 8_000
 
 
 def test_notebook_deduplicates_entities_and_creates_reference_pages_and_hints():
@@ -260,7 +271,12 @@ def test_notebook_capacity_rejects_an_oversized_result_atomically():
 
     rejected = notebook.apply(
         "search_knowledge_messages",
-        {"data": [{"id": "m2", "message": "second"}]},
+        {
+            "data": [
+                {"id": "m2", "message": "second"},
+                {"id": "m3", "message": "third"},
+            ]
+        },
     )
 
     assert first.accepted is True
@@ -461,3 +477,128 @@ def test_rollover_discards_older_inactive_contributions():
 
     retained_ids = {item["id"] for item in notebook.section_items("messages")}
     assert retained_ids == {"m1", "m2", "m3"}
+
+
+def _episode_result(prefix: str, count: int) -> dict:
+    return {
+        "data": {
+            "results": [
+                {
+                    "episodes": [
+                        {"episode_id": f"{prefix}{index}", "summary": "A memory"}
+                        for index in range(count)
+                    ]
+                }
+            ]
+        }
+    }
+
+
+def _episode_ids(notebook: RunNotebook) -> list[str]:
+    return [item["episode_id"] for item in notebook.section_items("episodes")]
+
+
+def test_new_episodes_replace_the_oldest_when_the_notebook_is_full():
+    notebook = RunNotebook(capacity=NotebookCapacity(max_episodes=8))
+    notebook.apply("search_episodes", _episode_result("first", 5))
+
+    second = notebook.apply("search_episodes", _episode_result("second", 5))
+
+    assert second.accepted is True
+    assert second.reason.startswith("rolled_over:")
+    assert _episode_ids(notebook) == [
+        "first2", "first3", "first4",
+        "second0", "second1", "second2", "second3", "second4",
+    ]
+
+
+def test_one_new_episode_gets_into_a_full_notebook_at_the_cost_of_one():
+    notebook = RunNotebook(capacity=NotebookCapacity(max_episodes=8))
+    notebook.apply("search_episodes", _episode_result("first", 8))
+
+    second = notebook.apply("search_episodes", _episode_result("second", 1))
+
+    assert second.accepted is True
+    assert _episode_ids(notebook) == [
+        *(f"first{index}" for index in range(1, 8)),
+        "second0",
+    ]
+
+
+def test_episodes_displaced_from_the_notebook_stay_on_the_previous_page():
+    notebook = RunNotebook(capacity=NotebookCapacity(max_episodes=8))
+    notebook.apply("search_episodes", _episode_result("first", 5))
+
+    notebook.apply("search_episodes", _episode_result("second", 5))
+
+    previous = notebook.previous_page
+    assert [item["episode_id"] for item in previous.section_items("episodes")] == [
+        f"first{index}" for index in range(5)
+    ]
+
+
+def test_a_result_too_big_for_an_empty_notebook_is_still_rejected():
+    notebook = RunNotebook(capacity=NotebookCapacity(max_episodes=8))
+    notebook.apply("search_episodes", _episode_result("first", 5))
+
+    too_big = notebook.apply("search_episodes", _episode_result("second", 9))
+
+    assert too_big.accepted is False
+    assert too_big.reason == "capacity"
+    assert _episode_ids(notebook) == [f"first{index}" for index in range(5)]
+
+
+def _events_result():
+    return {
+        "data": {
+            "results": [
+                {
+                    "events": [
+                        {
+                            "episode_id": "episode-uuid-1",
+                            "what": "Ada took a day hike at Muir Woods",
+                            "kind": "trip",
+                            "when": "2023-03-10",
+                            "precision": "day",
+                            "date_text": "just got back",
+                            "in_range": "inside",
+                        },
+                        {
+                            "episode_id": "episode-uuid-2",
+                            "what": "Ada volunteered at a fundraising dinner",
+                            "kind": "other",
+                            "when": "2023-02-01 to 2023-02-28",
+                            "precision": "month",
+                            "date_text": "back in February",
+                            "in_range": "overlaps",
+                        },
+                    ]
+                }
+            ]
+        }
+    }
+
+
+def test_listed_events_render_by_date_with_their_episode_handle():
+    from core.agent.notebook_renderer import render_notebook
+
+    notebook = RunNotebook()
+    applied = notebook.apply("list_events", _events_result())
+
+    page = render_notebook(notebook, local_uuid_references={"ep_abc123": "episode-uuid-1"})
+
+    assert applied.accepted and len(applied.references) == 2
+    assert "Events (one line per mention" in page
+    assert "2023-03-10 [trip] Ada took a day hike at Muir Woods (from ep_abc123" in page
+    assert "may overlap the asked dates" in page
+    assert '"back in February"' in page
+
+
+def test_the_same_event_listed_twice_is_kept_once():
+    notebook = RunNotebook()
+    notebook.apply("list_events", _events_result())
+
+    second = notebook.apply("list_events", _events_result())
+
+    assert second.changed is False
+    assert len(notebook.section_items("events")) == 2

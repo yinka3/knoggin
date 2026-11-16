@@ -612,3 +612,29 @@ async def test_memory_tools_return_clean_defaults_without_active_agent():
     for operation in operations:
         with pytest.raises(ToolExecutionError, match="No durable agent identity"):
             await operation
+
+
+def test_every_tool_schema_is_accepted_by_strict_providers():
+    """OpenAI rejects a tool whose parameters are not a plain top-level object."""
+    from common.schema.agent.tool_contracts import TOOL_SCHEMAS
+
+    rejected = {"oneOf", "anyOf", "allOf", "enum", "const", "not"}
+    for schema in TOOL_SCHEMAS:
+        parameters = schema["function"]["parameters"]
+        assert parameters.get("type") == "object", schema["function"]["name"]
+        assert not rejected & set(parameters), schema["function"]["name"]
+
+
+@pytest.mark.no_network
+async def test_execute_tool_rejects_misspelled_argument_names():
+    # A dropped misspelling would run the tool unfiltered and look like success.
+    with pytest.raises(ToolExecutionError) as failure:
+        await execute_tool(
+            DispatchTools(),
+            "search_knowledge_messages",
+            {"query": "trip", "limt": 3},
+        )
+
+    assert "unknown argument name" in failure.value.message
+    assert "limit" in failure.value.message
+    assert "limt" not in failure.value.message

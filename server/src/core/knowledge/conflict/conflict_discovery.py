@@ -6,6 +6,8 @@ import json
 from collections.abc import Awaitable, Callable, Iterable
 from typing import Any
 
+from loguru import logger
+
 from common.schema.evidence import EvidenceBundle, EvidenceTraversalLimits
 from core.knowledge.conflict.conflicts import (
     ConflictDiscoveryCursor,
@@ -144,11 +146,16 @@ class ConflictPacketBuilder:
 
             if estimated_tokens > max_tokens:
                 if not accepted_seeds:
-                    raise ValueError(
-                        "Conflict-discovery seed "
-                        f"{seed_id} with required provenance requires "
-                        f"{estimated_tokens} tokens; ceiling is {max_tokens}"
+                    # This seed can never fit; raising here would stop
+                    # discovery for every later observation in the project.
+                    logger.warning(
+                        "Skipping conflict-discovery seed {} with required provenance "
+                        "of {} tokens; ceiling is {}",
+                        seed_id,
+                        estimated_tokens,
+                        max_tokens,
                     )
+                    continue
                 break
 
             accepted_seeds[seed_id] = seed

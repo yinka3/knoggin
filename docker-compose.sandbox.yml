@@ -1,0 +1,11 @@
+# Opt in to project workspace commands with:
+# docker compose -f docker-compose.yml -f docker-compose.sandbox.yml up -d
+# Set the three required host values described in README.md first.
+services:
+  api:
+    environment:
+      - KNOGGIN_HOST_LIBRARY_ROOT=${KNOGGIN_HOST_LIBRARY_ROOT:?Set the absolute host path to the project library}
+    volumes:
+      - ${CONTAINER_RUNTIME_SOCKET:?Set the host Docker or Podman socket path}:/var/run/docker.sock
+    group_add:
+      - "${CONTAINER_RUNTIME_GID:?Set the numeric socket group ID}"

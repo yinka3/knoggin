@@ -17,10 +17,10 @@ class InlineBackgroundWork:
 
 class IndexingEmbedding:
     async def encode(self, values):
-        return [[0.0] * 1024 for _ in values]
+        return [[0.0] * 768 for _ in values]
 
     async def encode_single(self, _value):
-        return [0.0] * 1024
+        return [0.0] * 768
 
     async def encode_query(self, value):
         return await self.encode_single(value)

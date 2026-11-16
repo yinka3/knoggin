@@ -3,8 +3,9 @@
 import json
 import uuid
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Union
 
+from common.exceptions import SavedWebLinkAlreadyExistsError
 from common.utils.time_utils import parse_iso_time
 from infrastructure.postgres_client import PostgresClient
 
@@ -20,7 +21,11 @@ class DocumentWriter:
         self._project_id = project_id
 
     async def queue_legacy_locator_reindex(
-        self, *, pdf_fingerprint: str, notebook_fingerprint: str
+        self,
+        *,
+        standard_pdf_fingerprint: str,
+        ocr_pdf_fingerprint: str,
+        notebook_fingerprint: str,
     ) -> int:
         """Queue old indexed snapshots while preserving them until replacement."""
         async with self._client.transaction() as cur:
@@ -35,11 +40,20 @@ class DocumentWriter:
                   AND document.status = 'indexed'
                   AND document.current_snapshot_id = snapshot.snapshot_id
                   AND snapshot.source_content_hash = document.content_hash
-                  AND ((document.extension = '.pdf' AND snapshot.parser_fingerprint <> %s)
+                  AND ((document.extension = '.pdf' AND snapshot.parser_fingerprint <>
+                        CASE document.extraction_mode
+                            WHEN 'ocr' THEN %s
+                            ELSE %s
+                        END)
                     OR (document.extension = '.ipynb' AND snapshot.parser_fingerprint <> %s))
                 RETURNING document.document_id
                 """,
-                (self._project_id, pdf_fingerprint, notebook_fingerprint),
+                (
+                    self._project_id,
+                    ocr_pdf_fingerprint,
+                    standard_pdf_fingerprint,
+                    notebook_fingerprint,
+                ),
             )
             return len(await cur.fetchall())
 
@@ -138,6 +152,8 @@ class DocumentWriter:
         extension: str,
         size_bytes: int,
         content_hash: str,
+        extraction_mode: str,
+        extraction_strategy: str,
         created_at: str,
     ) -> None:
         """
@@ -154,6 +170,8 @@ class DocumentWriter:
                     extension,
                     size_bytes,
                     content_hash,
+                    extraction_mode,
+                    extraction_strategy,
                     scan_managed,
                     status,
                     created_at,
@@ -161,7 +179,7 @@ class DocumentWriter:
                 )
                 VALUES (
                     %s, %s,
-                    %s, %s, %s, %s, %s, false, 'queued', %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, false, 'queued', %s, %s
                 )
                 """,
                 (
@@ -172,6 +190,8 @@ class DocumentWriter:
                     extension,
                     size_bytes,
                     content_hash,
+                    extraction_mode,
+                    extraction_strategy,
                     created_at,
                     created_at,
                 ),
@@ -289,6 +309,44 @@ class DocumentWriter:
                     (affected_document_ids,),
                 )
 
+    async def apply_workspace_index_rule(
+        self, *, extensions: Iterable[str], document_id: str | None = None
+    ) -> int:
+        """Skip code, config and data inside a workspace; queue a skipped file
+        again once it no longer qualifies (its workspace was removed). Returns
+        how many were queued again."""
+        in_workspace = """split_part(pd.relative_path, '/', 2) <> ''
+            AND project.workspaces ? split_part(pd.relative_path, '/', 1)
+            AND pd.extension = ANY(%(extensions)s)"""
+        scope = "" if document_id is None else "AND pd.document_id = %(document_id)s"
+        params = {"project_id": self._project_id, "extensions": sorted(extensions),
+                  "document_id": document_id}
+        await self._client.execute(
+            f"""UPDATE public.project_documents AS pd SET status = 'skipped',
+                       index_attempt_count = 0, next_index_retry_at = NULL,
+                       error_message = NULL, updated_at = now()
+                FROM public.projects AS project
+                WHERE project.project_id = pd.project_id AND pd.project_id = %(project_id)s
+                  AND pd.status IN ('queued', 'failed', 'indexed') AND {in_workspace} {scope}""",
+            params,
+        )
+        return await self._client.execute(
+            f"""UPDATE public.project_documents AS pd SET status = 'queued', updated_at = now()
+                FROM public.projects AS project
+                WHERE project.project_id = pd.project_id AND pd.project_id = %(project_id)s
+                  AND pd.status = 'skipped' AND NOT ({in_workspace}) {scope}""",
+            params,
+        )
+
+    async def mark_derived_from_web(self, relative_paths: List[str]) -> None:
+        """Flag live documents at these paths as written after web reads.
+        The flag never clears: later edits do not remove the quoted text."""
+        await self._client.execute(
+            """UPDATE public.project_documents SET derived_from_web = true
+               WHERE project_id = %s AND relative_path = ANY(%s) AND status <> 'deleted'""",
+            (self._project_id, list(relative_paths)),
+        )
+
     async def delete_document(
         self,
         *,
@@ -318,6 +376,8 @@ class DocumentWriter:
                 extension,
                 size_bytes,
                 content_hash,
+                extraction_mode,
+                extraction_strategy,
                 current_snapshot_id,
                 status,
                 index_attempt_count,
@@ -386,6 +446,8 @@ class DocumentWriter:
                     extension,
                     size_bytes,
                     content_hash,
+                    extraction_mode,
+                    extraction_strategy,
                     current_snapshot_id,
                     status,
                     index_attempt_count,
@@ -487,6 +549,8 @@ class DocumentWriter:
                     extension,
                     size_bytes,
                     content_hash,
+                    extraction_mode,
+                    extraction_strategy,
                     current_snapshot_id,
                     status,
                     index_attempt_count,
@@ -586,6 +650,8 @@ class DocumentWriter:
                     extension,
                     size_bytes,
                     content_hash,
+                    extraction_mode,
+                    extraction_strategy,
                     current_snapshot_id,
                     status,
                     index_attempt_count,
@@ -755,6 +821,7 @@ class DocumentWriter:
                     updated_at
                 )
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (project_id, url) DO NOTHING
                 RETURNING
                     link_id,
                     project_id,
@@ -776,7 +843,7 @@ class DocumentWriter:
             )
             row = await cur.fetchone()
         if row is None:
-            raise RuntimeError("Saved web link insert did not return a row")
+            raise SavedWebLinkAlreadyExistsError()
         return dict(row)
 
     async def update_saved_web_link(

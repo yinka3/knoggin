@@ -179,6 +179,28 @@ class EvidenceService:
             state_token=state_token,
         )
 
+    async def for_message(
+        self,
+        message_id: int,
+        *,
+        user_name: str,
+        project_id: str,
+        limits: EvidenceTraversalLimits | None = None,
+    ) -> EvidenceBundle:
+        identifier = str(int(message_id))
+        active_limits = limits or EvidenceTraversalLimits()
+        rows = await self.reader.get_message_rows(
+            [int(message_id)],
+            user_name=user_name,
+            project_id=project_id,
+            row_limit=active_limits.max_edges + 1,
+        )
+        return self._bundle(
+            EvidenceSubject(kind="message", identifier=identifier),
+            rows,
+            limits=active_limits,
+        )
+
     async def for_context_block(
         self,
         block_id: UUID | str,
@@ -295,20 +317,17 @@ class EvidenceService:
                     status="retired" if row.get("retired_at") is not None else "active",
                 ),
             )
-        block = EvidencePointer(
-            kind="context_block",
-            identifier=str(row["block_id"]),
-        )
-        cls._node(
-            nodes,
-            EvidenceNode(
-                pointer=block,
-                content_hash=row.get("block_content_hash"),
-                excerpt=cls._excerpt(row.get("block_markdown")),
-            ),
-        )
-        if observation is not None:
-            cls._edge(edges, block, observation, "supports_relationship_observation")
+        block = None
+        if row.get("block_id") is not None:
+            block = EvidencePointer(kind="context_block", identifier=str(row["block_id"]))
+            cls._node(
+                nodes,
+                EvidenceNode(
+                    pointer=block,
+                    content_hash=row.get("block_content_hash"),
+                    excerpt=cls._excerpt(row.get("block_markdown")),
+                ),
+            )
 
         message = None
         if row.get("message_id") is not None:
@@ -349,8 +368,10 @@ class EvidenceService:
             )
         if source is not None and message is not None:
             cls._edge(edges, source, message, "source_owned_by_message")
+        if message is not None and observation is not None:
+            cls._edge(edges, message, observation, "supports_relationship_observation")
         support_source = source if source is not None else message
-        if support_source is not None:
+        if support_source is not None and block is not None:
             cls._edge(edges, support_source, block, "supports_context_block")
 
     @staticmethod

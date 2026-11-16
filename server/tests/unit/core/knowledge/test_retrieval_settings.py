@@ -25,6 +25,7 @@ def _retrieval(settings=None):
             search_messages_fts=AsyncMock(return_value=[]),
             search_messages_semantic=AsyncMock(return_value=[]),
             search_entity=AsyncMock(return_value=[]),
+            forgotten_name_notes=AsyncMock(return_value=[]),
             get_recent_activity=AsyncMock(return_value=[]),
         ),
         search_settings=settings,

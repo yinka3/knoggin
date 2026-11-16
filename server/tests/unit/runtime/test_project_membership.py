@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -100,11 +101,8 @@ class RecordingEntityCache:
 
 
 def make_manager(postgres, *, filesystem_factory=None):
-    async def get_vp01(_language):
-        return SimpleNamespace(extract_entities=lambda *_args, **_kwargs: ())
-
     return ProjectManager(
-        resources=SimpleNamespace(postgres=postgres, get_vp01=get_vp01),
+        resources=SimpleNamespace(postgres=postgres),
         user_name="ada",
         filesystem_factory=filesystem_factory,
     )
@@ -130,6 +128,109 @@ async def test_project_runtime_releases_its_exact_final_lease():
     assert manager._project_leases == {}
     assert manager.active_projects == {}
     assert shutdowns == ["project-1"]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_final_lease_release_allows_scheduler_job_to_finish_under_maintenance_lock():
+    manager = make_manager(RecordingPostgres())
+    finished = asyncio.Event()
+
+    async def shutdown():
+        async def running_job():
+            async with manager.maintenance_service.lock:
+                finished.set()
+
+        await asyncio.wait_for(asyncio.create_task(running_job()), timeout=0.2)
+
+    manager.active_projects["project-1"] = SimpleNamespace(shutdown=shutdown)
+    manager._project_leases["project-1"] = {"session-1"}
+
+    await asyncio.wait_for(
+        manager.release_project_for_session("project-1", "session-1"),
+        timeout=0.3,
+    )
+    assert finished.is_set()
+    assert manager.active_projects == {}
+    assert manager._project_leases == {}
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_new_lease_waits_for_final_runtime_shutdown():
+    manager = make_manager(RecordingPostgres())
+    shutting_down = asyncio.Event()
+    finish_shutdown = asyncio.Event()
+
+    async def old_shutdown():
+        shutting_down.set()
+        await finish_shutdown.wait()
+
+    async def new_shutdown():
+        pass
+
+    old_state = SimpleNamespace(shutdown=old_shutdown)
+    new_state = SimpleNamespace(shutdown=new_shutdown)
+    manager.active_projects["project-1"] = old_state
+    manager._project_leases["project-1"] = {"session-1"}
+
+    async def get_project(_project_id):
+        return {"status": ProjectStatus.ACTIVE.value}
+
+    async def readable_projects(_project_id, *, project_metadata):
+        return ["project-1"]
+
+    async def create_project_runtime(**_kwargs):
+        return new_state
+
+    manager.get_project = get_project
+    manager.get_readable_project_ids = readable_projects
+    manager.project_factory.create = create_project_runtime
+
+    release = asyncio.create_task(
+        manager.release_project_for_session("project-1", "session-1")
+    )
+    await shutting_down.wait()
+    acquire = asyncio.create_task(
+        manager.acquire_project_for_session("project-1", "session-2")
+    )
+    await asyncio.sleep(0)
+    assert not acquire.done()
+    assert manager.active_projects["project-1"] is old_state
+
+    finish_shutdown.set()
+    await release
+    assert await acquire is new_state
+    assert manager._project_leases["project-1"] == {"session-2"}
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_cancelled_final_release_still_settles_shutdown():
+    manager = make_manager(RecordingPostgres())
+    shutting_down = asyncio.Event()
+    finish_shutdown = asyncio.Event()
+
+    async def shutdown():
+        shutting_down.set()
+        await finish_shutdown.wait()
+
+    manager.active_projects["project-1"] = SimpleNamespace(shutdown=shutdown)
+    manager._project_leases["project-1"] = {"session-1"}
+    release = asyncio.create_task(
+        manager.release_project_for_session("project-1", "session-1")
+    )
+    await shutting_down.wait()
+    release.cancel()
+    await asyncio.sleep(0)
+    assert not release.done()
+    assert manager._project_leases["project-1"] == {"session-1"}
+
+    finish_shutdown.set()
+    with pytest.raises(asyncio.CancelledError):
+        await release
+    assert manager._project_leases == {}
+    assert manager.active_projects == {}
 
 
 @pytest.mark.runtime
@@ -266,40 +367,6 @@ async def test_create_project_persists_metadata_and_default_topics(
     assert result["id"] == "project-1"
     assert postgres.transaction_enters == 1
     assert postgres.transaction_exits == 1
-
-
-@pytest.mark.runtime
-@pytest.mark.no_network
-@pytest.mark.parametrize("invalid_adapter", [False, True])
-async def test_create_project_rejects_unavailable_vp01_before_files_or_storage(
-    invalid_adapter, tmp_path
-):
-    postgres = RecordingPostgres()
-    projects_root = tmp_path / "projects"
-
-    async def get_vp01(language):
-        assert language == "multilingual"
-        if invalid_adapter:
-            return object()
-        raise RuntimeError("model unavailable")
-
-    project_manager = ProjectManager(
-        resources=SimpleNamespace(postgres=postgres, get_vp01=get_vp01),
-        user_name="ada",
-        filesystem_factory=ProjectFilesystemFactory(projects_root),
-    )
-    candidate = make_domain_config(version=0).to_dict()
-    candidate["vp01_language"] = "multilingual"
-
-    with pytest.raises(
-        TypeError if invalid_adapter else RuntimeError,
-        match="VP-01 adapter" if invalid_adapter else "model unavailable",
-    ):
-        await project_manager.create_project("Research", domain_config=candidate)
-
-    assert postgres.calls == []
-    assert postgres.transaction_enters == 0
-    assert not projects_root.exists()
 
 
 @pytest.mark.runtime

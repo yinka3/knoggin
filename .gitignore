@@ -99,6 +99,7 @@ data/
 # Local engineering notes and generated document-parser evidence
 /CODE_REVIEW_GUIDE.md
 /KNOGGIN_*_PLAN.md
+/api/API_LAYER_PLAN.md
 /agent_behavior/
 /doc_testing/parser_evaluation/
 /server/*_IMPLEMENTATION_PLAN.md

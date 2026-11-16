@@ -18,6 +18,7 @@ def make_manager():
     manager._closed = False
     manager.active_projects = {}
     manager._project_leases = {}
+    manager._project_shutdown_tasks = {}
     manager.maintenance_service = SimpleNamespace(lock=asyncio.Lock())
 
     async def read(project_id):

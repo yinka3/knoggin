@@ -5,8 +5,9 @@ publication, stage checkpoints, Knowledge commit, finalization, and Context
 projection all use their production implementations.
 """
 
+import asyncio
+from datetime import datetime, timezone
 from types import SimpleNamespace
-from uuid import uuid4
 
 import pytest
 import spacy
@@ -22,31 +23,28 @@ from common.schema.episode.generation import (
     LLMEpisodeDecision,
     LLMEpisodeWindowDecision,
 )
-from common.schema.ingestion.contracts import (
-    ContextBlockEntityAssociation,
-    ContextEntityResult,
-    ContextRelationshipWrite,
-    EntityWrite,
-    ProjectEntityClassification,
-)
+from common.schema.ingestion.contracts import EntityResult
 from common.schema.semantic_window import SemanticWindowStage
 from common.schema.settings import (
     DeveloperSettings,
     EntityResolutionSettings,
+    ExtractionSettings,
     IngestionSettings,
     RootConfig,
-    TextProcessorSettings,
 )
-from core.ingestion.context_entity_build import ContextEntityBuildService
+from core.ingestion.entity_build import EntityBuildService
 from core.ingestion.policy import IngestionPolicy
 from core.ingestion.project_semantic_processor import ProjectSemanticProcessor
-from core.ingestion.relationship_extractor import ContextRelationshipExtractor
+from core.ingestion.relationship_extractor import RelationshipExtractor
 from core.ingestion.semantic_window_admission import SemanticWindowAdmission
 from core.ingestion.text_processor import TextProcessor
-from core.ingestion.vp01 import VP01EntitySpan
 from core.knowledge.context.projection import ContextProjection
 from core.knowledge.context.render import apply_context_edits, render_context_markdown
-from core.knowledge.context.updater import ContextUpdater, ContextUpdateResult
+from core.knowledge.context.updater import (
+    ContextUpdater,
+    ContextUpdateResult,
+    ForgetRequest,
+)
 from core.knowledge.db.readers.entity_reader import EntityReader
 from core.knowledge.db.readers.project_context_reader import ProjectContextReader
 from core.knowledge.db.writers.project_context_writer import ProjectContextWriter
@@ -58,6 +56,7 @@ from core.knowledge.store import KnowledgeStore
 from core.project.domain_config_store import DomainConfigStore
 from core.project.project_manager import ProjectManager
 from infrastructure.job.base import JobContext
+from infrastructure.job.scheduler import Scheduler
 from runtime.project_runtime import ProjectRuntime
 
 
@@ -91,18 +90,33 @@ def _relationship_domain():
     ).compile()
 
 
-def _classification(entity_id, entity_type, *, membership):
-    return ProjectEntityClassification(
-        entity_id=entity_id,
-        entity_type=entity_type,
-        topic="Work",
-        membership=membership,
-    )
-
-
 class _ZeroEpisodeGenerator:
     async def generate(self, **_kwargs):
         return type("EpisodeBuild", (), {"final_episodes": []})()
+
+
+class _BlockingEpisodeGenerator:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+
+    async def generate(self, **_kwargs):
+        self.started.set()
+        await asyncio.Event().wait()
+
+
+class _NoopContextModel:
+    async def generate_structured(self, **_kwargs):
+        return LLMContextUpdate(operations=[], edit_summary="No Context changes")
+
+
+class _UnexpectedKnowledgeBuilder:
+    async def build(self, _build):
+        raise AssertionError("a window without Episodes has no Knowledge input")
+
+
+class _UnexpectedRelationshipExtractor:
+    async def extract(self, _build):
+        raise AssertionError("a window without Episodes has no relationships")
 
 
 class _OneEpisodeGenerator:
@@ -119,12 +133,30 @@ class _OneEpisodeGenerator:
                     LLMEpisodeDecision(
                         summary="Both sessions asked for shared project Context.",
                         message_influences=list(build.message_ids_by_local),
+                        events=[
+                            {
+                                "what": "The user started the project Context",
+                                "kind": "started",
+                                "start_date": "2023-03-10",
+                                "precision": "day",
+                                "date_text": "today",
+                                "sources": ["message:1"],
+                            },
+                            {
+                                "what": "The user hiked a nearby trail",
+                                "kind": "other",
+                                "start_date": "2023-03-12",
+                                "precision": "day",
+                                "date_text": "Sunday",
+                                "sources": ["message:1"],
+                            },
+                        ],
                     )
                 ]
             )
         )
         build.create_episodes()
-        build.attach_embeddings([[0.25] * 1024])
+        build.attach_embeddings([[0.25] * 768])
         return build
 
 
@@ -150,24 +182,23 @@ class _AgentDerivedUpdater:
 
 
 class _EpisodeAwareAgentDerivedUpdater(_AgentDerivedUpdater):
-    async def update(self, *, episodes, **kwargs):
-        assert len(episodes) == 1
-        assert [message.message_id for message in episodes[0].messages] == [101, 102]
-        return await super().update(episodes=episodes, **kwargs)
+    async def update(self, *, earlier_episodes, **kwargs):
+        # The window's own Episode is already in its messages; only Episodes
+        # from earlier windows are background.
+        assert earlier_episodes == []
+        return await super().update(earlier_episodes=earlier_episodes, **kwargs)
 
 
 class _EmptyEntityBuilder:
     async def build(self, build):
-        assert build.knowledge_input_blocks == ()
-        result = ContextEntityResult(
+        assert len(build.episodes) == 1
+        result = EntityResult(
             entity_ids=(),
             new_entity_ids=frozenset(),
             alias_updated_ids=frozenset(),
             alias_updates={},
             pending_entity_writes={},
             project_classifications={},
-            block_entity_associations=(),
-            message_entity_refs=(),
         )
         build.set_entity_result(result)
         return result
@@ -175,31 +206,6 @@ class _EmptyEntityBuilder:
 
 class _EmptyRelationships:
     async def extract(self, build):
-        assert build.knowledge_input_blocks == ()
-        build.set_relationship_writes(())
-        return ()
-
-
-class _HumanEditEntityBuilder:
-    async def build(self, build):
-        assert len(build.knowledge_input_blocks) == 1
-        result = ContextEntityResult(
-            entity_ids=(),
-            new_entity_ids=frozenset(),
-            alias_updated_ids=frozenset(),
-            alias_updates={},
-            pending_entity_writes={},
-            project_classifications={},
-            block_entity_associations=(),
-            message_entity_refs=(),
-        )
-        build.set_entity_result(result)
-        return result
-
-
-class _HumanEditRelationships:
-    async def extract(self, build):
-        assert len(build.knowledge_input_blocks) == 1
         build.set_relationship_writes(())
         return ()
 
@@ -219,97 +225,85 @@ class _FailFirstWriteFilesystem:
         return self.filesystem.write_bytes(*args, **kwargs)
 
 
-class _SourceGroundedContextModel:
-    async def generate_structured(self, **_kwargs):
+class _UserAssertedContextModel:
+    """Each window records its own message as a Context block."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def generate_structured(self, *, user, **_kwargs):
+        self.calls += 1
+        line = next(
+            line for line in user.splitlines() if line.startswith("[M1]")
+        )
+        text = line.split(": ", 2)[-1].strip()
         return LLMContextUpdate(
             operations=[
                 ContextAdd(
                     section_key="current_state",
-                    markdown="Sarah owns Delta.",
-                    assertion_kind=AssertionKind.SOURCE_GROUNDED,
-                    evidence=[{"handle": "S1"}],
+                    markdown=text,
+                    assertion_kind=AssertionKind.USER_ASSERTED,
+                    user_quote=text,
+                    evidence=[{"handle": "M1"}],
                 )
             ],
-            edit_summary="Recorded source-grounded ownership",
+            edit_summary="Recorded the window's claim",
         )
 
 
-class _RelationshipEntityBuilder:
-    def __init__(self, store):
-        self.store = store
-        self.calls = 0
-        self.sarah_id: int | None = None
-        self.delta_id: int | None = None
+class _NamesLLM:
+    """VP-01 and VP-02 over a fixed name list: owner -> company in M1."""
 
-    async def build(self, build):
-        self.calls += 1
-        if self.calls > 1:
-            raise AssertionError("Knowledge publication recovery must not rebuild entities")
-        sarah_id = await self.store.allocate_entity_id()
-        delta_id = await self.store.allocate_entity_id()
-        self.sarah_id = sarah_id
-        self.delta_id = delta_id
-        block = build.knowledge_input_blocks[0]
-        entities = {
-            sarah_id: EntityWrite(
-                entity_id=sarah_id,
-                is_new=True,
-                canonical_name="Sarah",
-                entity_type="Person",
-                topic="Work",
-                aliases=("Sarah",),
-            ),
-            delta_id: EntityWrite(
-                entity_id=delta_id,
-                is_new=True,
-                canonical_name="Delta",
-                entity_type="Company",
-                topic="Work",
-                aliases=("Delta",),
-            ),
+    extraction_model = "test-extraction"
+
+    def __init__(self, people, companies):
+        self.people, self.companies = people, companies
+        self.entity_calls = 0
+        self.relationship_calls = 0
+
+    async def generate_structured(self, *, response_model, user, **_kwargs):
+        if response_model.__name__ == "EpisodeEntityExtraction":
+            self.entity_calls += 1
+            mentions = [
+                {"messages": ["M1"], "name": name, "type": kind}
+                for names, kind in ((self.people, "Person"), (self.companies, "Company"))
+                for name in names
+                if name in user.split("MESSAGES:", 1)[1]
+            ]
+            return response_model.model_validate({"mentions": mentions})
+        self.relationship_calls += 1
+        handles = {
+            line.split(" = ")[1].split(" [")[0]: line.split(" = ")[0]
+            for line in user.splitlines()
+            if line.startswith("e") and " = " in line
         }
-        result = ContextEntityResult(
-            entity_ids=(sarah_id, delta_id),
-            new_entity_ids=frozenset(entities),
-            alias_updated_ids=frozenset(),
-            alias_updates={},
-            pending_entity_writes=entities,
-            project_classifications={
-                sarah_id: _classification(
-                    sarah_id,
-                    "Person",
-                    membership="missing",
-                ),
-                delta_id: _classification(
-                    delta_id,
-                    "Company",
-                    membership="missing",
-                ),
-            },
-            block_entity_associations=(
-                ContextBlockEntityAssociation(
-                    block_id=block.block_id,
-                    entity_id=sarah_id,
-                    mention_text="Sarah",
-                ),
-                ContextBlockEntityAssociation(
-                    block_id=block.block_id,
-                    entity_id=delta_id,
-                    mention_text="Delta",
-                ),
-            ),
-            message_entity_refs=(),
-        )
-        build.set_entity_result(result)
-        return result
+        connections = [
+            {"messages": ["M1"], "entity_a": handles[person],
+             "entity_b": handles[company], "relationship": "owns",
+             "context": f"{person} owns {company}."}
+            for person in self.people for company in self.companies
+            if person in handles and company in handles
+        ]
+        return response_model.model_validate({"connections": connections})
 
 
-class _PendingContextEntities:
-    async def get_profile(self, _entity_id):
-        raise AssertionError("new Context entities do not require profile hydration")
-
-    def get_mentions_for_id(self, _entity_id):
-        return []
+def _extraction(resolver, llm, user_name, store):
+    processor = TextProcessor(
+        get_known_aliases=resolver.get_known_aliases,
+        get_alias_version=resolver.get_alias_version,
+        get_profile=resolver.get_profile,
+        spacy=spacy.blank("en"),
+        settings=ExtractionSettings(),
+        llm=llm,
+        user_name=user_name,
+    )
+    return (
+        EntityBuildService(
+            processor=processor, resolver=resolver,
+            allocate_entity_id=store.allocate_entity_id,
+        ),
+        RelationshipExtractor(user_name=user_name, llm=llm, entities=resolver),
+    )
 
 
 class _FailingCommittedEntityPublisher:
@@ -323,18 +317,6 @@ class _FailingCommittedEntityPublisher:
 
 async def _publish_nothing(_entity_ids: tuple[int, ...]) -> None:
     return None
-
-
-class _ContextRelationshipLLM:
-    extraction_model = "test-vp02"
-
-    def __init__(self, connections) -> None:
-        self.connections = connections
-        self.calls = 0
-
-    async def generate_structured(self, *, response_model, **_kwargs):
-        self.calls += 1
-        return response_model.model_validate({"connections": self.connections})
 
 
 class _Stage2ContextModel:
@@ -352,6 +334,7 @@ class _Stage2ContextModel:
                         section_key="current_state",
                         markdown="Avery Stone owns Delta Corp.",
                         assertion_kind=AssertionKind.USER_ASSERTED,
+                        user_quote="Avery Stone owns Delta Corp.",
                         evidence=[{"handle": "M1"}],
                     )
                 ],
@@ -365,6 +348,7 @@ class _Stage2ContextModel:
                         target={"handle": "C1"},
                         markdown="Avery Stone continues to own Delta Corp.",
                         assertion_kind=AssertionKind.USER_ASSERTED,
+                        user_quote="Avery Stone continues to own Delta Corp.",
                         evidence=[{"handle": "M1"}],
                     )
                 ],
@@ -388,292 +372,11 @@ class _Stage2Embedding:
     async def encode(self, values, **_kwargs):
         materialized = tuple(values)
         self.batch_calls.append(materialized)
-        return [[0.25] * 1024 for _ in materialized]
+        return [[0.25] * 768 for _ in materialized]
 
     async def encode_single(self, value):
         self.single_calls.append(value)
-        return [0.25] * 1024
-
-
-class _Stage2VP01:
-    """Return typed spans for the two names in the controlled Context edits."""
-
-    def __init__(self) -> None:
-        self.calls: list[str] = []
-
-    def extract_entities(self, text, _domain, *, threshold):
-        del threshold
-        self.calls.append(text)
-        spans = []
-        for name, label in (("Avery Stone", "person"), ("Delta Corp", "company")):
-            start = text.find(name)
-            if start >= 0:
-                spans.append(
-                    VP01EntitySpan(
-                        text=name,
-                        label=label,
-                        start=start,
-                        end=start + len(name),
-                    )
-                )
-        return spans
-
-
-class _HomonymSourceGroundedContextModel:
-    async def generate_structured(self, **_kwargs):
-        return LLMContextUpdate(
-            operations=[
-                ContextAdd(
-                    section_key="current_state",
-                    markdown="Alex owns Delta.",
-                    assertion_kind=AssertionKind.SOURCE_GROUNDED,
-                    evidence=[{"handle": "S1"}],
-                )
-            ],
-            edit_summary="Recorded homonymous source-grounded ownership",
-        )
-
-
-class _HomonymRelationshipEntityBuilder:
-    def __init__(self, store) -> None:
-        self.store = store
-        self.first_alex_id = None
-        self.second_alex_id = None
-        self.delta_id = None
-
-    async def build(self, build):
-        first_alex_id = await self.store.allocate_entity_id()
-        second_alex_id = await self.store.allocate_entity_id()
-        delta_id = await self.store.allocate_entity_id()
-        self.first_alex_id = first_alex_id
-        self.second_alex_id = second_alex_id
-        self.delta_id = delta_id
-        block = build.knowledge_input_blocks[0]
-        entities = {
-            first_alex_id: EntityWrite(
-                entity_id=first_alex_id,
-                is_new=True,
-                canonical_name="Alex",
-                entity_type="Person",
-                topic="Work",
-                aliases=("Alex",),
-            ),
-            second_alex_id: EntityWrite(
-                entity_id=second_alex_id,
-                is_new=True,
-                canonical_name="Alex",
-                entity_type="Person",
-                topic="Work",
-                aliases=("Alex",),
-            ),
-            delta_id: EntityWrite(
-                entity_id=delta_id,
-                is_new=True,
-                canonical_name="Delta",
-                entity_type="Company",
-                topic="Work",
-                aliases=("Delta",),
-            ),
-        }
-        result = ContextEntityResult(
-            entity_ids=(first_alex_id, second_alex_id, delta_id),
-            new_entity_ids=frozenset(entities),
-            alias_updated_ids=frozenset(),
-            alias_updates={},
-            pending_entity_writes=entities,
-            project_classifications={
-                first_alex_id: _classification(
-                    first_alex_id,
-                    "Person",
-                    membership="missing",
-                ),
-                second_alex_id: _classification(
-                    second_alex_id,
-                    "Person",
-                    membership="missing",
-                ),
-                delta_id: _classification(
-                    delta_id,
-                    "Company",
-                    membership="missing",
-                ),
-            },
-            block_entity_associations=tuple(
-                ContextBlockEntityAssociation(
-                    block_id=block.block_id,
-                    entity_id=entity_id,
-                    mention_text=mention_text,
-                )
-                for entity_id, mention_text in (
-                    (first_alex_id, "Alex"),
-                    (second_alex_id, "Alex"),
-                    (delta_id, "Delta"),
-                )
-            ),
-            message_entity_refs=(),
-        )
-        build.set_entity_result(result)
-        return result
-
-
-class _CorrectionContextModel:
-    """Return one older claim, its newer correction, then a Context no-op."""
-
-    def __init__(self) -> None:
-        self.calls = 0
-
-    async def generate_structured(self, **_kwargs):
-        self.calls += 1
-        if self.calls == 1:
-            return LLMContextUpdate(
-                operations=[
-                    ContextAdd(
-                        section_key="current_state",
-                        markdown="Sarah owns Delta.",
-                        assertion_kind=AssertionKind.USER_ASSERTED,
-                        evidence=[{"handle": "M1"}],
-                    )
-                ],
-                edit_summary="Recorded Sarah ownership",
-            )
-        if self.calls == 2:
-            return LLMContextUpdate(
-                operations=[
-                    ContextReplace(
-                        section_key="current_state",
-                        target={"handle": "C1"},
-                        markdown="John owns Delta.",
-                        assertion_kind=AssertionKind.USER_ASSERTED,
-                        evidence=[{"handle": "M1"}],
-                    )
-                ],
-                edit_summary="Corrected ownership",
-            )
-        if self.calls == 3:
-            return LLMContextUpdate(
-                operations=[],
-                edit_summary="No Context changes",
-            )
-        raise AssertionError("unexpected Context update")
-
-
-class _CorrectionEntityBuilder:
-    """Use production persistence with deterministic entity-resolution output."""
-
-    def __init__(self, store) -> None:
-        self.store = store
-        self.calls = 0
-        self.delta_id: int | None = None
-
-    async def build(self, build):
-        self.calls += 1
-        assert len(build.knowledge_input_blocks) == 1
-        block = build.knowledge_input_blocks[0]
-        if self.calls == 1:
-            source_name = "Sarah"
-            source_id = await self.store.allocate_entity_id()
-            self.delta_id = await self.store.allocate_entity_id()
-            writes = {
-                source_id: EntityWrite(
-                    entity_id=source_id,
-                    is_new=True,
-                    canonical_name=source_name,
-                    entity_type="Person",
-                    topic="Work",
-                    aliases=(source_name,),
-                ),
-                self.delta_id: EntityWrite(
-                    entity_id=self.delta_id,
-                    is_new=True,
-                    canonical_name="Delta",
-                    entity_type="Company",
-                    topic="Work",
-                    aliases=("Delta",),
-                ),
-            }
-        elif self.calls == 2:
-            assert self.delta_id is not None
-            source_name = "John"
-            source_id = await self.store.allocate_entity_id()
-            writes = {
-                source_id: EntityWrite(
-                    entity_id=source_id,
-                    is_new=True,
-                    canonical_name=source_name,
-                    entity_type="Person",
-                    topic="Work",
-                    aliases=(source_name,),
-                )
-            }
-        else:
-            raise AssertionError("no-op Context reuse must skip entity extraction")
-
-        assert self.delta_id is not None
-        result = ContextEntityResult(
-            entity_ids=(source_id, self.delta_id),
-            new_entity_ids=frozenset(writes),
-            alias_updated_ids=frozenset(),
-            alias_updates={},
-            pending_entity_writes=writes,
-            project_classifications={
-                source_id: _classification(
-                    source_id,
-                    "Person",
-                    membership="missing",
-                ),
-                self.delta_id: _classification(
-                    self.delta_id,
-                    "Company",
-                    membership=(
-                        "missing" if self.delta_id in writes else "existing"
-                    ),
-                ),
-            },
-            block_entity_associations=(
-                ContextBlockEntityAssociation(
-                    block_id=block.block_id,
-                    entity_id=source_id,
-                    mention_text=source_name,
-                ),
-                ContextBlockEntityAssociation(
-                    block_id=block.block_id,
-                    entity_id=self.delta_id,
-                    mention_text="Delta",
-                ),
-            ),
-            message_entity_refs=(),
-        )
-        build.set_entity_result(result)
-        return result
-
-
-class _CorrectionRelationshipExtractor:
-    def __init__(self) -> None:
-        self.calls = 0
-
-    async def extract(self, build):
-        self.calls += 1
-        if self.calls > 2:
-            raise AssertionError("no-op Context reuse must skip relationship extraction")
-        assert len(build.knowledge_input_blocks) == 1
-        block = build.knowledge_input_blocks[0]
-        source_id, target_id = build.entity_result.entity_ids
-        writes = (
-            ContextRelationshipWrite(
-                support_block_ids=(block.block_id,),
-                entity_a_id=source_id,
-                entity_b_id=target_id,
-                relationship_type="owns",
-                canonical_type="OWNS",
-                domain_status="recognized",
-                source_type="Person",
-                target_type="Company",
-                context=block.markdown,
-                domain_version=build.policy.domain.version,
-            ),
-        )
-        build.set_relationship_writes(writes)
-        return writes
+        return [0.25] * 768
 
 
 @pytest.mark.integration
@@ -958,7 +661,7 @@ async def test_project_semantic_processor_uses_real_storage_for_agent_derived_co
 
     domain = _domain()
     policy = IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(),
+        extraction=ExtractionSettings(),
         entity_resolution=EntityResolutionSettings(),
         compiled_domain=domain,
     )
@@ -986,8 +689,8 @@ async def test_project_semantic_processor_uses_real_storage_for_agent_derived_co
         capture_semantic_policy=capture_semantic_policy,
         context_updater=_EpisodeAwareAgentDerivedUpdater(),
         context_projection=projection,
-        context_entity_builder=_EmptyEntityBuilder(),
-        context_relationship_extractor=_EmptyRelationships(),
+        entity_builder=_EmptyEntityBuilder(),
+        relationship_extractor=_EmptyRelationships(),
         publish_committed_entity_ids=_publish_nothing,
     )
     context = JobContext(user_name=user_name, project_id=project_id)
@@ -998,6 +701,41 @@ async def test_project_semantic_processor_uses_real_storage_for_agent_derived_co
         "Semantic processor completed durable stages: "
         "Episode -> Context -> Knowledge -> finalization"
     )
+
+    events = await store.list_project_events(
+        user_name=user_name,
+        project_id=project_id,
+        after=datetime(2023, 3, 1, tzinfo=timezone.utc),
+        before=datetime(2023, 3, 31, tzinfo=timezone.utc),
+        limit=25,
+    )
+    assert [(e["what"], e["kind"], str(e["start_date"]), e["in_range"]) for e in events] == [
+        ("The user started the project Context", "started", "2023-03-10", "inside"),
+        ("The user hiked a nearby trail", "other", "2023-03-12", "inside"),
+    ]
+    assert events[0]["source_message_ids"] == [101]
+    # A kind is the model's guess, so events it could not label stay visible.
+    by_kind = await store.list_project_events(
+        user_name=user_name, project_id=project_id, kind="trip", limit=25
+    )
+    assert [e["what"] for e in by_kind] == ["The user hiked a nearby trail"]
+    # With words to match, the better-matching mention comes first, not the earlier one.
+    by_words = await store.list_project_events(
+        user_name=user_name, project_id=project_id, query="hiked trail project", limit=25
+    )
+    assert [e["what"] for e in by_words] == [
+        "The user hiked a nearby trail",
+        "The user started the project Context",
+    ]
+    # Episode search can reach an Episode through its events, and the card carries them.
+    found = await store.search_project_episodes_by_events(
+        "trail", user_name=user_name, project_id=project_id, limit=5
+    )
+    assert len(found) == 1
+    assert [event.what for event in found[0].events] == [
+        "The user started the project Context",
+        "The user hiked a nearby trail",
+    ]
 
     revision = await ProjectContextReader(postgres).get_current_revision(
         user_name=user_name,
@@ -1043,7 +781,7 @@ async def test_project_semantic_processor_uses_real_storage_for_agent_derived_co
         {"message_id": 102, "session_id": "second-semantic-session"},
     ]
     assert await postgres.fetch_one(
-        "SELECT count(*) AS count FROM public.context_block_entities WHERE project_id = %s",
+        "SELECT count(*) AS count FROM public.message_entity_occurrences WHERE project_id = %s",
         (project_id,),
     ) == {"count": 0}
     assert await postgres.fetch_one(
@@ -1087,8 +825,8 @@ async def test_project_semantic_processor_uses_real_storage_for_agent_derived_co
         capture_semantic_policy=capture_semantic_policy,
         context_updater=_AgentDerivedUpdater(),
         context_projection=recovery_projection,
-        context_entity_builder=_HumanEditEntityBuilder(),
-        context_relationship_extractor=_HumanEditRelationships(),
+        entity_builder=_UnexpectedKnowledgeBuilder(),
+        relationship_extractor=_UnexpectedRelationshipExtractor(),
         publish_committed_entity_ids=_publish_nothing,
     )
     first_human_result = await human_edit_job.execute(context)
@@ -1130,462 +868,388 @@ async def test_project_semantic_processor_uses_real_storage_for_agent_derived_co
     ) == {"count": 1}
 
 
-@pytest.mark.integration
-@pytest.mark.requires_postgres
-@pytest.mark.no_network
-async def test_project_semantic_processor_recovers_resolver_publication_and_commits_source_grounded_relationship_provenance(
-    real_server_scope,
-    tmp_path,
-):
-    scope = real_server_scope
-    postgres = scope["postgres"]
-    user_name = scope["user_name"]
-    project_id = scope["project_id"]
-    session_id = scope["session_id"]
-    source_ref_id = uuid4()
+async def _insert_closed_exchange(postgres, scope, message_id, content, timestamp_ms):
     await postgres.execute(
         """
         INSERT INTO public.messages (
             user_name, session_id, message_id, project_id, role, content,
             timestamp_ms, lifecycle_state, exchange_state, exchange_outcome,
             exchange_closed_at_ms
-        ) VALUES (%s, %s, 201, %s, 'user', 'Check the supplied ownership source.',
-                  1, 'sealed', 'closed', 'assistant_final', 2),
-                 (%s, %s, 202, %s, 'assistant', 'The source says Sarah owns Delta.',
-                  2, 'sealed', 'open', NULL, NULL)
+        ) VALUES (%s, %s, %s, %s, 'user', %s, %s, 'sealed', 'closed',
+                  'user_only', %s)
         """,
-        (user_name, session_id, project_id, user_name, session_id, project_id),
-    )
-    await postgres.execute(
-        """
-        UPDATE public.messages
-        SET user_msg_id = 201
-        WHERE project_id = %s AND message_id = 202
-        """,
-        (project_id,),
-    )
-    await postgres.execute(
-        """
-        INSERT INTO public.message_source_refs (
-            source_ref_id, project_id, session_id, message_id, source_kind,
-            source_message_id, content_hash, locator, excerpt, metadata,
-            encounter_kind, agent_run_id, result_position, idempotency_key
-        ) VALUES (
-            %s, %s, %s, 202, 'user_pasted_text', 201, %s,
-            '{"kind":"character_span","start_char":0,"end_char":8}',
-            'Sarah owns Delta.', '{}'::jsonb, 'user_pasted_text',
-            'composed-run', 0, 'composed-source-provenance'
-        )
-        """,
-        (source_ref_id, project_id, session_id, "0" * 64),
+        (scope["user_name"], scope["session_id"], message_id, scope["project_id"],
+         content, timestamp_ms, timestamp_ms),
     )
 
-    domain = _relationship_domain()
-    policy = IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(),
-        entity_resolution=EntityResolutionSettings(),
-        compiled_domain=domain,
-    )
-    store = KnowledgeStore(postgres, object())
-    projection = ContextProjection(
-        reader=ProjectContextReader(postgres),
-        writer=ProjectContextWriter(postgres),
-        filesystem=ProjectFilesystem(tmp_path / project_id),
-    )
+
+def _knowledge_job(store, postgres, tmp_path, project_id, policy, *, resolver, llm,
+                   user_name, publisher, now_ms=lambda: 1_000_000, context_model=None):
+    entity_builder, relationship_extractor = _extraction(resolver, llm, user_name, store)
+    settings = IngestionSettings(semantic_window_tokens=1)
 
     async def capture_semantic_policy():
         return policy
 
-    entity_builder = _RelationshipEntityBuilder(store)
-    relationship_extractor = ContextRelationshipExtractor(
-        user_name=user_name,
-        llm=_ContextRelationshipLLM(
-            [
-                {
-                    "block_ids": ["b1"],
-                    "entity_a": "e2",
-                    "entity_b": "e3",
-                    "relationship": "owns",
-                    "context": "Sarah owns Delta.",
-                }
-            ]
+    return ProjectSemanticProcessor(
+        SemanticWindowAdmission(
+            store, settings,
+            token_counter=lambda text: max(1, len(text.split())), now_ms=now_ms,
         ),
-        entities=_PendingContextEntities(),
+        store,
+        _OneEpisodeGenerator(),
+        settings=settings,
+        capture_semantic_policy=capture_semantic_policy,
+        context_updater=ContextUpdater(llm=context_model or _UserAssertedContextModel()),
+        context_projection=ContextProjection(
+            reader=ProjectContextReader(postgres),
+            writer=ProjectContextWriter(postgres),
+            filesystem=ProjectFilesystem(tmp_path / project_id),
+        ),
+        entity_builder=entity_builder,
+        relationship_extractor=relationship_extractor,
+        publish_committed_entity_ids=publisher,
+        now_ms=now_ms,
     )
+
+
+@pytest.mark.integration
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_knowledge_comes_from_episode_messages_and_survives_publication_failure(
+    real_server_scope,
+    tmp_path,
+):
+    scope = real_server_scope
+    postgres, user_name, project_id = (
+        scope["postgres"], scope["user_name"], scope["project_id"],
+    )
+    await _insert_closed_exchange(postgres, scope, 201, "Sarah owns Delta.", 1_000)
+    policy = IngestionPolicy.capture(
+        extraction=ExtractionSettings(),
+        entity_resolution=EntityResolutionSettings(),
+        compiled_domain=_relationship_domain(),
+    )
+    store = KnowledgeStore(postgres, object())
+    llm = _NamesLLM(["Sarah"], ["Delta"])
     now = [1_000_000]
 
-    def new_job(publisher):
+    def new_job(resolver, publisher):
+        return _knowledge_job(
+            store, postgres, tmp_path, project_id, policy, resolver=resolver, llm=llm,
+            user_name=user_name, publisher=publisher, now_ms=lambda: now[0],
+        )
+
+    context = JobContext(user_name=user_name, project_id=project_id)
+    failed_publisher = _FailingCommittedEntityPublisher()
+    failed = await new_job(
+        EntityResolver(store, project_id, [project_id]), failed_publisher,
+    ).execute(context)
+
+    assert failed.success is False
+    assert await postgres.fetch_one(
+        "SELECT stage, last_failure_stage FROM public.project_semantic_windows "
+        "WHERE project_id = %s",
+        (project_id,),
+    ) == {"stage": "knowledge_committed", "last_failure_stage": "resolver_publication"}
+    names = {
+        row["canonical_name"]: int(row["entity_id"])
+        for row in await postgres.fetch_all(
+            "SELECT entity_id, canonical_name FROM public.entities "
+            "WHERE user_name = %s AND canonical_name IN ('Sarah', 'Delta')",
+            (user_name,),
+        )
+    }
+    assert sorted(failed_publisher.calls[0]) == sorted(names.values())
+
+    now[0] = 1_030_001
+    recovered_resolver = EntityResolver(store, project_id, [project_id])
+    recovered = await new_job(
+        recovered_resolver, recovered_resolver.publish_committed_entity_ids,
+    ).execute(context)
+
+    assert recovered.success
+    # Recovery publishes the committed graph; it does not extract again.
+    assert (llm.entity_calls, llm.relationship_calls) == (1, 1)
+    assert await recovered_resolver.get_id("Sarah") == names["Sarah"]
+    assert await postgres.fetch_all(
+        "SELECT message_id, entity_id FROM public.message_entity_refs "
+        "WHERE message_id = 201 ORDER BY entity_id"
+    ) == [{"message_id": 201, "entity_id": e} for e in sorted(names.values())]
+    observation = await postgres.fetch_one(
+        "SELECT observation_id, source_entity_id, target_entity_id, observed_at_ms "
+        "FROM public.relationship_observations WHERE project_id = %s",
+        (project_id,),
+    )
+    assert (observation["source_entity_id"], observation["target_entity_id"]) == (
+        names["Sarah"], names["Delta"],
+    )
+    assert observation["observed_at_ms"] == 1_000
+    evidence = await store.get_relationship_observation_evidence(
+        int(observation["observation_id"]), user_name=user_name, project_id=project_id,
+    )
+    assert [(n.pointer.kind, n.pointer.identifier) for n in evidence.nodes] == [
+        ("relationship_observation", str(observation["observation_id"])),
+        ("message", "201"),
+    ]
+    assert {edge.relation for edge in evidence.edges} == {"supports_relationship_observation"}
+    episode = await postgres.fetch_one(
+        "SELECT episode_id FROM public.episodes WHERE project_id = %s", (project_id,),
+    )
+    assert await postgres.fetch_all(
+        "SELECT entity_id FROM public.episode_entities WHERE episode_id = %s "
+        "ORDER BY entity_id",
+        (episode["episode_id"],),
+    ) == [{"entity_id": e} for e in sorted(names.values())]
+    assert await postgres.fetch_one(
+        "SELECT count(*) AS count FROM public.episode_relationships WHERE episode_id = %s",
+        (episode["episode_id"],),
+    ) == {"count": 1}
+
+    assert await ProjectDeletionWriter(postgres).delete_project(
+        user_name=user_name, project_id=project_id,
+    ) is not None
+    after_deletion = await store.get_relationship_observation_evidence(
+        int(observation["observation_id"]), user_name=user_name, project_id=project_id,
+    )
+    assert [node.status for node in after_deletion.nodes] == ["missing"]
+
+
+@pytest.mark.integration
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_a_newer_relationship_keeps_the_older_one_as_history(
+    real_server_scope,
+    tmp_path,
+):
+    """Context replaces the old claim; the graph keeps both, each with its time."""
+
+    scope = real_server_scope
+    postgres, user_name, project_id = (
+        scope["postgres"], scope["user_name"], scope["project_id"],
+    )
+    policy = IngestionPolicy.capture(
+        extraction=ExtractionSettings(),
+        entity_resolution=EntityResolutionSettings(),
+        compiled_domain=_relationship_domain(),
+    )
+    store = KnowledgeStore(postgres, object())
+    resolver = EntityResolver(store, project_id, [project_id])
+    job = _knowledge_job(
+        store, postgres, tmp_path, project_id, policy, resolver=resolver,
+        llm=_NamesLLM(["Sarah", "John"], ["Delta"]), user_name=user_name,
+        publisher=resolver.publish_committed_entity_ids,
+    )
+    context = JobContext(user_name=user_name, project_id=project_id)
+
+    await _insert_closed_exchange(postgres, scope, 301, "Sarah owns Delta.", 1_000)
+    assert (await job.execute(context)).success
+    await _insert_closed_exchange(postgres, scope, 302, "John owns Delta.", 2_000)
+    assert (await job.execute(context)).success
+
+    # One Delta: a one-word name written like the stored one is reused.
+    assert await postgres.fetch_one(
+        "SELECT count(*) AS count FROM public.entities WHERE canonical_name = 'Delta'"
+    ) == {"count": 1}
+    rows = await postgres.fetch_all(
+        """SELECT source.canonical_name AS source, observation.observed_at_ms,
+                  observation.retired_at
+           FROM public.relationship_observations AS observation
+           JOIN public.entities AS source ON source.entity_id = observation.source_entity_id
+           WHERE observation.project_id = %s ORDER BY observation.observed_at_ms""",
+        (project_id,),
+    )
+    assert rows == [
+        {"source": "Sarah", "observed_at_ms": 1_000, "retired_at": None},
+        {"source": "John", "observed_at_ms": 2_000, "retired_at": None},
+    ]
+    delta_id = int((await postgres.fetch_one(
+        "SELECT entity_id FROM public.entities WHERE user_name = %s AND canonical_name = 'Delta'",
+        (user_name,),
+    ))["entity_id"])
+    related = await EntityReader(postgres).get_related_entities(
+        [delta_id], visible_project_ids=[project_id],
+    )
+    assert {(row["source"], row["last_observed"]) for row in related} == {
+        ("Sarah", 1_000), ("John", 2_000),
+    }
+    assert {
+        row["source"]: [ref["message_id"] for ref in row["evidence_refs"]]
+        for row in related
+    } == {"Sarah": [301], "John": [302]}
+    recency = {
+        row["canonical_name"]: row["last_mentioned_ms"]
+        for row in await postgres.fetch_all(
+            """SELECT entity.canonical_name, context.last_mentioned_ms
+               FROM public.project_entity_contexts AS context
+               JOIN public.entities AS entity ON entity.entity_id = context.entity_id
+               WHERE context.project_id = %s""",
+            (project_id,),
+        )
+    }
+    assert recency == {"Sarah": 1_000, "John": 2_000, "Delta": 2_000}
+
+
+@pytest.mark.integration
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_semantic_timeout_retry_survives_processor_restart(
+    real_server_scope,
+    tmp_path,
+):
+    """A scheduler timeout must be durable before a fresh processor resumes it."""
+
+    scope = real_server_scope
+    postgres = scope["postgres"]
+    user_name = scope["user_name"]
+    project_id = scope["project_id"]
+    session_id = scope["session_id"]
+    await postgres.execute(
+        """
+        INSERT INTO public.messages (
+            user_name, session_id, message_id, project_id, role, content,
+            timestamp_ms, lifecycle_state, exchange_state, exchange_outcome,
+            exchange_closed_at_ms
+        ) VALUES (%s, %s, 401, %s, 'user', 'Persist this retry.',
+                  1, 'sealed', 'closed', 'user_only', 1)
+        """,
+        (user_name, session_id, project_id),
+    )
+    domain = _domain()
+    settings = IngestionSettings.model_validate(
+        {
+            "semantic_window_tokens": 1,
+            "semantic_window_retry": {
+                "max_attempts": 2,
+                "initial_backoff_seconds": 30,
+                "max_backoff_seconds": 30,
+            },
+        }
+    )
+    policy = IngestionPolicy.capture(
+        extraction=ExtractionSettings(),
+        entity_resolution=EntityResolutionSettings(),
+        compiled_domain=domain,
+    )
+    store = KnowledgeStore(postgres, object())
+
+    async def capture_semantic_policy():
+        return policy
+
+    def new_job(generator, now_ms):
         return ProjectSemanticProcessor(
             SemanticWindowAdmission(
                 store,
-                IngestionSettings(semantic_window_tokens=100),
+                settings,
                 token_counter=lambda text: max(1, len(text.split())),
-                now_ms=lambda: now[0],
+                now_ms=now_ms,
             ),
             store,
-            _ZeroEpisodeGenerator(),
-            settings=IngestionSettings(semantic_window_tokens=100),
+            generator,
+            settings=settings,
             capture_semantic_policy=capture_semantic_policy,
-            context_updater=ContextUpdater(llm=_SourceGroundedContextModel()),
-            context_projection=projection,
-            context_entity_builder=entity_builder,
-            context_relationship_extractor=relationship_extractor,
-            publish_committed_entity_ids=publisher,
-            now_ms=lambda: now[0],
+            context_updater=ContextUpdater(llm=_NoopContextModel()),
+            context_projection=ContextProjection(
+                reader=ProjectContextReader(postgres),
+                writer=ProjectContextWriter(postgres),
+                filesystem=ProjectFilesystem(tmp_path / project_id),
+            ),
+            entity_builder=_UnexpectedKnowledgeBuilder(),
+            relationship_extractor=_UnexpectedRelationshipExtractor(),
+            publish_committed_entity_ids=_publish_nothing,
+            now_ms=now_ms,
         )
 
-    failed_publisher = _FailingCommittedEntityPublisher()
-    job = new_job(failed_publisher)
+    now = [1_000]
+    blocking = _BlockingEpisodeGenerator()
+    scheduler = Scheduler(user_name, project_id)
+    # Window claim and CONTEXT.md sync take ~10 ms before the episode stage;
+    # the blocking generator never returns, so the timeout still always fires.
+    scheduler.JOB_EXECUTION_TIMEOUT = 0.5
     context = JobContext(user_name=user_name, project_id=project_id)
 
-    failed_finalization = await job.execute(context)
-    assert failed_finalization.success is False
-    committed_window = await store.get_active_project_semantic_window(
+    await scheduler._execute_job(new_job(blocking, lambda: now[0]), context)
+    timed_out = await store.get_active_project_semantic_window(
         user_name=user_name,
         project_id=project_id,
     )
-    assert committed_window is not None
-    assert committed_window.stage is SemanticWindowStage.KNOWLEDGE_COMMITTED
-    assert entity_builder.sarah_id is not None
-    assert entity_builder.delta_id is not None
-    assert failed_publisher.calls == [
-        (entity_builder.sarah_id, entity_builder.delta_id)
-    ]
-    assert await postgres.fetch_one(
+    assert blocking.started.is_set()
+    assert timed_out is not None
+    assert timed_out.stage is SemanticWindowStage.CLAIMED
+    assert timed_out.attempt_count == 1
+    assert timed_out.last_failure_stage == "episode"
+    assert timed_out.last_failure_code == "TimeoutError"
+    assert timed_out.next_retry_at_ms == 31_000
+
+    now[0] = 31_000
+    restarted = new_job(_ZeroEpisodeGenerator(), lambda: now[0])
+    completed = await restarted.execute(context)
+
+    assert completed.success is True
+    assert await store.get_active_project_semantic_window(
+        user_name=user_name,
+        project_id=project_id,
+    ) is None
+    durable = await postgres.fetch_one(
         """
-        SELECT stage, last_failure_stage
+        SELECT stage, attempt_count, last_failure_stage, last_failure_code,
+               next_retry_at_ms
         FROM public.project_semantic_windows
         WHERE project_id = %s
         """,
         (project_id,),
-    ) == {
-        "stage": "knowledge_committed",
-        "last_failure_stage": "resolver_publication",
+    )
+    assert durable == {
+        "stage": "completed",
+        "attempt_count": 0,
+        "last_failure_stage": None,
+        "last_failure_code": None,
+        "next_retry_at_ms": None,
     }
-
-    now[0] = 1_030_001
-    recovered_resolver = EntityResolver(
-        store,
-        project_id,
-        [project_id],
-    )
-    recovered = await new_job(
-        recovered_resolver.publish_committed_entity_ids
-    ).execute(context)
-
-    assert recovered.success
-    assert entity_builder.calls == 1
-    assert await recovered_resolver.get_id("Sarah") == entity_builder.sarah_id
-    sarah = recovered_resolver.get_cached_profile(entity_builder.sarah_id)
-    assert sarah is not None
-    assert sarah.entity_type == "Person"
-    assert sarah.topic == "Work"
-    provenance = await postgres.fetch_one(
-        """
-        SELECT
-            observation.observed_relationship_label,
-            support.support_kind,
-            support.message_id,
-            support.source_ref_id,
-            source.message_id AS source_owner_message_id
-        FROM public.relationship_observations AS observation
-        JOIN public.relationship_observation_blocks AS observation_block
-          ON observation_block.observation_id = observation.observation_id
-         AND observation_block.project_id = observation.project_id
-        JOIN public.project_context_block_supports AS support
-          ON support.block_id = observation_block.block_id
-         AND support.project_id = observation.project_id
-        JOIN public.message_source_refs AS source
-          ON source.source_ref_id = support.source_ref_id
-         AND source.project_id = support.project_id
-         AND source.session_id = support.session_id
-         AND source.message_id = support.message_id
-        WHERE observation.project_id = %s AND observation.retired_at IS NULL
-        """,
-        (project_id,),
-    )
-    assert provenance == {
-        "observed_relationship_label": "owns",
-        "support_kind": "assistant_source",
-        "message_id": 202,
-        "source_ref_id": source_ref_id,
-        "source_owner_message_id": 202,
-    }
-    evidence = await store.get_relationship_observation_evidence(
-        int(
-            (
-                await postgres.fetch_one(
-                    """
-                    SELECT observation_id
-                    FROM public.relationship_observations
-                    WHERE project_id = %s AND retired_at IS NULL
-                    """,
-                    (project_id,),
-                )
-            )["observation_id"]
-        ),
-        user_name=user_name,
-        project_id=project_id,
-    )
-    assert [node.pointer.kind for node in evidence.nodes] == [
-        "relationship_observation",
-        "context_block",
-        "message",
-        "source_reference",
-    ]
-    assert {edge.relation for edge in evidence.edges} == {
-        "source_owned_by_message",
-        "supports_context_block",
-        "supports_relationship_observation",
-    }
-    assert evidence.nodes_truncated is False
-    assert evidence.edges_truncated is False
-    repeated = await store.get_relationship_observation_evidence(
-        int(evidence.subject.identifier),
-        user_name=user_name,
-        project_id=project_id,
-    )
-    assert repeated == evidence
-
-    block_id = next(
-        node.pointer.identifier
-        for node in evidence.nodes
-        if node.pointer.kind == "context_block"
-    )
-    block_evidence = await store.get_context_block_evidence(
-        block_id,
-        user_name=user_name,
-        project_id=project_id,
-    )
-    assert {node.pointer.kind for node in block_evidence.nodes} == {
-        "context_block",
-        "message",
-        "source_reference",
-    }
-    hidden = await store.get_relationship_observation_evidence(
-        int(evidence.subject.identifier),
-        user_name=user_name,
-        project_id=f"{project_id}-outside-scope",
-    )
-    assert len(hidden.nodes) == 1
-    assert hidden.nodes[0].status == "missing"
-    assert hidden.edges == ()
-
-    deleted = await ProjectDeletionWriter(postgres).delete_project(
-        user_name=user_name,
-        project_id=project_id,
-    )
-    assert deleted is not None
-    after_deletion = await store.get_relationship_observation_evidence(
-        int(evidence.subject.identifier),
-        user_name=user_name,
-        project_id=project_id,
-    )
-    assert len(after_deletion.nodes) == 1
-    assert after_deletion.nodes[0].status == "missing"
-    assert after_deletion.edges == ()
 
 
 @pytest.mark.integration
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
-async def test_context_vp02_persists_distinct_homonymous_handles_with_source_provenance(
+async def test_domain_activation_noop_bridge_completes_knowledge_and_following_window(
     real_server_scope,
     tmp_path,
 ):
-    scope = real_server_scope
-    postgres = scope["postgres"]
-    user_name = scope["user_name"]
-    project_id = scope["project_id"]
-    session_id = scope["session_id"]
-    source_ref_id = uuid4()
-    await postgres.execute(
-        """
-        INSERT INTO public.messages (
-            user_name, session_id, message_id, project_id, role, content,
-            timestamp_ms, lifecycle_state, exchange_state, exchange_outcome,
-            exchange_closed_at_ms
-        ) VALUES (%s, %s, 211, %s, 'user', 'Check the supplied ownership source.',
-                  1, 'sealed', 'closed', 'assistant_final', 2),
-                 (%s, %s, 212, %s, 'assistant', 'The source says Alex owns Delta.',
-                  2, 'sealed', 'open', NULL, NULL)
-        """,
-        (user_name, session_id, project_id, user_name, session_id, project_id),
-    )
-    await postgres.execute(
-        """
-        UPDATE public.messages
-        SET user_msg_id = 211
-        WHERE project_id = %s AND message_id = 212
-        """,
-        (project_id,),
-    )
-    await postgres.execute(
-        """
-        INSERT INTO public.message_source_refs (
-            source_ref_id, project_id, session_id, message_id, source_kind,
-            source_message_id, content_hash, locator, excerpt, metadata,
-            encounter_kind, agent_run_id, result_position, idempotency_key
-        ) VALUES (
-            %s, %s, %s, 212, 'user_pasted_text', 211, %s,
-            '{"kind":"character_span","start_char":0,"end_char":8}',
-            'Alex owns Delta.', '{}'::jsonb, 'user_pasted_text',
-            'homonym-run', 0, 'homonym-source-provenance'
-        )
-        """,
-        (source_ref_id, project_id, session_id, "0" * 64),
-    )
-
-    domain = _relationship_domain()
-    policy = IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(),
-        entity_resolution=EntityResolutionSettings(),
-        compiled_domain=domain,
-    )
-    store = KnowledgeStore(postgres, object())
-    projection = ContextProjection(
-        reader=ProjectContextReader(postgres),
-        writer=ProjectContextWriter(postgres),
-        filesystem=ProjectFilesystem(tmp_path / project_id),
-    )
-
-    async def capture_semantic_policy():
-        return policy
-
-    entity_builder = _HomonymRelationshipEntityBuilder(store)
-    job = ProjectSemanticProcessor(
-        SemanticWindowAdmission(
-            store,
-            IngestionSettings(semantic_window_tokens=100),
-            token_counter=lambda text: max(1, len(text.split())),
-            now_ms=lambda: 1_000_000,
-        ),
-        store,
-        _ZeroEpisodeGenerator(),
-        settings=IngestionSettings(semantic_window_tokens=100),
-        capture_semantic_policy=capture_semantic_policy,
-        context_updater=ContextUpdater(llm=_HomonymSourceGroundedContextModel()),
-        context_projection=projection,
-        context_entity_builder=entity_builder,
-        context_relationship_extractor=ContextRelationshipExtractor(
-            user_name=user_name,
-            llm=_ContextRelationshipLLM(
-                [
-                    {
-                        "block_ids": ["b1"],
-                        "entity_a": "e2",
-                        "entity_b": "e4",
-                        "relationship": "owns",
-                    },
-                    {
-                        "block_ids": ["b1"],
-                        "entity_a": "e3",
-                        "entity_b": "e4",
-                        "relationship": "owns",
-                    },
-                ]
-            ),
-            entities=_PendingContextEntities(),
-        ),
-        publish_committed_entity_ids=_publish_nothing,
-    )
-
-    result = await job.execute(JobContext(user_name=user_name, project_id=project_id))
-    assert result.success
-    assert entity_builder.first_alex_id is not None
-    assert entity_builder.second_alex_id is not None
-    assert entity_builder.delta_id is not None
-
-    observations = await postgres.fetch_all(
-        """
-        SELECT
-            observation.source_entity_id,
-            observation.target_entity_id,
-            support.message_id,
-            support.source_ref_id
-        FROM public.relationship_observations AS observation
-        JOIN public.relationship_observation_blocks AS observation_block
-          ON observation_block.observation_id = observation.observation_id
-         AND observation_block.project_id = observation.project_id
-        JOIN public.project_context_block_supports AS support
-          ON support.block_id = observation_block.block_id
-         AND support.project_id = observation.project_id
-        WHERE observation.project_id = %s AND observation.retired_at IS NULL
-        ORDER BY observation.source_entity_id
-        """,
-        (project_id,),
-    )
-    assert observations == [
-        {
-            "source_entity_id": entity_builder.first_alex_id,
-            "target_entity_id": entity_builder.delta_id,
-            "message_id": 212,
-            "source_ref_id": source_ref_id,
-        },
-        {
-            "source_entity_id": entity_builder.second_alex_id,
-            "target_entity_id": entity_builder.delta_id,
-            "message_id": 212,
-            "source_ref_id": source_ref_id,
-        },
-    ]
-
-
-@pytest.mark.integration
-@pytest.mark.requires_postgres
-@pytest.mark.no_network
-async def test_project_semantic_processor_preserves_correction_history_through_noop_restart(
-    real_server_scope,
-    tmp_path,
-):
-    """Compose correction, current/history reads, and no-op restart on real storage."""
+    """Compose the version bridge and its next window through real storage."""
 
     scope = real_server_scope
     postgres = scope["postgres"]
     user_name = scope["user_name"]
     project_id = scope["project_id"]
     session_id = scope["session_id"]
-
-    async def insert_closed_exchange(message_id: int, content: str, timestamp_ms: int):
-        await postgres.execute(
-            """
-            INSERT INTO public.messages (
-                user_name, session_id, message_id, project_id, role, content,
-                timestamp_ms, lifecycle_state, exchange_state, exchange_outcome,
-                exchange_closed_at_ms
-            ) VALUES (%s, %s, %s, %s, 'user', %s, %s, 'sealed', 'closed',
-                      'user_only', %s)
-            """,
-            (
-                user_name,
-                session_id,
-                message_id,
-                project_id,
-                content,
-                timestamp_ms,
-                timestamp_ms,
-            ),
-        )
-
-    domain = _relationship_domain()
     settings = IngestionSettings(semantic_window_tokens=1)
-    policy = IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(),
-        entity_resolution=EntityResolutionSettings(),
-        compiled_domain=domain,
-    )
     store = KnowledgeStore(postgres, object())
+    domain_store = DomainConfigStore(postgres)
+    initial_domain = await domain_store.load(user_name, project_id)
+    runtime = ProjectRuntime(
+        project_id=project_id,
+        entities=object(),
+        knowledge_retrieval=object(),
+        text_processor=SimpleNamespace(
+            gliner_threshold=0.42,
+            llm_ner_mode="fallback",
+        ),
+        scheduler=None,
+        user_name=user_name,
+        readable_project_ids=[project_id],
+        domain_config=initial_domain,
+        compiled_domain=initial_domain.compile(),
+        document_service=SimpleNamespace(),
+        domain_config_store=domain_store,
+        config_manager=SimpleNamespace(
+            config=RootConfig(developer_settings=DeveloperSettings()),
+        ),
+    )
     projection = ContextProjection(
         reader=ProjectContextReader(postgres),
         writer=ProjectContextWriter(postgres),
         filesystem=ProjectFilesystem(tmp_path / project_id),
     )
-    model = _CorrectionContextModel()
-    entity_builder = _CorrectionEntityBuilder(store)
-    relationship_extractor = _CorrectionRelationshipExtractor()
-
-    async def capture_semantic_policy():
-        return policy
 
     def new_job():
         return ProjectSemanticProcessor(
@@ -1598,318 +1262,23 @@ async def test_project_semantic_processor_preserves_correction_history_through_n
             store,
             _ZeroEpisodeGenerator(),
             settings=settings,
-            capture_semantic_policy=capture_semantic_policy,
-            context_updater=ContextUpdater(llm=model),
+            capture_semantic_policy=runtime.capture_semantic_policy,
+            context_updater=ContextUpdater(llm=_NoopContextModel()),
             context_projection=projection,
-            context_entity_builder=entity_builder,
-            context_relationship_extractor=relationship_extractor,
+            entity_builder=_UnexpectedKnowledgeBuilder(),
+            relationship_extractor=_UnexpectedRelationshipExtractor(),
             publish_committed_entity_ids=_publish_nothing,
         )
 
-    context = JobContext(user_name=user_name, project_id=project_id)
-
-    async def complete_window(job):
-        result = await job.execute(context)
-        assert result.success
-
-    job = new_job()
-    await insert_closed_exchange(301, "Sarah owns Delta.", 1_000)
-    await complete_window(job)
-
-    reader = ProjectContextReader(postgres)
-    initial_revision = await reader.get_current_revision(
-        user_name=user_name,
-        project_id=project_id,
-    )
-    assert initial_revision is not None
-    old_observation = await postgres.fetch_one(
-        """
-        SELECT observation_id
-        FROM public.relationship_observations
-        WHERE project_id = %s AND retired_at IS NULL
-        """,
-        (project_id,),
-    )
-    assert old_observation is not None
-    old_observation_id = int(old_observation["observation_id"])
-
-    await insert_closed_exchange(302, "John owns Delta.", 2_000)
-    await complete_window(job)
-
-    correction_revision = await reader.get_current_revision(
-        user_name=user_name,
-        project_id=project_id,
-    )
-    assert correction_revision is not None
-    assert correction_revision.revision_number == initial_revision.revision_number + 1
-
-    await insert_closed_exchange(303, "No change to the ownership.", 3_000)
-    await complete_window(job)
-    assert await store.get_active_project_semantic_window(
-        user_name=user_name,
-        project_id=project_id,
-    ) is None
-
-    assert model.calls == 3
-    assert entity_builder.calls == 2
-    assert relationship_extractor.calls == 2
-    assert entity_builder.delta_id is not None
-
-    observations = await postgres.fetch_all(
-        """
-        SELECT observation_id, source_entity_id, target_entity_id, observed_at_ms,
-               retired_at, retired_reason
-        FROM public.relationship_observations
-        WHERE project_id = %s
-        ORDER BY observation_id
-        """,
-        (project_id,),
-    )
-    assert len(observations) == 2
-    retired = next(
-        row for row in observations if int(row["observation_id"]) == old_observation_id
-    )
-    active = next(
-        row for row in observations if int(row["observation_id"]) != old_observation_id
-    )
-    assert retired["retired_at"] is not None
-    assert retired["retired_reason"] == "context_block_replaced_or_deleted"
-    assert active["retired_at"] is None
-    assert active["observed_at_ms"] == 2_000
-    assert await postgres.fetch_one(
-        """
-        SELECT count(*) AS count
-        FROM public.relationship_observation_blocks
-        WHERE project_id = %s
-        """,
-        (project_id,),
-    ) == {"count": 2}
-
-    current = await EntityReader(postgres).get_related_entities(
-        [entity_builder.delta_id],
-        visible_project_ids=[project_id],
-    )
-    assert len(current) == 1
-    assert current[0]["source"] == "John"
-    assert current[0]["target"] == "Delta"
-    assert current[0]["observation_count"] == 1
-    assert current[0]["first_observed"] == 2_000
-    assert current[0]["last_observed"] == 2_000
-    assert current[0]["observation_refs"] == [
-        {
-            "observation_id": int(active["observation_id"]),
-            "observed_relationship_label": "owns",
-            "relationship_type": "owns",
-            "observed_at_ms": 2_000,
-            "context": "John owns Delta.",
-        }
-    ]
-    assert current[0]["evidence_refs"] == [
-        {
-            "project_id": project_id,
-            "user_name": user_name,
-            "session_id": session_id,
-            "message_id": 302,
-        }
-    ]
-
-    old_evidence = await store.get_relationship_observation_evidence(
-        old_observation_id,
-        user_name=user_name,
-        project_id=project_id,
-    )
-    historical_observation = next(
-        node
-        for node in old_evidence.nodes
-        if node.pointer.kind == "relationship_observation"
-    )
-    assert historical_observation.status == "retired"
-    old_support = await postgres.fetch_one(
-        """
-        SELECT block_id
-        FROM public.relationship_observation_blocks
-        WHERE observation_id = %s AND project_id = %s
-        """,
-        (old_observation_id, project_id),
-    )
-    assert old_support is not None
-    assert {
-        (node.pointer.kind, node.pointer.identifier) for node in old_evidence.nodes
-    } == {
-        ("relationship_observation", str(old_observation_id)),
-        ("context_block", str(old_support["block_id"])),
-        ("message", "301"),
-    }
-
-    recency_rows = await postgres.fetch_all(
-        """
-        SELECT entity.canonical_name, context.last_mentioned_ms
-        FROM public.project_entity_contexts AS context
-        JOIN public.entities AS entity ON entity.entity_id = context.entity_id
-        WHERE context.project_id = %s
-          AND entity.canonical_name = ANY(%s)
-        """,
-        (project_id, ["Sarah", "John", "Delta"]),
-    )
-    assert {
-        row["canonical_name"]: row["last_mentioned_ms"] for row in recency_rows
-    } == {"Sarah": 1_000, "John": 2_000, "Delta": 2_000}
-    assert await postgres.fetch_one(
-        """
-        SELECT count(*) AS total,
-               count(*) FILTER (WHERE stage = 'completed') AS completed,
-               count(*) FILTER (WHERE episode_result_recorded) AS episode_results
-        FROM public.project_semantic_windows
-        WHERE project_id = %s
-        """,
-        (project_id,),
-    ) == {"total": 3, "completed": 3, "episode_results": 3}
-
-
-@pytest.mark.integration
-@pytest.mark.requires_postgres
-@pytest.mark.no_network
-async def test_project_semantic_processor_composes_real_resolution_extraction_and_recovery(
-    real_server_scope,
-    tmp_path,
-):
-    """Exercise foreign identity reuse through real Context extraction and recovery."""
-
-    scope = real_server_scope
-    postgres = scope["postgres"]
-    user_name = scope["user_name"]
-    project_id = scope["project_id"]
-    session_id = scope["session_id"]
-    shared_project_id = f"{project_id}-shared"
-    domain = _relationship_domain()
-    settings = IngestionSettings(semantic_window_tokens=1)
-    policy = IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(),
-        entity_resolution=EntityResolutionSettings(),
-        compiled_domain=domain,
-    )
-    store = KnowledgeStore(postgres, object())
-    vp01 = _Stage2VP01()
-    context_model = _Stage2ContextModel()
-    relationship_llm = _ContextRelationshipLLM(
-        [
-            {
-                "block_ids": ["b1"],
-                "entity_a": "e2",
-                "entity_b": "e3",
-                "relationship": "owns",
-                "context": "Avery Stone owns Delta Corp.",
-            }
-        ]
-    )
-    projection = ContextProjection(
-        reader=ProjectContextReader(postgres),
-        writer=ProjectContextWriter(postgres),
-        filesystem=ProjectFilesystem(tmp_path / project_id),
-    )
-
-    await postgres.execute(
-        """
-        INSERT INTO public.projects (project_id, user_name, name, domain_config)
-        VALUES (%s, %s, 'Shared identity source', %s::jsonb)
-        """,
-        (shared_project_id, user_name, "{}"),
-    )
-    await postgres.execute(
-        """
-        INSERT INTO public.project_read_scopes (
-            user_name, project_id, readable_project_id
-        ) VALUES (%s, %s, %s)
-        """,
-        (user_name, project_id, shared_project_id),
-    )
-    target_id = await store.allocate_entity_id()
-    homonym_id = await store.allocate_entity_id()
-    await postgres.execute(
-        """
-        INSERT INTO public.entities (entity_id, user_name, canonical_name)
-        VALUES (%s, %s, 'Avery Stone'),
-               (%s, %s, 'Avery Quinn')
-        """,
-        (target_id, user_name, homonym_id, user_name),
-    )
-    await postgres.execute(
-        """
-        INSERT INTO public.entity_aliases (entity_id, alias)
-        VALUES (%s, 'Avery'), (%s, 'Avery')
-        """,
-        (target_id, homonym_id),
-    )
-    await postgres.execute(
-        """
-        INSERT INTO public.project_entity_contexts (
-            project_id, entity_id, user_name, entity_type, topic
-        ) VALUES (%s, %s, %s, 'Person', 'Work'),
-                 (%s, %s, %s, 'Person', 'Work')
-        """,
-        (
-            shared_project_id,
-            target_id,
-            user_name,
-            shared_project_id,
-            homonym_id,
-            user_name,
-        ),
-    )
-    async def capture_semantic_policy():
-        return policy
-
-    now = [1_000_000]
-
-    def new_job(resolver, publisher):
-        processor = TextProcessor(
-            get_known_aliases=resolver.get_known_aliases,
-            get_alias_version=resolver.get_alias_version,
-            get_profile=resolver.get_profile,
-            vp01=vp01,
-            spacy=spacy.blank("en"),
-            settings=TextProcessorSettings(),
-        )
-        return ProjectSemanticProcessor(
-            SemanticWindowAdmission(
-                store,
-                settings,
-                token_counter=lambda text: max(1, len(text.split())),
-                now_ms=lambda: now[0],
-            ),
-            store,
-            _ZeroEpisodeGenerator(),
-            settings=settings,
-            capture_semantic_policy=capture_semantic_policy,
-            context_updater=ContextUpdater(llm=context_model),
-            context_projection=projection,
-            context_entity_builder=ContextEntityBuildService(
-                processor=processor,
-                resolver=resolver,
-                allocate_entity_id=store.allocate_entity_id,
-            ),
-            context_relationship_extractor=ContextRelationshipExtractor(
-                user_name=user_name,
-                llm=relationship_llm,
-                entities=resolver,
-            ),
-            publish_committed_entity_ids=publisher,
-            now_ms=lambda: now[0],
-        )
-
-    async def insert_closed_exchange(
-        message_id: int,
-        content: str,
-        timestamp_ms: int,
-    ) -> None:
+    async def add_and_complete(message_id: int, content: str):
         await postgres.execute(
             """
             INSERT INTO public.messages (
                 user_name, session_id, message_id, project_id, role, content,
                 timestamp_ms, lifecycle_state, exchange_state, exchange_outcome,
                 exchange_closed_at_ms
-            ) VALUES (%s, %s, %s, %s, 'user', %s, %s, 'sealed', 'closed',
-                      'user_only', %s)
+            ) VALUES (%s, %s, %s, %s, 'user', %s, %s,
+                      'sealed', 'closed', 'user_only', %s)
             """,
             (
                 user_name,
@@ -1917,238 +1286,600 @@ async def test_project_semantic_processor_composes_real_resolution_extraction_an
                 message_id,
                 project_id,
                 content,
-                timestamp_ms,
-                timestamp_ms,
+                message_id,
+                message_id,
             ),
         )
+        result = await new_job().execute(
+            JobContext(user_name=user_name, project_id=project_id)
+        )
+        assert result.success is True
 
-    async def complete_window(job, context):
-        result = await job.execute(context)
-        assert result.success
-
-    context = JobContext(user_name=user_name, project_id=project_id)
-    cold_resolver = EntityResolver(
-        store,
-        project_id,
-        [project_id, shared_project_id],
-    )
-    failed_publisher = _FailingCommittedEntityPublisher()
-    failed_job = new_job(cold_resolver, failed_publisher)
-
-    await insert_closed_exchange(401, "Avery Stone owns Delta Corp.", 1_000)
-    failed_finalization = await failed_job.execute(context)
-    assert failed_finalization.success is False
-    committed_window = await store.get_active_project_semantic_window(
+    await add_and_complete(501, "Establish the original Context version.")
+    before_activation = await ProjectContextReader(postgres).get_current_revision(
         user_name=user_name,
         project_id=project_id,
     )
-    assert committed_window is not None
-    assert committed_window.stage is SemanticWindowStage.KNOWLEDGE_COMMITTED
-    assert await postgres.fetch_one(
-        """
-        SELECT entity_id, entity_type, topic, last_mentioned_ms
-        FROM public.project_entity_contexts
-        WHERE project_id = %s AND entity_id = %s
-        """,
-        (project_id, target_id),
-    ) == {
-        "entity_id": target_id,
-        "entity_type": "Person",
-        "topic": "Work",
-        "last_mentioned_ms": 1_000,
-    }
-    delta = await postgres.fetch_one(
-        """
-        SELECT entity_id
-        FROM public.entities
-        WHERE user_name = %s AND canonical_name = 'Delta Corp'
-        """,
-        (user_name,),
-    )
-    assert delta is not None
-    delta_id = int(delta["entity_id"])
-    assert await postgres.fetch_one(
-        """
-        SELECT count(*) AS count
-        FROM public.entities
-        WHERE user_name = %s AND canonical_name = 'Avery Stone'
-        """,
-        (user_name,),
-    ) == {"count": 1}
+    assert before_activation is not None
+    assert before_activation.domain_version == initial_domain.version
 
-    initial_observation = await postgres.fetch_one(
-        """
-        SELECT observation_id, source_entity_id, target_entity_id, observed_at_ms
-        FROM public.relationship_observations
-        WHERE project_id = %s AND retired_at IS NULL
-        """,
-        (project_id,),
+    activation = await runtime.activate_domain_config(
+        initial_domain.with_version(0),
+        expected_version=initial_domain.version,
     )
-    assert initial_observation is not None
-    initial_observation_id = int(initial_observation["observation_id"])
-    assert initial_observation == {
-        "observation_id": initial_observation_id,
-        "source_entity_id": target_id,
-        "target_entity_id": delta_id,
-        "observed_at_ms": 1_000,
-    }
-    assert await postgres.fetch_all(
-        """
-        SELECT association.entity_id, support.message_id, support.support_kind
-        FROM public.relationship_observation_blocks AS observation_block
-        JOIN public.context_block_entities AS association
-          ON association.block_id = observation_block.block_id
-         AND association.project_id = observation_block.project_id
-        JOIN public.project_context_block_supports AS support
-          ON support.block_id = observation_block.block_id
-         AND support.project_id = observation_block.project_id
-        WHERE observation_block.observation_id = %s
-          AND observation_block.project_id = %s
-        ORDER BY association.entity_id
-        """,
-        (initial_observation_id, project_id),
-    ) == [
-        {
-            "entity_id": target_id,
-            "message_id": 401,
-            "support_kind": "user_message",
-        },
-        {
-            "entity_id": delta_id,
-            "message_id": 401,
-            "support_kind": "user_message",
-        },
-    ]
+    await add_and_complete(502, "No Context change after activation.")
+    bridge = await ProjectContextReader(postgres).get_current_revision(
+        user_name=user_name,
+        project_id=project_id,
+    )
+    assert bridge is not None
+    assert bridge.revision_id != before_activation.revision_id
+    assert bridge.domain_version == activation.config.version
+    assert bridge.content_hash == before_activation.content_hash
 
-    assert failed_publisher.calls == [(target_id, delta_id)]
-    assert await postgres.fetch_one(
-        """
-        SELECT stage, last_failure_stage
-        FROM public.project_semantic_windows
-        WHERE window_id = %s
-        """,
-        (committed_window.window_id,),
-    ) == {
-        "stage": "knowledge_committed",
-        "last_failure_stage": "resolver_publication",
-    }
-    assert await postgres.fetch_one(
-        """
-        SELECT count(*) AS count
-        FROM public.relationship_observations
-        WHERE project_id = %s
-        """,
-        (project_id,),
-    ) == {"count": 1}
-
-    now[0] = 1_030_001
-    recovered_resolver = EntityResolver(
-        store,
-        project_id,
-        [project_id, shared_project_id],
+    await add_and_complete(503, "The following window is also a no-op.")
+    following = await ProjectContextReader(postgres).get_current_revision(
+        user_name=user_name,
+        project_id=project_id,
     )
-    recovered_job = new_job(
-        recovered_resolver,
-        recovered_resolver.publish_committed_entity_ids,
-    )
-    recovered = await recovered_job.execute(context)
-    assert recovered.success
-    assert len(vp01.calls) == 1
-    assert relationship_llm.calls == 1
-    assert await recovered_resolver.get_id("Avery Stone") == target_id
-    target_profile = recovered_resolver.get_cached_profile(target_id)
-    assert target_profile is not None
-    assert (
-        target_profile.project_id,
-        target_profile.entity_type,
-        target_profile.topic,
-    ) == (project_id, "Person", "Work")
-
-    await insert_closed_exchange(
-        402,
-        "Avery Stone continues to own Delta Corp.",
-        2_000,
-    )
-    await complete_window(recovered_job, context)
-    observations = await postgres.fetch_all(
-        """
-        SELECT observation_id, source_entity_id, target_entity_id, observed_at_ms,
-               retired_at, retired_reason
-        FROM public.relationship_observations
-        WHERE project_id = %s
-        ORDER BY observation_id
-        """,
-        (project_id,),
-    )
-    assert len(observations) == 2
-    retired = next(
-        row
-        for row in observations
-        if int(row["observation_id"]) == initial_observation_id
-    )
-    active = next(
-        row
-        for row in observations
-        if int(row["observation_id"]) != initial_observation_id
-    )
-    assert retired["retired_at"] is not None
-    assert retired["retired_reason"] == "context_block_replaced_or_deleted"
-    assert active == {
-        "observation_id": active["observation_id"],
-        "source_entity_id": target_id,
-        "target_entity_id": delta_id,
-        "observed_at_ms": 2_000,
-        "retired_at": None,
-        "retired_reason": None,
-    }
-    assert len(vp01.calls) == 2
-    assert relationship_llm.calls == 2
-
-    await insert_closed_exchange(403, "No ownership change.", 3_000)
-    await complete_window(recovered_job, context)
-    assert context_model.calls == 3
-    assert len(vp01.calls) == 2
-    assert relationship_llm.calls == 2
-    assert await postgres.fetch_one(
-        """
-        SELECT count(*) AS count
-        FROM public.entities
-        WHERE user_name = %s AND canonical_name = 'Avery Stone'
-        """,
-        (user_name,),
-    ) == {"count": 1}
-    recency_rows = await postgres.fetch_all(
-        """
-        SELECT entity_id, last_mentioned_ms
-        FROM public.project_entity_contexts
-        WHERE project_id = %s AND entity_id = ANY(%s)
-        ORDER BY entity_id
-        """,
-        (project_id, [target_id, delta_id]),
-    )
-    assert recency_rows == [
-        {"entity_id": target_id, "last_mentioned_ms": 2_000},
-        {"entity_id": delta_id, "last_mentioned_ms": 2_000},
-    ]
+    assert following is not None
+    assert following.revision_id == bridge.revision_id
     assert await postgres.fetch_one(
         """
         SELECT count(*) AS total,
-               count(*) FILTER (WHERE stage = 'completed') AS completed
+               count(*) FILTER (WHERE stage = 'completed') AS completed,
+               count(*) FILTER (WHERE context_revision_id = %s) AS bridged
         FROM public.project_semantic_windows
         WHERE project_id = %s
         """,
-        (project_id,),
-    ) == {"total": 3, "completed": 3}
+        (bridge.revision_id, project_id),
+    ) == {"total": 3, "completed": 3, "bridged": 2}
 
-    homonym_audit = EntityResolver(
-        store,
-        project_id,
-        [project_id, shared_project_id],
+
+@pytest.mark.integration
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_episode_extraction_reuses_a_readable_foreign_identity(
+    real_server_scope,
+    tmp_path,
+):
+    """A name another readable project already knows resolves to that entity."""
+
+    scope = real_server_scope
+    postgres, user_name, project_id = (
+        scope["postgres"], scope["user_name"], scope["project_id"],
     )
-    homonym_candidates = {
+    shared_project_id = f"{project_id}-shared"
+    policy = IngestionPolicy.capture(
+        extraction=ExtractionSettings(),
+        entity_resolution=EntityResolutionSettings(),
+        compiled_domain=_relationship_domain(),
+    )
+    store = KnowledgeStore(postgres, object())
+    await postgres.execute(
+        """INSERT INTO public.projects (project_id, user_name, name, domain_config)
+           VALUES (%s, %s, 'Shared identity source', %s::jsonb)""",
+        (shared_project_id, user_name, "{}"),
+    )
+    await postgres.execute(
+        """INSERT INTO public.project_read_scopes
+           (user_name, project_id, readable_project_id) VALUES (%s, %s, %s)""",
+        (user_name, project_id, shared_project_id),
+    )
+    target_id = await store.allocate_entity_id()
+    homonym_id = await store.allocate_entity_id()
+    await postgres.execute(
+        """INSERT INTO public.entities (entity_id, user_name, canonical_name)
+           VALUES (%s, %s, 'Avery Stone'), (%s, %s, 'Avery Quinn')""",
+        (target_id, user_name, homonym_id, user_name),
+    )
+    await postgres.execute(
+        "INSERT INTO public.entity_aliases (entity_id, alias) VALUES (%s, 'Avery'), (%s, 'Avery')",
+        (target_id, homonym_id),
+    )
+    await postgres.execute(
+        """INSERT INTO public.project_entity_contexts
+           (project_id, entity_id, user_name, entity_type, topic)
+           VALUES (%s, %s, %s, 'Person', 'Work'), (%s, %s, %s, 'Person', 'Work')""",
+        (shared_project_id, target_id, user_name, shared_project_id, homonym_id, user_name),
+    )
+    resolver = EntityResolver(store, project_id, [project_id, shared_project_id])
+    llm = _NamesLLM(["Avery Stone"], ["Delta Corp"])
+    job = _knowledge_job(
+        store, postgres, tmp_path, project_id, policy, resolver=resolver, llm=llm,
+        user_name=user_name, publisher=resolver.publish_committed_entity_ids,
+    )
+    context = JobContext(user_name=user_name, project_id=project_id)
+
+    await _insert_closed_exchange(postgres, scope, 401, "Avery Stone owns Delta Corp.", 1_000)
+    assert (await job.execute(context)).success
+    await _insert_closed_exchange(
+        postgres, scope, 402, "Avery Stone continues to own Delta Corp.", 2_000,
+    )
+    assert (await job.execute(context)).success
+
+    assert await postgres.fetch_one(
+        "SELECT count(*) AS count FROM public.entities "
+        "WHERE user_name = %s AND canonical_name = 'Avery Stone'",
+        (user_name,),
+    ) == {"count": 1}
+    assert await postgres.fetch_one(
+        "SELECT entity_type, topic, last_mentioned_ms FROM public.project_entity_contexts "
+        "WHERE project_id = %s AND entity_id = %s",
+        (project_id, target_id),
+    ) == {"entity_type": "Person", "topic": "Work", "last_mentioned_ms": 2_000}
+    observations = await postgres.fetch_all(
+        "SELECT source_entity_id, observed_at_ms, retired_at "
+        "FROM public.relationship_observations WHERE project_id = %s "
+        "ORDER BY observed_at_ms",
+        (project_id,),
+    )
+    assert observations == [
+        {"source_entity_id": target_id, "observed_at_ms": 1_000, "retired_at": None},
+        {"source_entity_id": target_id, "observed_at_ms": 2_000, "retired_at": None},
+    ]
+    assert (llm.entity_calls, llm.relationship_calls) == (2, 2)
+    candidates = {
         candidate.entity_id: candidate
-        for candidate in await homonym_audit.get_candidate_ids("Avery")
+        for candidate in await EntityResolver(
+            store, project_id, [project_id, shared_project_id],
+        ).get_candidate_ids("Avery")
     }
-    assert {target_id, homonym_id}.issubset(homonym_candidates)
-    assert "ambiguous_alias" in homonym_candidates[target_id].signals
-    assert "ambiguous_alias" in homonym_candidates[homonym_id].signals
+    assert {target_id, homonym_id} <= set(candidates)
+    assert "ambiguous_alias" in candidates[target_id].signals
+
+
+class _EchoEpisodeGenerator:
+    """One Episode per window that repeats its messages; rewrites keep only
+    what the user did not ask to forget."""
+
+    def __init__(self):
+        self.rewrites = []
+
+    async def generate(self, *, project_id, messages, policy, **_kwargs):
+        build = ProjectEpisodeBuild(
+            project_id=project_id,
+            policy=policy,
+            messages=[dict(message) for message in messages],
+        )
+        build.prepare_local_references()
+        text = " ".join(str(message["content"]) for message in messages)
+        build.apply_llm_output(LLMEpisodeWindowDecision(proposals=[LLMEpisodeDecision(
+            summary=f"The user said: {text}",
+            message_influences=list(build.message_ids_by_local),
+            events=[{
+                "what": f"The user said: {text}", "kind": "other",
+                "start_date": "2023-03-10", "precision": "day",
+                "date_text": "today", "sources": ["message:1"],
+            }],
+        )]))
+        build.create_episodes()
+        build.attach_embeddings([[0.25] * 768])
+        return build
+
+    async def rewrite_without(self, *, user_name, episode, forgotten_texts):
+        self.rewrites.append((episode["summary"], forgotten_texts))
+        return (
+            SimpleNamespace(
+                summary="The user asked to forget part of the conversation.",
+                new_developments=[], updates=[], unresolved=[],
+            ),
+            [0.5] * 768,
+        )
+
+
+class _ForgetContextUpdater:
+    """Context only ever records pottery; the partner's name never reaches it.
+    The second window's request names the value to forget."""
+
+    async def update(self, *, snapshot, domain, project_id, messages, **_kwargs):
+        if snapshot is None:
+            return ContextUpdateResult(
+                materialization=apply_context_edits(snapshot, [ContextAdd(
+                    section_key="current_state", markdown="The user likes pottery.",
+                    assertion_kind=AssertionKind.AGENT_DERIVED,
+                    evidence=[{"handle": "M2"}],
+                )], domain, project_id=project_id),
+                edit_summary="Recorded pottery", operation_count=1,
+            )
+        requests = [m for m in messages if "forget" in str(m["content"])]
+        return ContextUpdateResult(
+            materialization=None, edit_summary="No Context change", operation_count=0,
+            forget_requests=tuple(ForgetRequest(("James",), (int(m["message_id"]),)) for m in requests),
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_forgetting_hides_messages_and_rewrites_their_episodes(
+    real_server_scope, tmp_path
+):
+    scope = real_server_scope
+    postgres = scope["postgres"]
+    user_name, project_id = scope["user_name"], scope["project_id"]
+    domain = _domain()
+    policy = IngestionPolicy.capture(
+        extraction=ExtractionSettings(),
+        entity_resolution=EntityResolutionSettings(),
+        compiled_domain=domain,
+    )
+    store = KnowledgeStore(postgres, object())
+
+    async def capture_semantic_policy():
+        return policy
+
+    episodes = _EchoEpisodeGenerator()
+    job = ProjectSemanticProcessor(
+        SemanticWindowAdmission(
+            store, IngestionSettings(semantic_window_tokens=100),
+            token_counter=lambda text: max(1, len(text.split())),
+            now_ms=lambda: 1_000_000,
+        ),
+        store,
+        episodes,
+        settings=IngestionSettings(semantic_window_tokens=100),
+        capture_semantic_policy=capture_semantic_policy,
+        context_updater=_ForgetContextUpdater(),
+        context_projection=ContextProjection(
+            reader=ProjectContextReader(postgres),
+            writer=ProjectContextWriter(postgres),
+            filesystem=ProjectFilesystem(tmp_path / project_id),
+        ),
+        entity_builder=_EmptyEntityBuilder(),
+        relationship_extractor=_EmptyRelationships(),
+        publish_committed_entity_ids=_publish_nothing,
+    )
+    context = JobContext(user_name=user_name, project_id=project_id)
+    await _insert_closed_exchange(postgres, scope, 301, "My partner is James.", 1)
+    await _insert_closed_exchange(postgres, scope, 302, "I like pottery.", 2)
+    assert (await job.execute(context)).success
+    await _insert_closed_exchange(
+        postgres, scope, 303, "My partner is James. Please forget that.", 3
+    )
+    assert (await job.execute(context)).success
+
+    states = {
+        row["message_id"]: row["lifecycle_state"]
+        for row in await postgres.fetch_all(
+            "SELECT message_id, lifecycle_state FROM public.messages "
+            "WHERE project_id = %s", (project_id,),
+        )
+    }
+    # 301 contains the value and 303 is the request; 302 never named it, and
+    # the pottery block it supports stays.
+    assert states == {301: "forgotten", 302: "sealed", 303: "forgotten"}
+    found = await store.search_messages_fts(
+        "James | pottery", user_name=user_name,
+        session_ids=[scope["session_id"]], visible_project_ids=[project_id],
+    )
+    assert [message_id for message_id, *_ in found] == [302]
+
+    rows = await postgres.fetch_all(
+        "SELECT episode_id, summary FROM public.episodes "
+        "WHERE project_id = %s ORDER BY created_at", (project_id,),
+    )
+    assert len(rows) == 2
+    assert all("James" not in row["summary"] for row in rows)
+    sources = [
+        [message["message_id"] for message in await store.get_project_episode_source_messages(
+            row["episode_id"], user_name=user_name, project_id=project_id,
+        )]
+        for row in rows
+    ]
+    assert sources == [[302], []]
+    events = await postgres.fetch_all(
+        "SELECT what FROM public.episode_events WHERE project_id = %s", (project_id,)
+    )
+    assert all("James" not in row["what"] for row in events)
+    # Both Episodes were rewritten once, each told what to leave out.
+    assert sorted(len(texts) for _, texts in episodes.rewrites) == [1, 1]
+    # A rewritten Episode is not rewritten again on the next window.
+    await _insert_closed_exchange(postgres, scope, 304, "I also like hiking.", 4)
+    assert (await job.execute(context)).success
+    assert len(episodes.rewrites) == 2
+
+
+class _ReleaseCadenceContextModel:
+    """Records the release cadence, updates it in other words, then forgets
+    it when asked, citing the block. Context only ever holds that one block."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def generate_structured(self, **_kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            return LLMContextUpdate.model_validate({"operations": [{
+                "operation": "add", "section_key": "current_state",
+                "markdown": "The team ships every merge.",
+                "assertion_kind": "user_asserted",
+                "user_quote": "The team ships every merge.",
+                "evidence": [{"handle": "M1"}],
+            }, {
+                "operation": "add", "section_key": "current_state",
+                "markdown": "I like pottery.", "assertion_kind": "user_asserted",
+                "user_quote": "I like pottery.", "evidence": [{"handle": "M2"}],
+            }]})
+        if self.calls == 2:
+            return LLMContextUpdate.model_validate({"operations": [{
+                "operation": "replace", "section_key": "current_state",
+                "target": {"handle": "C1"},
+                "markdown": "Merges now go straight to production.",
+                "assertion_kind": "user_asserted",
+                "user_quote": "Merges now go straight to production.",
+                "evidence": [{"handle": "M1"}],
+            }]})
+        return LLMContextUpdate.model_validate({
+            "operations": [{
+                "operation": "delete", "section_key": "current_state",
+                "target": {"handle": "C1"}, "evidence": [{"handle": "M1"}],
+            }],
+            "forget": [{
+                "values": ["continuous deploy on merge"],
+                "evidence": [{"handle": "M1"}],
+                "blocks": [{"handle": "C1"}],
+            }],
+        })
+
+
+@pytest.mark.integration
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_forgetting_a_block_forgets_what_the_user_said_in_other_words(
+    real_server_scope, tmp_path
+):
+    scope = real_server_scope
+    postgres = scope["postgres"]
+    user_name, project_id = scope["user_name"], scope["project_id"]
+    domain = _domain()
+    policy = IngestionPolicy.capture(
+        extraction=ExtractionSettings(),
+        entity_resolution=EntityResolutionSettings(),
+        compiled_domain=domain,
+    )
+    store = KnowledgeStore(postgres, object())
+
+    async def capture_semantic_policy():
+        return policy
+
+    job = ProjectSemanticProcessor(
+        SemanticWindowAdmission(
+            store, IngestionSettings(semantic_window_tokens=100),
+            token_counter=lambda text: max(1, len(text.split())),
+            now_ms=lambda: 1_000_000,
+        ),
+        store,
+        _EchoEpisodeGenerator(),
+        settings=IngestionSettings(semantic_window_tokens=100),
+        capture_semantic_policy=capture_semantic_policy,
+        context_updater=ContextUpdater(llm=_ReleaseCadenceContextModel()),
+        context_projection=ContextProjection(
+            reader=ProjectContextReader(postgres),
+            writer=ProjectContextWriter(postgres),
+            filesystem=ProjectFilesystem(tmp_path / project_id),
+        ),
+        entity_builder=_EmptyEntityBuilder(),
+        relationship_extractor=_EmptyRelationships(),
+        publish_committed_entity_ids=_publish_nothing,
+    )
+    context = JobContext(user_name=user_name, project_id=project_id)
+    await _insert_closed_exchange(postgres, scope, 401, "The team ships every merge.", 1)
+    await _insert_closed_exchange(postgres, scope, 402, "I like pottery.", 2)
+    assert (await job.execute(context)).success
+    await _insert_closed_exchange(
+        postgres, scope, 403, "Merges now go straight to production.", 3
+    )
+    assert (await job.execute(context)).success
+    episode_ids = [row['episode_id'] for row in await postgres.fetch_all(
+        'SELECT episode_id FROM episodes WHERE project_id = %s ORDER BY created_at', (project_id,))]
+    await postgres.execute("INSERT INTO episodes (episode_id, project_id, summary) VALUES ('unrelated', %s, 'Pottery')", (project_id,))
+    context_links = await store.get_episode_context_links([*episode_ids, 'unrelated'], user_name=user_name, project_id=project_id)
+    assert context_links['unrelated'] == {'context_updates': [], 'context_updated_by': []}
+    assert context_links[episode_ids[1]]['context_updates'] == [{'episode_id': episode_ids[0]}]
+    assert context_links[episode_ids[0]]['context_updated_by'] == [{'episode_id': episode_ids[1]}]
+    await _insert_closed_exchange(
+        postgres, scope, 404,
+        "Our release cadence is continuous deploy on merge. Please remove that.", 4,
+    )
+    assert (await job.execute(context)).success
+
+    states = {
+        row["message_id"]: row["lifecycle_state"]
+        for row in await postgres.fetch_all(
+            "SELECT message_id, lifecycle_state FROM public.messages "
+            "WHERE project_id = %s", (project_id,),
+        )
+    }
+    # Neither 401 nor 403 contains the quoted value. 403 supported the cited
+    # block and 401 the version it replaced; 402 supported neither.
+    assert states == {401: "forgotten", 402: "sealed", 403: "forgotten", 404: "forgotten"}
+
+    assert all(not value for directions in (await store.get_episode_context_links(
+        episode_ids, user_name=user_name, project_id=project_id)).values() for value in directions.values())
+
+    # The erase job must retain recent requests and never erase incomplete cleanup.
+    from common.schema.settings import ForgetSettings
+    from core.knowledge.context.render import context_block_hash
+    from core.knowledge.jobs.forget_erase_job import ForgetEraseJob
+    erase = ForgetEraseJob(store, ForgetSettings())
+    before = await postgres.fetch_all("SELECT * FROM messages ORDER BY message_id")
+    assert (await erase.execute(context)).success
+    assert await postgres.fetch_all("SELECT * FROM messages ORDER BY message_id") == before
+    await postgres.execute("UPDATE project_forget_records SET requested_at = now() - interval '4 days', cleanup_completed_at = NULL")
+    assert (await erase.execute(context)).success
+    assert await postgres.fetch_all("SELECT * FROM messages ORDER BY message_id") == before
+    await store.complete_forget_cleanup(user_name=user_name, project_id=project_id)
+    # Draft revisions and edit summaries must not preserve the removed text.
+    await postgres.execute(
+        "INSERT INTO message_revisions (user_name, session_id, project_id, message_id, revision, content, created_at_ms) "
+        "VALUES (%s, %s, %s, 401, 1, 'The team ships every merge.', 1)",
+        (user_name, scope['session_id'], project_id))
+    await postgres.execute("UPDATE project_context_revisions SET edit_summary = 'continuous deploy on merge'")
+    revision = await store.get_current_project_context_revision(user_name=user_name, project_id=project_id)
+    current = await ProjectContextReader(postgres).get_snapshot(revision.revision_id, user_name=user_name, project_id=project_id)
+    file_before = (tmp_path / project_id / 'CONTEXT.md').read_bytes()
+    # A live setting change adjusts the cutoff, without rebuilding the job.
+    erase.update_settings(ForgetSettings(erase_after_days=5))
+    await erase.execute(context)
+    assert await store.list_forget_records(user_name=user_name, project_id=project_id)
+    erase.update_settings(ForgetSettings(erase_after_days=3))
+    await postgres.execute("UPDATE project_contexts SET projection_revision_id = NULL")
+    await erase.execute(context)
+    assert await store.list_forget_records(user_name=user_name, project_id=project_id)
+    await postgres.execute("UPDATE project_contexts SET projection_revision_id = current_revision_id")
+    record = await postgres.fetch_one('SELECT * FROM project_forget_records')
+    await postgres.execute('UPDATE project_forget_records SET block_ids = block_ids || %s::uuid[]', ([current.blocks[0].block_id],))
+    await erase.execute(context)
+    assert await store.list_forget_records(user_name=user_name, project_id=project_id)
+    # Value-only requests must also erase history through message supports.
+    await postgres.execute("UPDATE project_forget_records SET block_ids = '{}'")
+    assert not await store.erase_forget_record(record['forget_id'], user_name='someone_else',
+                                               project_id=project_id, cutoff=datetime.now(timezone.utc))
+    # Failure at the last step rolls back every text wipe.
+    await postgres.execute("""CREATE FUNCTION reject_erase() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN RAISE EXCEPTION 'injected erase failure'; END $$""")
+    await postgres.execute("CREATE TRIGGER reject_erase BEFORE DELETE ON project_forget_records FOR EACH ROW EXECUTE FUNCTION reject_erase()")
+    import psycopg
+    with pytest.raises(psycopg.Error, match='injected erase failure'):
+        await erase.execute(context)
+    assert await postgres.fetch_all("SELECT * FROM messages ORDER BY message_id") == before
+    assert await store.list_forget_records(user_name=user_name, project_id=project_id)
+    await postgres.execute("DROP TRIGGER reject_erase ON project_forget_records")
+    assert (await erase.execute(context)).success
+    assert await store.list_forget_records(user_name=user_name, project_id=project_id) == []
+    messages = await postgres.fetch_all("SELECT message_id, content, search_tsvector::text AS search FROM messages ORDER BY message_id")
+    assert [row['content'] for row in messages] == ['', 'I like pottery.', '', '']
+    assert all(not row['search'] for row in messages if row['message_id'] != 402)
+    assert (await postgres.fetch_one("SELECT content FROM message_revisions WHERE message_id = 401"))['content'] == ''
+    blocks = await postgres.fetch_all("SELECT markdown, content_hash FROM project_context_blocks")
+    assert len(blocks) == 3
+    assert sorted(row['markdown'] for row in blocks) == ['I like pottery.', '[Erased at the user’s request.]', '[Erased at the user’s request.]']
+    assert all(row['content_hash'] == context_block_hash(row['markdown']) for row in blocks)
+    assert not await postgres.fetch_all("SELECT 1 FROM project_context_revisions WHERE edit_summary LIKE '%%continuous deploy%%'")
+    after = await ProjectContextReader(postgres).get_snapshot(revision.revision_id, user_name=user_name, project_id=project_id)
+    assert after.blocks == current.blocks and after.content_hash == current.content_hash
+    assert (tmp_path / project_id / 'CONTEXT.md').read_bytes() == file_before
+    assert (await erase.execute(context)).success
+    assert await postgres.fetch_all("SELECT message_id, content, search_tsvector::text AS search FROM messages ORDER BY message_id") == messages
+
+
+@pytest.mark.integration
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+@pytest.mark.parametrize("shared, fail_publication", [(False, False), (True, False), (False, True)])
+async def test_forget_removes_only_unsupported_graph_and_records_request(real_server_scope, tmp_path, shared, fail_publication):
+    scope = real_server_scope
+    postgres, user, project = scope['postgres'], scope['user_name'], scope['project_id']
+    store = KnowledgeStore(postgres, object())
+    resolver = EntityResolver(store, project, [project])
+    policy = IngestionPolicy.capture(
+        extraction=ExtractionSettings(), entity_resolution=EntityResolutionSettings(),
+        compiled_domain=_relationship_domain(),
+    )
+    now = [1_000_000]
+    job = _knowledge_job(
+        store, postgres, tmp_path, project, policy, resolver=resolver,
+        llm=_NamesLLM(['James', 'Sarah'], ['Delta']), user_name=user,
+        publisher=resolver.publish_committed_entity_ids, now_ms=lambda: now[0],
+    )
+    class ForgetUpdater:
+        async def update(self, *, messages, **kwargs):
+            requests = [m['message_id'] for m in messages if 'forget' in m['content']]
+            return ContextUpdateResult(
+                materialization=None, edit_summary='No change', operation_count=0,
+                forget_requests=tuple(ForgetRequest(('James', 'private'), (mid,)) for mid in requests),
+            )
+    job._context_updater = ForgetUpdater()
+    job.episode_generator = _EchoEpisodeGenerator()
+    ctx = JobContext(user_name=user, project_id=project)
+    for mid, content in [(501, 'James owns Delta.'), (502, 'Sarah owns Delta. private'),
+                         (503, 'Sarah owns Delta.')]:
+        await _insert_closed_exchange(postgres, scope, mid, content, mid)
+        assert (await job.execute(ctx)).success
+    james = (await store.search_entity('James', visible_project_ids=[project]))[0]['entity_id']
+    assert await resolver.get_profile(james) is not None
+    redirect_id = await store.allocate_entity_id()
+    await postgres.execute(
+        "INSERT INTO entities (entity_id, user_name, canonical_name, status, redirect_entity_id) "
+        "VALUES (%s, %s, 'Jim', 'redirected', %s)", (redirect_id, user, james))
+    await postgres.execute("INSERT INTO entity_aliases VALUES (%s, 'Jimmy')", (james,))
+    if shared:
+        await postgres.execute(
+            "INSERT INTO projects (project_id, user_name, name, domain_config) "
+            "SELECT 'other', user_name, 'Other', domain_config FROM projects WHERE project_id = %s", (project,))
+        await postgres.execute(
+            "INSERT INTO project_entity_contexts (project_id, entity_id, user_name, entity_type, topic) "
+            "SELECT 'other', entity_id, user_name, entity_type, topic FROM project_entity_contexts "
+            "WHERE project_id = %s AND entity_id = %s", (project, james))
+        await postgres.execute(
+            "INSERT INTO entity_name_supports (entity_id, name, project_id, source_kind, source_key) "
+            "VALUES (%s, 'Jimmy', 'other', 'project', 'other')", (james,))
+    # A loaded reader can cache the owner's profile without owning its data.
+    reader = EntityResolver(store, 'reader', ['reader', project])
+    assert await reader.get_profile(james) is not None
+    manager = ProjectManager(SimpleNamespace(postgres=postgres), user_name=user)
+    owner_runtime = SimpleNamespace(project_id=project, entities=resolver)
+    manager.active_projects.update({
+        project: owner_runtime,
+        'reader': SimpleNamespace(entities=reader),
+    })
+    async def publish(ids):
+        await manager.project_factory._publish_entity_ids(owner_runtime, ids)
+    job._publish_committed_entity_ids = publish
+    await _insert_closed_exchange(postgres, scope, 504, 'Please forget James and private.', 504)
+    if fail_publication:
+        async def fail_refresh(ids):
+            raise RuntimeError('Cache unavailable')
+        job._publish_committed_entity_ids = fail_refresh
+        assert not (await job.execute(ctx)).success
+        pending = await postgres.fetch_one('SELECT * FROM project_forget_records')
+        assert pending['cleanup_completed_at'] is None
+        assert james in pending['deleted_entity_ids']
+        job._publish_committed_entity_ids = publish
+        now[0] += 1_000_000
+    assert (await job.execute(ctx)).success
+    assert await store.search_entity('James', visible_project_ids=[project]) == []
+    assert await resolver.get_profile(james) is None
+    assert await reader.get_profile(james) is None
+    assert bool(await postgres.fetch_one("SELECT 1 FROM entities WHERE entity_id = %s", (james,))) == shared
+    assert await postgres.fetch_one("SELECT 1 FROM entities WHERE entity_id = %s", (redirect_id,)) is None
+    if shared:
+        assert await store.search_entity('Jimmy', visible_project_ids=['other'])
+    notes = await store.forgotten_name_notes(user_name=user, project_id=project,
+                                            names=['james', 'JIMMY', 'Jim', 'Sarah'])
+    assert {note['name'] for note in notes} == {'James', 'Jimmy', 'Jim'}
+    assert await store.forgotten_name_notes(user_name=user, project_id='other', names=['James']) == []
+    assert await store.search_entity('Sarah', visible_project_ids=[project])
+    rows = await postgres.fetch_all(
+        'SELECT context FROM relationship_observations WHERE project_id = %s', (project,))
+    assert [r['context'] for r in rows] == ['Sarah owns Delta.']
+    assert len(await postgres.fetch_all(
+        'SELECT * FROM relationships WHERE project_id = %s', (project,))) == 1
+    records = await store.list_forget_records(user_name=user, project_id=project)
+    assert len(records) == 1
+    assert records[0]['values'] == ['James', 'private']
+    assert records[0]['message_count'] == 3
+    assert len(records[0]['episodes']) == 3
+    before = await postgres.fetch_all('SELECT * FROM project_forget_records')
+    assert before[0]['cleanup_completed_at'] is not None
+    assert before[0]['request_message_ids'] == [504]
+    assert before[0]['message_ids'] == [501, 502, 504]
+    assert all(episode['date'] is not None for episode in records[0]['episodes'])
+    assert (await job.execute(ctx)).success
+    assert await postgres.fetch_all('SELECT * FROM project_forget_records') == before
+
+    # A genuinely new mention receives a new ID and only the temporary name reminder.
+    from core.knowledge.retrieval import KnowledgeRetrieval
+    await _insert_closed_exchange(postgres, scope, 505, 'James owns Delta.', 505)
+    assert (await job.execute(ctx)).success
+    retrieval = KnowledgeRetrieval(
+        project_id=project, readable_project_ids=[project], user_name=user,
+        entities=resolver, embedding_service=object(), knowledge_store=store,
+    )
+    found = await retrieval.search_entities('James')
+    assert len(found) == 1 and found[0]['entity_id'] != james
+    assert "previously forgotten" in found[0]['forget_notes'][0]
+    for episode in records[0]['episodes']:
+        messages = await retrieval.read_episode(episode['episode_id'], session_id=scope['session_id'])
+        assert messages[0]['forget_note'].startswith('This Episode was rewritten')

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from time import time
 from typing import Any, Dict
+from uuid import UUID, uuid4
 
 from common.exceptions import IdempotencyConflictError
 from common.scoping import require_scope_value
+from common.utils.time_utils import get_now_ms
 from core.knowledge.db.writers.message_writer import MessageWriter
 from infrastructure.postgres_client import PostgresClient
 
@@ -43,7 +44,241 @@ class MessageLifecycleWriter:
 
     @staticmethod
     def _now_ms() -> int:
-        return int(time() * 1000)
+        return get_now_ms()
+
+    async def forget_messages(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        values: tuple[str, ...],
+        message_ids: tuple[int, ...],
+        block_ids: tuple[UUID, ...],
+    ) -> list[int]:
+        """Mark every project message containing one of ``values`` (ignoring
+        case), the given messages, and every message that supported one of
+        ``block_ids`` or a version it replaced, forgotten with their whole
+        exchanges; return what was newly forgotten.
+
+        A reply can repeat what its question said, so forgetting either half
+        forgets both. Repeating a request changes nothing.
+        """
+
+        if not values and not message_ids and not block_ids:
+            return []
+        if not message_ids:
+            raise ValueError("Forgetting requires a request message")
+        async with self.client.transaction() as cur:
+            await cur.execute(
+                """INSERT INTO project_forget_records (
+                       forget_id, project_id, user_name, request_message_ids, values, block_ids
+                   ) SELECT %s, %s, %s, %s, %s, %s
+                   WHERE EXISTS (SELECT 1 FROM projects WHERE project_id = %s AND user_name = %s)
+                   ON CONFLICT (project_id, request_message_ids) DO NOTHING
+                   RETURNING forget_id""",
+                (uuid4(), project_id, user_name, sorted(set(message_ids)), list(values),
+                 list(block_ids), project_id, user_name),
+            )
+            record = await cur.fetchone()
+            if record is None:
+                return []
+            await cur.execute(
+                """
+                WITH RECURSIVE versions AS (
+                    SELECT block.block_id, block.supersedes_block_id
+                    FROM public.project_context_blocks AS block
+                    WHERE block.project_id = %(project_id)s
+                      AND block.block_id = ANY(%(block_ids)s::uuid[])
+                    UNION
+                    SELECT older.block_id, older.supersedes_block_id
+                    FROM public.project_context_blocks AS older
+                    JOIN versions ON older.block_id = versions.supersedes_block_id
+                    WHERE older.project_id = %(project_id)s
+                ),
+                named AS (
+                    SELECT message.message_id
+                    FROM public.messages AS message
+                    WHERE message.project_id = %(project_id)s
+                      AND message.user_name = %(user_name)s
+                      AND message.lifecycle_state = 'sealed'
+                      AND EXISTS (
+                          SELECT 1 FROM unnest(%(values)s::text[]) AS value
+                          WHERE strpos(lower(message.content), lower(value)) > 0
+                      )
+                    UNION
+                    SELECT unnest(%(message_ids)s::bigint[])
+                    UNION
+                    SELECT support.message_id
+                    FROM public.project_context_block_supports AS support
+                    JOIN versions USING (block_id)
+                    WHERE support.project_id = %(project_id)s
+                ),
+                exchange AS (
+                    SELECT COALESCE(message.user_msg_id, message.message_id) AS user_id
+                    FROM public.messages AS message
+                    JOIN named USING (message_id)
+                    WHERE message.project_id = %(project_id)s
+                )
+                UPDATE public.messages AS message
+                SET lifecycle_state = 'forgotten', forgotten_at = NOW()
+                WHERE message.project_id = %(project_id)s
+                  AND message.user_name = %(user_name)s
+                  AND message.lifecycle_state = 'sealed'
+                  AND (
+                      message.message_id IN (SELECT message_id FROM named)
+                      OR message.message_id IN (SELECT user_id FROM exchange)
+                      OR message.user_msg_id IN (SELECT user_id FROM exchange)
+                  )
+                RETURNING message.message_id
+                """,
+                {
+                    "project_id": project_id,
+                    "user_name": user_name,
+                    "values": list(values),
+                    "message_ids": list(message_ids),
+                    "block_ids": list(block_ids),
+                },
+            )
+            forgotten = [int(row["message_id"]) for row in await cur.fetchall()]
+            if forgotten:
+                await cur.execute(
+                    """
+                    DELETE FROM public.exchange_embeddings
+                    WHERE project_id = %s AND user_message_id = ANY(%s)
+                    """,
+                    (project_id, forgotten),
+                )
+            await cur.execute(
+                """UPDATE project_forget_records
+                   SET message_ids = %s,
+                       episode_ids = ARRAY(SELECT DISTINCT episode_id FROM episode_messages
+                           WHERE project_id = %s AND message_id = ANY(%s) ORDER BY episode_id)
+                   WHERE forget_id = %s""",
+                (forgotten, project_id, forgotten, record["forget_id"]),
+            )
+        return forgotten
+
+    async def complete_forget_cleanup(self, *, user_name: str, project_id: str) -> None:
+        await self.client.execute(
+            """UPDATE project_forget_records SET cleanup_completed_at = now()
+               WHERE project_id = %s AND user_name = %s AND cleanup_completed_at IS NULL
+                 AND episode_ids <@ rewritten_episode_ids""", (project_id, user_name),
+        )
+
+    async def record_run_steer(
+        self, *, user_name: str, project_id: str, session_id: str,
+        message_id: int, steer: dict[str, str], expected_state: str | None = None,
+    ) -> bool:
+        """Attach one steer to its open user exchange or advance its state."""
+        scope = (*self._edit_scope(user_name, project_id, session_id, message_id), message_id)
+        if expected_state is None:
+            assignment = "jsonb_set(metadata, '{run_steer}', %s::jsonb, true)"
+            condition = "NOT (metadata ? 'run_steer')"
+            values = (json.dumps(steer), *scope)
+        else:
+            assignment = "jsonb_set(metadata, '{run_steer,state}', to_jsonb(%s::text), true)"
+            condition = "metadata -> 'run_steer' ->> 'steer_id' = %s AND metadata -> 'run_steer' ->> 'state' = %s"
+            values = (steer["state"], *scope, steer["steer_id"], expected_state)
+        exchange_condition = (
+            "" if steer["state"] == "undelivered" else
+            "AND (exchange_state = 'open' OR "
+            "(exchange_state = 'closed' AND exchange_outcome = 'user_only' "
+            "AND metadata ->> 'origin' = 'steer'))"
+        )
+        async with self.client.transaction() as cur:
+            await cur.execute(
+                f"""
+                UPDATE public.messages
+                SET metadata = {assignment}
+                WHERE user_name = %s AND project_id = %s AND session_id = %s
+                  AND message_id = %s AND role = 'user'
+                  {exchange_condition} AND {condition}
+                RETURNING message_id
+                """,
+                values,
+            )
+            return await cur.fetchone() is not None
+
+    async def mark_orphaned_run_steers_undelivered(
+        self, *, user_name: str, project_id: str | None = None,
+        session_id: str | None = None,
+    ) -> int:
+        """Close stale pending steers at startup or on session resume."""
+
+        if (project_id is None) != (session_id is None):
+            raise ValueError("Project and session scope must be supplied together")
+        scope_sql = (
+            "AND project_id = %s AND session_id = %s"
+            if project_id is not None else ""
+        )
+        values = (user_name, project_id, session_id) if project_id is not None else (user_name,)
+        async with self.client.transaction() as cur:
+            await cur.execute(
+                f"""UPDATE public.messages
+                   SET metadata = jsonb_set(
+                       metadata, '{{run_steer,state}}', '"undelivered"'::jsonb, true
+                   )
+                   WHERE user_name = %s {scope_sql}
+                     AND role = 'user' AND exchange_state = 'closed'
+                     AND exchange_outcome = 'user_only'
+                     AND metadata ->> 'origin' = 'steer'
+                     AND metadata -> 'run_steer' ->> 'state' = 'pending'
+                   RETURNING message_id""",
+                values,
+            )
+            return len(await cur.fetchall())
+
+    async def create_closed_standalone_message(
+        self, *, user_name: str, project_id: str, session_id: str,
+        message_id: int, role: str, content: str, timestamp_ms: int,
+        acceptance_key: str, metadata: dict[str, Any],
+    ) -> MessageAcceptance:
+        """Atomically accept one user-only or assistant-only recorded turn."""
+
+        if role not in {"user", "assistant"} or not content.strip():
+            raise ValueError("Standalone message needs a role and nonblank content")
+        if not isinstance(timestamp_ms, int) or timestamp_ms < 0 or not acceptance_key:
+            raise ValueError("Standalone message needs a timestamp and acceptance key")
+        outcome = "user_only" if role == "user" else "assistant_only"
+        async with self.client.transaction() as cur:
+            await cur.execute(
+                """SELECT 1 FROM public.sessions
+                   WHERE user_name = %s AND project_id = %s AND session_id = %s
+                     AND status = 'open' FOR KEY SHARE""",
+                (user_name, project_id, session_id),
+            )
+            if await cur.fetchone() is None:
+                raise ValueError("Cannot import a message into a deleted session")
+            await cur.execute(
+                """INSERT INTO public.messages (
+                       user_name, session_id, message_id, project_id, role, content,
+                       user_msg_id, metadata, acceptance_key, timestamp_ms,
+                       lifecycle_state, sealed_at_ms, exchange_state,
+                       exchange_outcome, exchange_closed_at_ms
+                   ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s,
+                             'sealed', %s, 'closed', %s, %s)
+                   ON CONFLICT (user_name, session_id, acceptance_key)
+                   WHERE acceptance_key IS NOT NULL DO NOTHING
+                   RETURNING message_id""",
+                (user_name, session_id, message_id, project_id, role, content,
+                 message_id if role == "user" else None, json.dumps(metadata),
+                 acceptance_key, timestamp_ms, timestamp_ms, outcome, timestamp_ms),
+            )
+            inserted = await cur.fetchone()
+            if inserted is not None:
+                return MessageAcceptance(message_id=int(inserted["message_id"]), created=True)
+            await cur.execute(
+                """SELECT message_id, project_id, role, content, timestamp_ms
+                   FROM public.messages
+                   WHERE user_name = %s AND session_id = %s AND acceptance_key = %s""",
+                (user_name, session_id, acceptance_key),
+            )
+            existing = await cur.fetchone()
+            if existing is None or (existing["project_id"], existing["role"],
+                                    existing["content"], existing["timestamp_ms"]) != (
+                                        project_id, role, content, timestamp_ms):
+                raise IdempotencyConflictError()
+            return MessageAcceptance(message_id=int(existing["message_id"]), created=False)
 
     async def create_editable_user_message(
         self, message: Dict[str, Any], *, edit_window_seconds: int
@@ -412,6 +647,37 @@ class MessageLifecycleWriter:
                 terminal_error={"code": "run_failed", "retryable": True},
                 cur=cur,
             )
+
+    async def close_orphaned_open_exchanges(self, *, user_name: str) -> int:
+        """Close every open exchange left behind by a previous engine process.
+
+        Call only at application startup, before any session can run: the
+        local single-engine runtime then owns no in-flight run, so an open
+        exchange can never complete and would block its session's semantic
+        FIFO forever.
+        """
+
+        rows = await self.client.fetch_all(
+            """
+            SELECT project_id, session_id, message_id
+            FROM public.messages
+            WHERE user_name = %s
+              AND role = 'user'
+              AND exchange_state = 'open'
+            ORDER BY message_id
+            """,
+            (user_name,),
+        )
+        for row in rows:
+            await self.close_user_exchange(
+                user_name=user_name,
+                project_id=row["project_id"],
+                session_id=row["session_id"],
+                user_message_id=int(row["message_id"]),
+                outcome="failed",
+                terminal_error={"code": "run_failed", "retryable": True},
+            )
+        return len(rows)
 
     async def edit_user_message(
         self,

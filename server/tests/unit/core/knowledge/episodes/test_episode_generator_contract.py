@@ -34,7 +34,7 @@ class _RecordingEmbeddingService:
 
     async def encode(self, texts):
         self.calls.append(list(texts))
-        return [[float(index + 1)] * 1024 for index in range(len(texts))]
+        return [[float(index + 1)] * 768 for index in range(len(texts))]
 
 
 @pytest.mark.no_network
@@ -221,7 +221,7 @@ async def test_valid_long_narrative_embeds_every_chunk_and_keeps_full_text():
     assert len(embeddings.calls[0]) > 1
     assert all(len(chunk) <= 400 for chunk in embeddings.calls[0])
     assert "".join(embeddings.calls[0]) == "Summary:\n" + summary.strip()
-    assert len(build.final_episodes[0].embedding) == 1024
+    assert len(build.final_episodes[0].embedding) == 768
 
 
 @pytest.mark.no_network
@@ -274,13 +274,13 @@ async def test_generator_repairs_an_overlong_narrative_without_changing_sources(
 
 
 @pytest.mark.no_network
-async def test_generator_rejects_over_capacity_output_without_embedding_it():
+async def test_generator_drops_over_capacity_output_without_embedding_it():
     llm = _ScriptedLLM(
         [
             LLMEpisodeWindowDecision(
                 proposals=[
                     LLMEpisodeDecision(
-                        summary="The model selected too many source messages.",
+                        summary="The model selected two exchanges past the limit.",
                         message_influences=["message:1", "message:2"],
                     )
                 ]
@@ -290,31 +290,76 @@ async def test_generator_rejects_over_capacity_output_without_embedding_it():
     embeddings = _RecordingEmbeddingService()
     generator = EpisodeGenerator(llm=llm, embedding_service=embeddings)
 
-    with pytest.raises(ValueError, match="source message limit"):
-        await generator.generate(
-            user_name="ada",
-            project_id="project-1",
-            messages=[
-                {
-                    "message_id": 101,
-                    "session_id": "session-1",
-                    "role": "user",
-                    "content": "First source.",
-                    "timestamp_ms": 1,
-                },
-                {
-                    "message_id": 102,
-                    "session_id": "session-1",
-                    "role": "assistant",
-                    "content": "Second source.",
-                    "timestamp_ms": 2,
-                    "user_msg_id": 101,
-                },
-            ],
-            policy=EpisodeGenerationPolicy.capture(
-                settings=EpisodeSettings(max_episode_source_messages=1)
-            ),
-        )
+    build = await generator.generate(
+        user_name="ada",
+        project_id="project-1",
+        messages=[
+            {
+                "message_id": 101,
+                "session_id": "session-1",
+                "role": "user",
+                "content": "First source.",
+                "timestamp_ms": 1,
+            },
+            {
+                "message_id": 103,
+                "session_id": "session-1",
+                "role": "user",
+                "content": "A second exchange.",
+                "timestamp_ms": 3,
+            },
+        ],
+        policy=EpisodeGenerationPolicy.capture(
+            settings=EpisodeSettings(max_episode_source_messages=1)
+        ),
+    )
 
+    assert build.final_episodes == []
+    assert "source message limit" in build.rejected_proposals[0]
     assert len(llm.calls) == 1
     assert embeddings.calls == []
+
+
+@pytest.mark.no_network
+async def test_narrative_repair_keeps_the_original_events_unchanged():
+    event = {
+        "what": "Ada bought a smoker",
+        "kind": "purchase",
+        "start_date": "2023-03-15",
+        "precision": "day",
+        "sources": ["message:1"],
+    }
+    llm = _ScriptedLLM(
+        [
+            LLMEpisodeWindowDecision(
+                proposals=[
+                    LLMEpisodeDecision(
+                        summary="x" * 4001, message_influences=["message:1"], events=[event]
+                    )
+                ]
+            ),
+            LLMEpisodeWindowDecision(
+                proposals=[
+                    LLMEpisodeDecision(summary="Repaired prose.", message_influences=["message:1"])
+                ]
+            ),
+        ]
+    )
+    build = await EpisodeGenerator(llm=llm, embedding_service=_RecordingEmbeddingService()).generate(
+        user_name="ada",
+        project_id="project-1",
+        messages=[
+            {
+                "message_id": 101,
+                "session_id": "session-1",
+                "role": "user",
+                "content": "I just got a smoker.",
+                "timestamp_ms": 1,
+            }
+        ],
+        policy=EpisodeGenerationPolicy.capture(settings=EpisodeSettings()),
+    )
+
+    episode = build.final_episodes[0]
+    assert episode.summary == "Repaired prose."
+    assert [event.what for event in episode.events] == ["Ada bought a smoker"]

@@ -67,3 +67,37 @@ async def test_old_memory_reservation_does_not_charge_new_reset_period():
     assert snapshot["spent_usd"] == 0
     assert snapshot["reserved_usd"] == 0
     assert snapshot["request_count"] == 0
+
+
+async def test_billed_cost_wins_and_unpriced_models_still_record_it():
+    # No prices configured at all: the provider's billed cost is the record.
+    ledger = ExternalModelSpendingLedger(LLMSpendingBudgetSettings())
+    reservation = await ledger.reserve(model="google/gemini-2.5-flash", estimated_prompt_tokens=100)
+    await ledger.record(
+        reservation, model="google/gemini-2.5-flash", prompt_tokens=100,
+        completion_tokens=10, approximate_usage=False, failed=False,
+        reported_cost_usd=0.0042,
+    )
+    # A configured price is only the fallback when the provider is silent.
+    priced = ExternalModelSpendingLedger(settings(price=5))
+    billed = await reserve(priced)
+    await priced.record(
+        billed, model="synthetic", prompt_tokens=100, completion_tokens=0,
+        approximate_usage=False, failed=False, reported_cost_usd=0.001,
+    )
+    await record(priced, await reserve(priced))
+
+    assert (await ledger.snapshot())["spent_usd"] == pytest.approx(0.0042)
+    assert (await priced.snapshot())["spent_usd"] == pytest.approx(0.001 + 0.0005)
+
+
+def test_reported_cost_reads_openrouter_usage_and_ignores_junk():
+    from types import SimpleNamespace
+
+    from infrastructure.llm_client import reported_cost
+
+    assert reported_cost(SimpleNamespace(cost=2.34e-05)) == pytest.approx(2.34e-05)
+    assert reported_cost({"cost_usd": 0.5}) == 0.5
+    assert reported_cost(SimpleNamespace()) is None
+    assert reported_cost({"cost": -1}) is None
+    assert reported_cost({"cost": True}) is None

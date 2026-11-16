@@ -5,13 +5,16 @@ from uuid import uuid4
 import pytest
 
 from common.conf.domain_config import DomainConfig
+from common.exceptions import LLMBudgetExceededError, LLMProviderError
 from common.schema.context import (
     AssertionKind,
     ContextAdd,
     ContextBlockRecord,
+    ContextReplace,
     ContextRevisionOrigin,
     ContextSnapshot,
 )
+from common.schema.episode.models import EpisodeCard
 from common.schema.semantic_window import (
     SemanticWindowOrigin,
     SemanticWindowRecord,
@@ -19,12 +22,14 @@ from common.schema.semantic_window import (
 )
 from common.schema.settings import (
     EntityResolutionSettings,
+    ExtractionSettings,
     IngestionSettings,
-    TextProcessorSettings,
 )
 from core.ingestion.policy import IngestionPolicy
 from core.ingestion.project_semantic_processor import ProjectSemanticProcessor
+from core.knowledge.context.maintainer import ContextMaintenanceResult
 from core.knowledge.context.models import (
+    ContextMaintenanceState,
     ContextRevisionConflictError,
     ContextUserEditSynchronizationError,
 )
@@ -41,7 +46,7 @@ def _domain(version=1):
 
 def _policy(domain=None):
     return IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(),
+        extraction=ExtractionSettings(),
         entity_resolution=EntityResolutionSettings(),
         compiled_domain=domain or _domain(),
     )
@@ -110,6 +115,10 @@ class _ContextStore:
         self.failures = []
         self.fail_commit_once = False
         self.external_snapshot_on_conflict = None
+        self.window_episodes = []
+        self.maintenance_state = ContextMaintenanceState(0, {})
+        self.recent_episodes = []
+        self.recent_limits = []
 
     async def get_active_project_semantic_window(self, **_kwargs):
         return (
@@ -135,8 +144,15 @@ class _ContextStore:
     async def get_project_context_block_supports(self, _block_ids, **_kwargs):
         return {}
 
+    async def get_project_context_maintenance_state(self, _revision_id, **_kwargs):
+        return self.maintenance_state
+
     async def get_project_semantic_window_episode_result(self, _window_id, **_kwargs):
-        return []
+        return self.window_episodes
+
+    async def get_recent_project_episodes(self, *, limit, **_kwargs):
+        self.recent_limits.append(limit)
+        return self.recent_episodes[:limit]
 
     async def get_project_semantic_window_evidence_messages(self, _window_id, **_kwargs):
         return [
@@ -151,6 +167,23 @@ class _ContextStore:
 
     async def get_project_semantic_window_assistant_source_refs(self, _window_id, **_kwargs):
         return []
+
+    async def forget_messages(self, **kwargs):
+        self.__dict__.setdefault("forget_calls", []).append(kwargs)
+        return []
+
+    async def get_episodes_with_forgotten_sources(self, **kwargs):
+        return self.__dict__.get("forgotten_episodes", [])
+
+    async def forget_graph(self, **kwargs):
+        return []
+
+    async def complete_forget_cleanup(self, **kwargs):
+        pass
+
+    async def forget_in_episode(self, **kwargs):
+        self.__dict__.setdefault("episode_forgets", []).append(kwargs)
+        return True
 
     async def commit_project_context_revision(self, **kwargs):
         self.commit_calls.append(kwargs)
@@ -226,7 +259,8 @@ class _ContextStore:
         self.window = self.window.model_validate(
             self.window.model_dump()
             | {
-                "attempt_count": self.window.attempt_count + 1,
+                "attempt_count": self.window.attempt_count
+                + (1 if kwargs.get("consume_attempt", True) else 0),
                 "last_failure_stage": kwargs["failure_stage"],
                 "last_failure_code": kwargs["failure_code"],
                 "last_failure_at_ms": kwargs["failed_at_ms"],
@@ -351,7 +385,10 @@ async def _publish_nothing(_entity_ids):
     return None
 
 
-def _job(store, updater, *, now_ms=lambda: 1_000, projection=None, policy=None):
+def _job(
+    store, updater, *, now_ms=lambda: 1_000, projection=None, policy=None,
+    exchange_embedding_service=None, maintainer=None,
+):
     async def capture_semantic_policy():
         return policy or _policy()
 
@@ -359,14 +396,16 @@ def _job(store, updater, *, now_ms=lambda: 1_000, projection=None, policy=None):
         _Admission(),
         store,
         object(),
+        exchange_embedding_service=exchange_embedding_service,
         settings=IngestionSettings(semantic_window_tokens=1),
         capture_semantic_policy=capture_semantic_policy,
         context_updater=updater,
         context_projection=projection or _NoopProjection(),
-        context_entity_builder=_UnexpectedBuilder(),
-        context_relationship_extractor=_UnexpectedRelationships(),
+        entity_builder=_UnexpectedBuilder(),
+        relationship_extractor=_UnexpectedRelationships(),
         publish_committed_entity_ids=_publish_nothing,
         now_ms=now_ms,
+        context_maintainer=maintainer,
     )
 
 
@@ -377,8 +416,8 @@ def _job(store, updater, *, now_ms=lambda: 1_000, projection=None, policy=None):
     [
         "context_updater",
         "context_projection",
-        "context_entity_builder",
-        "context_relationship_extractor",
+        "entity_builder",
+        "relationship_extractor",
     ],
 )
 def test_semantic_processor_rejects_a_missing_required_collaborator(missing):
@@ -388,8 +427,8 @@ def test_semantic_processor_rejects_a_missing_required_collaborator(missing):
     collaborators = {
         "context_updater": _NoopUpdater(),
         "context_projection": _NoopProjection(),
-        "context_entity_builder": _UnexpectedBuilder(),
-        "context_relationship_extractor": _UnexpectedRelationships(),
+        "entity_builder": _UnexpectedBuilder(),
+        "relationship_extractor": _UnexpectedRelationships(),
     }
     collaborators[missing] = None
 
@@ -420,8 +459,8 @@ def test_semantic_processor_requires_an_entity_publication_callback():
             capture_semantic_policy=capture_semantic_policy,
             context_updater=_NoopUpdater(),
             context_projection=_NoopProjection(),
-            context_entity_builder=_UnexpectedBuilder(),
-            context_relationship_extractor=_UnexpectedRelationships(),
+            entity_builder=_UnexpectedBuilder(),
+            relationship_extractor=_UnexpectedRelationships(),
             publish_committed_entity_ids=None,
         )
 
@@ -463,8 +502,8 @@ async def test_scheduler_cadence_runs_context_sync_without_semantic_work():
         capture_semantic_policy=capture_semantic_policy,
         context_updater=_NoopUpdater(),
         context_projection=projection,
-        context_entity_builder=_UnexpectedBuilder(),
-        context_relationship_extractor=_UnexpectedRelationships(),
+        entity_builder=_UnexpectedBuilder(),
+        relationship_extractor=_UnexpectedRelationships(),
         publish_committed_entity_ids=_publish_nothing,
     )
     scheduler = Scheduler("ada", "project-1")
@@ -512,8 +551,8 @@ async def test_readiness_does_not_select_and_claim_uses_one_captured_policy():
         capture_semantic_policy=capture_semantic_policy,
         context_updater=_NoopUpdater(),
         context_projection=_NoopProjection(),
-        context_entity_builder=_UnexpectedBuilder(),
-        context_relationship_extractor=_UnexpectedRelationships(),
+        entity_builder=_UnexpectedBuilder(),
+        relationship_extractor=_UnexpectedRelationships(),
         publish_committed_entity_ids=_publish_nothing,
     )
 
@@ -554,8 +593,8 @@ async def test_projection_failure_does_not_block_new_semantic_admission():
         capture_semantic_policy=capture_policy,
         context_updater=_NoopUpdater(),
         context_projection=_FailingProjection(),
-        context_entity_builder=_UnexpectedBuilder(),
-        context_relationship_extractor=_UnexpectedRelationships(),
+        entity_builder=_UnexpectedBuilder(),
+        relationship_extractor=_UnexpectedRelationships(),
         publish_committed_entity_ids=_publish_nothing,
     )
 
@@ -584,8 +623,8 @@ async def test_unresolved_user_edit_blocks_new_semantic_admission():
         capture_semantic_policy=capture_policy,
         context_updater=_NoopUpdater(),
         context_projection=_BlockedUserEditProjection(),
-        context_entity_builder=_UnexpectedBuilder(),
-        context_relationship_extractor=_UnexpectedRelationships(),
+        entity_builder=_UnexpectedBuilder(),
+        relationship_extractor=_UnexpectedRelationships(),
         publish_committed_entity_ids=_publish_nothing,
     )
 
@@ -657,8 +696,8 @@ async def test_successful_user_edit_retry_finishes_before_conversation_admission
         capture_semantic_policy=capture_policy,
         context_updater=_NoopUpdater(),
         context_projection=projection,
-        context_entity_builder=_UnexpectedBuilder(),
-        context_relationship_extractor=_UnexpectedRelationships(),
+        entity_builder=_UnexpectedBuilder(),
+        relationship_extractor=_UnexpectedRelationships(),
         publish_committed_entity_ids=_publish_nothing,
     )
     context = JobContext(user_name="ada", project_id="project-1")
@@ -792,3 +831,281 @@ async def test_stale_parent_conflict_retries_with_the_same_window_evidence_and_r
     assert len(updater.calls) == 2
     assert updater.calls[1]["snapshot"].blocks[0].markdown == "Concurrent Context revision."
     assert store.window.stage is SemanticWindowStage.COMPLETED
+
+
+class _RaisingUpdater(_Updater):
+    def __init__(self, error):
+        super().__init__()
+        self.error = error
+
+    async def update(self, **kwargs):
+        self.calls.append(kwargs)
+        raise self.error
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("error", "consumes_attempt", "retry_delay_ms"),
+    [
+        (LLMProviderError("provider down", transient=True), False, 300_000),
+        (LLMBudgetExceededError("spending cap reached"), False, 300_000),
+        (LLMProviderError("context too long"), True, 30_000),
+        (ValueError("invalid model output"), True, 30_000),
+    ],
+)
+async def test_only_non_transient_failures_consume_window_attempts(
+    error, consumes_attempt, retry_delay_ms
+):
+    store = _ContextStore(_window())
+    job = _job(store, _RaisingUpdater(error), now_ms=lambda: 1_000)
+
+    result = await job.execute(JobContext(user_name="ada", project_id="project-1"))
+
+    assert not result.success
+    failure = store.failures[0]
+    assert failure.get("consume_attempt", True) is consumes_attempt
+    assert failure["next_retry_at_ms"] == 1_000 + retry_delay_ms
+    assert store.window.attempt_count == (1 if consumes_attempt else 0)
+
+
+class _ExchangeStore(_ContextStore):
+    def __init__(self, window):
+        super().__init__(window)
+        self.written = []
+
+    async def get_exchanges_without_embeddings(self, **_kwargs):
+        return [{
+            "user_message_id": 7, "session_id": "session-1",
+            "user_content": "Which queue?", "assistant_content": "The durable one.",
+        }]
+
+    async def write_exchange_embeddings(self, *, project_id, rows):
+        self.written.append((project_id, rows))
+        return len(rows)
+
+
+class _Embedder:
+    def __init__(self, *, fail=False):
+        self.fail = fail
+        self.texts = []
+
+    def split_for_embedding(self, text):
+        return [text]
+
+    async def encode(self, texts):
+        if self.fail:
+            raise RuntimeError("embedding model unavailable")
+        self.texts.extend(texts)
+        return [[0.5] * 768 for _ in texts]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_closed_exchanges_get_search_vectors_before_window_work():
+    store = _ExchangeStore(_window())
+    embedder = _Embedder()
+    job = _job(store, _Updater(), exchange_embedding_service=embedder)
+
+    result = await job.execute(JobContext(user_name="ada", project_id="project-1"))
+
+    assert result.success
+    assert embedder.texts == ["USER: Which queue?\n\nASSISTANT: The durable one."]
+    project_id, rows = store.written[0]
+    assert project_id == "project-1"
+    assert rows[0]["user_message_id"] == 7 and len(rows[0]["embedding"]) == 768
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_exchange_embedding_failure_never_blocks_semantic_windows():
+    store = _ExchangeStore(_window())
+    job = _job(store, _Updater(), exchange_embedding_service=_Embedder(fail=True))
+
+    result = await job.execute(JobContext(user_name="ada", project_id="project-1"))
+
+    assert result.success
+    assert store.written == []
+    assert store.window.stage is SemanticWindowStage.COMPLETED
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_save_now_flushes_admission_until_nothing_is_left():
+    class RecordingAdmission(_IdleAdmission):
+        def __init__(self):
+            self.flushes = []
+
+        async def claim_next(self, **kwargs):
+            self.flushes.append(kwargs["force_flush"])
+            return None
+
+    admission = RecordingAdmission()
+
+    async def capture_policy():
+        return _policy()
+
+    job = ProjectSemanticProcessor(
+        admission,
+        _IdleStore(),
+        object(),
+        settings=IngestionSettings(semantic_window_tokens=1),
+        capture_semantic_policy=capture_policy,
+        context_updater=_NoopUpdater(),
+        context_projection=_RecordingProjection(),
+        entity_builder=_UnexpectedBuilder(),
+        relationship_extractor=_UnexpectedRelationships(),
+        publish_committed_entity_ids=_publish_nothing,
+    )
+    context = JobContext(user_name="ada", project_id="project-1")
+
+    await job.execute(context)
+    job.request_flush()
+    await job.execute(context)
+    # Nothing was left to claim, so the request is spent.
+    await job.execute(context)
+
+    assert admission.flushes == [False, True, False]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_flush_requested_during_an_unflushed_claim_is_kept():
+    class MidClaimFlushAdmission(_IdleAdmission):
+        def __init__(self):
+            self.flushes = []
+            self.job = None
+
+        async def claim_next(self, **kwargs):
+            self.flushes.append(kwargs["force_flush"])
+            if len(self.flushes) == 1:
+                self.job.request_flush()
+            return None
+
+    admission = MidClaimFlushAdmission()
+
+    async def capture_policy():
+        return _policy()
+
+    job = ProjectSemanticProcessor(
+        admission,
+        _IdleStore(),
+        object(),
+        settings=IngestionSettings(semantic_window_tokens=1),
+        capture_semantic_policy=capture_policy,
+        context_updater=_NoopUpdater(),
+        context_projection=_RecordingProjection(),
+        entity_builder=_UnexpectedBuilder(),
+        relationship_extractor=_UnexpectedRelationships(),
+        publish_committed_entity_ids=_publish_nothing,
+    )
+    admission.job = job
+    context = JobContext(user_name="ada", project_id="project-1")
+
+    await job.execute(context)
+    assert job.flush_pending
+    await job.execute(context)
+
+    assert admission.flushes == [False, True]
+    assert not job.flush_pending
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_context_stage_reads_earlier_episodes_oldest_first_without_this_windows():
+    store = _ContextStore(_window())
+    store.window_episodes = [SimpleNamespace(episode_id="now", summary="now", messages=[])]
+    store.recent_episodes = [
+        EpisodeCard(episode_id=episode_id, project_id="project-1", summary=episode_id)
+        for episode_id in ("now", "third", "second", "first")
+    ]
+    updater = _Updater()
+    job = _job(store, updater)
+    job.update_settings(
+        IngestionSettings(semantic_window_tokens=1, context={"earlier_episodes": 2})
+    )
+
+    assert (await job.execute(JobContext(user_name="ada", project_id="project-1"))).success
+
+    call = updater.calls[0]
+    assert [episode.summary for episode in call["earlier_episodes"]] == ["second", "third"]
+    assert call["budget_tokens"] == 40_000
+
+
+class _Maintainer:
+    count_tokens = None
+
+    def __init__(self, *, fail=False):
+        self.builds = []
+        self.fail = fail
+
+    async def maintain(self, *, user_name, build):
+        self.builds.append(build)
+        if self.fail:
+            raise RuntimeError("maintainer model unavailable")
+        return ContextMaintenanceResult(
+            materialization=apply_context_edits(
+                build.snapshot,
+                [ContextReplace(
+                    section_key="current_state", target={"handle": "C1"},
+                    markdown="Old fact, short.",
+                )],
+                build.domain,
+                project_id="project-1",
+            ),
+            summary="Compressed an old fact",
+        )
+
+
+def _maintenance_case(*, every, episodes_since=0, fail=False):
+    old = _block("An old fact that nobody has touched in a long while.")
+    store = _ContextStore(_window(), current_snapshot=_snapshot(old))
+    store.window_episodes = [SimpleNamespace(episode_id="now", summary="now", messages=[])]
+    store.maintenance_state = ContextMaintenanceState(episodes_since, {old.block_id: 9})
+    maintainer = _Maintainer(fail=fail)
+    job = _job(store, _Updater(), maintainer=maintainer)
+    job.update_settings(IngestionSettings(
+        semantic_window_tokens=1, context={"maintain_every_episodes": every},
+    ))
+    return store, maintainer, job, old
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_maintainer_runs_once_enough_episodes_pass_and_shares_the_revision():
+    store, maintainer, job, old = _maintenance_case(every=12, episodes_since=11)
+
+    assert (await job.execute(JobContext(user_name="ada", project_id="project-1"))).success
+
+    build = maintainer.builds[0]
+    # The window's own Episode ages every block it did not write.
+    assert build.ages[old.block_id] == 10
+    assert [build.ages[b.block_id] for b in build.snapshot.blocks if b is not old] == [0]
+    commit = store.commit_calls[0]
+    assert commit["maintained"] is True
+    assert [b.markdown for b in commit["materialization"].blocks] == [
+        "Old fact, short.", "The Context stage is active.",
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_maintainer_waits_until_it_is_due():
+    store, maintainer, job, _ = _maintenance_case(every=12, episodes_since=10)
+
+    assert (await job.execute(JobContext(user_name="ada", project_id="project-1"))).success
+
+    assert maintainer.builds == []
+    assert store.commit_calls[0]["maintained"] is False
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_a_failed_maintainer_is_skipped_and_the_update_still_commits():
+    store, maintainer, job, _ = _maintenance_case(every=1, fail=True)
+
+    assert (await job.execute(JobContext(user_name="ada", project_id="project-1"))).success
+
+    assert len(maintainer.builds) == 1
+    assert store.commit_calls[0]["maintained"] is False
+    assert len(store.commit_calls[0]["materialization"].blocks) == 2

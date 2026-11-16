@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import uuid
 from collections.abc import Awaitable, Callable
@@ -41,18 +42,27 @@ from core.agent.formatters import (
     format_documents_context,
 )
 from core.agent.notebook import NotebookApplyResult
+from core.agent.prompt_budget import (
+    PromptBudgetExceeded,
+    allocate_memory,
+    token_count,
+    trim_to_tokens,
+)
 from core.agent.prompt_context import (
     build_evidence_context,
     build_user_message,
+    format_conversation_history,
 )
 from core.agent.run import AgentRun
 from core.agent.sources.tool_results import capture_tool_source_candidates
 from core.agent.system_prompt import (
-    get_agent_prompt,
+    get_agent_prompt_parts,
     get_fallback_summary_prompt,
 )
+from core.agent.tool_events import RESULTS, stream_tool_calls
 from core.agent.tool_references import localize_agent_tool_result
 from core.agent.tool_runtime import execute_tool, summarize_result
+from core.agent.tools.findings import findings_table
 from core.agent.tools.registry import (
     Tools,
     get_runtime_instructions,
@@ -62,7 +72,6 @@ from core.agent.tools.registry import (
 from core.knowledge.context.render import render_context_model_input
 from infrastructure.llm_client import LLMService
 
-MAX_PROJECT_CONTEXT_CHARS = 24_000
 PUBLIC_AGENT_FAILURE_MESSAGE = (
     "The agent couldn't complete this request. Please try again."
 )
@@ -100,6 +109,16 @@ def _notebook_rejection_feedback(
             "message": message,
         },
     }
+
+
+def _add_episode_feedback(
+    ctx: AgentRun, tool_name: str, result: Dict, model_result: Dict
+) -> None:
+    """Tell the model how many returned Episodes are new to this run."""
+
+    new = ctx.note_episode_results(tool_name, result)
+    if new is not None and isinstance(model_result, dict):
+        model_result["episode_feedback"] = {"new": new}
 
 
 def _result_has_notebook_rejection(result: Dict) -> bool:
@@ -148,12 +167,14 @@ class AgentExecutor:
         *,
         on_successful_completion: Callable[[str], Awaitable[object]] | None = None,
         aac_budget: object | None = None,
+        take_steer: Callable[[], Awaitable[dict | None]] | None = None,
     ):
         self.ctx = ctx
         self.llm = llm
         self.tools = tools
         self._on_successful_completion = on_successful_completion
         self._aac_budget = aac_budget
+        self._take_steer = take_steer
         token_counter = getattr(llm, "count_tokens", None)
         if callable(token_counter):
             ctx.notebook.set_token_counter(token_counter)
@@ -163,6 +184,7 @@ class AgentExecutor:
             ctx.short_uuid_references,
         )
         tools.run_notebook = ctx.notebook
+        tools.agent_run = ctx
         for candidate in ctx.initial_source_candidates:
             ctx.record_source(candidate)
 
@@ -172,17 +194,27 @@ class AgentExecutor:
     ) -> AsyncGenerator[AgentExecutionEvent, None]:
         """Run one execution from the policy captured on ``AgentRun``."""
 
-        with diagnostic_scope(
-            user_name=self.ctx.user_name,
-            project_id=self.ctx.project_id,
-            session_id=self.ctx.session_id,
-            agent_run_id=self.ctx.run_id,
-        ):
+        scope = {
+            "user_name": self.ctx.user_name,
+            "project_id": self.ctx.project_id,
+            "session_id": self.ctx.session_id,
+            "agent_run_id": self.ctx.run_id,
+        }
+        run = self._execute_run(user_timezone=user_timezone)
+        try:
+            while True:
+                # A stream can be closed by a different task after yielding.
+                # Keep each ContextVar token within one generator step.
+                with diagnostic_scope(**scope):
+                    try:
+                        event = await anext(run)
+                    except StopAsyncIteration:
+                        break
+                yield event
+        finally:
             try:
-                async for event in self._execute_run(
-                    user_timezone=user_timezone,
-                ):
-                    yield event
+                with diagnostic_scope(**scope):
+                    await run.aclose()
             finally:
                 self.ctx.release()
 
@@ -209,6 +241,9 @@ class AgentExecutor:
         # The executor, not the model, owns phase transitions.
         needs_replan = False
         needs_final_synthesis = False
+        # The answer submitted before synthesis was scheduled. Synthesis only
+        # improves it; if that pass fails, this answer is still the result.
+        synthesis_draft: tuple[str, ArtifactDraft | None] | None = None
         needs_deep_research_gap_review = self.ctx.needs_deep_research_gap_review()
 
         while (
@@ -247,7 +282,9 @@ class AgentExecutor:
                     logger.info("AgentExecutor: replanning after an insufficient step.")
             else:
                 phase = _AgentPhase.EXECUTE
-                current_model = self.ctx.model or self.llm.extraction_model
+                # One model per run: provider caches are per model, so
+                # switching models between steps restarts the prompt cache.
+                current_model = self.ctx.model or self.llm.agent_model
                 current_reasoning = "medium"
 
             # Reset flags so a successful retrieval defaults back to execution.
@@ -263,6 +300,15 @@ class AgentExecutor:
 
             # Monitoring/Emits
             await self._emit_llm_call(current_model, current_reasoning)
+
+            if self._take_steer is not None:
+                # A bounded queue can accumulate while the preceding model call runs.
+                for _ in range(5):
+                    steer = await self._take_steer()
+                    if steer is None:
+                        break
+                    self.ctx.user_query += "\n\n**User instruction during this run:** " + steer["instruction"]
+                    yield {"event": "steer_applied", "data": {"steer_id": steer["steer_id"]}}
 
             # Call LLM for this step
             pending_tool_calls: List[_ToolCall] = []
@@ -299,9 +345,12 @@ class AgentExecutor:
 
                 if event_type == "step_error":
                     self._accumulate_usage(data.get("usage"))
-                    if data.get("code") == "llm_budget_exhausted":
+                    if data.get("code") in {
+                        "llm_budget_exhausted", "prompt_budget_exceeded",
+                        "provider_context_limit",
+                    }:
                         yield self._terminal_error(
-                            code="llm_budget_exhausted",
+                            code=data["code"],
                             retryable=False,
                         )
                         return
@@ -391,15 +440,20 @@ class AgentExecutor:
                             )
                             step_failed = True
                             break
-                        coverage_error = self.ctx.validate_research_coverage(
-                            submit.args.get("research_coverage")
-                        )
+                        coverage = submit.args.get("research_coverage")
+                        raw_artifact = submit.args.get("artifact")
+                        if isinstance(raw_artifact, dict) and "research_coverage" in raw_artifact:
+                            # Measured runs nest coverage inside the artifact.
+                            raw_artifact = dict(raw_artifact)
+                            coverage = coverage or raw_artifact.pop("research_coverage")
+                        if not coverage and self.ctx.findings:
+                            coverage = self.ctx.coverage_from_findings()
+                        coverage_error = self.ctx.validate_research_coverage(coverage)
                         if coverage_error is not None:
                             self._record_step_error(coverage_error, "research")
                             step_failed = True
                             break
                         artifact = None
-                        raw_artifact = submit.args.get("artifact")
                         if raw_artifact is not None:
                             try:
                                 artifact = ArtifactDraft.model_validate(raw_artifact)
@@ -418,22 +472,11 @@ class AgentExecutor:
                             logger.info(
                                 "AgentExecutor: evidence is ready; scheduling synthesis."
                             )
+                            synthesis_draft = (content, artifact)
                             needs_final_synthesis = True
                             break
 
-                        artifact = self._complete_artifact(content, artifact)
-                        response = self._wrap_final_response(
-                            content=content,
-                            usage=dict(self.ctx.usage),
-                            sources_consulted=list(self.ctx.source_candidates),
-                            artifact=(
-                                artifact.model_dump(mode="json")
-                                if artifact is not None
-                                else None
-                            ),
-                        )
-                        await self._finalize_successfully(content)
-                        yield response
+                        yield await self._final_response(content, artifact)
                         return
 
                     clarification = next(
@@ -506,15 +549,26 @@ class AgentExecutor:
                         if self.ctx.record_empty_result(
                             [(call.name, call.args) for call in pending_tool_calls]
                         ):
-                            logger.info(
-                                f"AgentExecutor: "
-                                f"{self.ctx.consecutive_empty_results} "
-                                "consecutive empty results. Forcing replan."
-                            )
-                            needs_replan = True
                             self.ctx.clear_empty_results()
+                            self.ctx.empty_replans += 1
+                            if (
+                                self.ctx.empty_replans
+                                >= self.ctx.limits.empty_replans_before_answer
+                            ):
+                                # Replanning keeps finding nothing: answer with
+                                # what the run has instead of searching again.
+                                logger.info("AgentExecutor: retrieval keeps finding nothing; answering.")
+                                needs_final_synthesis = True
+                            else:
+                                logger.info(
+                                    f"AgentExecutor: "
+                                    f"{self.ctx.consecutive_empty_results} "
+                                    "consecutive empty results. Forcing replan."
+                                )
+                                needs_replan = True
                     else:
                         self.ctx.clear_empty_results()
+                        self.ctx.empty_replans = 0
 
                     break
 
@@ -524,6 +578,13 @@ class AgentExecutor:
                     "provider",
                 )
                 step_failed = True
+
+            if step_failed and is_final_synthesis and synthesis_draft is not None:
+                # Measured runs called tools that do not exist while synthesizing
+                # and then failed the whole run; the draft was a valid answer.
+                logger.info("AgentExecutor: synthesis failed; keeping the submitted answer.")
+                yield await self._final_response(*synthesis_draft)
+                return
 
             if step_failed:
                 if (
@@ -535,11 +596,27 @@ class AgentExecutor:
                 needs_replan = True
                 continue
 
+        if synthesis_draft is not None:
+            yield await self._final_response(*synthesis_draft)
+            return
         # Fallback if max attempts reached
         if self.ctx.consecutive_errors:
             yield self._terminal_error()
             return
         yield await self._fallback()
+
+    async def _final_response(
+        self, content: str, artifact: ArtifactDraft | None
+    ) -> InternalAgentStreamEvent:
+        artifact = self._complete_artifact(content, artifact)
+        response = self._wrap_final_response(
+            content=content,
+            usage=dict(self.ctx.usage),
+            sources_consulted=list(self.ctx.source_candidates),
+            artifact=artifact.model_dump(mode="json") if artifact is not None else None,
+        )
+        await self._finalize_successfully(content)
+        return response
 
     def _tool_schemas_for_phase(self, phase: _AgentPhase) -> list[dict]:
         """Return the model-visible tools allowed for one executor phase."""
@@ -618,25 +695,26 @@ class AgentExecutor:
             if phase is _AgentPhase.SYNTHESIZE
             else self.ctx.tool_runtime.runtime_instructions
         )
-        system_prompt = get_agent_prompt(
-            user_name=self.ctx.user_name,
-            current_time=date,
-            persona=self.ctx.agent.persona,
-            agent_name=self.ctx.agent.name,
-            documents_context=documents_context,
-            document_focus_context=document_focus_context,
-            agent_brain=self.ctx.brain,
-            project_brief=project_brief,
-            project_context=project_context,
-            runtime_instructions=runtime_instructions,
-            is_community=self.ctx.is_community,
-            participants=self.ctx.current_participants,
-            phase=phase,
-            research_profile=self.ctx.research_profile,
-            gap_review=gap_review,
-        )
-
-        user_message = build_user_message(self.ctx, last_result)
+        try:
+            system_prompt, user_message = self._bounded_prompt(
+                date=date, phase=phase, gap_review=gap_review,
+                documents_context=documents_context,
+                document_focus_context=document_focus_context,
+                project_brief=project_brief, project_context=project_context,
+                runtime_instructions=runtime_instructions,
+                tool_schemas=tool_schemas, last_result=last_result,
+            )
+        except PromptBudgetExceeded:
+            yield {
+                "event": "step_error",
+                "data": {
+                    "kind": "formatting",
+                    "message": "The fixed prompt exceeds the configured input budget.",
+                    "code": "prompt_budget_exceeded",
+                    "retryable": False,
+                },
+            }
+            return
         self.ctx.clear_last_error()
         saw_tool_calls = False
 
@@ -649,22 +727,58 @@ class AgentExecutor:
                 temperature=self.ctx.temperature,
                 reasoning=reasoning,
                 aac_budget=self._aac_budget,
+                max_completion_tokens=self.ctx.memory_budget.response_reserve_tokens,
             ):
                 if event["event"] == "tool_calls":
                     saw_tool_calls = True
                     yield event
                 elif event["event"] == "step_completed" and not saw_tool_calls:
-                    yield {
-                        "event": "step_error",
-                        "data": {
-                            "kind": "formatting",
-                            "message": (
-                                "You must either call an investigative tool or call "
-                                "submit_answer. Do not output raw text."
-                            ),
-                            "usage": event["data"]["usage"],
-                        },
-                    }
+                    text = (event["data"].get("content") or "").strip()
+                    if text and any(
+                        schema["function"]["name"] == "submit_answer"
+                        for schema in tool_schemas
+                    ):
+                        # A plain reply with no tool call is the final answer.
+                        yield {
+                            "event": "tool_calls",
+                            "data": {
+                                "content": "",
+                                "calls": [
+                                    {
+                                        "id": str(uuid.uuid4()),
+                                        "name": "submit_answer",
+                                        "arguments": json.dumps({"content": text}),
+                                    }
+                                ],
+                            },
+                        }
+                        yield event
+                    elif event["data"].get("finish_reason") == "length":
+                        # The model spent the whole reply cap, usually on thinking.
+                        yield {
+                            "event": "step_error",
+                            "data": {
+                                "kind": "truncated",
+                                "message": (
+                                    "Your reply hit the output limit before it called a "
+                                    "tool or gave an answer. Think briefly, then call "
+                                    "a tool or answer."
+                                ),
+                                "usage": event["data"]["usage"],
+                            },
+                        }
+                    else:
+                        yield {
+                            "event": "step_error",
+                            "data": {
+                                "kind": "formatting",
+                                "message": (
+                                    "You must either call an investigative tool or "
+                                    "reply with your answer."
+                                ),
+                                "usage": event["data"]["usage"],
+                            },
+                        }
                 else:
                     yield event
         except LLMBudgetExceededError:
@@ -687,6 +801,84 @@ class AgentExecutor:
                     "message": "LLM provider unavailable",
                 },
             }
+
+    def _bounded_prompt(
+        self, *, date, phase, gap_review, documents_context,
+        document_focus_context, project_brief, project_context,
+        runtime_instructions, tool_schemas, last_result,
+    ) -> tuple[tuple[str, str], str]:
+        """Fit every memory category around the actual fixed prompt for this step."""
+        budget = self.ctx.memory_budget
+        counter = getattr(self.llm, "count_tokens", None)
+        counter = counter if callable(counter) else None
+        parts = {
+            "project_context": project_context,
+            "run_notebook": (build_evidence_context(self.ctx) if self.ctx.has_any() else ""),
+            "selected_notebook": (
+                self.ctx.selected_notebook["context"] if self.ctx.selected_notebook else ""
+            ),
+            "conversation": format_conversation_history(self.ctx),
+        }
+
+        def system(context: str) -> tuple[str, str, str]:
+            return get_agent_prompt_parts(
+                user_name=self.ctx.user_name, current_time=date,
+                persona=self.ctx.agent.persona, agent_name=self.ctx.agent.name,
+                documents_context=documents_context,
+                document_focus_context=document_focus_context,
+                agent_brain=self.ctx.brain, project_brief=project_brief,
+                project_context=context, runtime_instructions=runtime_instructions,
+                is_community=self.ctx.is_community,
+                participants=self.ctx.current_participants, phase=phase,
+                research_profile=self.ctx.research_profile, gap_review=gap_review,
+            )
+
+        def user(memory: dict[str, str]) -> str:
+            return build_user_message(
+                self.ctx, last_result,
+                history_text=memory["conversation"],
+                selected_notebook_text=memory["selected_notebook"],
+                evidence_text=memory["run_notebook"],
+            )
+
+        empty = {key: "" for key in parts}
+        tool_tokens = token_count(
+            json.dumps(tool_schemas, sort_keys=True, default=str, separators=(",", ":")),
+            counter,
+        )
+        # Covers provider message framing and small tool-envelope differences.
+        framing_reserve = 64
+        fixed_tokens = (
+            token_count("".join(system("")), counter)
+            + token_count(user(empty), counter)
+            + tool_tokens + framing_reserve
+        )
+        memory = allocate_memory(parts, budget, budget.input_tokens - fixed_tokens, counter)
+        for _ in range(16):
+            system_prompt = system(memory["project_context"])
+            user_message = user(memory)
+            used = (
+                token_count("".join(system_prompt), counter)
+                + token_count(user_message, counter)
+                + tool_tokens + framing_reserve
+            )
+            if used <= budget.input_tokens:
+                stable, project, per_step = system_prompt
+                # Providers such as Gemini cache the system message as one unit,
+                # so per-step text (time, phase) leads the user message instead.
+                return (stable, project), f"{per_step.strip()}\n\n{user_message}"
+            overage = used - budget.input_tokens
+            for key in reversed(budget.spare_priority):
+                current = memory[key]
+                if current:
+                    allowance = max(0, token_count(current, counter) - overage - 1)
+                    memory[key] = trim_to_tokens(
+                        current, allowance, counter, tail=key == "conversation"
+                    )
+                    break
+            else:
+                break
+        raise PromptBudgetExceeded("Prompt exceeds configured input budget")
 
     async def _ensure_project_briefing(self) -> tuple[str, str, str]:
         """Return run-cached persistent Project prompt material."""
@@ -808,10 +1000,7 @@ class AgentExecutor:
                 type(exc).__name__,
             )
             return ""
-        if len(rendered) <= MAX_PROJECT_CONTEXT_CHARS:
-            return rendered
-        marker = "\n\n[Project Context truncated at the deterministic prompt limit.]\n"
-        return rendered[: MAX_PROJECT_CONTEXT_CHARS - len(marker)].rstrip() + marker
+        return rendered
 
     def _parse_tool_calls(
         self,
@@ -949,7 +1138,9 @@ class AgentExecutor:
 
                 if self.ctx.is_duplicate(call.name, call.args):
                     error_message = (
-                        f"Duplicate call to '{call.name}' with same arguments"
+                        f"Duplicate call to '{call.name}' with same arguments; its "
+                        "result is already in this run. Use a different tool or "
+                        "query, or answer with submit_answer."
                     )
                     self.ctx.note_nonfatal_error(error_message)
                     results_out.append({"tool": call.name, "error": error_message})
@@ -965,12 +1156,17 @@ class AgentExecutor:
 
                 self.ctx.record_tool_call(call.name, call.args)
 
-                async with asyncio.timeout(self.ctx.limits.tool_timeout):
-                    result = await execute_tool(
-                        self.tools,
-                        call.name,
-                        call.args,
-                    )
+                async def invoke(call=call):
+                    async with asyncio.timeout(self._timeout_for_call(call)):
+                        return await execute_tool(self.tools, call.name, call.args)
+
+                async for item in stream_tool_calls([(call.call_id, call.name, invoke)]):
+                    if item["event"] != RESULTS:
+                        yield item
+                        continue
+                    result = item["data"][0]
+                if isinstance(result, Exception):
+                    raise result
 
                 # Keep the untouched backend result in the canonical notebook.
                 # Localization is a model-facing projection and must happen only
@@ -995,6 +1191,7 @@ class AgentExecutor:
                 )
                 summary, _ = summarize_result(call.name, result)
                 model_result = localize_agent_tool_result(self.ctx, call.name, result)
+                _add_episode_feedback(self.ctx, call.name, result, model_result)
                 self.ctx.record_tool_success()
                 results_out.append({"tool": call.name, "result": model_result})
 
@@ -1058,23 +1255,20 @@ class AgentExecutor:
                 },
             }
 
-        async def invoke(call: _ToolCall):
-            try:
-                async with asyncio.timeout(self.ctx.limits.tool_timeout):
+        def invoker(call: _ToolCall):
+            async def invoke():
+                async with asyncio.timeout(self._timeout_for_call(call)):
                     return await execute_tool(self.tools, call.name, call.args)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                return exc
+            return invoke
 
-        tasks = [asyncio.create_task(invoke(call)) for call in tool_calls]
-        try:
-            outcomes = await asyncio.gather(*tasks)
-        except BaseException:
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            raise
+        outcomes: list = []
+        async for item in stream_tool_calls(
+            [(call.call_id, call.name, invoker(call)) for call in tool_calls]
+        ):
+            if item["event"] == RESULTS:
+                outcomes = item["data"]
+            else:
+                yield item
 
         for call, outcome in zip(tool_calls, outcomes, strict=True):
             if isinstance(outcome, Exception):
@@ -1104,6 +1298,7 @@ class AgentExecutor:
             model_result = localize_agent_tool_result(
                 self.ctx, call.name, outcome
             )
+            _add_episode_feedback(self.ctx, call.name, outcome, model_result)
             self.ctx.record_tool_success()
             results_out.append({"tool": call.name, "result": model_result})
             yield {
@@ -1114,6 +1309,15 @@ class AgentExecutor:
                     "call_id": call.call_id,
                 },
             }
+
+    def _timeout_for_call(self, call: _ToolCall) -> float:
+        if call.name not in {"run_workspace_command", "install_python_package"}:
+            return self.ctx.limits.tool_timeout
+        seconds = call.args.get("timeout_seconds", 300)
+        if not isinstance(seconds, int) or isinstance(seconds, bool) or not 1 <= seconds <= 900:
+            return self.ctx.limits.tool_timeout
+        approval_seconds = 120 if call.name == "install_python_package" else 0
+        return max(self.ctx.limits.tool_timeout, approval_seconds + seconds + 15)
 
     async def _normalize_tool_failure(
         self,
@@ -1127,7 +1331,7 @@ class AgentExecutor:
         if isinstance(failure, TimeoutError):
             message = (
                 "Tool execution timed out after "
-                f"{self.ctx.limits.tool_timeout:g} seconds"
+                f"{self._timeout_for_call(call):g} seconds"
             )
             retryable = True
             logger.warning("Tool {}: {}", call.name, message)
@@ -1150,7 +1354,12 @@ class AgentExecutor:
                         "reason": "unknown_or_wrong_type",
                     },
                 )
-            self.ctx.record_error(message)
+            if failure.details.get("nonfatal"):
+                # Feedback such as a rejected quote: shown to the model, but it
+                # does not count toward ending the run.
+                self.ctx.note_nonfatal_error(message)
+            else:
+                self.ctx.record_error(message)
         else:
             message = "Internal tool failure"
             logger.exception(
@@ -1214,6 +1423,10 @@ class AgentExecutor:
         elif artifact is not None and expected_kind is not None:
             if artifact.kind != expected_kind:
                 artifact = artifact.model_copy(update={"kind": expected_kind})
+        if artifact is not None and self.ctx.findings and len(artifact.blocks) < 50:
+            artifact = artifact.model_copy(update={
+                "blocks": (*artifact.blocks, findings_table(self.ctx.findings)),
+            })
         return artifact
 
     async def _finalize_successfully(self, content: str) -> None:
@@ -1304,16 +1517,26 @@ class AgentExecutor:
     async def _generate_fallback_summary(self) -> Optional[str]:
         """Generate a final response summary from accumulated evidence."""
         evidence_ctx = build_evidence_context(self.ctx)
-
-        prompt = get_fallback_summary_prompt(
-            self.ctx.user_name, self.ctx.user_query, evidence_ctx
-        )
+        counter = getattr(self.llm, "count_tokens", None)
+        counter = counter if callable(counter) else None
+        system = "You are a helpful assistant providing a summary of found information."
+        def prompt(context: str) -> str:
+            return get_fallback_summary_prompt(
+                self.ctx.user_name, self.ctx.user_query, context
+            )
+        fixed = token_count(system, counter) + token_count(prompt(""), counter) + 64
+        available = self.ctx.memory_budget.input_tokens - fixed
+        if available < 0:
+            return None
+        evidence_ctx = trim_to_tokens(evidence_ctx, available, counter)
+        while evidence_ctx and token_count(system, counter) + token_count(prompt(evidence_ctx), counter) + 64 > self.ctx.memory_budget.input_tokens:
+            evidence_ctx = trim_to_tokens(evidence_ctx, max(0, token_count(evidence_ctx, counter) - 1), counter)
+        if token_count(system, counter) + token_count(prompt(evidence_ctx), counter) + 64 > self.ctx.memory_budget.input_tokens:
+            return None
 
         return await self.llm.generate_text(
-            system=(
-                "You are a helpful assistant providing a summary of found information."
-            ),
-            user=prompt,
+            system=system,
+            user=prompt(evidence_ctx),
             temperature=0.3,
             aac_budget=self._aac_budget,
         )

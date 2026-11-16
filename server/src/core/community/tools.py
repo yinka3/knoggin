@@ -7,7 +7,7 @@ from typing import Awaitable, Callable, Dict, List, Mapping, Optional
 from common.schema.agent.community_tools import AAC_SPECIFIC_SCHEMAS
 from common.schema.agent.identity import AgentConfig, PersonaProfile
 from common.utils.agent_identity import normalize_agent_brain
-from core.agent.services.agent_manager import AgentManager
+from core.agent.agent_manager import AgentManager
 from core.agent.tools.registry import Tools, validate_tool_owner
 from core.community.aac_store import AACStore
 

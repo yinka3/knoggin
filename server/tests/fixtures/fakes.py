@@ -418,6 +418,9 @@ class FakeEphemeralStore:
 
 
 class FakeKnowledgeStore:
+    async def forgotten_name_notes(self, **kwargs):
+        return []
+
     def __init__(self):
         self.saved_message_logs = []
         self.recent_project_messages = []
@@ -427,9 +430,40 @@ class FakeKnowledgeStore:
         self.embedding_rebuild_calls = []
         self.accepted_message_ids = {}
         self.closed_exchanges = []
+        self.run_steers = {}
 
     async def get_session_history(self, **kwargs):
         return []
+
+    async def mark_orphaned_run_steers_undelivered(self, **kwargs):
+        del kwargs
+        count = 0
+        for steer in self.run_steers.values():
+            if steer["state"] == "pending":
+                steer["state"] = "undelivered"
+                count += 1
+        return count
+
+    async def create_closed_standalone_message(self, **kwargs):
+        from types import SimpleNamespace
+
+        message_id = kwargs["message_id"]
+        self.saved_message_logs.append(kwargs)
+        steer = kwargs.get("metadata", {}).get("run_steer")
+        if steer is not None:
+            self.run_steers[message_id] = dict(steer)
+        return SimpleNamespace(message_id=message_id, created=True)
+
+    async def record_run_steer(self, *, message_id, steer, expected_state=None, **kwargs):
+        del kwargs
+        current = self.run_steers.get(message_id)
+        if expected_state is None:
+            if current is not None:
+                return False
+        elif current is None or current["steer_id"] != steer["steer_id"] or current["state"] != expected_state:
+            return False
+        self.run_steers[message_id] = dict(steer)
+        return True
 
     async def allocate_entity_id(self):
         entity_id = self.next_entity_id
@@ -517,6 +551,8 @@ class FakeEmbeddingService:
 
 
 class FakeLLMService:
+    agent_model = "agent-model"
+
     async def close(self):
         pass
 
@@ -554,14 +590,6 @@ class FakePostgresClient:
         self.calls.append(("execute", query, params))
         self._execute_against_stores(query, params or {})
         return self.write_count
-
-    @staticmethod
-    def build_cypher(
-        cypher_query,
-        return_types="result agtype",
-        graph_name="knoggin_graph",
-    ):
-        return f"cypher<{graph_name}|{return_types}>:{cypher_query}"
 
     @asynccontextmanager
     async def transaction(self):
@@ -954,8 +982,6 @@ class FakePostgresClient:
                 row["brain_revision"] += 1
             if "set is_default = true" in normalized:
                 row["is_default"] = True
-            if "last_turn_at = now()" in normalized:
-                row["last_turn_at"] = self._now()
             return
 
         if "delete from public.agents" in normalized:
@@ -1036,16 +1062,14 @@ class FakeProjectManager:
         self.release_calls.append((project_id, session_id))
 
 class FakeConfigValue:
-    def __init__(self, conversation_context_turns=100):
+    def __init__(self):
+        from common.schema.agent.settings import PromptMemorySettings
+
         self.developer_settings = type(
             "DeveloperSettings",
             (),
             {
-                "limits": type(
-                    "Limits",
-                    (),
-                    {"conversation_context_turns": conversation_context_turns},
-                )(),
+                "prompt_memory": PromptMemorySettings(),
                 "ingestion": type(
                     "Ingestion",
                     (),
@@ -1121,14 +1145,6 @@ class RecordingPostgresClient:
         exc = exceptions.pop(0)
         if exc is not None:
             raise exc
-
-    def build_cypher(
-        self,
-        cypher_query,
-        return_types="result agtype",
-        graph_name="knoggin_graph",
-    ):
-        return f"cypher<{graph_name}|{return_types}>:{cypher_query}"
 
     @asynccontextmanager
     async def transaction(self):

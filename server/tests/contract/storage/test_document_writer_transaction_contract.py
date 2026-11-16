@@ -28,7 +28,7 @@ def test_chunk_copy_row_preserves_all_source_locator_fields():
             start_paragraph=11,
             end_paragraph=13,
         ),
-        embedding=[0.1] * 1024,
+        embedding=[0.1] * 768,
     )
 
     assert row[10:18] == (2, 8, 9, 4, 5, ["Results", "Revenue"], 11, 13)
@@ -69,6 +69,8 @@ async def test_insert_document_uses_public_transaction_contract():
         extension=".md",
         size_bytes=5,
         content_hash="hash",
+        extraction_mode="standard",
+        extraction_strategy="auto",
         created_at="2026-07-12T00:00:00+00:00",
     )
 

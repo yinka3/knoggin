@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from uuid import UUID
 
 from common.schema.semantic_window import SemanticWindowMessage, SemanticWindowRecord
@@ -33,9 +34,11 @@ _WINDOW_COLUMNS = """
 
 
 _ELIGIBLE_CONVERSATION_EXCHANGES_CTE = """
+    conversation_scope AS (SELECT %s::text AS user_name, %s::text AS project_id),
     eligible_conversation_exchanges AS (
         SELECT
             user_message.message_id AS user_message_id,
+            'user'::text AS anchor_role,
             user_message.session_id,
             user_message.project_id,
             user_message.content AS user_content,
@@ -44,6 +47,8 @@ _ELIGIBLE_CONVERSATION_EXCHANGES_CTE = """
             user_message.exchange_state AS user_exchange_state,
             user_message.exchange_outcome AS user_exchange_outcome,
             user_message.exchange_closed_at_ms,
+            user_message.metadata ->> 'origin' AS user_origin,
+            user_message.metadata -> 'run_steer' ->> 'state' AS user_steer_state,
             assistant_message.message_id AS assistant_message_id,
             assistant_message.content AS assistant_content,
             assistant_message.timestamp_ms AS assistant_timestamp_ms,
@@ -59,13 +64,47 @@ _ELIGIBLE_CONVERSATION_EXCHANGES_CTE = """
          AND assistant_message.session_id = user_message.session_id
          AND assistant_message.user_msg_id = user_message.message_id
          AND assistant_message.role = 'assistant'
-        WHERE user_message.user_name = %s
-          AND user_message.project_id = %s
+        WHERE user_message.user_name = (SELECT user_name FROM conversation_scope)
+          AND user_message.project_id = (SELECT project_id FROM conversation_scope)
           AND user_message.role = 'user'
           AND user_message.lifecycle_state <> 'superseded'
           AND session.status = 'open'
           AND session.semantic_participation_enabled
           AND user_message.message_id > session.semantic_participation_after_message_id
+          AND (user_message.metadata ->> 'origin' IS DISTINCT FROM 'steer'
+               OR user_message.metadata -> 'run_steer' ->> 'state'
+                  IS DISTINCT FROM 'undelivered')
+        UNION ALL
+        SELECT
+            assistant_turn.message_id AS user_message_id,
+            'assistant'::text AS anchor_role,
+            assistant_turn.session_id,
+            assistant_turn.project_id,
+            assistant_turn.content AS user_content,
+            assistant_turn.timestamp_ms AS user_timestamp_ms,
+            assistant_turn.lifecycle_state AS user_lifecycle_state,
+            assistant_turn.exchange_state AS user_exchange_state,
+            assistant_turn.exchange_outcome AS user_exchange_outcome,
+            assistant_turn.exchange_closed_at_ms,
+            assistant_turn.metadata ->> 'origin' AS user_origin,
+            NULL::text AS user_steer_state,
+            NULL::bigint AS assistant_message_id,
+            NULL::text AS assistant_content,
+            NULL::bigint AS assistant_timestamp_ms,
+            NULL::text AS assistant_lifecycle_state
+        FROM public.messages AS assistant_turn
+        JOIN public.sessions AS session
+          ON session.session_id = assistant_turn.session_id
+         AND session.project_id = assistant_turn.project_id
+         AND session.user_name = assistant_turn.user_name
+        WHERE assistant_turn.user_name = (SELECT user_name FROM conversation_scope)
+          AND assistant_turn.project_id = (SELECT project_id FROM conversation_scope)
+          AND assistant_turn.role = 'assistant'
+          AND assistant_turn.exchange_outcome = 'assistant_only'
+          AND assistant_turn.lifecycle_state <> 'superseded'
+          AND session.status = 'open'
+          AND session.semantic_participation_enabled
+          AND assistant_turn.message_id > session.semantic_participation_after_message_id
     )
 """
 
@@ -75,6 +114,126 @@ class SemanticWindowReader:
 
     def __init__(self, client: PostgresClient) -> None:
         self.client = client
+
+    async def list_jev_decisions_for_message(
+        self, message_id: int, *, user_name: str,
+        project_id: str, limit: int = 50,
+    ) -> dict | None:
+        """Read decisions that cited one owned message as evidence."""
+
+        user_name, project_id = self._scope(
+            user_name, project_id, "list_jev_decisions_for_message"
+        )
+        if not isinstance(message_id, int) or message_id <= 0 or not 1 <= limit <= 100:
+            raise ValueError("JEV message decision request is out of bounds")
+        message = await self.client.fetch_one(
+            """SELECT message.message_id, left(message.content, 2000) AS excerpt
+               FROM public.messages AS message
+               WHERE message.message_id = %s AND message.project_id = %s
+                 AND message.user_name = %s""",
+            (message_id, project_id, user_name),
+        )
+        if message is None:
+            return None
+        cited = json.dumps([message_id])
+        rows = await self.client.fetch_all(
+            """SELECT capability, decision, window_id, pass_number, occurrence_key
+               FROM (
+                   SELECT 'identity' AS capability, item.decision, item.window_id,
+                          item.pass_number, item.occurrence_key, item.created_at
+                   FROM public.project_jev_identity_decisions AS item
+                   JOIN public.project_semantic_windows AS semantic_window
+                     ON semantic_window.window_id = item.window_id AND semantic_window.project_id = item.project_id
+                   WHERE item.project_id = %s AND semantic_window.user_name = %s
+                     AND item.decision -> 'record' -> 'evidence_message_ids' @> %s::jsonb
+                   UNION ALL
+                   SELECT 'classification', item.decision, item.window_id,
+                          item.pass_number, item.occurrence_key, item.created_at
+                   FROM public.project_jev_classification_decisions AS item
+                   JOIN public.project_semantic_windows AS semantic_window
+                     ON semantic_window.window_id = item.window_id AND semantic_window.project_id = item.project_id
+                   WHERE item.project_id = %s AND semantic_window.user_name = %s
+                     AND item.decision -> 'record' -> 'evidence_message_ids' @> %s::jsonb
+               ) AS decisions
+               ORDER BY created_at DESC, window_id, pass_number, occurrence_key
+               LIMIT %s""",
+            (project_id, user_name, cited, project_id, user_name, cited, limit),
+        )
+        return {"message_id": message_id, "excerpt": message["excerpt"],
+                "decisions": rows}
+
+    async def list_jev_decisions_for_entity(
+        self, entity_id: int, *, user_name: str,
+        project_id: str, limit: int = 50,
+    ) -> list[dict] | None:
+        """Read recorded decisions linked to one project-visible entity."""
+
+        user_name, project_id = self._scope(
+            user_name, project_id, "list_jev_decisions_for_entity"
+        )
+        if entity_id <= 0 or not 1 <= limit <= 100:
+            raise ValueError("JEV entity decision request is out of bounds")
+        visible = await self.client.fetch_one(
+            """SELECT 1 FROM public.project_entity_contexts AS context
+               JOIN public.projects AS project ON project.project_id = context.project_id
+               WHERE context.entity_id = %s AND context.project_id = %s
+                 AND project.user_name = %s""",
+            (entity_id, project_id, user_name),
+        )
+        if visible is None:
+            return None
+        return await self.client.fetch_all(
+            """SELECT capability, decision, window_id, pass_number, occurrence_key
+               FROM (
+                   SELECT 'identity' AS capability, item.decision, item.window_id,
+                          item.pass_number, item.occurrence_key, item.created_at
+                   FROM public.project_jev_identity_decisions AS item
+                   JOIN public.project_semantic_windows AS semantic_window
+                     ON semantic_window.window_id = item.window_id AND semantic_window.project_id = item.project_id
+                   WHERE item.project_id = %s AND semantic_window.user_name = %s
+                     AND (item.decision ->> 'operational_entity_id')::bigint = %s
+                   UNION ALL
+                   SELECT 'classification', item.decision, item.window_id,
+                          item.pass_number, item.occurrence_key, item.created_at
+                   FROM public.project_jev_classification_decisions AS item
+                   JOIN public.project_semantic_windows AS semantic_window
+                     ON semantic_window.window_id = item.window_id AND semantic_window.project_id = item.project_id
+                   WHERE item.project_id = %s AND semantic_window.user_name = %s
+                     AND item.entity_id = %s
+               ) AS decisions
+               ORDER BY created_at DESC, window_id, pass_number, occurrence_key
+               LIMIT %s""",
+            (
+                project_id, user_name, entity_id,
+                project_id, user_name, entity_id, limit,
+            ),
+        )
+
+    async def get_jev_decision(
+        self, capability: str, window_id: UUID | str, pass_number: int,
+        occurrence_key: str, *, user_name: str, project_id: str,
+    ) -> dict | None:
+        """Locate one immutable decision without exposing its private payload."""
+
+        user_name, project_id = self._scope(user_name, project_id, "get_jev_decision")
+        window_id = self._uuid(window_id, "window_id")
+        tables = {
+            "identity": "project_jev_identity_decisions",
+            "classification": "project_jev_classification_decisions",
+        }
+        if capability not in tables or pass_number not in {1, 2} or not occurrence_key:
+            raise ValueError("Invalid JEV decision locator")
+        return await self.client.fetch_one(
+            f"""SELECT item.decision
+                FROM public.{tables[capability]} AS item
+                JOIN public.project_semantic_windows AS semantic_window
+                  ON semantic_window.window_id = item.window_id
+                 AND semantic_window.project_id = item.project_id
+                WHERE item.window_id = %s AND item.project_id = %s
+                  AND item.pass_number = %s AND item.occurrence_key = %s
+                  AND semantic_window.user_name = %s""",
+            (window_id, project_id, pass_number, occurrence_key, user_name),
+        )
 
     async def list_jev_identity_decisions(
         self,
@@ -97,40 +256,6 @@ class SemanticWindowReader:
             """
             SELECT decision.decision
             FROM public.project_jev_identity_decisions AS decision
-            JOIN public.project_semantic_windows AS semantic_window
-              ON semantic_window.window_id = decision.window_id
-             AND semantic_window.project_id = decision.project_id
-            WHERE semantic_window.window_id = %s
-              AND semantic_window.user_name = %s
-              AND semantic_window.project_id = %s
-            ORDER BY decision.pass_number, decision.occurrence_key
-            LIMIT %s OFFSET %s
-            """,
-            (window_id, user_name, project_id, limit, offset),
-        )
-        return [row["decision"] for row in rows]
-
-    async def list_jev_extraction_decisions(
-        self,
-        window_id: UUID | str,
-        *,
-        user_name: str,
-        project_id: str,
-        limit: int = 100,
-        offset: int = 0,
-    ) -> list[dict]:
-        """Read a bounded page of private extraction decisions."""
-
-        user_name, project_id = self._scope(
-            user_name, project_id, "list_jev_extraction_decisions"
-        )
-        window_id = self._uuid(window_id, "window_id")
-        if not 1 <= limit <= 500 or offset < 0:
-            raise ValueError("JEV decision page is out of bounds")
-        rows = await self.client.fetch_all(
-            """
-            SELECT decision.decision
-            FROM public.project_jev_extraction_decisions AS decision
             JOIN public.project_semantic_windows AS semantic_window
               ON semantic_window.window_id = decision.window_id
              AND semantic_window.project_id = decision.project_id
@@ -331,6 +456,7 @@ class SemanticWindowReader:
                          AND eligible.user_lifecycle_state = 'sealed'
                          AND eligible.user_exchange_outcome IS NOT NULL
                          AND eligible.exchange_closed_at_ms IS NOT NULL
+                         AND eligible.user_steer_state IS DISTINCT FROM 'pending'
                          AND (
                             (eligible.user_exchange_outcome IN
                                 ('assistant_final', 'clarification')
@@ -455,6 +581,7 @@ class SemanticWindowReader:
                    message.content,
                    message.timestamp_ms,
                    message.user_msg_id,
+                   message.lifecycle_state,
                    exchange_user.exchange_outcome
             FROM public.project_semantic_window_messages AS membership
             JOIN public.project_semantic_windows AS semantic_window
@@ -469,7 +596,7 @@ class SemanticWindowReader:
              AND exchange_user.project_id = membership.project_id
              AND exchange_user.session_id = membership.session_id
              AND exchange_user.user_name = semantic_window.user_name
-             AND exchange_user.role = 'user'
+             AND (exchange_user.role = 'user' OR (exchange_user.role = 'assistant' AND exchange_user.exchange_outcome = 'assistant_only'))
             WHERE membership.window_id = %s
               AND membership.project_id = %s
               AND semantic_window.user_name = %s
@@ -490,6 +617,10 @@ class SemanticWindowReader:
         This is intentionally a narrow Context-stage catalog rather than a
         second source store. The updater receives only canonical refs whose
         owning assistant message is itself frozen window evidence.
+
+        Web sources never reach Context: a page can carry injected text, and
+        Context feeds every future prompt and the entity graph. Project files
+        the agent wrote after reading the web are kept out for the same reason.
         """
 
         user_name, project_id = self._scope(
@@ -522,6 +653,14 @@ class SemanticWindowReader:
               AND membership.project_id = %s
               AND semantic_window.user_name = %s
               AND message.role = 'assistant'
+              AND ref.source_kind NOT IN (
+                  'web_search_result', 'news_search_result', 'web_page', 'web_pdf'
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM public.project_documents AS document
+                  WHERE document.document_id = ref.document_id
+                    AND document.derived_from_web
+              )
             ORDER BY membership.ordinal ASC, ref.created_at ASC,
                      ref.result_position ASC, ref.source_ref_id ASC
             """,
@@ -584,10 +723,12 @@ class SemanticWindowReader:
             WITH {_ELIGIBLE_CONVERSATION_EXCHANGES_CTE}
             SELECT
                 eligible.user_message_id,
+                eligible.anchor_role,
                 eligible.session_id,
                 eligible.user_content,
                 eligible.user_timestamp_ms,
                 eligible.user_lifecycle_state,
+                eligible.user_steer_state,
                 eligible.user_exchange_state,
                 eligible.user_exchange_outcome,
                 eligible.exchange_closed_at_ms,

@@ -20,10 +20,11 @@ from common.schema.context import (
     ContextSnapshot,
     ContextSupportKind,
 )
-from common.schema.settings import EntityResolutionSettings, TextProcessorSettings
+from common.schema.settings import EntityResolutionSettings, ExtractionSettings
 from core.ingestion.policy import IngestionPolicy
 from core.knowledge.context.models import (
     ContextProjectionConflictError,
+    ContextRevisionConflictError,
     ContextUserEditSynchronizationError,
 )
 from core.knowledge.context.projection import (
@@ -73,6 +74,93 @@ def _snapshot(*blocks: ContextBlockRecord) -> ContextSnapshot:
 
 @pytest.mark.unit
 @pytest.mark.no_network
+async def test_user_note_commits_human_block_and_preserves_existing_context():
+    original = _block(section_key="current_state", markdown="Agent observation")
+    current = _snapshot(original)
+    domain = _domain()
+    policy = IngestionPolicy.capture(
+        extraction=ExtractionSettings(),
+        entity_resolution=EntityResolutionSettings(),
+        compiled_domain=domain,
+    )
+    initial_file = render_context_markdown(current, domain).encode()
+    state = SimpleNamespace(
+        current_revision_id=current.revision_id,
+        projection_revision_id=current.revision_id,
+        projection_hash=hashlib.sha256(initial_file).hexdigest(),
+        projection_pending_hash=None,
+    )
+    captured = []
+
+    class Reader:
+        async def get_current_revision(self, **_scope):
+            return current
+
+        async def get_snapshot(self, revision_id, **_scope):
+            assert revision_id == current.revision_id
+            return current
+
+        async def get_projection_state(self, **_scope):
+            return state
+
+    class Writer:
+        async def ensure_context(self, **_scope):
+            pass
+
+        async def commit_revision(self, **kwargs):
+            nonlocal current
+            captured.append(kwargs)
+            assert kwargs["expected_parent_revision_id"] == current.revision_id
+            assert kwargs["new_human_edit_window"].policy_snapshot["kind"] == "context_user_note"
+            current = ContextSnapshot(
+                revision_id=uuid4(), project_id="project-1",
+                revision_number=current.revision_number + 1,
+                parent_revision_id=kwargs["expected_parent_revision_id"],
+                origin=ContextRevisionOrigin.HUMAN_EDIT, domain_version=1,
+                content_hash=kwargs["materialization"].content_hash,
+                blocks=list(kwargs["materialization"].blocks),
+            )
+            state.current_revision_id = current.revision_id
+            return current
+
+        async def record_projection(self, *, revision_id, projection_hash, **_scope):
+            state.projection_revision_id = revision_id
+            state.projection_hash = projection_hash
+            return True
+
+    class Filesystem:
+        content = initial_file
+
+        def read_bytes(self, _path):
+            return self.content
+
+        def write_bytes(self, _path, content, *, expected_content_hash, **_kwargs):
+            assert expected_content_hash == hashlib.sha256(self.content).hexdigest()
+            self.content = content
+
+    filesystem = Filesystem()
+    projection = ContextProjection(reader=Reader(), writer=Writer(), filesystem=filesystem)
+    original_revision_id = current.revision_id
+    changed = await projection.change_user_note(
+        user_name="ada", project_id="project-1", ingestion_policy=policy,
+        expected_revision_id=original_revision_id,
+        operation="add", section_key="preferences", markdown="Prefer concise answers",
+    )
+    assert changed.revision_id != original_revision_id
+    assert changed.blocks[0].block_id == original.block_id
+    assert changed.blocks[1].assertion_kind is AssertionKind.HUMAN_ASSERTED
+    assert b"Prefer concise answers" in filesystem.content
+    assert len(captured) == 1
+    with pytest.raises(ContextRevisionConflictError):
+        await projection.change_user_note(
+            user_name="ada", project_id="project-1", ingestion_policy=policy,
+            expected_revision_id=original_revision_id,
+            operation="add", section_key="preferences", markdown="Stale note",
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 async def test_detected_user_edit_failure_keeps_its_admission_meaning():
     snapshot = _snapshot()
     domain = _domain()
@@ -103,7 +191,7 @@ async def test_detected_user_edit_failure_keeps_its_admission_meaning():
             return b"not a valid Context document"
 
     policy = IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(),
+        extraction=ExtractionSettings(),
         entity_resolution=EntityResolutionSettings(),
         compiled_domain=domain,
     )
@@ -163,7 +251,7 @@ async def test_known_stale_projection_is_repaired_without_user_edit_blocking():
             writes.append((path, content, kwargs))
 
     policy = IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(),
+        extraction=ExtractionSettings(),
         entity_resolution=EntityResolutionSettings(),
         compiled_domain=domain,
     )
@@ -257,7 +345,7 @@ async def test_domain_title_change_repairs_clean_projection_before_or_after_brid
             writes.append((path, content, kwargs))
 
     policy = IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(),
+        extraction=ExtractionSettings(),
         entity_resolution=EntityResolutionSettings(),
         compiled_domain=updated_domain,
     )
@@ -513,3 +601,114 @@ def test_context_import_fails_closed_for_unknown_marker_or_section():
         )
     with pytest.raises(ContextProjectionConflictError, match="section"):
         _parse_markdown(rendered.replace("## Active Work", "## Work"), _domain(), snapshot)
+
+
+def _discard_harness(*, file_content, snapshot):
+    domain = _domain()
+    state = SimpleNamespace(
+        current_revision_id=None if snapshot is None else snapshot.revision_id,
+        # The local edit was made against an older projection, which is the
+        # case synchronization refuses to import.
+        projection_revision_id=uuid4(),
+        projection_hash="0" * 64,
+        projection_pending_hash=None,
+    )
+
+    class Reader:
+        async def get_projection_state(self, **_kwargs):
+            return state
+
+        async def get_snapshot(self, *_args, **_kwargs):
+            return snapshot
+
+    class Writer:
+        async def ensure_context(self, **_kwargs):
+            return None
+
+        async def record_projection(self, *, revision_id, projection_hash, **_kwargs):
+            state.projection_revision_id = revision_id
+            state.projection_hash = projection_hash
+            return True
+
+        async def record_projection_failure(self, **_kwargs):
+            return None
+
+    class Filesystem:
+        content = file_content
+
+        def read_bytes(self, _path):
+            if self.content is None:
+                raise FileNotFoundError(_path)
+            return self.content
+
+        def write_bytes(self, _path, content, *, expected_content_hash, **_kwargs):
+            assert expected_content_hash == hashlib.sha256(self.content).hexdigest()
+            self.content = content
+
+        def delete_file(self, _path, *, expected_content_hash):
+            assert expected_content_hash == hashlib.sha256(self.content).hexdigest()
+            self.content = None
+
+    filesystem = Filesystem()
+    projection = ContextProjection(reader=Reader(), writer=Writer(), filesystem=filesystem)
+    return projection, filesystem, domain
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_discarding_a_stale_local_edit_restores_context_and_unblocks_sync():
+    snapshot = _snapshot()
+    edit = b"my edit against an older Context"
+    projection, filesystem, domain = _discard_harness(file_content=edit, snapshot=snapshot)
+    policy = IngestionPolicy.capture(
+        extraction=ExtractionSettings(),
+        entity_resolution=EntityResolutionSettings(),
+        compiled_domain=domain,
+    )
+    with pytest.raises(ContextUserEditSynchronizationError):
+        await projection.synchronize(
+            user_name="ada", project_id="project-1",
+            ingestion_policy=policy, allow_user_edit=True,
+        )
+
+    discarded = await projection.discard_local_edits(
+        user_name="ada", project_id="project-1", domain=domain,
+        expected_file_hash=hashlib.sha256(edit).hexdigest(),
+    )
+
+    assert discarded == edit.decode()
+    assert filesystem.content == render_context_markdown(snapshot, domain).encode()
+    await projection.synchronize(
+        user_name="ada", project_id="project-1",
+        ingestion_policy=policy, allow_user_edit=True,
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_discard_refuses_edits_the_user_has_not_seen():
+    projection, filesystem, domain = _discard_harness(
+        file_content=b"a newer edit", snapshot=_snapshot()
+    )
+
+    with pytest.raises(ContextProjectionConflictError):
+        await projection.discard_local_edits(
+            user_name="ada", project_id="project-1", domain=domain,
+            expected_file_hash=hashlib.sha256(b"the edit I reviewed").hexdigest(),
+        )
+    assert filesystem.content == b"a newer edit"
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_discard_without_committed_context_removes_the_local_file():
+    edit = b"a first Context that could not be imported"
+    projection, filesystem, domain = _discard_harness(file_content=edit, snapshot=None)
+
+    discarded = await projection.discard_local_edits(
+        user_name="ada", project_id="project-1", domain=domain,
+        expected_file_hash=hashlib.sha256(edit).hexdigest(),
+    )
+
+    assert discarded == edit.decode()
+    assert filesystem.content is None

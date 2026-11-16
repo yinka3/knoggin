@@ -1,11 +1,10 @@
-from uuid import uuid4
 
 import pytest
 
 from common.conf.domain_config import DomainConfig
 from common.conf.relationship_config import normalize_relationship
 from common.schema.ingestion.contracts import (
-    ContextRelationshipWrite,
+    RelationshipWrite,
     relationship_identity,
 )
 
@@ -97,8 +96,8 @@ def test_symmetric_relationship_keeps_symmetric_marker_for_identity_handling():
 @pytest.mark.unit
 @pytest.mark.no_network
 def test_context_relationship_write_preserves_observed_and_canonical_labels():
-    write = ContextRelationshipWrite(
-        support_block_ids=(uuid4(),),
+    write = RelationshipWrite(
+        support_message_ids=(1,),
         entity_a_id=2,
         entity_b_id=3,
         relationship_type="USES",
@@ -117,16 +116,16 @@ def test_context_relationship_write_preserves_observed_and_canonical_labels():
 @pytest.mark.unit
 @pytest.mark.no_network
 def test_context_relationship_status_is_derived_from_canonical_presence():
-    recognized = ContextRelationshipWrite(
-        support_block_ids=(uuid4(),),
+    recognized = RelationshipWrite(
+        support_message_ids=(1,),
         entity_a_id=2,
         entity_b_id=3,
         relationship_type="uses",
         canonical_type="USES",
         domain_status="unrecognized",
     )
-    unknown = ContextRelationshipWrite(
-        support_block_ids=(uuid4(),),
+    unknown = RelationshipWrite(
+        support_message_ids=(1,),
         entity_a_id=2,
         entity_b_id=3,
         relationship_type="deploys to",
@@ -143,15 +142,15 @@ def test_context_relationship_status_is_derived_from_canonical_presence():
 def test_relationship_identity_is_directional_unless_symmetric_is_explicit():
     assert relationship_identity("p", 3, 2, "USES", symmetric=False) == ("p:3:2:uses")
     assert relationship_identity("p", 3, 2, "USES", symmetric=True) == ("p:2:3:uses")
-    directional = ContextRelationshipWrite(
-        support_block_ids=(uuid4(),),
+    directional = RelationshipWrite(
+        support_message_ids=(1,),
         entity_a_id=3,
         entity_b_id=2,
         relationship_type="uses",
         symmetric=False,
     )
-    symmetric = ContextRelationshipWrite(
-        support_block_ids=(uuid4(),),
+    symmetric = RelationshipWrite(
+        support_message_ids=(1,),
         entity_a_id=3,
         entity_b_id=2,
         relationship_type="collaborates_with",

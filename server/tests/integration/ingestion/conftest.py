@@ -5,7 +5,6 @@ import json
 import os
 import sys
 import uuid
-from pathlib import Path
 
 import psycopg
 import pytest
@@ -13,11 +12,12 @@ from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from infrastructure.postgres_client import PostgresClient
+from infrastructure.schema_migrations import migrate
 from tests.fixtures.factories import make_domain_config
 
 DB_URL = os.environ.get(
-    "KNOGGIN_TEST_DATABASE_URL",
-    "postgresql://knoggin:knoggin@127.0.0.1:5432/knoggin_db",
+    "TEST_DATABASE_URL",
+    "postgresql://knoggin:knoggin@127.0.0.1:5432/postgres",
 )
 
 
@@ -41,20 +41,11 @@ async def real_server_scope():
     database = f"knoggin_ingestion_{uuid.uuid4().hex[:12]}"
     admin_url = _database_url("postgres")
     database_url = _database_url(database)
-    schema_sql = (
-        Path(__file__).resolve().parents[3] / "src" / "infrastructure" / "schema.sql"
-    ).read_text(encoding="utf-8")
     with psycopg.connect(admin_url, autocommit=True) as admin:
         admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database)))
     postgres = None
     try:
-        with psycopg.connect(database_url, autocommit=True) as connection:
-            connection.execute("CREATE EXTENSION vector")
-            connection.execute("CREATE EXTENSION age")
-            connection.execute("LOAD 'age'")
-            connection.execute('SET search_path = ag_catalog, "$user", public')
-            connection.execute(schema_sql)
-            connection.execute("SELECT ag_catalog.create_graph('knoggin_graph')")
+        migrate(database_url)
 
         postgres = PostgresClient(dsn=database_url, min_size=1, max_size=2)
         await postgres.connect()

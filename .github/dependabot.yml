@@ -1,0 +1,30 @@
+# Weekly update PRs for pinned dependencies. Actions are pinned by commit SHA
+# and images by digest; Dependabot moves those pins and keeps the version
+# comment beside them. Each ecosystem's updates arrive grouped in one PR.
+version: 2
+updates:
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      python:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly

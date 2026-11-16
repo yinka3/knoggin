@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from functools import partial
-from typing import cast
+from typing import Callable, cast
 
 from loguru import logger
 
@@ -15,11 +15,12 @@ from common.scoping import (
     require_scope_value,
     require_visible_project_ids,
 )
-from core.ingestion.context_entity_build import ContextEntityBuildService
+from core.ingestion.entity_build import EntityBuildService
 from core.ingestion.project_semantic_processor import ProjectSemanticProcessor
-from core.ingestion.relationship_extractor import ContextRelationshipExtractor
+from core.ingestion.relationship_extractor import RelationshipExtractor
 from core.ingestion.semantic_window_admission import SemanticWindowAdmission
 from core.ingestion.text_processor import TextProcessor
+from core.knowledge.context.maintainer import ContextMaintainer
 from core.knowledge.context.projection import ContextProjection
 from core.knowledge.context.updater import ContextUpdater
 from core.knowledge.db.readers.document_reader import DocumentReader
@@ -35,6 +36,7 @@ from core.knowledge.documents import (
 from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.episodes.generator import EpisodeGenerator
 from core.knowledge.jobs.conflict_discovery_job import ConflictDiscoveryJob
+from core.knowledge.jobs.forget_erase_job import ForgetEraseJob
 from core.knowledge.jobs.relationship_advisory_job import RelationshipAdvisoryJob
 from core.knowledge.retrieval import KnowledgeRetrieval
 from core.project.domain_config_store import DomainConfigStore
@@ -56,12 +58,14 @@ class ProjectRuntimeFactory:
         maintenance_service: ProjectMaintenanceService | None = None,
         config_manager: ConfigManager | None = None,
         filesystem_factory: ProjectFilesystemFactory | None = None,
+        invalidate_reading_entity_caches: Callable[[str, tuple[int, ...]], None] | None = None,
     ) -> None:
         self.resources = resources
         self.user_name = user_name
         self._maintenance_service = maintenance_service
         self._config_manager = config_manager
         self._filesystem_factory = filesystem_factory
+        self._invalidate_reading_entity_caches = invalidate_reading_entity_caches
 
     @property
     def dev_settings(self):
@@ -115,14 +119,11 @@ class ProjectRuntimeFactory:
                 get_known_aliases=entities.get_known_aliases,
                 get_alias_version=entities.get_alias_version,
                 get_profile=entities.get_profile,
-                vp01=await resources.get_vp01(compiled_domain.vp01_language),
                 spacy=resources.spacy,
-                settings=developer_settings.nlp_pipeline,
-                model_work=resources.model_work,
-                get_vp01=resources.get_vp01,
+                settings=developer_settings.extraction,
                 llm=resources.llm_service,
-                jev_client=getattr(resources, "jev_client", None),
                 user_name=self.user_name,
+                model_work=resources.model_work,
             ),
         )
         scheduler = Scheduler(
@@ -151,7 +152,6 @@ class ProjectRuntimeFactory:
             domain_config_store=domain_store,
             config_manager=config_manager,
             background_work=resources.background_work,
-            get_vp01=resources.get_vp01,
         )
         project_semantic_processor = self._create_project_semantic_processor(
             runtime,
@@ -241,6 +241,12 @@ class ProjectRuntimeFactory:
             blocking_runner=asyncio.to_thread,
             document_rerank_enabled=document_settings.rerank_enabled,
             document_rerank_candidates=document_settings.rerank_candidates,
+            max_document_upload_bytes=lambda: (
+                config_manager.config.developer_settings.documents.max_document_upload_bytes
+            ),
+            max_reconciled_files=lambda: (
+                config_manager.config.developer_settings.documents.max_reconciled_files
+            ),
             filesystem_factory=filesystem_factory,
             reconciliation_interval_seconds=(
                 runtime_config.developer_settings.jobs.document_indexing.reconciliation_interval_seconds
@@ -278,6 +284,7 @@ class ProjectRuntimeFactory:
             token_counter=token_counter,
             token_counter_batch=getattr(resources.llm_service, "count_tokens_batch", None),
             episode_settings=developer_settings.jobs.episode,
+            model_context_window=self._extraction_context_window(resources.llm_service),
         )
         episode_generator = EpisodeGenerator(
             llm=resources.llm_service,
@@ -294,29 +301,61 @@ class ProjectRuntimeFactory:
             writer=ProjectContextWriter(resources.postgres),
             filesystem=context_filesystem,
         )
+        relationship_extractor = RelationshipExtractor(
+            user_name=self.user_name,
+            llm=resources.llm_service,
+            entities=runtime.entities,
+            settings=developer_settings.extraction,
+        )
+        runtime.add_config_unsubscriber(
+            config_manager.subscribe(
+                relationship_extractor.update_settings, "developer_settings.extraction",
+            )
+        )
         return ProjectSemanticProcessor(
             admission,
             resources.knowledge_store,
             episode_generator,
+            exchange_embedding_service=resources.embedding,
             settings=developer_settings.ingestion,
             capture_semantic_policy=runtime.capture_semantic_policy,
-            context_updater=ContextUpdater(llm=resources.llm_service),
+            context_updater=ContextUpdater(
+                llm=resources.llm_service,
+                model=developer_settings.ingestion.context.update_model,
+            ),
+            context_maintainer=ContextMaintainer(
+                llm=resources.llm_service,
+                model=developer_settings.ingestion.context.maintenance_model,
+            ),
             context_projection=context_projection,
-            context_entity_builder=ContextEntityBuildService(
+            entity_builder=EntityBuildService(
                 processor=runtime.text_processor,
                 resolver=runtime.entities,
                 allocate_entity_id=resources.knowledge_store.allocate_entity_id,
             ),
-            context_relationship_extractor=ContextRelationshipExtractor(
-                user_name=self.user_name,
-                llm=resources.llm_service,
-                entities=runtime.entities,
-            ),
-            publish_committed_entity_ids=runtime.entities.publish_committed_entity_ids,
+            relationship_extractor=relationship_extractor,
+            publish_committed_entity_ids=partial(self._publish_entity_ids, runtime),
             signal_relationship_advisories=lambda: runtime.scheduler.wake_job(
                 "relationship_advisories"
             ),
         )
+
+    async def _publish_entity_ids(self, runtime, entity_ids: tuple[int, ...]) -> None:
+        await runtime.entities.publish_committed_entity_ids(entity_ids)
+        if self._invalidate_reading_entity_caches is not None:
+            self._invalidate_reading_entity_caches(runtime.project_id, entity_ids)
+
+    @staticmethod
+    def _extraction_context_window(llm):
+        lookup = getattr(llm, "context_window", None)
+        if lookup is None:
+            return None
+
+        async def window():
+            # Read the model at admission time; settings can change it.
+            return await lookup(llm.extraction_model)
+
+        return window
 
     def _create_conflict_discovery_job(
         self,
@@ -359,10 +398,17 @@ class ProjectRuntimeFactory:
         runtime.add_config_unsubscriber(
             config_manager.subscribe(
                 processor.update_settings,
-                "developer_settings.nlp_pipeline",
+                "developer_settings.extraction",
             )
         )
         scheduler.register(project_semantic_processor)
+        forget_erase = ForgetEraseJob(
+            self.resources.knowledge_store, config_manager.config.developer_settings.ingestion.forget,
+        )
+        scheduler.register(forget_erase)
+        runtime.add_config_unsubscriber(config_manager.subscribe(
+            forget_erase.update_settings, 'developer_settings.ingestion.forget',
+        ))
         if self._maintenance_service is not None:
             scheduler.register(RelationshipAdvisoryJob(self._maintenance_service))
         runtime.add_config_unsubscriber(

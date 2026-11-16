@@ -3,7 +3,7 @@ from copy import deepcopy
 import pytest
 from jinja2 import StrictUndefined, UndefinedError
 
-from core.agent.notebook import RunNotebook
+from core.agent.notebook import NotebookCapacity, RunNotebook
 from core.agent.notebook_renderer import (
     _passage_text,
     _result_locator,
@@ -11,6 +11,7 @@ from core.agent.notebook_renderer import (
     notebook_environment,
     render_notebook,
 )
+from core.agent.prompt_context import _empty_retrieval_guidance
 
 
 def test_empty_notebook_renders_a_stable_minimal_view():
@@ -257,7 +258,7 @@ def test_notebook_renderer_marks_a_clipped_read_passage_for_follow_up():
                 {
                     "document_id": "doc_abc123",
                     "document_name": "long-decision.md",
-                    "content": ("leading evidence " * 90) + "TAIL_IS_NOT_RENDERED",
+                    "content": ("leading evidence " * 900) + "TAIL_IS_NOT_RENDERED",
                     "locator": {
                         "kind": "text_lines",
                         "start_line": 1,
@@ -323,3 +324,123 @@ def test_notebook_renderer_defensively_formats_optional_source_metadata():
         "search result 2"
     )
     assert _source_continuation({}, display_clipped=False) == ""
+
+
+def _web_read(content, *, start_line, end_line, total_lines):
+    notebook = RunNotebook()
+    notebook.apply(
+        "read_web_page",
+        {
+            "data": [
+                {
+                    "title": "Guide",
+                    "url": "https://example.com/guide",
+                    "content": content,
+                    "start_line": start_line,
+                    "end_line": end_line,
+                    "total_lines": total_lines,
+                    "has_more": end_line < total_lines,
+                    "next_start_line": end_line + 1 if end_line < total_lines else None,
+                    "content_hash": "a" * 64,
+                    "source_kind": "web_page",
+                }
+            ]
+        },
+    )
+    return notebook
+
+
+def test_a_full_150_line_page_read_is_shown_whole():
+    lines = "\n".join(f"line {number} " + "word " * 10 for number in range(1, 151))
+    rendered = render_notebook(_web_read(lines, start_line=1, end_line=150, total_lines=300))
+
+    assert "line 150 " in rendered
+    assert "more source text is available from line 151" in rendered
+
+
+def test_a_clipped_read_names_the_line_to_continue_from_not_the_next_range():
+    lines = "\n".join(f"line {number} " + "word " * 60 for number in range(1, 151))
+    notebook = RunNotebook(capacity=NotebookCapacity(max_passage_chars=3000))
+    notebook.apply("read_web_page", {"data": [{
+        "title": "Guide", "url": "https://example.com/guide", "content": lines,
+        "start_line": 1, "end_line": 150, "total_lines": 300, "has_more": True,
+        "next_start_line": 151, "content_hash": "a" * 64, "source_kind": "web_page",
+    }]})
+
+    rendered = render_notebook(notebook)
+
+    # About 3000 characters is under 10 of these lines; the rest of the range
+    # comes before line 151, so the hint must not skip to it.
+    assert "continue reading with start_line 10." in rendered
+    assert "from line 151" not in rendered
+
+
+def test_the_last_passage_of_a_page_says_the_source_ended():
+    rendered = render_notebook(
+        _web_read("closing words", start_line=90, end_line=96, total_lines=96)
+    )
+
+    assert "end of source: this passage reaches its last line (96)." in rendered
+
+
+def test_rollover_with_recorded_actions_keeps_them_bounded():
+    notebook = RunNotebook()
+    for index in range(3):
+        notebook.apply(
+            "create_project_file",
+            {"data": {"status": "created", "relative_path": f"notes/{index}.md"}},
+        )
+    notebook.apply("read_web_page", {"data": [{
+        "title": "Guide", "url": "https://example.com/guide", "content": "Text.",
+        "start_line": 1, "end_line": 1, "total_lines": 1,
+        "content_hash": "a" * 64, "source_kind": "web_page",
+    }]})
+
+    notebook.rollover()
+
+    assert len(notebook.actions) <= notebook.capacity.max_actions
+
+
+def test_a_recalled_episode_shows_its_whole_narrative_and_named_metadata():
+    notebook = RunNotebook()
+    tail = "the detail at the very end"
+    notebook.apply(
+        "search_episodes",
+        {"data": {
+            "resolution": "semantic",
+            "results": [{
+                "query": "launch",
+                "episodes": [{
+                    "episode_id": "episode-1",
+                    "summary": "x" * 1400 + tail,
+                    "new_developments": [f"development {n}" for n in range(5)],
+                    "updates": [],
+                    "unresolved": [],
+                    "entities": [{"entity_id": 7, "name": "Dr. Lee"}],
+                    "relationships": [{
+                        "relationship_id": "r",
+                        "source": "Dr. Lee",
+                        "relationship_type": "treats",
+                        "target": "Ada",
+                    }],
+                }],
+            }],
+        }},
+    )
+
+    rendered = render_notebook(notebook)
+
+    assert tail in rendered
+    assert "development 4" in rendered
+    assert "entities: Dr. Lee" in rendered
+    assert "relationships: Dr. Lee treats Ada" in rendered
+
+
+def test_empty_search_only_suggests_tools_the_run_has():
+    enabled = frozenset({"search_episodes", "search_knowledge_entities", "search_project_documents"})
+
+    guidance = _empty_retrieval_guidance("search_episodes", enabled)
+
+    assert "entities or documents" in guidance
+    assert "messages" not in guidance.split("If the question")[0]
+    assert "messages, entities or documents" in _empty_retrieval_guidance("search_episodes")
