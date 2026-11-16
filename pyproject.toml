@@ -3,9 +3,9 @@ members = ["server", "api"]
 
 [dependency-groups]
 dev = [
-    "diff-cover>=9.2.0",
-    "mypy>=1.17.0",
-    "pytest>=9.0.2",
-    "pytest-asyncio>=1.3.0",
-    "pytest-cov>=7.0.0",
+    "diff-cover>=11.0.1",
+    "mypy>=2.4.1",
+    "pytest>=9.2.0",
+    "pytest-asyncio>=1.5.0",
+    "pytest-cov>=7.1.0",
 ]

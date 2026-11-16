@@ -13,7 +13,7 @@ dependencies = [
 server = { workspace = true }
 
 [build-system]
-requires = ["setuptools>=75.0"]
+requires = ["setuptools>=84.2.1"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
