@@ -332,12 +332,14 @@ class ContainerRuntimeSettings(ConfigModel):
 
 class WorkspaceCommandSettings(ConfigModel):
     enabled: bool = True
-    default_image: str = "docker.io/library/ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852"
+    default_image: str = "docker.io/library/python:3.12-slim@sha256:12316debbfb86890f6b2d825820612741ba527ad5a44e3902759141d572bfe8f"
     memory_mb: int = Field(4096, ge=256, le=262_144)
     cpus: float = Field(2.0, gt=0, le=64)
     pids: int = Field(512, ge=32, le=65_536)
     idle_minutes: int = Field(30, ge=1, le=1_440)
     check_timeout_seconds: float = Field(120.0, gt=0, le=3_600, allow_inf_nan=False)
+    min_free_disk_mb: int = Field(2048, ge=0, le=1_048_576)
+    disk_check_interval_seconds: float = Field(1.0, gt=0, le=60, allow_inf_nan=False)
 
 
 class DeveloperSettings(ConfigModel):

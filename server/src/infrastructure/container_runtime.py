@@ -109,6 +109,51 @@ class ContainerRuntime:
         )
         return response.json()
 
+    async def exec_create(self, container_id: str, command: list[str], workdir: str) -> str:
+        response = await self._request(
+            "POST", f"/containers/{quote(container_id, safe='')}/exec",
+            json={
+                "Cmd": command, "WorkingDir": workdir,
+                "AttachStdout": True, "AttachStderr": True,
+                "AttachStdin": False, "Tty": False,
+            },
+        )
+        return str(response.json()["Id"])
+
+    async def exec_stream(self, exec_id: str):
+        """Yield Docker's separate stdout/stderr frames without buffering the command."""
+        try:
+            async with self._client.stream(
+                "POST", f"/exec/{quote(exec_id, safe='')}/start",
+                json={"Detach": False, "Tty": False}, timeout=None,
+            ) as response:
+                if response.is_error:
+                    await response.aread()
+                    raise ContainerRuntimeError(response.text, response.status_code)
+                pending = bytearray()
+                async for chunk in response.aiter_raw():
+                    pending.extend(chunk)
+                    while len(pending) >= 8:
+                        size = int.from_bytes(pending[4:8], "big")
+                        if size > 1024 * 1024:
+                            raise ContainerRuntimeError("Exec output frame exceeds 1 MiB")
+                        if len(pending) < 8 + size:
+                            break
+                        stream = pending[0]
+                        payload = bytes(pending[8:8 + size])
+                        del pending[:8 + size]
+                        if stream not in (1, 2):
+                            raise ContainerRuntimeError("Invalid exec output stream")
+                        yield ("stdout" if stream == 1 else "stderr"), payload
+                if pending:
+                    raise ContainerRuntimeError("Incomplete exec output frame")
+        except httpx.HTTPError as exc:
+            raise ContainerRuntimeError(str(exc)) from exc
+
+    async def exec_inspect(self, exec_id: str) -> dict[str, Any]:
+        response = await self._request("GET", f"/exec/{quote(exec_id, safe='')}/json")
+        return response.json()
+
     async def list_containers(self, labels: Mapping[str, str]) -> list[dict[str, Any]]:
         filters = {"label": [f"{key}={value}" for key, value in labels.items()]}
         response = await self._request(
