@@ -111,6 +111,30 @@ Stop Postgres with `docker compose down`. This keeps the database volume; `docke
 - To use a model server on your machine, such as Ollama, set its URL to `http://host.docker.internal:11434`.
 - Start only the database with `docker compose up -d postgres`.
 
+#### Workspace commands in Compose
+
+For a single-host Linux Compose setup, the API needs access to a container runtime socket before it can run agent commands in project workspaces. Opt in with `docker-compose.sandbox.yml`; the regular Compose setup does not mount the socket. Other deployment layouts need their own runtime and project-storage wiring.
+
+Set these values in `.env` before starting the sandbox override:
+
+```dotenv
+CONTAINER_RUNTIME_SOCKET=/var/run/docker.sock
+CONTAINER_RUNTIME_GID=999
+KNOGGIN_HOST_LIBRARY_ROOT=/absolute/path/to/config/data/projects
+```
+
+Use the actual socket path and its numeric group ID (`stat -c %g /var/run/docker.sock` on the Linux host). Set `KNOGGIN_HOST_LIBRARY_ROOT` to the **host** path of `developer_settings.documents.project_library_root` under your `SETTINGS_DIR`; the default project library is `data/projects`. The path must be absolute and must point to the same files the API sees through its settings mount. If `container_runtime.socket` is explicitly set in `knoggin.yml`, use `/var/run/docker.sock`, the socket's path inside the API container. For a rootless runtime, set `UID` to the host socket owner's UID as well.
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.sandbox.yml up -d
+```
+
+The socket gives the API process control over the host container runtime. Only use the override where that access is intended. Project command containers still start with networking disabled. The override supports Linux Unix sockets; other host runtimes need a different connection setup.
+
+The agent can ask to install an exact-version Python package such as `duckdb==2.0.0`. Approval creates a temporary networked container that reaches PyPI and mounts only the project's sandbox home and temporary folders; it cannot read project workspaces. The package is saved under `/home/sandbox/python` in the project directory and stays available to later offline project commands after a container rebuild. Denying or ignoring the question leaves networking off. This first install tool does not install operating-system packages or arbitrary CLI programs.
+
+Each workspace command stops its project container when it finishes, so background work cannot survive a call. The next command restarts it with the same workspace and project home; `/tmp` is cleared after each command. The container filesystem is read-only, with writable workspace, home, and temporary folders under the project directory. Commands also refuse to start, or stop while running, when the filesystem holding the project library has less than 2 GiB free. Set `developer_settings.workspace_commands.min_free_disk_mb` and `disk_check_interval_seconds` in `knoggin.yml` to tune that guard; the defaults are 2048 MiB and 1 second. This is a safety threshold, not a disk quota: a fast write can cross it between checks.
+
 ## Where your data goes
 
 Knoggin stores your memory locally: the database, your project files, search indexes, embeddings, reranking, and document parsing all run on your machine.
