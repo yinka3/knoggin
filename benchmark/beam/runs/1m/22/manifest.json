@@ -1,0 +1,55 @@
+{
+  "dataset_sha256": "d72370298a5bf37e2b4314b77d2fff4401787a5c3bdae71db806895d1eb4ceb5",
+  "domain_sha256": "f345b20f82a50d99ae9f46f1a3e82853eb73cf6d5f8adfee67b073e7f74316be",
+  "config": {
+    "llm": {
+      "agent_model": "anthropic/claude-haiku-5.5",
+      "extraction_model": "anthropic/claude-haiku-5.5",
+      "merge_model": "anthropic/claude-sonnet-5.5",
+      "spending_budget": {
+        "limit_usd": 10.0
+      }
+    },
+    "developer_settings": {
+      "ingestion": {
+        "semantic_window_tokens": 128000,
+        "window_share_of_model_context": 0.4,
+        "idle_flush_seconds": 86400,
+        "context": {
+          "max_tokens": 30000,
+          "maintenance_model": "anthropic/claude-sonnet-5.5"
+        }
+      },
+      "jobs": {
+        "episode": {
+          "max_episode_source_tokens": 20000,
+          "max_episode_source_messages": 120
+        },
+        "conflict_discovery": {
+          "enabled": false
+        },
+        "duplicate_review": {
+          "enabled": false
+        }
+      },
+      "limits": {
+        "max_accumulated_episodes": 16
+      },
+      "community": {
+        "enabled": false
+      },
+      "chat_compaction": {
+        "enabled": false
+      }
+    }
+  },
+  "models": [
+    "anthropic/claude-haiku-5.5",
+    "openai/gpt-6-luna",
+    "qwen/qwen3.8-27b"
+  ],
+  "repository_revision": "fa88c1453b37fc2f9caf39e1da2a05015024b43c",
+  "beam_revision": "b2da22eac88bb0874c64665f13457eb99835774a",
+  "settle_timeout": 1800.0,
+  "min_episode_coverage": 0.6
+}

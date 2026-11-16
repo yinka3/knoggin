@@ -1,0 +1,9 @@
+{
+  "max_tool_calls": 20,
+  "max_attempts": 25,
+  "tool_limit_overrides": {
+    "search_episodes": 10,
+    "list_events": 8,
+    "read_episode_messages": 8
+  }
+}
