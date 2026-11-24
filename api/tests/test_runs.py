@@ -85,6 +85,31 @@ def test_cancelled_process_owned_run_reports_a_terminal_event():
     asyncio.run(exercise())
 
 
+def test_a_run_whose_stream_never_starts_is_stopped_after_the_grace_period():
+    # A client that disconnects before its response body starts never runs
+    # the stream; the run used to go on spending with no stop scheduled.
+    async def exercise():
+        settings = RunEventSettings(
+            max_buffered_events=10, max_buffered_bytes=4096, max_retained_runs=2,
+            unwatched_run_grace_seconds=0.05,
+        )
+        events = RunEvents(lambda: settings)
+
+        async def frames():
+            yield b'event: run_started\ndata: {"sequence":0}\n\n'
+            await asyncio.Event().wait()
+
+        events.start("session-1", "never-watched", frames())
+        run = events.get("session-1", "never-watched")
+        await asyncio.wait_for(asyncio.gather(run.task, return_exceptions=True), 1)
+        assert run.task.cancelled()
+        replay = [frame async for frame in events.stream(run, after=0)]
+        assert b'"reason": "unwatched"' in replay[0]
+        await events.close()
+
+    asyncio.run(exercise())
+
+
 def test_a_run_nobody_reconnects_to_is_stopped_after_the_grace_period():
     async def exercise():
         settings = RunEventSettings(

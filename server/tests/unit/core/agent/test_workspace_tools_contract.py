@@ -12,6 +12,7 @@ from common.schema.agent.tool_contracts import (
 )
 from core.agent.tool_runtime import execute_tool
 from core.agent.tools.registry import ToolPermissions, get_default_tool_limits
+from core.agent.tools.search import DocumentSearchTools
 from core.agent.tools.workspace import ProjectFileTools
 
 
@@ -20,6 +21,10 @@ class FakeDocumentService:
         self.calls = []
         self.project_id = "project-1"
         self.registered_documents = {}
+
+    async def grep_project_files(self, text, *, path_prefix=None, case_sensitive=False, max_matches=30):
+        self.calls.append(("grep", path_prefix))
+        return {"matches": [], "truncated": False}
 
     async def list_project_files(self, *, path_prefix=None, limit=100):
         self.calls.append(("list", path_prefix, limit))
@@ -305,3 +310,54 @@ async def test_agents_cannot_change_files_in_a_read_only_workspace():
     await tools.create_project_file("api/new.md", "text")  # a writable workspace
     await tools.create_project_file("notes.md", "text")  # outside every workspace
     assert [call[0] for call in service.calls] == ["create", "create"]
+
+
+class FocusedFileHarness(ProjectFileTools, DocumentSearchTools):
+    def __init__(self, service, focus):
+        self.document_service = service
+        self.document_focus = focus
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize("behavior", ["restrict", "prefer"])
+async def test_a_restrictive_subtree_focus_bounds_file_reads_lists_and_grep(behavior):
+    service = FakeDocumentService()
+    tools = FocusedFileHarness(service, {
+        "target_type": "subtree", "path_prefix": "docs", "behavior": behavior,
+    })
+
+    await tools.list_project_files()
+    await tools.grep_project_files("needle")
+    await tools.read_project_file("docs/notes.md")
+    await tools.read_project_file("PROJECT.md")  # the brief is always allowed
+    outside = [
+        tools.read_project_file("src/app.py"),
+        tools.list_project_files(path_prefix="src"),
+        tools.grep_project_files("needle", path_prefix="src"),
+    ]
+    if behavior == "restrict":
+        for call in outside:
+            with pytest.raises(ValueError, match="focused subtree"):
+                await call
+        assert ("list", "docs", 100) in service.calls
+        assert ("grep", "docs") in service.calls
+    else:
+        for call in outside:
+            await call
+        assert ("list", None, 100) in service.calls
+        assert ("grep", None) in service.calls
+
+
+@pytest.mark.no_network
+async def test_a_restrictive_document_focus_allows_only_that_file():
+    service = FakeDocumentService()
+    tools = FocusedFileHarness(service, {
+        "target_type": "document", "document_id": "d1",
+        "relative_path": "docs/notes.md", "behavior": "restrict",
+    })
+
+    await tools.read_project_file("docs/notes.md")
+    await tools.grep_project_files("needle")
+    assert ("grep", "docs/notes.md") in service.calls
+    with pytest.raises(ValueError, match="selected document"):
+        await tools.read_project_file("docs/other.md")

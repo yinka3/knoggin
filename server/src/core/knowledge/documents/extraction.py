@@ -1520,9 +1520,30 @@ def _split_csv(text: str) -> List[DocumentChunk]:
     for row_number, row in enumerate(rows[1:], start=1):
         rendered = _render_csv_row(row)
         if len(header) + 1 + len(rendered) > _TEXT_CHUNK_TARGET_CHARS:
-            raise ValueError(
-                f"CSV row {row_number} exceeds the document chunk size limit"
-            )
+            # A wide row used to fail the whole file permanently. Give it its
+            # own chunks instead, each with the header and the row's exact range.
+            if current:
+                chunks.append(
+                    DocumentChunk(
+                        content="\n".join([header, *current]),
+                        chunk_kind="csv",
+                        start_row=start_row,
+                        end_row=row_number - 1,
+                    )
+                )
+                current = []
+                current_size = len(header) + 1
+            for excerpt in split_text(rendered):
+                chunks.append(
+                    DocumentChunk(
+                        content="\n".join([header, excerpt]),
+                        chunk_kind="csv",
+                        start_row=row_number,
+                        end_row=row_number,
+                    )
+                )
+            start_row = row_number + 1
+            continue
         if current and current_size + len(rendered) + 1 > _TEXT_CHUNK_TARGET_CHARS:
             chunks.append(
                 DocumentChunk(
@@ -1908,10 +1929,27 @@ def _split_code_sections(
         start = section_start
         for line_index, line in enumerate(section_lines, start=section_start):
             if len(line) > _CODE_CHUNK_TARGET_CHARS:
-                raise ValueError(
-                    f"Code line {line_index + line_offset + 1} "
-                    "exceeds the document chunk size limit"
-                )
+                # One very long line (generated code, embedded data) used to
+                # fail the whole file permanently. As for text, split it into
+                # excerpts that each point at that exact line.
+                if current:
+                    chunks.append(
+                        _code_chunk(current, language, start + line_offset, symbol_name)
+                    )
+                    current = []
+                    current_chars = 0
+                line_number = line_index + line_offset + 1
+                for excerpt in split_text(line):
+                    chunks.append(DocumentChunk(
+                        content=excerpt,
+                        language=language,
+                        chunk_kind="code",
+                        symbol_name=symbol_name,
+                        start_line=line_number,
+                        end_line=line_number,
+                    ))
+                start = line_index + 1
+                continue
             if current and current_chars + len(line) + 1 > _CODE_CHUNK_TARGET_CHARS:
                 chunks.append(
                     _code_chunk(current, language, start + line_offset, symbol_name)

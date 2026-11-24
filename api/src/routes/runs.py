@@ -23,7 +23,7 @@ from core.project.notebook_store import NotebookConflict
 from contracts.sessions import QueueFollowUp, StartRun, SteerRun
 from annotations import resolve_annotations, with_annotations
 from runtime.session_runtime import FollowUpQueueFull, SteerQueueFull
-from routes.project_settings import _error, _json
+from routes.project_settings import _error, _json, _project_error
 
 
 def _stream_response(frames: AsyncIterator[bytes]) -> StreamingResponse:
@@ -186,9 +186,8 @@ async def start_run(request):
     metadata = (await runtime.sessions.list_sessions()).get(session_id)
     if metadata is None:
         return _error("session_not_found", "Session not found", 404)
-    project = await runtime.projects.get_project(metadata["project_id"])
-    if project is None or project["status"] != "active":
-        return _error("project_unavailable", "Project is unavailable", 409)
+    if error := await _project_error(runtime, metadata["project_id"], write=True):
+        return error
     try:
         session = await runtime.sessions.get_or_resume_session(session_id)
         if session is None:

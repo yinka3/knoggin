@@ -256,24 +256,34 @@ class ProjectContextReader:
                       WHERE revision_id = %(revision_id)s AND project_id = %(project_id)s
                   )
                 GROUP BY member.block_id
+            ),
+            ages AS (
+                SELECT born.block_id, coalesce(sum(later.episodes), 0) AS age
+                FROM born
+                LEFT JOIN revision_episodes AS later
+                  ON later.revision_number > born.revision_number
+                GROUP BY born.block_id
+            ),
+            since AS (
+                SELECT coalesce(sum(episodes), 0) AS since FROM revision_episodes
+                WHERE revision_number > (
+                    SELECT coalesce(max(revision_number), 0)
+                    FROM revision_episodes WHERE maintained
+                )
             )
-            SELECT born.block_id,
-                   coalesce(sum(later.episodes), 0) AS age,
-                   (SELECT coalesce(sum(episodes), 0) FROM revision_episodes
-                    WHERE revision_number > (
-                        SELECT coalesce(max(revision_number), 0)
-                        FROM revision_episodes WHERE maintained
-                    )) AS since
-            FROM born
-            LEFT JOIN revision_episodes AS later
-              ON later.revision_number > born.revision_number
-            GROUP BY born.block_id
+            -- One row even when the revision has no blocks, so the count of
+            -- episodes since maintenance is never lost.
+            SELECT ages.block_id, ages.age, since.since
+            FROM since LEFT JOIN ages ON true
             """,
             {"project_id": project_id, "user_name": user_name, "revision_id": revision_id},
         )
         return ContextMaintenanceState(
             episodes_since_maintenance=int(rows[0]["since"]) if rows else 0,
-            block_ages={UUID(str(row["block_id"])): int(row["age"]) for row in rows},
+            block_ages={
+                UUID(str(row["block_id"])): int(row["age"])
+                for row in rows if row["block_id"] is not None
+            },
         )
 
     async def get_revision_impact_block_ids(

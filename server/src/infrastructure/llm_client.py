@@ -2,7 +2,7 @@ import asyncio
 import json
 import math
 import re
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 from typing import (
     Any,
     AsyncIterator,
@@ -648,7 +648,10 @@ class LLMService:
             if declared_approximate is not None
             else prompt_tokens is None or completion_tokens is None
         )
-        if approximate:
+        if approximate and failed:
+            # A failed request with no provider usage is not charged an estimate.
+            prompt_tokens = completion_tokens = 0
+        elif approximate:
             prompt_tokens = (
                 self.count_tokens(f"{system}\n{user}")
                 + max(additional_prompt_tokens, 0)
@@ -1163,7 +1166,10 @@ class LLMService:
         model = model or self._agent_model
         is_openrouter = self._is_openrouter
         async with self._client_snapshot() as (raw_client, _):
-            async for event in self._stream_with_client(
+            # Closing this generator must close the inner one right away, so
+            # its cleanup (closing the provider stream, recording spend) does
+            # not wait for the event loop's generator finalizer.
+            async with aclosing(self._stream_with_client(
                 raw_client=raw_client,
                 system=system_text(system),
                 system_message=self._system_message(system),
@@ -1175,8 +1181,9 @@ class LLMService:
                 is_openrouter=is_openrouter,
                 aac_budget=aac_budget,
                 max_completion_tokens=max_completion_tokens,
-            ):
-                yield event
+            )) as events:
+                async for event in events:
+                    yield event
 
     async def _stream_with_client(
         self,
@@ -1224,6 +1231,7 @@ class LLMService:
                 }
                 return
             recorded = False
+            response = None
 
             try:
                 create_kwargs: Dict[str, Any] = dict(
@@ -1441,6 +1449,18 @@ class LLMService:
                 }
                 return
             finally:
+                if response is not None:
+                    # A stopped run or a failure leaves the provider stream
+                    # open; close it so the connection (and possibly the
+                    # generation) does not run on until garbage collection.
+                    close = getattr(response, "close", None) or getattr(
+                        response, "aclose", None
+                    )
+                    try:
+                        if close is not None:
+                            await close()
+                    except Exception as close_error:
+                        logger.debug(f"Closing the LLM stream failed: {close_error}")
                 if not recorded:
                     await self._record_external_attempt(
                         reservation,

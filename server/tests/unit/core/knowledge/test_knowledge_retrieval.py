@@ -525,6 +525,7 @@ async def test_exact_entity_episode_lookup_uses_the_store_contract_without_sessi
             project_id,
             limit,
             visible_project_ids,
+            offset=0,
         ):
             self.calls.append(
                 {
@@ -532,6 +533,7 @@ async def test_exact_entity_episode_lookup_uses_the_store_contract_without_sessi
                     "user_name": user_name,
                     "project_id": project_id,
                     "limit": limit,
+                    "offset": offset,
                     "visible_project_ids": visible_project_ids,
                 }
             )
@@ -558,10 +560,50 @@ async def test_exact_entity_episode_lookup_uses_the_store_contract_without_sessi
             "entity_ids": [2],
             "user_name": "ada",
             "project_id": "project-1",
-            "limit": 10,
+            # One more than the page size, to learn whether a next page exists.
+            "limit": 11,
+            "offset": 0,
             "visible_project_ids": ["project-1"],
         }
     ]
+
+
+@pytest.mark.no_network
+async def test_exact_entity_episode_lookup_pages_with_offset():
+    class Entities:
+        async def get_profile(self, entity_id):
+            return SimpleNamespace(canonical_name="Ada Lovelace")
+
+    class Store:
+        def __init__(self):
+            self.calls = []
+
+        async def get_project_episodes_for_entities(self, entity_ids, **kwargs):
+            self.calls.append(kwargs)
+            return []
+
+    store = Store()
+    retrieval = KnowledgeRetrieval(
+        project_id="project-1",
+        readable_project_ids=["project-1"],
+        user_name="ada",
+        entities=Entities(),
+        embedding_service=SimpleNamespace(),
+        knowledge_store=store,
+    )
+
+    result = await retrieval.episode_check(
+        "What did Ada decide?", session_id="session-1", entity_id=2, offset=10
+    )
+
+    assert store.calls[0]["offset"] == 10
+    assert store.calls[0]["limit"] == 11
+    assert result == {
+        "resolution": "no_more_episodes",
+        "results": [],
+        "has_more": False,
+        "next_offset": None,
+    }
 
 
 @pytest.mark.no_network

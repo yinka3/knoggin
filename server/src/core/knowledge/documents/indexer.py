@@ -482,7 +482,13 @@ class DocumentIndexer:
         try:
             task.result()
         except BackgroundWorkRejected as exc:
+            # The work queue is full. Waking the drain loop now would only be
+            # refused again at once, so wake it after a backoff instead.
             logger.warning("Document indexing remains queued: {}", exc.message)
+            asyncio.get_running_loop().call_later(
+                _DRAIN_FAILURE_RETRY_SECONDS, self._request_drain
+            )
+            return
         except Exception as exc:
             logger.error("Background document indexing failed: {}", exc)
         self._request_drain()
@@ -516,10 +522,18 @@ class DocumentIndexer:
                             break
                         retry_at = await self._reader.next_index_retry_at()
                         retry_time = parse_iso_time(retry_at) if retry_at is not None else None
-                        if retry_time is not None and not self._document_tasks:
-                            timeout = max(0.01, (retry_time - get_now()).total_seconds())
-                        else:
+                        if self._document_tasks:
+                            # Each finished task wakes this loop as well.
                             timeout = _DRAIN_RETRY_SECONDS
+                        else:
+                            timeout = (
+                                (retry_time - get_now()).total_seconds()
+                                if retry_time is not None else 0
+                            )
+                            if timeout <= 0:
+                                # Work is due but none was taken: admission was
+                                # refused (queue full), so back off, not spin.
+                                timeout = _DRAIN_FAILURE_RETRY_SECONDS
                     except Exception as exc:
                         logger.error("Document index admission loop failed: {}", exc)
                         timeout = _DRAIN_FAILURE_RETRY_SECONDS

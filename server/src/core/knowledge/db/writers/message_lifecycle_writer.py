@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from typing import Any, Dict
 from uuid import UUID, uuid4
 
+from loguru import logger
+
 from common.exceptions import IdempotencyConflictError
 from common.scoping import require_scope_value
 from common.utils.time_utils import get_now_ms
@@ -668,16 +670,27 @@ class MessageLifecycleWriter:
             """,
             (user_name,),
         )
+        closed = 0
         for row in rows:
-            await self.close_user_exchange(
-                user_name=user_name,
-                project_id=row["project_id"],
-                session_id=row["session_id"],
-                user_message_id=int(row["message_id"]),
-                outcome="failed",
-                terminal_error={"code": "run_failed", "retryable": True},
-            )
-        return len(rows)
+            try:
+                await self.close_user_exchange(
+                    user_name=user_name,
+                    project_id=row["project_id"],
+                    session_id=row["session_id"],
+                    user_message_id=int(row["message_id"]),
+                    outcome="failed",
+                    terminal_error={"code": "run_failed", "retryable": True},
+                )
+            except ValueError as exc:
+                # Closed or removed since the listing: one bad row must not
+                # abort startup or leave the remaining exchanges open.
+                logger.warning(
+                    "Skipped orphaned exchange {} in session {}: {}",
+                    row["message_id"], row["session_id"], exc,
+                )
+                continue
+            closed += 1
+        return closed
 
     async def edit_user_message(
         self,

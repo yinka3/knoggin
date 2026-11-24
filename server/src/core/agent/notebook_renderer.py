@@ -58,6 +58,9 @@ _SHORT_TEXT_LIMIT = 320
 _PASSAGE_TEXT_LIMIT = 12_000
 # The cap on a stored Episode's narrative, so a recalled Episode is shown whole.
 _EPISODE_TEXT_LIMIT = 4_000
+# Items per Episode list (developments, updates, unresolved): high enough
+# that a recalled Episode is still shown whole.
+_EPISODE_LIST_ITEMS = 100
 
 NOTEBOOK_TEMPLATE = """RUN NOTEBOOK
 {% if summary.text %}Summary: {{ summary.text }}{% if summary.references %} ({{ summary.references|join(', ') }}){% endif %}
@@ -563,7 +566,7 @@ def _public_details(record: dict[str, Any], localizer: _ReferenceLocalizer) -> s
             or key.endswith("_id")
             or key.endswith("_ids")
             or key.endswith("_refs")
-            or key == "evidence"
+            or key in {"evidence", "reference"}  # rendered on their own
         ):
             continue
         if isinstance(value, (str, int, float, bool)) and value not in ("", None):
@@ -637,7 +640,7 @@ def _record_list(
             ):
                 item[field] = _bounded_text_items(
                     item.get(source),
-                    max_items=_EPISODE_TEXT_LIMIT,
+                    max_items=_EPISODE_LIST_ITEMS,
                     item_limit=_EPISODE_TEXT_LIMIT,
                 )
             item["entity_names"] = _episode_entity_names(item)

@@ -103,7 +103,9 @@ def test_import_passes_validated_exchanges_and_returns_their_ids(monkeypatch, tm
 
                 projects.status = "archived"
                 archived = await client.post(_URL, json={"exchanges": [_EXCHANGE]})
-                assert archived.json()["error"]["code"] == "project_unavailable"
+                # The same code every route uses for an archived project.
+                assert archived.status_code == 409
+                assert archived.json()["error"]["code"] == "project_archived"
 
                 missing = await client.post(
                     "/v1/sessions/other/imports", json={"exchanges": [_EXCHANGE]}

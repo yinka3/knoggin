@@ -399,6 +399,7 @@ class ProjectManager:
         domain_config: DomainConfig | Mapping[str, object],
         description: Optional[str] = None,
         allowed_projects: Optional[List[str]] = None,
+        connections: Optional[List[str]] = None,
     ) -> dict:
         """Create a project with its first active domain revision."""
         if not name or not name.strip():
@@ -410,15 +411,16 @@ class ProjectManager:
         allowed_projects = await self._validate_allowed_project_ids(
             project_id, allowed_projects or []
         )
+        connections = _project_connections(connections or [])
         if self._filesystem_factory is None:
             raise RuntimeError("Project filesystem is not configured")
         project_query = """
             INSERT INTO public.projects (
                 project_id, user_name, name, description, status,
-                domain_config
+                domain_config, connections
             ) VALUES (
                 %(project_id)s, %(user_name)s, %(name)s, %(description)s,
-                %(status)s, %(domain_config)s
+                %(status)s, %(domain_config)s, %(connections)s
             )
         """
         scope_query = """
@@ -457,6 +459,7 @@ class ProjectManager:
                         "description": description,
                         "status": ProjectStatus.ACTIVE.value,
                         "domain_config": json.dumps(active_domain.to_dict()),
+                        "connections": connections,
                     },
                 )
                 for allowed_id in allowed_projects:
@@ -503,6 +506,7 @@ class ProjectManager:
             meta["id"] = meta.pop("project_id")
             meta["allowed_projects"] = meta["allowed_projects"] or []
             meta["workspaces"] = _workspace_dicts(meta.get("workspaces"))
+            meta["connections"] = list(meta.get("connections") or [])
             meta.pop("domain_config", None)
             projects.append(meta)
 
@@ -527,6 +531,7 @@ class ProjectManager:
         meta["id"] = meta.pop("project_id")
         meta["allowed_projects"] = meta["allowed_projects"] or []
         meta["workspaces"] = _workspace_dicts(meta.get("workspaces"))
+        meta["connections"] = list(meta.get("connections") or [])
         meta.pop("domain_config", None)
         return meta
 
@@ -620,13 +625,20 @@ class ProjectManager:
                 expected_version=expected_version,
             )
 
-    async def _scan_settings_service(self, project_id: str) -> DocumentService:
+    async def _scan_settings_service(
+        self, project_id: str, *, write: bool = True
+    ) -> DocumentService:
         if project_id in self._project_shutdown_tasks:
             raise WorkspaceConflictError(
                 f"Project '{project_id}' is finishing runtime shutdown"
             )
         project = await self.get_project(project_id)
-        if project is None or project["status"] != ProjectStatus.ACTIVE.value:
+        # Reading is plain storage access, so an archived project may show
+        # its settings; only changes need an active project.
+        allowed = {ProjectStatus.ACTIVE.value} | (
+            set() if write else {ProjectStatus.ARCHIVED.value}
+        )
+        if project is None or project["status"] not in allowed:
             raise ValueError("Scan settings require an active project")
         active = self.active_projects.get(project_id)
         if active is not None:
@@ -652,7 +664,7 @@ class ProjectManager:
 
     async def get_document_scan_settings(self, project_id: str) -> FolderScanSettings:
         async with self.maintenance_service.lock:
-            service = await self._scan_settings_service(project_id)
+            service = await self._scan_settings_service(project_id, write=False)
             return await service.get_scan_settings()
 
     async def save_document_scan_settings(
@@ -855,11 +867,13 @@ class ProjectManager:
         name: Optional[str] = None,
         description: Optional[str] = None,
         allowed_projects: Optional[List[str]] = None,
+        connections: Optional[List[str]] = None,
     ) -> Optional[dict]:
         """Update project metadata that does not control lifecycle status."""
         return await self._mutate_project(
             self._update_project_locked, project_id,
             name=name, description=description, allowed_projects=allowed_projects,
+            connections=connections,
         )
 
     async def add_workspace(
@@ -958,6 +972,7 @@ class ProjectManager:
     async def _update_project_locked(
         self, project_id: str, name: Optional[str] = None,
         description: Optional[str] = None, allowed_projects: Optional[List[str]] = None,
+        connections: Optional[List[str]] = None,
     ) -> Optional[dict]:
         meta = await self.get_project(project_id)
         if not meta:
@@ -973,6 +988,8 @@ class ProjectManager:
             col_values["name"] = name.strip()
         if description is not None:
             col_values["description"] = description
+        if connections is not None:
+            col_values["connections"] = _project_connections(connections)
 
         if allowed_projects is not None:
             active_state = self.active_projects.get(project_id)
@@ -1286,3 +1303,19 @@ class ProjectManager:
             raise RuntimeError(
                 f"Failed to shut down {len(failures)} project runtime(s)"
             ) from failures[0]
+
+
+def _project_connections(names) -> list[str]:
+    """Saved logins a project's sandbox commands may use: known sandbox
+    services only, deduplicated and sorted."""
+    from common.credential_store import SANDBOX_SERVICES
+
+    if not isinstance(names, (list, tuple)) or not all(isinstance(name, str) for name in names):
+        raise ValueError("connections must be a list of service names")
+    unknown = sorted(set(names) - SANDBOX_SERVICES)
+    if unknown:
+        raise ValueError(
+            "Unknown connections: " + ", ".join(unknown)
+            + ". Choose from: " + ", ".join(sorted(SANDBOX_SERVICES))
+        )
+    return sorted(set(names))

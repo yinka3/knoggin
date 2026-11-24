@@ -1454,6 +1454,44 @@ async def test_research_coverage_nested_in_the_artifact_is_accepted():
 
 
 @pytest.mark.no_network
+async def test_research_coverage_given_both_top_level_and_nested_is_accepted():
+    # The nested copy used to stay in the artifact, whose schema forbids it,
+    # so a valid answer was rejected.
+    coverage = (
+        '[{"subquestion": "What changed?", "supporting_references": [], '
+        '"unresolved_gap": "Evidence was supplied outside the run notebook."}]'
+    )
+    llm = ScriptedLLM(
+        [
+            [
+                tool_call_event(
+                    "submit_answer",
+                    '{"content": "Answer from supplied evidence.", '
+                    f'"research_coverage": {coverage}, '
+                    '"artifact": {"kind": "research_brief", "title": "Brief", '
+                    '"blocks": [{"kind": "markdown", "content": "Answer."}], '
+                    f'"research_coverage": {coverage}}}}}',
+                    "submit-both",
+                ),
+                completed_event(),
+            ]
+        ]
+    )
+    run = make_run(
+        limits=AgentRunLimits(max_attempts=1, max_calls=1),
+        research_profile=resolve_research_profile("research"),
+        initial_source_candidates=_validated_initial_source_candidates("pasted_text"),
+    )
+    assert run.set_research_plan(["What changed?"]) is None
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+
+    events = [event async for event in executor._execute_run()]
+
+    assert events[-1]["event"] == "response"
+    assert events[-1]["data"]["artifact"]["title"] == "Brief"
+
+
+@pytest.mark.no_network
 async def test_research_plan_is_frozen_before_completion():
     llm = ScriptedLLM(
         [
@@ -1943,6 +1981,38 @@ async def test_executor_loop_enforces_duplicate_tool_and_global_limits(
         "one",
         "two",
     ]
+
+
+@pytest.mark.no_network
+async def test_retryable_tool_failure_can_be_retried_with_the_same_arguments(
+    monkeypatch,
+):
+    run = make_run()
+    executor = AgentExecutor(run, ScriptedLLM([]), SimpleNamespace())
+    attempts = []
+
+    async def flaky_execute(_tools, _name, args):
+        attempts.append(args["query"])
+        if len(attempts) == 1:
+            raise ToolExecutionError(
+                "search_knowledge_messages", "Search is busy", retryable=True
+            )
+        return {"data": [{"id": args["query"], "message": args["query"]}]}
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", flaky_execute)
+
+    def call(call_id):
+        return ToolCall("search_knowledge_messages", {"query": "one"}, call_id=call_id)
+
+    first = [event async for event in executor._execute_tools([call("first")], [])]
+    retry = [event async for event in executor._execute_tools([call("retry")], [])]
+
+    assert first[-1]["event"] == "tool_error"
+    assert first[-1]["data"]["retryable"] is True
+    assert not any(event["event"] == "tool_error" for event in retry)
+    assert attempts == ["one", "one"]
+    # The retry still counts toward the run's call limit.
+    assert run.call_count == 2
 
 
 @pytest.mark.no_network

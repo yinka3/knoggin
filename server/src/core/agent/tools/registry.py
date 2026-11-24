@@ -361,7 +361,7 @@ TOOL_DEFINITIONS = {
     "report_relationship_conflict": _definition("report_relationship_conflict"),
     "list_project_files": _definition("list_project_files", default_limit=4),
     "run_workspace_command": _definition("run_workspace_command", default_limit=4),
-    "install_python_package": _definition("install_python_package", default_limit=2),
+    "run_approved_command": _definition("run_approved_command", default_limit=4),
     "list_command_workspaces": _definition("list_command_workspaces", default_limit=2),
     "read_project_file": _definition("read_project_file", default_limit=4),
     "create_project_file": _definition(

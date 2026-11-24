@@ -1353,19 +1353,28 @@ class DocumentService:
             start_line + MAX_READ_LINES - 1,
         )
         requested_end = min(requested_end, total_lines)
+        selected = lines[start_line - 1 : requested_end]
+        # Keep whole lines within the character cap, so end_line and the
+        # locator name only the lines actually returned.
+        numbered_lines: List[str] = []
+        size = 0
+        for line_number, line in enumerate(selected, start=start_line):
+            entry = f"{line_number}: {line}"
+            added = len(entry) + (1 if numbered_lines else 0)
+            if size + added > MAX_READ_CHARACTERS:
+                break
+            numbered_lines.append(entry)
+            size += added
+        character_truncated = len(numbered_lines) < len(selected)
+        if not numbered_lines:
+            # The first line alone is over the cap: return its start.
+            numbered_lines = [f"{start_line}: {selected[0]}"[:MAX_READ_CHARACTERS]]
+        requested_end = start_line + len(numbered_lines) - 1
         if extension == ".csv":
             locator["end_row"] = requested_end
         elif selected_page is None:
             locator["end_line"] = requested_end
-        selected = lines[start_line - 1 : requested_end]
-        numbered_lines = [
-            f"{line_number}: {line}"
-            for line_number, line in enumerate(selected, start=start_line)
-        ]
         content = "\n".join(numbered_lines)
-        character_truncated = len(content) > MAX_READ_CHARACTERS
-        if character_truncated:
-            content = content[:MAX_READ_CHARACTERS]
 
         result = self._public_metadata(document_metadata)
         result.update(

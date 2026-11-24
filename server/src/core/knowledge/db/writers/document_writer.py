@@ -322,7 +322,10 @@ class DocumentWriter:
         params = {"project_id": self._project_id, "extensions": sorted(extensions),
                   "document_id": document_id}
         await self._client.execute(
+            # Drop the current snapshot so a skipped file's old chunks stop
+            # appearing in search and reads; requeueing reindexes it.
             f"""UPDATE public.project_documents AS pd SET status = 'skipped',
+                       current_snapshot_id = NULL,
                        index_attempt_count = 0, next_index_retry_at = NULL,
                        error_message = NULL, updated_at = now()
                 FROM public.projects AS project

@@ -21,6 +21,7 @@ from common.schema.jev import ChoiceQuestion, JevDecisionRecord, NoulQuestion
 from common.schema.semantic_window import SemanticWindowStage
 from common.scoping import IDENTITY_ENTITY_ID, require_scope_value
 from core.ingestion.batch import SemanticWindowBuild
+from core.knowledge.db.readers.entity_reader import EntityReader
 from core.knowledge.entity.jev_classification import (
     accepted_classification_topic,
     proposed_topic,
@@ -839,25 +840,13 @@ class SemanticCommitWriter:
             aliases_by_entity_id.setdefault(entity.entity_id, []).extend(entity.aliases)
         for entity_id, aliases in result.alias_updates.items():
             aliases_by_entity_id.setdefault(entity_id, []).extend(aliases)
+        # One query for every entity touched, not one per entity.
+        available = await EntityReader.validate_existing_ids(
+            cur, aliases_by_entity_id, user_name=user_name, visible_project_ids=[project_id],
+        )
+        if set(aliases_by_entity_id) - available:
+            raise ValueError("Alias update references an unavailable entity")
         for entity_id in sorted(aliases_by_entity_id):
-            await cur.execute(
-                """
-                SELECT 1
-                FROM public.entities AS entity
-                WHERE entity.entity_id = %s
-                  AND entity.user_name = %s
-                  AND (entity.entity_id = %s OR EXISTS (
-                      SELECT 1 FROM public.project_entity_contexts AS context
-                      WHERE context.project_id = %s
-                        AND context.entity_id = entity.entity_id
-                        AND context.user_name = %s
-                  ))
-                  AND entity.status = 'active'
-                """,
-                (entity_id, user_name, IDENTITY_ENTITY_ID, project_id, user_name),
-            )
-            if await cur.fetchone() is None:
-                raise ValueError("Alias update references an unavailable entity")
             for alias in dict.fromkeys(aliases_by_entity_id[entity_id]):
                 await cur.execute(
                     """

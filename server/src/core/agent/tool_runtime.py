@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from collections.abc import Collection
@@ -243,6 +244,20 @@ async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
                 status="rejected",
                 error="Tool execution was rejected.",
             )
+        raise
+    except asyncio.CancelledError:
+        # A tool timeout or a stopped run cancels the call. Close the audit
+        # row rather than leaving it "started" forever.
+        if audit_id:
+            try:
+                await asyncio.shield(_safe_finish_tool_audit(
+                    tools,
+                    audit_id,
+                    status="failed",
+                    error="Tool execution was cancelled or timed out.",
+                ))
+            except asyncio.CancelledError:
+                pass
         raise
     except Exception as exc:
         if audit_id:

@@ -214,3 +214,18 @@ def test_lock_descriptor_closes_handle_when_parent_changes(tmp_path, monkeypatch
     monkeypatch.setattr(handles, "_assert_handle_at_path", reject_lock_parent)
     with pytest.raises(ValueError, match="lock parent moved"):
         handles.open_lock_descriptor(library, "project.lock")
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["notes.md:hidden", "CON", "docs/nul.txt", "Com1.md", "trailing.", "folder /a.md", 'a"b.md'],
+)
+def test_names_windows_cannot_use_as_plain_files_are_refused(tmp_path, path):
+    with pytest.raises(ValueError, match="not a valid Windows"):
+        handles.write_project_file(tmp_path, path, b"x", overwrite=False, expected_hash=None)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_ordinary_names_stay_valid():
+    for name in ("notes.md", "console.md", "con-notes.md", ".env", "a b.md", "LPT10.md"):
+        assert handles.is_portable_name(name), name

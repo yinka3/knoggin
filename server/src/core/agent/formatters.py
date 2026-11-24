@@ -27,25 +27,6 @@ def format_topic_context(context: Dict[str, Dict], *, label: str = "TOPIC") -> s
     return "\n".join(blocks)
 
 
-def format_memory_context(blocks: dict) -> str:
-    """Format short-term and persistent memory blocks for the system prompt."""
-
-    if not blocks:
-        return ""
-
-    sections = []
-    for topic, entries in blocks.items():
-        if not entries:
-            continue
-
-        lines = [f"[{topic}]"]
-        for entry in entries:
-            lines.append(f"  - ({entry['id']}) {entry['content']}")
-        sections.append("\n".join(lines))
-
-    return "\n".join(sections)
-
-
 def format_documents_context(documents: list) -> str:
     """Format indexed document metadata for the agent system prompt."""
 

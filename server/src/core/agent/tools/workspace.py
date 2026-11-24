@@ -57,6 +57,23 @@ class ProjectFileTools:
 
     document_service = None
 
+    async def _focus_scope(self, path_prefix: Optional[str]) -> Optional[str]:
+        """Keep a list or grep inside a restrictive document focus: no prefix
+        means the focus itself, and any other prefix must lie inside it."""
+
+        is_restrictive = getattr(self, "_focus_is_restrictive", None)
+        if is_restrictive is None or not is_restrictive():
+            return path_prefix
+        if path_prefix is None:
+            focus = self.document_focus
+            return (
+                focus.get("relative_path")
+                if focus.get("target_type") == "document"
+                else focus.get("path_prefix")
+            )
+        await self._require_focus_document(document_id=None, relative_path=path_prefix)
+        return path_prefix
+
     @staticmethod
     def _files_unavailable(tool_name: str) -> None:
         raise ToolExecutionError(
@@ -88,7 +105,7 @@ class ProjectFileTools:
                 f"limit must be between 1 and {PROJECT_FILE_TOOL_MAX_LIST_LIMIT}"
             )
         return await self.document_service.list_project_files(
-            path_prefix=path_prefix,
+            path_prefix=await self._focus_scope(path_prefix),
             limit=limit,
         )
 
@@ -108,6 +125,12 @@ class ProjectFileTools:
             )
         unindexed = False
         if normalized_path.casefold() != PROJECT_FILE_PATH.casefold():
+            # PROJECT.md is the brief every run already sees; anything else
+            # must sit inside a restrictive focus.
+            if getattr(self, "_focus_is_restrictive", lambda: False)():
+                await self._require_focus_document(
+                    document_id=None, relative_path=normalized_path
+                )
             try:
                 document = await self.document_service.get_document_info(
                     relative_path=normalized_path,
@@ -208,8 +231,13 @@ class ProjectFileTools:
     ) -> Dict:
         if self.document_service is None:
             self._files_unavailable("grep_project_files")
+        if path_prefix is not None and path_prefix.strip() in {"", "."}:
+            path_prefix = None
+        if path_prefix is not None:
+            path_prefix = normalize_relative_path(path_prefix, path_prefix)
         return await self.document_service.grep_project_files(
-            text, path_prefix=path_prefix, case_sensitive=case_sensitive,
+            text, path_prefix=await self._focus_scope(path_prefix),
+            case_sensitive=case_sensitive,
             max_matches=max_results,
         )
 

@@ -375,6 +375,29 @@ async def test_packet_skips_a_seed_that_cannot_fit_and_reviews_the_next():
     assert package.next_observation_id == 102
 
 
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_packet_moves_past_a_batch_where_no_seed_can_fit():
+    # Returning nothing here left the cursor in place, so every run reread
+    # the same oversized seeds and later observations were never reviewed.
+    first = _observation(101, 1, 2, observed_at_ms=100)
+    second = _observation(102, 3, 4, observed_at_ms=110)
+
+    package = await ConflictPacketBuilder(
+        PacketReader([first, second], {1: [first], 2: [first], 3: [second], 4: [second]}),
+        token_counter=lambda _prompt: 42,
+        evidence_loader=PacketEvidenceLoader(),
+    ).build(
+        ConflictDiscoveryCursor("ada", "project-1", 0),
+        max_span_days=60,
+        max_tokens=10,
+    )
+
+    assert package is not None
+    assert package.observations == ()
+    assert package.next_observation_id == 102
+
+
 class JobStore:
     def __init__(self, package: ConflictDiscoveryPackage) -> None:
         self.package = package

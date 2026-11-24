@@ -47,6 +47,10 @@ from runtime.resources import RuntimeResources
 _REQUEST_FINGERPRINT_METADATA_KEY = "request_fingerprint"
 
 
+# Queued follow-ups and background reports a session keeps a status for.
+_MAX_TRACKED_FOLLOW_UPS = 100
+
+
 class FollowUpQueueFull(ValueError):
     pass
 
@@ -285,11 +289,7 @@ class SessionRuntime:
                 return None
             if len(self._follow_up_queue) >= 5:
                 raise FollowUpQueueFull("Follow-up queue is full")
-            if len(self._follow_ups) >= 100:
-                for old_id, old in list(self._follow_ups.items()):
-                    if old["state"] in {"completed", "clarification", "failed", "cancelled"}:
-                        del self._follow_ups[old_id]
-                        break
+            self._make_room_for_follow_up()
             queue_id = str(uuid4())
             item = {
                 "queue_id": queue_id, "after_run_id": run_id,
@@ -321,6 +321,9 @@ class SessionRuntime:
         async with self._agent_run_lock:
             if self._agent_runs_closed or self._closed:
                 return None
+            # Reports bypass the queue limit, so they must also evict old
+            # entries, or a report-heavy chat grows this record without bound.
+            self._make_room_for_follow_up()
             queue_id = str(uuid4())
             item = {
                 "queue_id": queue_id, "after_run_id": None,
@@ -334,6 +337,16 @@ class SessionRuntime:
             if self._follow_up_task is None or self._follow_up_task.done():
                 self._follow_up_task = asyncio.create_task(self._drain_follow_ups())
             return self._public_follow_up(item)
+
+    def _make_room_for_follow_up(self) -> None:
+        """Keep the record of queued turns bounded, dropping the oldest
+        finished ones; queued and running items are never dropped."""
+
+        for old_id, old in list(self._follow_ups.items()):
+            if len(self._follow_ups) < _MAX_TRACKED_FOLLOW_UPS:
+                return
+            if old["state"] in {"completed", "clarification", "failed", "cancelled"}:
+                del self._follow_ups[old_id]
 
     @staticmethod
     def _public_follow_up(item: dict[str, Any]) -> dict[str, Any]:
@@ -376,48 +389,60 @@ class SessionRuntime:
                 item["state"] = "starting"
                 self._follow_up_starting = True
                 self._run_idle.clear()
-            stream = None
+            # Each item runs in its own task. Stopping that run cancels only
+            # the child, so later items still drain; shutdown cancels this
+            # task, and asyncio carries that cancel into the child.
+            run = asyncio.create_task(self._run_follow_up(item))
             try:
-                stream = await self.open_agent_run_stream(
-                    Message(content=item["query"], metadata=item.get("metadata", {})),
-                    run_id=item["run_id"],
-                    _from_follow_up=True,
-                )
-                async with self._agent_run_lock:
-                    self._follow_up_starting = False
-                    item["state"] = "running"
-                async for event in stream:
-                    if event["event"] == "response":
-                        item["assistant_message_id"] = event["data"].get("assistant_message_id")
-                        item["state"] = "completed"
-                    elif event["event"] == "clarification":
-                        item["assistant_message_id"] = event["data"].get("assistant_message_id")
-                        item["state"] = "clarification"
-                    elif event["event"] == "error":
-                        item["state"] = "failed"
-                        code = event["data"].get("code")
-                        item["error_code"] = (
-                            code if code in {"llm_budget_exhausted", "workspace_conflict"}
-                            else "run_failed"
-                        )
-                if item["state"] == "running":
-                    item["state"] = "failed"
-                    item["error_code"] = "run_failed"
+                await run
             except asyncio.CancelledError:
-                item["state"] = "cancelled"
-                raise
-            except Exception:
-                logger.exception("Queued follow-up failed for session {}", self.session_id)
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise
+
+    async def _run_follow_up(self, item: dict[str, Any]) -> None:
+        stream = None
+        try:
+            stream = await self.open_agent_run_stream(
+                Message(content=item["query"], metadata=item.get("metadata", {})),
+                run_id=item["run_id"],
+                _from_follow_up=True,
+            )
+            async with self._agent_run_lock:
+                self._follow_up_starting = False
+                item["state"] = "running"
+            async for event in stream:
+                if event["event"] == "response":
+                    item["assistant_message_id"] = event["data"].get("assistant_message_id")
+                    item["state"] = "completed"
+                elif event["event"] == "clarification":
+                    item["assistant_message_id"] = event["data"].get("assistant_message_id")
+                    item["state"] = "clarification"
+                elif event["event"] == "error":
+                    item["state"] = "failed"
+                    code = event["data"].get("code")
+                    item["error_code"] = (
+                        code if code in {"llm_budget_exhausted", "workspace_conflict"}
+                        else "run_failed"
+                    )
+            if item["state"] == "running":
                 item["state"] = "failed"
                 item["error_code"] = "run_failed"
-            finally:
-                item.pop("query", None)
-                if stream is not None:
-                    await stream.aclose()
-                async with self._agent_run_lock:
-                    self._follow_up_starting = False
-                    if not self._agent_run_reserved:
-                        self._run_idle.set()
+        except asyncio.CancelledError:
+            item["state"] = "cancelled"
+            raise
+        except Exception:
+            logger.exception("Queued follow-up failed for session {}", self.session_id)
+            item["state"] = "failed"
+            item["error_code"] = "run_failed"
+        finally:
+            item.pop("query", None)
+            if stream is not None:
+                await stream.aclose()
+            async with self._agent_run_lock:
+                self._follow_up_starting = False
+                if not self._agent_run_reserved:
+                    self._run_idle.set()
 
     async def submit_steer(
         self, run_id: str, instruction: str, *, annotations: list[dict] | None = None
@@ -1321,11 +1346,6 @@ class SessionRuntime:
                         f"{message_id} after {max_retries} attempts: {e}"
                     )
                     raise
-
-    async def close_user_only_turn(self, user_message_id: int) -> None:
-        """Explicitly close a canonical user-only exchange for non-agent callers."""
-
-        await self._close_user_exchange(user_message_id, outcome="user_only")
 
     async def import_exchanges(
         self, exchanges: List[ImportedExchange | ImportedAssistantTurn]

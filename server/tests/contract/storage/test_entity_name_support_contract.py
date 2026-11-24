@@ -29,6 +29,49 @@ async def _seed_mergeable_entities(client) -> None:
 
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
+async def test_rollback_restores_a_project_context_the_merge_only_moved(
+    real_postgres_client,
+):
+    # project-1 has both entities (merged); project-2 only the retired one
+    # (moved). The moved context used to be reported as a conflict forever.
+    await _seed_mergeable_entities(real_postgres_client)
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.project_entity_contexts (
+            project_id, entity_id, user_name, entity_type, topic
+        ) VALUES ('project-2', 3, 'ada', 'Concept', 'General')
+        """
+    )
+    writer = GlobalEntityMergeWriter(real_postgres_client)
+    merge_id = str(uuid4())
+    await writer.merge(user_name="ada", survivor_id=2, retired_id=3, merge_id=merge_id)
+
+    rollback = await writer.plan_rollback(merge_id=merge_id, user_name="ada")
+    assert [
+        conflict for conflict in rollback["conflicting_mutations"]
+        if conflict["object_kind"] == "project_context"
+    ] == []
+    result = await writer.rollback_safe(
+        merge_id=merge_id,
+        user_name="ada",
+        safe_mutation_ids=rollback["safe_mutation_ids"],
+    )
+
+    assert result["rolled_back"] is True
+    assert await real_postgres_client.fetch_all(
+        """
+        SELECT project_id, entity_id FROM public.project_entity_contexts
+        WHERE entity_id IN (2, 3) ORDER BY project_id, entity_id
+        """
+    ) == [
+        {"project_id": "project-1", "entity_id": 2},
+        {"project_id": "project-1", "entity_id": 3},
+        {"project_id": "project-2", "entity_id": 3},
+    ]
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
 async def test_explicit_user_names_have_global_support(real_postgres_client):
     await GraphWriter(real_postgres_client).ensure_identity_entity(
         "ada", ["Ada Lovelace", "A. Lovelace"]
@@ -251,3 +294,32 @@ async def test_global_merge_moves_name_supports_and_rollback_restores_them(
             "source_key": "project-1",
         },
     ]
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_restart_keeps_identity_names_learned_outside_settings(real_postgres_client):
+    writer = GraphWriter(real_postgres_client)
+    await writer.ensure_identity_entity("ada", ["Ada Lovelace"])
+    # Learned later, e.g. from a merge into the identity.
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.entity_aliases (entity_id, alias) VALUES (1, 'Countess');
+        INSERT INTO public.entity_name_supports (
+            entity_id, name, project_id, source_kind, source_key
+        ) VALUES (1, 'Countess', 'project-1', 'project', 'project-1')
+        """
+    )
+
+    await writer.ensure_identity_entity("ada", [])  # restart, with the alias removed
+
+    aliases = await real_postgres_client.fetch_all(
+        "SELECT alias FROM public.entity_aliases WHERE entity_id = 1"
+    )
+    assert {row["alias"] for row in aliases} == {"Countess"}
+    supports = await real_postgres_client.fetch_all(
+        "SELECT name, source_kind FROM public.entity_name_supports WHERE entity_id = 1"
+    )
+    assert {(row["name"], row["source_kind"]) for row in supports} == {
+        ("ada", "user"), ("Countess", "project"),
+    }

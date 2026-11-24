@@ -196,6 +196,11 @@ class SourceReferenceReader:
               ON episode.episode_id = attachment.episode_id
              AND episode.project_id = attachment.project_id
             JOIN public.projects project ON project.project_id = episode.project_id
+            -- As the Episode's source messages: none from forgotten ones.
+            JOIN public.messages message
+              ON message.message_id = attachment.message_id
+             AND message.project_id = attachment.project_id
+             AND message.lifecycle_state <> 'forgotten'
             JOIN public.message_source_refs ref
               ON ref.message_id = attachment.message_id
              AND ref.project_id = attachment.project_id

@@ -240,14 +240,25 @@ class KnowledgeRetrieval:
             profile = await self.entities.get_profile(entity_id)
             if profile is None:
                 return {"resolution": "exact", "results": []}
+            # One extra row says whether another page exists.
             episodes = await self.knowledge_store.get_project_episodes_for_entities(
                 [entity_id],
                 user_name=self.user_name,
                 project_id=self.project_id,
-                limit=page_size,
+                limit=page_size + 1,
+                offset=offset,
                 visible_project_ids=self.readable_project_ids,
                 **date_range,
             )
+            has_more = len(episodes) > page_size
+            episodes = episodes[:page_size]
+            if offset and not episodes:
+                return {
+                    "resolution": "no_more_episodes",
+                    "results": [],
+                    "has_more": False,
+                    "next_offset": None,
+                }
             metrics: Dict[str, int | float] = {}
             serialized = await self._serialize_episodes(episodes, metrics=metrics)
             await self._emit_episode_retrieval(
@@ -272,6 +283,8 @@ class KnowledgeRetrieval:
                         "episodes": serialized,
                     }
                 ],
+                "has_more": has_more,
+                "next_offset": offset + page_size if has_more else None,
             }
 
         # Both channels contribute: a weak semantic hit must not suppress an

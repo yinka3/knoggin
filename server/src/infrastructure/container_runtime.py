@@ -109,14 +109,20 @@ class ContainerRuntime:
         )
         return response.json()
 
-    async def exec_create(self, container_id: str, command: list[str], workdir: str) -> str:
+    async def exec_create(
+        self, container_id: str, command: list[str], workdir: str,
+        env: Mapping[str, str] | None = None,
+    ) -> str:
+        body = {
+            "Cmd": command, "WorkingDir": workdir,
+            "AttachStdout": True, "AttachStderr": True,
+            "AttachStdin": False, "Tty": False,
+        }
+        if env:
+            # Only this process sees these, not the container's other execs.
+            body["Env"] = [f"{key}={value}" for key, value in env.items()]
         response = await self._request(
-            "POST", f"/containers/{quote(container_id, safe='')}/exec",
-            json={
-                "Cmd": command, "WorkingDir": workdir,
-                "AttachStdout": True, "AttachStderr": True,
-                "AttachStdin": False, "Tty": False,
-            },
+            "POST", f"/containers/{quote(container_id, safe='')}/exec", json=body,
         )
         return str(response.json()["Id"])
 

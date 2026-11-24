@@ -395,8 +395,11 @@ class ProjectNotebookStore:
         self, project_id: str, notebook_id: str, *, expected_revision: int,
         question_id: str, claim_id: str,
     ) -> dict:
-        notebook = await self.evidence_board(project_id, notebook_id)
-        if notebook is None:
+        # The stored board, as record_board_judgment reads it: the read-time
+        # stale flags of evidence_board() would change the dependency
+        # fingerprint and make every later record look like a conflict.
+        notebook = await self.get(project_id, notebook_id)
+        if notebook is None or notebook["view"] != "evidence_board":
             raise NotebookConflict("Evidence board not found")
         if notebook["revision"] != expected_revision:
             raise NotebookConflict("Notebook revision changed")

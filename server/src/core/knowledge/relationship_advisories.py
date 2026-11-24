@@ -9,11 +9,12 @@ from typing import Any, Iterable, Literal
 from common.conf.relationship_config import normalize_observed_relationship
 
 _RELATIONSHIP_NAME = re.compile(r"^[A-Z][A-Z0-9_]{1,39}$")
-ADVISORY_DISPOSITIONS = frozenset(
-    {"pending", "accepted", "dismissed", "suppressed"}
-)
-AdvisoryAction = Literal["accept", "edit", "dismiss", "reopen", "suppress"]
-ADVISORY_ACTIONS = frozenset({"accept", "edit", "dismiss", "reopen", "suppress"})
+ADVISORY_DISPOSITIONS = frozenset({"pending", "accepted", "dismissed"})
+AdvisoryAction = Literal["accept", "edit", "dismiss", "reopen"]
+ADVISORY_ACTIONS = frozenset({"accept", "edit", "dismiss", "reopen"})
+# Reviews saved before "suppress" was removed still carry it; it reads as a
+# dismissal.
+StoredAdvisoryAction = Literal["accept", "edit", "dismiss", "reopen", "suppress"]
 
 
 class RelationshipAdvisoryDecisionError(ValueError):
@@ -181,8 +182,7 @@ def apply_advisory_action(
         "accept": {"pending"},
         "edit": {"pending"},
         "dismiss": {"pending"},
-        "suppress": {"pending", "dismissed"},
-        "reopen": {"accepted", "dismissed", "suppressed"},
+        "reopen": {"accepted", "dismissed"},
     }
     if current.disposition not in allowed[action]:
         raise RelationshipAdvisoryDecisionError(
@@ -194,8 +194,6 @@ def apply_advisory_action(
         disposition = "accepted"
     elif action == "dismiss":
         disposition = "dismissed"
-    elif action == "suppress":
-        disposition = "suppressed"
     elif action == "reopen":
         disposition = "pending"
 

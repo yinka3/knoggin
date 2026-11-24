@@ -216,11 +216,36 @@ def open_directory_chain(path: Path, *, create: bool = False) -> Iterator[int]:
             _close(handle)
 
 
+_RESERVED_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
+    | {f"{prefix}{digit}" for prefix in ("COM", "LPT") for digit in "123456789"}
+)
+_INVALID_NAME_CHARACTERS = frozenset('<>:"|?*') | {chr(code) for code in range(32)}
+
+
+def is_portable_name(name: str) -> bool:
+    """Whether Windows tools can use this name as one ordinary file.
+
+    The native API opens these names literally, so it would make a ':' name an
+    alternate data stream (invisible to scans) and a reserved or dot/space
+    ending name a file that Explorer and most programs cannot open or delete.
+    """
+
+    return bool(name) and not (
+        any(char in _INVALID_NAME_CHARACTERS for char in name)
+        or name[-1] in {".", " "}
+        or name.split(".", 1)[0].rstrip(" ").upper() in _RESERVED_NAMES
+    )
+
+
 @contextmanager
 def open_relative_parent(root_handle: int, relative_path: str, *, create: bool = False) -> Iterator[tuple[int, str]]:
     parts = PurePosixPath(relative_path).parts
     if not parts or any(part in {"", ".", ".."} for part in parts):
         raise ValueError("relative project path is invalid")
+    for part in parts:
+        if not is_portable_name(part):
+            raise ValueError(f"'{part}' is not a valid Windows file or folder name")
     handles: list[int] = []
     try:
         for part in parts[:-1]:
@@ -642,10 +667,13 @@ def iter_project_paths(
 
     def walk(directory: int, prefix: str) -> Iterator[tuple[str, int, int]]:
         with os.scandir(_handle_path(directory)) as scan:
+            # A name the Win32 layer rewrites (CON, "a.") would be stat-ed as a
+            # different object than the handle opens, so it is not listed.
             entries = [
                 (entry.name, (metadata := os.lstat(entry.path)).st_ino,
                  stat.S_ISDIR(metadata.st_mode))
                 for entry in scan
+                if is_portable_name(entry.name)
             ]
         for name, expected_file_id, _ in sorted(
             entries, key=lambda item: item[0] + ("/" if item[2] else "")

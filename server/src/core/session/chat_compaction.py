@@ -64,7 +64,7 @@ class ChatCompaction:
 
         summary, through = await self.load()
         dropped = self._dropped(history, conversation_tokens, through)
-        if sum(self._tokens(turn) for turn in dropped) < settings.min_dropped_tokens:
+        if not dropped or sum(self._tokens(turn) for turn in dropped) < settings.min_dropped_tokens:
             return False
         def request_text(previous: str, turns: str) -> str:
             return (
@@ -103,13 +103,16 @@ class ChatCompaction:
         updated = trim_to_tokens((updated or "").strip(), settings.summary_max_tokens, self._count)
         if not updated:
             return False
-        await self._postgres.execute(
+        changed = await self._postgres.execute(
             """UPDATE public.sessions
                SET chat_summary = %s, chat_summary_through_message_id = %s
                WHERE user_name = %s AND session_id = %s
                  AND chat_summary_through_message_id = %s""",
             (updated, int(batch[-1]["message_id"]), self._user_name, self._session_id, through),
         )
+        if not changed:
+            # Another pass moved the summary first (or the chat is gone).
+            return False
         logger.info(
             "Chat summary for {} now covers {} more turns", self._session_id, len(batch)
         )

@@ -142,6 +142,8 @@ def test_scan_settings_routes_use_project_owner_without_runtime_lease(
                 assert (await client.delete(url)).json()["max_file_count"] == 1000
 
                 state.status = "archived"
-                assert (await client.get(url)).status_code == 409
+                # Reading stays possible; only changes need an active project.
+                assert (await client.get(url)).status_code == 200
+                assert (await client.put(url, json={"max_file_count": 5})).status_code == 409
 
     asyncio.run(exercise())

@@ -371,7 +371,9 @@ class JevClient:
                     finally:
                         # Accounting has its own bound and remains owned even
                         # when the foreground request's deadline/cancellation wins.
-                        input_tokens = usage.input_tokens if usage else len(body) + 512
+                        # A failed request the provider reported no usage
+                        # for is not charged an estimate.
+                        input_tokens = usage.input_tokens if usage else 0
                         output_tokens = usage.output_tokens if usage else 0
                         totals["input_tokens"] += input_tokens
                         totals["output_tokens"] += output_tokens
@@ -396,6 +398,11 @@ class JevClient:
                                 completion_tokens=output_tokens,
                                 approximate_usage=usage is None,
                                 failed=failed,
+                                # What the provider billed, as in the result
+                                # totals above; the ledger prefers it to price.
+                                reported_cost_usd=(
+                                    usage.cost if usage is not None else None
+                                ),
                             ),
                             policy.accounting_timeout_seconds,
                         )

@@ -66,7 +66,7 @@ async def create_project(request):
     try:
         row = await request.app.state.runtime.projects.create_project(
             name=body.name, description=body.description,
-            domain_config=DEFAULT_DOMAIN,
+            domain_config=DEFAULT_DOMAIN, connections=body.connections,
         )
     except ValueError:
         return _error("invalid_project", "Invalid project", 422)

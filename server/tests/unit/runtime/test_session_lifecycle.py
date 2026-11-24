@@ -98,11 +98,19 @@ async def test_failed_session_shutdown_retains_runtime_and_lease_for_retry(
         await stop()
     assert manager._active_sessions[context.session_id] is context
     assert projects.release_calls == []
-    with pytest.raises(RuntimeError):
-        await manager.get_or_resume_session(context.session_id)
-    await stop()
-    assert context.session_id not in manager._active_sessions
-    assert projects.release_calls == [("project-1", context.session_id)]
+    if operation == "shutdown":
+        with pytest.raises(RuntimeError):
+            await manager.get_or_resume_session(context.session_id)
+        await stop()
+        assert context.session_id not in manager._active_sessions
+    else:
+        # Resuming finishes the interrupted unload, then loads a fresh
+        # runtime, instead of refusing the session until a restart.
+        resumed = await manager.get_or_resume_session(context.session_id)
+        assert resumed is not context
+        assert manager._active_sessions[context.session_id] is resumed
+    assert projects.release_calls[0] == ("project-1", context.session_id)
+    assert attempts == 2
 
 
 @pytest.mark.runtime

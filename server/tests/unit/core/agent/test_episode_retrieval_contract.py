@@ -134,7 +134,9 @@ async def test_episode_check_exact_entity_returns_scoped_episode_card():
             {
                 "user_name": "ada",
                 "project_id": "project-1",
-                "limit": 10,
+                # Page size plus one row, to learn whether a next page exists.
+                "limit": 11,
+                "offset": 0,
                 "visible_project_ids": ["project-1"],
             },
         )

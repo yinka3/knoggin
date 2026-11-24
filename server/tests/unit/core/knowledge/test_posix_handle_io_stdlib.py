@@ -303,6 +303,49 @@ class PosixHandleIOTests(unittest.TestCase):
         with patch.object(module.os, "open", side_effect=remove_before_open):
             self.assertEqual(list(module.iter_project_paths(self.root)), [])
 
+    def test_special_files_are_skipped_by_scan_and_removed_by_cleanup(self):
+        import socket
+        import threading
+
+        module = self.module
+        (self.root / "a.md").write_bytes(b"a")
+        (self.root / "nested").mkdir()
+        os.mkfifo(self.root / "nested" / "pipe")
+        listener = socket.socket(socket.AF_UNIX)
+        self.addCleanup(listener.close)
+        listener.bind(str(self.root / "sock"))
+
+        found = []
+        scan = threading.Thread(
+            target=lambda: found.extend(module.iter_project_paths(self.root)), daemon=True
+        )
+        scan.start()
+        scan.join(timeout=5)
+        self.assertFalse(scan.is_alive(), "scan blocked on a FIFO")
+        self.assertEqual([path for path, _size, _mtime in found], ["a.md"])
+
+        with self.assertRaisesRegex(ValueError, "regular file"):
+            module.delete_project_file(self.root, "nested/pipe", expected_hash=None)
+
+        self.assertTrue(module.remove_project_tree(self.root.parent, self.root.name))
+        self.assertFalse(self.root.exists())
+
+    def test_scan_ignores_an_entry_removed_before_its_stat(self):
+        module = self.module
+        (self.root / "a.md").write_bytes(b"a")
+        (self.root / "b.md").write_bytes(b"b")
+        real_stat = os.stat
+
+        def remove_before_stat(name, *args, **kwargs):
+            if name == "b.md" and kwargs.get("dir_fd") is not None:
+                (self.root / name).unlink(missing_ok=True)
+            return real_stat(name, *args, **kwargs)
+
+        with patch.object(module.os, "stat", side_effect=remove_before_stat):
+            self.assertEqual(
+                [path for path, _size, _mtime in module.iter_project_paths(self.root)], ["a.md"]
+            )
+
     def test_cleanup_detects_swapped_child(self):
         module = self.module
         module.write_project_file(self.root, "nested/owned.md", b"owned", overwrite=False, expected_hash=None)

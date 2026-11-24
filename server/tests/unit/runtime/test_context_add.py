@@ -166,6 +166,60 @@ async def test_shutdown_cancels_running_follow_up(context):
 
 @pytest.mark.runtime
 @pytest.mark.no_network
+async def test_background_reports_keep_the_follow_up_record_bounded(context):
+    # Reports skip the queue limit and used to add entries without evicting.
+    ctx, _ = context
+    for index in range(100):
+        ctx._follow_ups[f"old-{index}"] = {
+            "queue_id": f"old-{index}", "after_run_id": None, "run_id": f"run-{index}",
+            "state": "completed", "assistant_message_id": None, "error_code": None,
+        }
+
+    report = await ctx.queue_report(
+        "Folder import finished.", origin="folder_ingestion_report", metadata={},
+    )
+
+    assert len(ctx._follow_ups) <= 100
+    assert "old-0" not in ctx._follow_ups
+    assert report["queue_id"] in ctx._follow_ups
+    await ctx.shutdown()
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_stopping_a_follow_up_run_keeps_draining_the_queue(context):
+    ctx, _ = context
+    started = asyncio.Event()
+
+    async def handler(kwargs):
+        if kwargs["user_query"] == "slow":
+            started.set()
+            await asyncio.Event().wait()
+        yield _response_event(f"Answer to {kwargs['user_query']}")
+
+    ctx.agent_orchestrator = _FakeTurnOrchestrator(handler)
+    first = await ctx.open_agent_run_stream(Message(content="first"))
+    slow = await ctx.queue_follow_up(first.run_id, "slow")
+    after = await ctx.queue_follow_up(first.run_id, "after")
+    await _collect_stream(first)
+    await asyncio.wait_for(started.wait(), 2)
+
+    assert await asyncio.wait_for(ctx.cancel_active_agent_run(run_id=slow["run_id"]), 2)
+
+    async def completed():
+        while (await ctx.get_follow_up(after["queue_id"]))["state"] != "completed":
+            await asyncio.sleep(0.01)
+    await asyncio.wait_for(completed(), 2)
+    assert (await ctx.get_follow_up(slow["queue_id"]))["state"] == "cancelled"
+    # The session is not left busy behind a dead queue.
+    events = await asyncio.wait_for(
+        _collect_turn(ctx, Message(content="fresh"), ctx.agent_orchestrator), 2
+    )
+    assert events[-1]["event"] == "response"
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
 async def test_a_full_length_follow_up_can_quote_an_excerpt(context):
     ctx, _ = context
     queries = []

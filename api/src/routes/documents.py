@@ -23,7 +23,7 @@ from contracts.documents import (
 )
 from core.project.project_files import workspace_of
 from errors import handle_error
-from folder_staging import IntakeConflict, IntakeTooLarge
+from folder_staging import IntakeConflict, IntakeNotFound, IntakeTooLarge
 from project_lease import project_documents, project_runtime, readable_project_documents
 from routes.project_settings import _error, _json, _project_error
 
@@ -397,7 +397,8 @@ async def _staged_error(request, operation):
     intake_id = request.path_params.get("intake_id")
     try:
         return await operation(request.app.state.folder_staging, project_id, intake_id)
-    except KeyError:
+    except IntakeNotFound:
+        # Only the staging's own lookups; a KeyError from a bug stays a 500.
         return _error("intake_not_found", "Folder intake not found", 404)
     except IntakeConflict:
         return _error("intake_conflict", "Folder intake state changed", 409)

@@ -354,21 +354,6 @@ class KnowledgeStore:
             visible_project_ids=visible_project_ids,
         )
 
-    async def get_message_text(
-        self,
-        message_id: int,
-        *,
-        user_name: str,
-        session_id: str,
-        visible_project_ids: List[str],
-    ) -> str:
-        return await self._message_reader.get_message_text(
-            message_id,
-            user_name=user_name,
-            session_id=session_id,
-            visible_project_ids=visible_project_ids,
-        )
-
     async def get_messages_by_ids(
         self,
         ids: List[int],
@@ -1168,6 +1153,7 @@ class KnowledgeStore:
         visible_project_ids: Optional[List[str]] = None,
         after: Optional[datetime] = None,
         before: Optional[datetime] = None,
+        offset: int = 0,
     ) -> List[EpisodeCard]:
         return await self._episode_reader.get_project_episodes_for_entities(
             entity_ids,
@@ -1177,6 +1163,7 @@ class KnowledgeStore:
             visible_project_ids=visible_project_ids,
             after=after,
             before=before,
+            offset=offset,
         )
 
     # Entity, graph, and evidence retrieval
@@ -1188,14 +1175,6 @@ class KnowledgeStore:
         self, user_name: str, aliases: Optional[List[str]] = None
     ) -> Dict:
         return await self._graph_writer.ensure_identity_entity(user_name, aliases)
-
-    async def validate_existing_ids(
-        self, ids: List[int], *, visible_project_ids: List[str]
-    ) -> Set[int]:
-        return await self._entity_reader.validate_existing_ids(
-            ids,
-            visible_project_ids=visible_project_ids,
-        )
 
     async def get_entities_by_names(
         self, names: List[str], *, visible_project_ids: List[str]
@@ -1247,23 +1226,6 @@ class KnowledgeStore:
         return await self._entity_reader.get_entities_by_ids(
             entity_ids,
             visible_project_ids=visible_project_ids,
-        )
-
-    async def get_top_connected_entities(
-        self, *, visible_project_ids: List[str], limit: int = 10
-    ) -> List[Dict]:
-        return await self._entity_reader.get_top_connected_entities(
-            visible_project_ids=visible_project_ids,
-            limit=limit,
-        )
-
-    async def get_recently_active_entities(
-        self, *, visible_project_ids: List[str], days: int = 7, limit: int = 10
-    ) -> List[Dict]:
-        return await self._entity_reader.get_recently_active_entities(
-            visible_project_ids=visible_project_ids,
-            days=days,
-            limit=limit,
         )
 
     async def get_neighbor_ids_batch(

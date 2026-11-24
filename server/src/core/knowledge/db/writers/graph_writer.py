@@ -140,11 +140,32 @@ class GraphWriter:
                     user_name,
                 ),
             )
+            current_names = [stored_canonical_name, *clean_aliases]
+            # Settings own only the names they wrote (source_kind 'user'). A
+            # name taken out of settings goes, with all its support; names the
+            # identity learned elsewhere (a merge, a JEV identity decision) stay.
             await cur.execute(
-                "DELETE FROM entity_aliases WHERE entity_id = %s",
+                """
+                SELECT DISTINCT name FROM public.entity_name_supports
+                WHERE entity_id = %s AND source_kind = 'user'
+                """,
                 (IDENTITY_ENTITY_ID,),
             )
-            current_names = [stored_canonical_name, *clean_aliases]
+            removed = sorted(
+                {row["name"] for row in await cur.fetchall()} - set(current_names)
+            )
+            if removed:
+                await cur.execute(
+                    "DELETE FROM entity_aliases WHERE entity_id = %s AND alias = ANY(%s)",
+                    (IDENTITY_ENTITY_ID, removed),
+                )
+                await cur.execute(
+                    """
+                    DELETE FROM public.entity_name_supports
+                    WHERE entity_id = %s AND name = ANY(%s)
+                    """,
+                    (IDENTITY_ENTITY_ID, removed),
+                )
             await cur.execute(
                 """
                 DELETE FROM public.entity_name_supports
@@ -152,14 +173,6 @@ class GraphWriter:
                   AND source_kind = 'user'
                 """,
                 (IDENTITY_ENTITY_ID,),
-            )
-            await cur.execute(
-                """
-                DELETE FROM public.entity_name_supports
-                WHERE entity_id = %s
-                  AND name <> ALL(%s)
-                """,
-                (IDENTITY_ENTITY_ID, current_names),
             )
             for alias in clean_aliases:
                 await cur.execute(

@@ -358,6 +358,8 @@ class GraphReader:
             visible_project_ids,
             "get_neighbor_entities",
         )
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+            raise ValueError("get_neighbor_entities limit must be between 1 and 100")
         try:
             rows = await self.client.fetch_all(
                 """
@@ -395,9 +397,11 @@ class GraphReader:
         query = """
         SELECT
             (
-                SELECT count(*)
-                FROM project_entity_contexts
-                WHERE project_id = ANY(%s)
+                -- Each entity once, however many visible projects it is in.
+                SELECT count(DISTINCT context.entity_id)
+                FROM project_entity_contexts context
+                JOIN entities e ON e.entity_id = context.entity_id AND e.status = 'active'
+                WHERE context.project_id = ANY(%s)
             ) AS entities,
             (
                 SELECT count(*)

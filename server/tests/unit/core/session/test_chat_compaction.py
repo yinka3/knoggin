@@ -15,6 +15,8 @@ class FakePostgres:
         summary, through, _user, _session, expected = params
         if self.row["chat_summary_through_message_id"] == expected:
             self.row = {"chat_summary": summary, "chat_summary_through_message_id": through}
+            return 1
+        return 0
 
 
 class FakeLLM:
@@ -137,3 +139,21 @@ async def test_an_oldest_turn_over_the_cap_is_summarized_in_part_and_passed():
 def test_the_summary_must_leave_room_for_turns():
     with pytest.raises(ValueError):
         ChatCompactionSettings(max_input_tokens=1_000, summary_max_tokens=600)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_a_pass_that_lost_the_race_reports_no_change():
+    postgres, llm = FakePostgres(), FakeLLM()
+    compaction = _compaction(postgres, llm)
+    real_generate = llm.generate_text
+
+    async def another_pass_wins(system, user, **kwargs):
+        postgres.row = {"chat_summary": "newer", "chat_summary_through_message_id": 9}
+        return await real_generate(system, user, **kwargs)
+
+    llm.generate_text = another_pass_wins
+
+    assert not await compaction.extend(_turns(10), conversation_tokens=400, settings=SETTINGS)
+    assert await compaction.load() == ("newer", 9)
+

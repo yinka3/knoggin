@@ -301,6 +301,12 @@ class RelationshipInterpretationWriter:
                    observation.relationship_id,
                    count(DISTINCT episode_message.message_id)::integer
             FROM public.episode_messages episode_message
+            -- A forgotten message no longer supports a link; counting it
+            -- would restore links the forget removed.
+            JOIN public.messages message
+              ON message.message_id = episode_message.message_id
+             AND message.project_id = episode_message.project_id
+             AND message.lifecycle_state <> 'forgotten'
             JOIN public.relationship_observation_messages support
               ON support.project_id = episode_message.project_id
              AND support.message_id = episode_message.message_id

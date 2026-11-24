@@ -57,6 +57,27 @@ async def test_preview_uses_configured_blocking_runner():
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_preview_excludes_file_types_that_cannot_be_indexed(preview_service):
+    # These used to be "included", then failed one by one at upload, and the
+    # local-tree sync made catalog rows for them that failed to index.
+    preview = await preview_service.preview_folder(
+        folder_name="repo",
+        entries=[entry("notes.md"), entry("letter.rtf"), entry("data.tsv")],
+        force_include_paths=["letter.rtf"],
+    )
+
+    assert [item.relative_path for item in preview.included] == ["notes.md"]
+    reasons = {item.relative_path: item for item in preview.excluded}
+    assert {path: item.reason for path, item in reasons.items()} == {
+        "data.tsv": "unsupported_file_type",
+        "letter.rtf": "unsupported_file_type",
+    }
+    # Forcing cannot help: admission would still reject the file.
+    assert not reasons["letter.rtf"].overridable
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_preview_normalizes_paths_orders_entries_and_does_not_write(
     preview_service,
     tmp_path,
@@ -244,24 +265,24 @@ async def test_preview_applies_root_and_nested_gitignore_negation(
     preview = await preview_service.preview_folder(
         folder_name="repo",
         entries=[
-            entry(".gitignore", b"*.dropme\n!keep.dropme\nnested/*.skipme\n"),
-            entry("drop.dropme"),
-            entry("keep.dropme"),
-            entry("nested/.gitignore", b"!keep.skipme\n"),
-            entry("nested/drop.skipme"),
-            entry("nested/keep.skipme"),
+            entry(".gitignore", b"*.md\n!keep.md\nnested/*.yaml\n"),
+            entry("drop.md"),
+            entry("keep.md"),
+            entry("nested/.gitignore", b"!keep.yaml\n"),
+            entry("nested/drop.yaml"),
+            entry("nested/keep.yaml"),
         ],
     )
 
     assert [item.relative_path for item in preview.included] == [
-        "keep.dropme",
-        "nested/keep.skipme",
+        "keep.md",
+        "nested/keep.yaml",
     ]
     reasons = {
         item.relative_path: item.reason for item in preview.excluded
     }
-    assert reasons["drop.dropme"] == "gitignore"
-    assert reasons["nested/drop.skipme"] == "gitignore"
+    assert reasons["drop.md"] == "gitignore"
+    assert reasons["nested/drop.yaml"] == "gitignore"
     assert reasons[".gitignore"] == "hidden_path"
     assert reasons["nested/.gitignore"] == "hidden_path"
 

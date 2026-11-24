@@ -453,6 +453,35 @@ async def test_stream_retries_only_before_output(llm_service, monkeypatch):
 
 @pytest.mark.unit
 @pytest.mark.no_network
+async def test_stopping_a_stream_closes_the_provider_response(llm_service):
+    service, raw_client, _, _, _ = llm_service
+
+    class ProviderStream:
+        closed = False
+
+        def __aiter__(self):
+            return self._chunks()
+
+        async def _chunks(self):
+            yield stream_chunk(content="partial")
+            await asyncio.Event().wait()
+
+        async def close(self):
+            self.closed = True
+
+    stream = ProviderStream()
+    raw_client.chat.completions.create.return_value = stream
+    events = service.stream_with_tools(system="system", user="user", tools=[])
+
+    assert (await anext(events))["event"] == "token"
+    # What a stopped run does to this generator.
+    await events.aclose()
+
+    assert stream.closed
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 async def test_stream_does_not_retry_after_output(llm_service):
     service, raw_client, _, _, _ = llm_service
 
