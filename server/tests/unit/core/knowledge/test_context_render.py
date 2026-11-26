@@ -20,7 +20,7 @@ from common.schema.context import (
     ContextSnapshot,
     ContextSupportKind,
 )
-from common.schema.settings import EntityResolutionSettings, TextProcessorSettings
+from common.schema.settings import EntityResolutionSettings, ExtractionSettings
 from core.ingestion.policy import IngestionPolicy
 from core.knowledge.context.models import (
     ContextProjectionConflictError,
@@ -79,7 +79,7 @@ async def test_user_note_commits_human_block_and_preserves_existing_context():
     current = _snapshot(original)
     domain = _domain()
     policy = IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(),
+        extraction=ExtractionSettings(),
         entity_resolution=EntityResolutionSettings(),
         compiled_domain=domain,
     )
@@ -191,7 +191,7 @@ async def test_detected_user_edit_failure_keeps_its_admission_meaning():
             return b"not a valid Context document"
 
     policy = IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(),
+        extraction=ExtractionSettings(),
         entity_resolution=EntityResolutionSettings(),
         compiled_domain=domain,
     )
@@ -251,7 +251,7 @@ async def test_known_stale_projection_is_repaired_without_user_edit_blocking():
             writes.append((path, content, kwargs))
 
     policy = IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(),
+        extraction=ExtractionSettings(),
         entity_resolution=EntityResolutionSettings(),
         compiled_domain=domain,
     )
@@ -345,7 +345,7 @@ async def test_domain_title_change_repairs_clean_projection_before_or_after_brid
             writes.append((path, content, kwargs))
 
     policy = IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(),
+        extraction=ExtractionSettings(),
         entity_resolution=EntityResolutionSettings(),
         compiled_domain=updated_domain,
     )
@@ -661,7 +661,7 @@ async def test_discarding_a_stale_local_edit_restores_context_and_unblocks_sync(
     edit = b"my edit against an older Context"
     projection, filesystem, domain = _discard_harness(file_content=edit, snapshot=snapshot)
     policy = IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(),
+        extraction=ExtractionSettings(),
         entity_resolution=EntityResolutionSettings(),
         compiled_domain=domain,
     )

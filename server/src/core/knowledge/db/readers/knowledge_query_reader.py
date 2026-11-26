@@ -43,47 +43,69 @@ class KnowledgeQueryReader:
         if not hot_topic_names:
             return {}
 
+        # Bounded per topic: the 3 most recently mentioned entities, at most
+        # 10 aliases each, and only the newest msg_limit visible mentions.
         query = """
+        WITH ranked AS (
+            SELECT context.topic, context.entity_id,
+                   row_number() OVER (
+                       PARTITION BY context.topic
+                       ORDER BY context.last_mentioned_ms DESC NULLS LAST,
+                                context.entity_id
+                   ) AS rank
+            FROM project_entity_contexts context
+            WHERE context.topic = ANY(%(topics)s)
+              AND context.project_id = %(project_id)s
+        )
         SELECT
-            context.topic,
+            ranked.topic,
             entity.canonical_name AS name,
-            COALESCE(
-                array_agg(DISTINCT alias.alias) FILTER (WHERE alias.alias IS NOT NULL),
-                '{}'::text[]
+            ARRAY(
+                SELECT alias.alias FROM entity_aliases alias
+                WHERE alias.entity_id = entity.entity_id
+                ORDER BY alias.alias LIMIT 10
             ) AS aliases,
-            COALESCE(
-                jsonb_agg(
-                    DISTINCT jsonb_build_object(
+            COALESCE((
+                SELECT jsonb_agg(recent.ref ORDER BY recent.message_id DESC)
+                FROM (
+                    SELECT message.message_id, jsonb_build_object(
                         'project_id', message.project_id,
                         'user_name', message.user_name,
                         'session_id', message.session_id,
                         'message_id', message.message_id
-                    )
-                ) FILTER (WHERE message.message_id IS NOT NULL),
-                '[]'::jsonb
-            ) AS message_refs
-        FROM entities entity
-        JOIN project_entity_contexts context
-          ON context.entity_id = entity.entity_id
-        LEFT JOIN entity_aliases alias ON alias.entity_id = entity.entity_id
-        LEFT JOIN message_entity_refs mention
-          ON mention.entity_id = entity.entity_id
-        LEFT JOIN messages message
-          ON message.message_id = mention.message_id
-         AND message.project_id = context.project_id
-        WHERE context.topic = ANY(%s)
-          AND context.project_id = %s
-        GROUP BY entity.entity_id, context.project_id, context.topic,
-                 entity.canonical_name, context.last_mentioned_ms
-        ORDER BY context.last_mentioned_ms DESC NULLS LAST
+                    ) AS ref
+                    FROM message_entity_refs mention
+                    -- Only discoverable messages count as evidence: never
+                    -- forgotten ones, or those of deleted sessions.
+                    JOIN messages message
+                      ON message.message_id = mention.message_id
+                     AND message.project_id = %(project_id)s
+                     AND message.lifecycle_state = 'sealed'
+                    WHERE mention.entity_id = entity.entity_id
+                      AND EXISTS (
+                          SELECT 1 FROM sessions
+                          WHERE sessions.session_id = message.session_id
+                            AND sessions.project_id = message.project_id
+                            AND sessions.user_name = message.user_name
+                            AND sessions.status = 'open'
+                      )
+                    ORDER BY message.message_id DESC
+                    LIMIT %(msg_limit)s
+                ) AS recent
+            ), '[]'::jsonb) AS message_refs
+        FROM ranked
+        JOIN entities entity ON entity.entity_id = ranked.entity_id
+        WHERE ranked.rank <= 3
+        ORDER BY ranked.topic, ranked.rank
         """
         try:
             rows = await self.client.fetch_all(
                 query,
-                (
-                    hot_topic_names,
-                    project_id,
-                ),
+                {
+                    "topics": hot_topic_names,
+                    "project_id": project_id,
+                    "msg_limit": msg_limit,
+                },
             )
         except Exception as exc:
             self._raise_storage_read("get_hot_topic_context_with_messages", exc)
@@ -92,10 +114,9 @@ class KnowledgeQueryReader:
         for row in rows:
             topic = row["topic"]
             result = topics.setdefault(topic, {"entities": [], "message_refs": []})
-            if len(result["entities"]) < 3:
-                result["entities"].append(
-                    {"name": row["name"], "aliases": row["aliases"] or []}
-                )
+            result["entities"].append(
+                {"name": row["name"], "aliases": row["aliases"] or []}
+            )
             known = {
                 (ref["user_name"], ref["session_id"], ref["message_id"])
                 for ref in result["message_refs"]
@@ -156,16 +177,12 @@ class KnowledgeQueryReader:
         FROM message_entity_refs mention
         JOIN messages message ON message.message_id = mention.message_id
         JOIN entities entity ON entity.entity_id = mention.entity_id
-        LEFT JOIN project_context_block_supports support
-          ON support.project_id = message.project_id
-         AND support.session_id = message.session_id
-         AND support.message_id = message.message_id
-        LEFT JOIN relationship_observation_blocks observation_block
-          ON observation_block.project_id = support.project_id
-         AND observation_block.block_id = support.block_id
+        LEFT JOIN relationship_observation_messages observation_message
+          ON observation_message.message_id = message.message_id
+         AND observation_message.project_id = message.project_id
         LEFT JOIN relationship_observations observation
-          ON observation.observation_id = observation_block.observation_id
-         AND observation.project_id = observation_block.project_id
+          ON observation.observation_id = observation_message.observation_id
+         AND observation.project_id = observation_message.project_id
          AND observation.retired_at IS NULL
          AND (
              observation.source_entity_id = mention.entity_id
@@ -174,6 +191,15 @@ class KnowledgeQueryReader:
         WHERE mention.entity_id = %s
           AND message.timestamp_ms > %s
           AND message.project_id = ANY(%s)
+          -- Never forgotten messages, or those of deleted sessions.
+          AND message.lifecycle_state = 'sealed'
+          AND EXISTS (
+              SELECT 1 FROM sessions
+              WHERE sessions.session_id = message.session_id
+                AND sessions.project_id = message.project_id
+                AND sessions.user_name = message.user_name
+                AND sessions.status = 'open'
+          )
         """
         params: tuple = (
             entity_id,

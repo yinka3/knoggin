@@ -318,3 +318,48 @@ async def test_generator_drops_over_capacity_output_without_embedding_it():
     assert "source message limit" in build.rejected_proposals[0]
     assert len(llm.calls) == 1
     assert embeddings.calls == []
+
+
+@pytest.mark.no_network
+async def test_narrative_repair_keeps_the_original_events_unchanged():
+    event = {
+        "what": "Ada bought a smoker",
+        "kind": "purchase",
+        "start_date": "2023-03-15",
+        "precision": "day",
+        "sources": ["message:1"],
+    }
+    llm = _ScriptedLLM(
+        [
+            LLMEpisodeWindowDecision(
+                proposals=[
+                    LLMEpisodeDecision(
+                        summary="x" * 4001, message_influences=["message:1"], events=[event]
+                    )
+                ]
+            ),
+            LLMEpisodeWindowDecision(
+                proposals=[
+                    LLMEpisodeDecision(summary="Repaired prose.", message_influences=["message:1"])
+                ]
+            ),
+        ]
+    )
+    build = await EpisodeGenerator(llm=llm, embedding_service=_RecordingEmbeddingService()).generate(
+        user_name="ada",
+        project_id="project-1",
+        messages=[
+            {
+                "message_id": 101,
+                "session_id": "session-1",
+                "role": "user",
+                "content": "I just got a smoker.",
+                "timestamp_ms": 1,
+            }
+        ],
+        policy=EpisodeGenerationPolicy.capture(settings=EpisodeSettings()),
+    )
+
+    episode = build.final_episodes[0]
+    assert episode.summary == "Repaired prose."
+    assert [event.what for event in episode.events] == ["Ada bought a smoker"]

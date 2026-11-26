@@ -124,12 +124,12 @@ async def activate_domain(request):
 async def get_scan_settings(request):
     runtime = request.app.state.runtime
     project_id = request.path_params["project_id"]
-    if error := await _project_error(runtime, project_id, write=True):
+    if error := await _project_error(runtime, project_id, write=False):
         return error
     try:
         settings = await runtime.projects.get_document_scan_settings(project_id)
     except ValueError:
-        return await _project_error(runtime, project_id, write=True) or _error(
+        return await _project_error(runtime, project_id, write=False) or _error(
             "project_unavailable", "Project is unavailable", 409
         )
     return JSONResponse(settings.model_dump(mode="json"))

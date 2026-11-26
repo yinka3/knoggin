@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple, cast
@@ -285,7 +286,8 @@ class AgentRunLimits:
     max_accumulated_profiles: int = 20
     max_accumulated_graph: int = 40
     max_accumulated_paths: int = 8
-    max_accumulated_episodes: int = 8
+    max_accumulated_episodes: int = 16
+    max_accumulated_events: int = 60
     max_accumulated_documents: int = 30
     max_accumulated_web_discoveries: int = 12
     max_accumulated_web_reads: int = 12
@@ -329,6 +331,7 @@ class AgentRunLimits:
             max_accumulated_graph=settings.max_accumulated_graph,
             max_accumulated_paths=settings.max_accumulated_paths,
             max_accumulated_episodes=settings.max_accumulated_episodes,
+            max_accumulated_events=settings.max_accumulated_events,
             max_accumulated_documents=settings.max_accumulated_documents,
             max_accumulated_web_discoveries=settings.max_accumulated_web_discoveries,
             max_accumulated_web_reads=settings.max_accumulated_web_reads,
@@ -449,6 +452,8 @@ class AgentRun:
     empty_replans: int = 0
     empty_retrieval_signatures: Set[Tuple[str, str]] = field(default_factory=set)
     previous_calls: Set[Tuple[str, str]] = field(default_factory=set)
+    # Episodes any search or browse has returned in this run.
+    seen_episode_ids: Set[str] = field(default_factory=set)
     last_error: Optional[str] = None
     tool_call_counts: Dict[str, int] = field(default_factory=dict)
     short_uuid_references: Dict[str, str] = field(default_factory=dict)
@@ -912,6 +917,14 @@ class AgentRun:
         """Whether this run has called a tool that returns web content."""
         return any(self.tool_call_counts.get(name) for name in WEB_CONTENT_TOOL_NAMES)
 
+    def forget_tool_call(self, tool_name: str, args: Dict) -> None:
+        """Let a retryable failure be retried with the same arguments.
+
+        The call still counts toward the run and per-tool limits.
+        """
+        call_sig = (tool_name, json.dumps(args, sort_keys=True, default=str))
+        self.previous_calls.discard(call_sig)
+
     def record_tool_call(self, tool_name: str, args: Dict) -> None:
         self._require_active()
         if not self.can_call_tool(tool_name, args):
@@ -941,14 +954,6 @@ class AgentRun:
         self.consecutive_errors = 0
         self.last_error = None
 
-    def record_tool_result(self, result: Dict) -> None:
-        self._require_active()
-        if result.get("error"):
-            self.record_error(str(result["error"]))
-            return
-        self.consecutive_errors = 0
-        self.last_error = None
-
     def record_source(self, candidate: SourceReferenceCandidate) -> None:
         self._require_active()
         if candidate not in self.source_candidates:
@@ -968,6 +973,24 @@ class AgentRun:
         apply_result = self.notebook.apply(tool_name, result)
         self.new_evidence_gathered = self.new_evidence_gathered or apply_result.changed
         return apply_result
+
+    def note_episode_results(self, tool_name: str, result: Dict) -> int | None:
+        """Count Episodes this search returned that the run had not seen yet."""
+
+        if tool_name not in ("search_episodes", "read_recent_episodes"):
+            return None
+        data = result.get("data") if isinstance(result, dict) else None
+        groups = data.get("results", []) if isinstance(data, dict) else []
+        found = {
+            str(episode["episode_id"])
+            for group in groups
+            if isinstance(group, dict)
+            for episode in group.get("episodes", [])
+            if isinstance(episode, dict) and episode.get("episode_id") is not None
+        }
+        new = found - self.seen_episode_ids
+        self.seen_episode_ids |= found
+        return len(new)
 
     def record_empty_result(self, calls: List[Tuple[str, Dict]] | None = None) -> bool:
         """Record an empty tool turn and report whether replanning is due."""
@@ -1045,7 +1068,12 @@ class AgentRun:
         """Start a bounded notebook generation while preserving references."""
 
         self._require_active()
-        return self.notebook.rollover(summary)
+        # Roll a copy and adopt it only on success: a summary over capacity
+        # must not leave a half-rolled notebook behind.
+        candidate = deepcopy(self.notebook)
+        result = candidate.rollover(summary)
+        self.notebook._adopt_from(candidate)
+        return result
 
     def finalize(self, content: str) -> None:
         self._require_active()

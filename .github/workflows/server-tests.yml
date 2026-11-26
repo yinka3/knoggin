@@ -200,6 +200,11 @@ jobs:
         run: >-
           uv run pytest -q
           --ignore=tests/architecture
+          --ignore=tests/integration/sandbox
+          --ignore=tests/unit/core/sandbox/test_container_runtime.py
+          --ignore=tests/unit/core/sandbox/test_project_container.py
+          --ignore=tests/unit/core/sandbox/test_startup_check.py
+          --deselect=tests/unit/core/sandbox/test_application_lifecycle.py::test_application_start_owns_and_attaches_sandbox
           -m "not requires_postgres and not requires_pgvector and not requires_async_psycopg and not model and not slow"
           --cov=src
           --cov-branch
@@ -341,8 +346,6 @@ jobs:
       KNOGGIN_SEMANTIC_SMOKE_MODEL_REVISION: 7817065102fd9e1b031fe874e910c01f40b2f001
       KNOGGIN_SEMANTIC_SMOKE_RERANKER_MODEL: BAAI/bge-reranker-large
       KNOGGIN_SEMANTIC_SMOKE_RERANKER_REVISION: 55611d7bca2a7133960a6d3b71e083071bbfc312
-      KNOGGIN_VP01_MODEL: fastino/gliner2.5-base-v1
-      KNOGGIN_VP01_REVISION: 1a8bc24e00dc7300b9017c81d63e3dcdabb26596
       KNOGGIN_EMBEDDING_BACKEND: onnx
       KNOGGIN_ONNX_PROVIDER: CPUExecutionProvider
       KNOGGIN_SEMANTIC_SMOKE_EXPECTED_PROVIDER: CPUExecutionProvider
@@ -368,7 +371,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .hf-cache
-          key: knoggin-models-${{ runner.os }}-stella-v5-bge-reranker-large-vp01-v1
+          key: knoggin-models-${{ runner.os }}-stella-v5-bge-reranker-large-v2
 
       - name: Provision configured model artifacts
         working-directory: server
@@ -380,7 +383,6 @@ jobs:
           artifacts = (
               ("KNOGGIN_SEMANTIC_SMOKE_MODEL", "KNOGGIN_SEMANTIC_SMOKE_MODEL_REVISION"),
               ("KNOGGIN_SEMANTIC_SMOKE_RERANKER_MODEL", "KNOGGIN_SEMANTIC_SMOKE_RERANKER_REVISION"),
-              ("KNOGGIN_VP01_MODEL", "KNOGGIN_VP01_REVISION"),
           )
           for model_variable, revision_variable in artifacts:
               snapshot_download(

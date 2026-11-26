@@ -92,8 +92,8 @@ def test_knowledge_explorer_scopes_reads_and_removes_private_fields(monkeypatch,
     assert ("entity", 3, {"visible_project_ids": ["p1"]}) in calls
 
 
-def test_context_block_jev_explanation_is_scoped_and_allowlisted(monkeypatch, tmp_path):
-    block_id, window_id = str(uuid4()), str(uuid4())
+def test_message_jev_explanation_is_scoped_and_allowlisted(monkeypatch, tmp_path):
+    message_id, window_id = 101, str(uuid4())
 
     class Projects:
         async def get_project(self, project_id):
@@ -114,21 +114,21 @@ def test_context_block_jev_explanation_is_scoped_and_allowlisted(monkeypatch, tm
                          "operational_topic": "Research", "record": {
                              "baseline_outcome": "default_topic",
                              "acceptance_status": "accepted",
-                             "evidence_block_ids": [block_id],
+                             "evidence_message_ids": [message_id],
                          },
                      }}]
 
-        async def list_jev_decisions_for_block(self, requested_id, **scope):
-            assert requested_id == block_id
+        async def list_jev_decisions_for_message(self, requested_id, **scope):
+            assert requested_id == message_id
             assert scope == {"user_name": "ada", "project_id": "p1", "limit": 50}
-            return {"block_id": block_id, "excerpt": "Evidence text", "decisions": [{
+            return {"message_id": message_id, "excerpt": "Evidence text", "decisions": [{
                 "capability": "classification", "window_id": window_id,
                 "pass_number": 1, "occurrence_key": "one", "decision": {
                     "baseline_topic": "General", "suggested_topic": "Research",
                     "operational_topic": "Research", "internal": "private",
                     "record": {
                         "baseline_outcome": "default_topic", "acceptance_status": "accepted",
-                        "evidence_block_ids": [block_id], "pinned_model": "jev-model",
+                        "evidence_message_ids": [message_id], "pinned_model": "jev-model",
                         "question_version": "v1", "acceptance_policy_version": "v1",
                         "option_mapping": {"topic_1": "Research"},
                         "result": {"outcome": "available", "response": {"answers": {
@@ -146,7 +146,7 @@ def test_context_block_jev_explanation_is_scoped_and_allowlisted(monkeypatch, tm
                     "accepted_entity_id": 4,
                     "record": {
                         "baseline_outcome": "deterministic_reuse",
-                        "acceptance_status": "accepted", "evidence_block_ids": [block_id],
+                        "acceptance_status": "accepted", "evidence_message_ids": [message_id],
                         "pinned_model": "jev-model", "question_version": "v1",
                         "acceptance_policy_version": "v1", "option_mapping": {},
                         "result": {"outcome": "available", "response": {"answers": {}}},
@@ -170,7 +170,7 @@ def test_context_block_jev_explanation_is_scoped_and_allowlisted(monkeypatch, tm
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
-                path = f"/v1/projects/p1/knowledge/context-blocks/{block_id}/jev-decisions"
+                path = f"/v1/projects/p1/knowledge/messages/{message_id}/jev-decisions"
                 normal = await client.get(path)
                 assert normal.status_code == 200
                 assert normal.json()["items"][0]["operational_result"] == "Research"
@@ -188,3 +188,39 @@ def test_context_block_jev_explanation_is_scoped_and_allowlisted(monkeypatch, tm
                 assert (await client.get(path.replace("/p1/", "/p2/"))).status_code == 404
 
     asyncio.run(exercise())
+
+
+def test_forget_history_is_owner_scoped_read_only_and_available_when_archived(monkeypatch, tmp_path):
+    calls = []
+    records = [{'forget_id': str(uuid4()), 'values': ['James'],
+                'requested_at': '2026-11-11T00:00:00+00:00', 'message_count': 2,
+                'episodes': [{'episode_id': 'ep-1', 'date': '2026-11-10T00:00:00+00:00'}]}]
+
+    class Projects:
+        async def get_project(self, project_id):
+            return {'status': 'archived'} if project_id == 'p1' else None
+
+    class Store:
+        async def list_forget_records(self, **scope):
+            calls.append(scope)
+            return records
+
+    async def start(**kwargs):
+        async def shutdown():
+            pass
+        return SimpleNamespace(projects=Projects(), resources=SimpleNamespace(knowledge_store=Store()),
+                               sessions=SimpleNamespace(user_name='ada'), shutdown=shutdown)
+
+    monkeypatch.setattr('app.ApplicationRuntime.start', start)
+    app = create_app(user_name='ada', config_dir=tmp_path)
+
+    async def exercise():
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+                response = await client.get('/v1/projects/p1/forget-records')
+                assert response.status_code == 200
+                assert response.json() == records
+                assert (await client.get('/v1/projects/missing/forget-records')).status_code == 404
+                assert (await client.post('/v1/projects/p1/forget-records')).status_code == 405
+    asyncio.run(exercise())
+    assert calls == [{'user_name': 'ada', 'project_id': 'p1'}]

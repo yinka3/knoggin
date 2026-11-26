@@ -9,7 +9,7 @@ from common.exceptions import WorkspaceConflictError
 
 
 def test_workspaces_are_added_removed_and_shown_on_documents(monkeypatch, tmp_path):
-    workspaces = []
+    workspaces = {}
     folders = []
 
     class Documents:
@@ -33,19 +33,25 @@ def test_workspaces_are_added_removed_and_shown_on_documents(monkeypatch, tmp_pa
                 return None
             return {"id": "p1", "name": "Repos", "status": "active", "workspaces": workspaces}
 
-        async def add_workspace(self, project_id, name):
+        async def add_workspace(self, project_id, name, *, read_only=False):
             if name in workspaces or len(workspaces) == 2:
                 raise ValueError("unavailable")
-            workspaces.append(name)
-            return list(workspaces)
+            workspaces[name] = {"read_only": read_only}
+            return dict(workspaces)
+
+        async def update_workspace(self, project_id, name, changes):
+            if name not in workspaces:
+                return None
+            workspaces[name] = {**workspaces[name], **changes}
+            return dict(workspaces)
 
         async def remove_workspace(self, project_id, name):
             if name == "backend":
                 raise WorkspaceConflictError("has documents")
             if name not in workspaces:
                 return None
-            workspaces.remove(name)
-            return list(workspaces)
+            del workspaces[name]
+            return dict(workspaces)
 
         async def acquire_project_for_session(self, project_id, lease_id):
             return SimpleNamespace(document_service=Documents())
@@ -69,25 +75,33 @@ def test_workspaces_are_added_removed_and_shown_on_documents(monkeypatch, tmp_pa
                 base = "/v1/projects/p1/workspaces"
                 added = await client.post(base, json={"name": "backend"})
                 assert added.status_code == 201
-                assert added.json() == {"workspaces": ["backend"]}
+                assert added.json() == {"workspaces": [{"name": "backend", "read_only": False}]}
                 assert folders == ["backend"]
                 assert (await client.post(base, json={"name": "a/b"})).status_code == 422
                 assert (await client.post(base, json={"name": ".git"})).status_code == 422
                 clash = await client.post(base, json={"name": "notes.md"})
-                assert clash.status_code == 409 and workspaces == ["backend"]
-                await client.post(base, json={"name": "frontend"})
+                assert clash.status_code == 409 and list(workspaces) == ["backend"]
+                await client.post(base, json={"name": "frontend", "read_only": True})
                 full = await client.post(base, json={"name": "infra"})
                 assert full.json()["error"]["code"] == "workspace_unavailable"
 
                 project = (await client.get("/v1/projects/p1")).json()
-                assert project["workspaces"] == ["backend", "frontend"]
+                assert project["workspaces"] == [
+                    {"name": "backend", "read_only": False},
+                    {"name": "frontend", "read_only": True},
+                ]
+                patched = await client.patch(base + "/frontend", json={"read_only": False})
+                assert patched.json()["workspaces"][1] == {"name": "frontend", "read_only": False}
+                bad = await client.patch(base + "/frontend", json={"colour": "red"})
+                assert bad.status_code == 422
+                assert (await client.patch(base + "/nope", json={"read_only": True})).status_code == 404
                 listed = (await client.get("/v1/projects/p1/documents")).json()["items"]
                 assert [item["workspace"] for item in listed] == ["backend", None, None]
 
                 busy = await client.delete(base + "/backend")
                 assert busy.json()["error"]["code"] == "workspace_not_empty"
                 assert (await client.delete(base + "/frontend")).json() == {
-                    "workspaces": ["backend"]
+                    "workspaces": [{"name": "backend", "read_only": False}]
                 }
                 assert (await client.delete(base + "/frontend")).status_code == 404
 

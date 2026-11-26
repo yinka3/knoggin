@@ -15,11 +15,11 @@ from core.knowledge.maintenance.maintenance_reviews import (
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
-async def test_relationship_enrichment_requires_a_complete_observation_support_set(
+async def test_episodes_link_the_entities_and_relationships_their_messages_carry(
     real_postgres_client,
 ):
-    """A relationship needs every block from one active observation in the Episode."""
-    window_id, revision_id, first_block, second_block = (uuid4() for _ in range(4))
+    """An Episode links a relationship or entity only through its own messages."""
+    window_id = uuid4()
     relationship_id = "project-1:2:3:uses"
     await real_postgres_client.execute(
         """
@@ -30,11 +30,11 @@ async def test_relationship_enrichment_requires_a_complete_observation_support_s
             timestamp_ms, exchange_state, exchange_outcome, exchange_closed_at_ms
         ) VALUES
             ('ada', 'episode-session', 101, 'project-1', 'user',
-             'Only the first block.', 101, 'closed', 'user_only', 101),
+             'Knoggin is new.', 101, 'closed', 'user_only', 101),
             ('ada', 'episode-session', 102, 'project-1', 'user',
-             'First block in the complete Episode.', 102, 'closed', 'user_only', 102),
+             'Ada started using it.', 102, 'closed', 'user_only', 102),
             ('ada', 'episode-session', 103, 'project-1', 'user',
-             'Second block in the complete Episode.', 103, 'closed', 'user_only', 103);
+             'Ada uses Knoggin daily.', 103, 'closed', 'user_only', 103);
         INSERT INTO public.entities (entity_id, user_name, canonical_name)
         VALUES (2, 'ada', 'Ada'), (3, 'ada', 'Knoggin');
         INSERT INTO public.project_entity_contexts (
@@ -60,55 +60,6 @@ async def test_relationship_enrichment_requires_a_complete_observation_support_s
         """,
         (window_id,),
     )
-    await real_postgres_client.execute(
-        """
-        INSERT INTO public.project_context_revisions (
-            revision_id, project_id, revision_number, origin, domain_version,
-            content_hash
-        ) VALUES (%s, 'project-1', 1, 'conversation', 1, %s)
-        """,
-        (revision_id, "a" * 64),
-    )
-    await real_postgres_client.execute(
-        """
-        UPDATE public.project_semantic_windows
-        SET context_revision_id = %s
-        WHERE window_id = %s
-        """,
-        (revision_id, window_id),
-    )
-    await real_postgres_client.execute(
-        """
-        INSERT INTO public.project_context_blocks (
-            block_id, project_id, section_key, markdown, content_hash,
-            assertion_kind
-        ) VALUES
-            (%s, 'project-1', 'current_state', 'First assertion.', %s, 'user_asserted'),
-            (%s, 'project-1', 'current_state', 'Second assertion.', %s, 'user_asserted')
-        """,
-        (first_block, "b" * 64, second_block, "c" * 64),
-    )
-    await real_postgres_client.execute(
-        """
-        INSERT INTO public.project_context_revision_blocks (
-            revision_id, project_id, block_id, ordinal
-        ) VALUES
-            (%s, 'project-1', %s, 0),
-            (%s, 'project-1', %s, 1)
-        """,
-        (revision_id, first_block, revision_id, second_block),
-    )
-    await real_postgres_client.execute(
-        """
-        INSERT INTO public.project_context_block_supports (
-            block_id, project_id, message_id, session_id, support_kind
-        ) VALUES
-            (%s, 'project-1', 101, 'episode-session', 'user_message'),
-            (%s, 'project-1', 102, 'episode-session', 'user_message'),
-            (%s, 'project-1', 103, 'episode-session', 'user_message')
-        """,
-        (first_block, first_block, second_block),
-    )
     observation = await real_postgres_client.fetch_one(
         """
         INSERT INTO public.relationship_observations (
@@ -123,14 +74,21 @@ async def test_relationship_enrichment_requires_a_complete_observation_support_s
     assert observation is not None
     await real_postgres_client.execute(
         """
-        INSERT INTO public.relationship_observation_blocks (
-            observation_id, project_id, block_id
-        ) VALUES (%s, 'project-1', %s), (%s, 'project-1', %s)
+        INSERT INTO public.relationship_observation_messages (
+            observation_id, project_id, message_id
+        ) VALUES (%s, 'project-1', 102), (%s, 'project-1', 103)
         """,
-        (
-            observation["observation_id"], first_block,
-            observation["observation_id"], second_block,
-        ),
+        (observation["observation_id"], observation["observation_id"]),
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.message_entity_occurrences (
+            window_id, project_id, pass_number, occurrence_index, message_id,
+            resolved_entity_id, mention_text
+        ) VALUES (%s, 'project-1', 1, 0, 101, 3, 'Knoggin'),
+                 (%s, 'project-1', 1, 0, 103, 3, 'Knoggin')
+        """,
+        (window_id, window_id),
     )
     await real_postgres_client.execute(
         """
@@ -156,7 +114,7 @@ async def test_relationship_enrichment_requires_a_complete_observation_support_s
         """,
         (window_id, window_id),
     )
-    # Simulate a link saved by the former partial-support query.
+    # A stale link from a message that does not support the relationship.
     await real_postgres_client.execute(
         """
         INSERT INTO public.episode_relationships (
@@ -171,6 +129,16 @@ async def test_relationship_enrichment_requires_a_complete_observation_support_s
         await writer.enrich_project_semantic_window_episodes(
             window_id=str(window_id), user_name="ada", project_id="project-1"
         )
+        assert await real_postgres_client.fetch_all(
+            """
+            SELECT episode_id, entity_id, source_message_count
+            FROM public.episode_entities
+            ORDER BY episode_id
+            """
+        ) == [
+            {"episode_id": "complete-episode", "entity_id": 3, "source_message_count": 1},
+            {"episode_id": "partial-episode", "entity_id": 3, "source_message_count": 1},
+        ]
         assert await real_postgres_client.fetch_all(
             """
             SELECT episode_id, relationship_id, source_message_count

@@ -7,103 +7,34 @@ from uuid import uuid4
 
 import pytest
 
-from common.schema.ingestion.contracts import ContextBlockEntityAssociation
 from core.knowledge.db.writers.semantic_commit_writer import SemanticCommitWriter
 from tests.contract.storage.test_semantic_commit_contract import (
     _add_jev_classification_observation,
-    _add_jev_extraction_observation,
     _add_jev_observation,
     _build,
     _classification_policy,
     _entity,
 )
-from tests.unit.core.ingestion.test_context_entity_build import block, build
 
 
 def staged(capability):
     frozen = _classification_policy()
     frozen = replace(
         frozen,
-        jev=frozen.jev.model_copy(
-            update={
-                "identity_mode": "observe",
-                "extraction_mode": "active",
-            }
-        ),
+        jev=frozen.jev.model_copy(update={"identity_mode": "observe"}),
     )
-    current_block = block("Delta manages the budget.")
-    current = build(blocks=(current_block,), compiled_domain=frozen.domain)
     current = _build(
-        SimpleNamespace(window_id=current.window_id, context=current.context),
-        impact=(current_block.block_id,),
-        entity_ids=(10,),
+        SimpleNamespace(window_id=uuid4()),
+        (("ep-1", (101,)),),
+        mentions=((10, "Delta", (101,), "Company"),),
         entities={10: _entity(10, "Delta", "Company")},
-        associations=(
-            ContextBlockEntityAssociation(
-                block_id=current_block.block_id, entity_id=10, mention_text="Delta"
-            ),
-        ),
-        ingestion_policy=frozen,
+        policy=frozen,
     )
-    helpers = {
+    {
         "identity": _add_jev_observation,
-        "extraction": _add_jev_extraction_observation,
         "classification": _add_jev_classification_observation,
-    }
-    helpers[capability](current, current_block.block_id)
-    return current, {current_block.block_id}
-
-
-@pytest.mark.parametrize(
-    "mutation,error",
-    [
-        ("scope", "scope"),
-        ("type", "invalid entity type"),
-        ("offset", "offset provenance"),
-        ("truncation_flag", "candidate-set provenance"),
-        ("truncated", "Truncated"),
-        ("status", "acceptance status"),
-        ("response", "valid response"),
-        ("mapping", "committed mention"),
-        ("mention", "committed mention"),
-        ("size", "record limit"),
-    ],
-)
-async def test_extraction_rejects_forged_provenance_before_insert(mutation, error):
-    current, eligible = staged("extraction")
-    observation = current.trace.extraction_decisions[0]
-    if mutation == "scope":
-        observation["record"]["project_id"] = "other-project"
-    elif mutation == "type":
-        observation["suggested_entity_type"] = "Unconfigured"
-    elif mutation == "offset":
-        observation["has_context_offsets"] = None
-    elif mutation == "truncation_flag":
-        observation["candidate_set_truncated"] = None
-    elif mutation == "truncated":
-        observation["candidate_set_truncated"] = True
-    elif mutation == "status":
-        observation["accepted_entity_type"] = None
-    elif mutation == "response":
-        observation["record"]["result"]["response"] = None
-    elif mutation == "mapping":
-        observation["record"]["option_mapping"] = {"type_1": "Company"}
-    elif mutation == "mention":
-        association = current.entity_result.block_entity_associations[0]
-        current.entity_result = replace(
-            current.entity_result,
-            block_entity_associations=(replace(association, mention_text="Different"),),
-        )
-    elif mutation == "size":
-        observation["candidate_name"] = "x" * 256_000
-        observation["accepted_entity_type"] = None
-        observation["record"]["acceptance_status"] = "rejected"
-    cursor = SimpleNamespace(execute=AsyncMock())
-    with pytest.raises(ValueError, match=error):
-        await SemanticCommitWriter._write_jev_extraction_decisions(
-            cursor, current, eligible_blocks=eligible
-        )
-    cursor.execute.assert_not_awaited()
+    }[capability](current, 101)
+    return current, {101}
 
 
 @pytest.mark.parametrize(
@@ -145,7 +76,7 @@ async def test_topic_rejects_forged_provenance_before_insert(mutation, error):
     elif mutation == "aggregate":
         aggregate["observation_count"] = 2
     elif mutation == "scope":
-        observation["record"]["evidence_block_ids"] = [str(uuid4())]
+        observation["record"]["evidence_message_ids"] = [999]
     elif mutation == "options":
         observation["allowed_topics"] = ["Finance"]
     elif mutation == "response":
@@ -155,7 +86,7 @@ async def test_topic_rejects_forged_provenance_before_insert(mutation, error):
     cursor = SimpleNamespace(execute=AsyncMock())
     with pytest.raises(ValueError, match=error):
         await SemanticCommitWriter._write_jev_classification_decisions(
-            cursor, current, eligible_blocks=eligible
+            cursor, current, eligible_messages=eligible
         )
     cursor.execute.assert_not_awaited()
 
@@ -186,19 +117,19 @@ async def test_identity_rejects_forged_provenance_before_insert(mutation, error)
     cursor = SimpleNamespace(execute=AsyncMock())
     with pytest.raises(ValueError, match=error):
         await SemanticCommitWriter._write_jev_identity_decisions(
-            cursor, current, eligible_blocks=eligible
+            cursor, current, eligible_messages=eligible
         )
     cursor.execute.assert_not_awaited()
 
 
-@pytest.mark.parametrize("capability", ["identity", "extraction", "classification"])
+@pytest.mark.parametrize("capability", ["identity", "classification"])
 async def test_valid_private_provenance_inserts_once(capability):
     current, eligible = staged(capability)
     cursor = SimpleNamespace(execute=AsyncMock())
     await getattr(SemanticCommitWriter, f"_write_jev_{capability}_decisions")(
         cursor,
         current,
-        eligible_blocks=eligible,
+        eligible_messages=eligible,
     )
     cursor.execute.assert_awaited_once()
     query, params = cursor.execute.await_args.args
@@ -240,11 +171,11 @@ async def test_active_topic_commit_rechecks_evidence_gate(weak):
     if weak:
         with pytest.raises(ValueError, match="operational topic"):
             await SemanticCommitWriter._write_jev_classification_decisions(
-                cursor, current, eligible_blocks=eligible
+                cursor, current, eligible_messages=eligible
             )
         cursor.execute.assert_not_awaited()
     else:
         await SemanticCommitWriter._write_jev_classification_decisions(
-            cursor, current, eligible_blocks=eligible
+            cursor, current, eligible_messages=eligible
         )
         cursor.execute.assert_awaited_once()

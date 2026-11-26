@@ -10,9 +10,11 @@ from common.schema.context import (
     AssertionKind,
     ContextAdd,
     ContextBlockRecord,
+    ContextReplace,
     ContextRevisionOrigin,
     ContextSnapshot,
 )
+from common.schema.episode.models import EpisodeCard
 from common.schema.semantic_window import (
     SemanticWindowOrigin,
     SemanticWindowRecord,
@@ -20,12 +22,14 @@ from common.schema.semantic_window import (
 )
 from common.schema.settings import (
     EntityResolutionSettings,
+    ExtractionSettings,
     IngestionSettings,
-    TextProcessorSettings,
 )
 from core.ingestion.policy import IngestionPolicy
 from core.ingestion.project_semantic_processor import ProjectSemanticProcessor
+from core.knowledge.context.maintainer import ContextMaintenanceResult
 from core.knowledge.context.models import (
+    ContextMaintenanceState,
     ContextRevisionConflictError,
     ContextUserEditSynchronizationError,
 )
@@ -42,7 +46,7 @@ def _domain(version=1):
 
 def _policy(domain=None):
     return IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(),
+        extraction=ExtractionSettings(),
         entity_resolution=EntityResolutionSettings(),
         compiled_domain=domain or _domain(),
     )
@@ -111,6 +115,10 @@ class _ContextStore:
         self.failures = []
         self.fail_commit_once = False
         self.external_snapshot_on_conflict = None
+        self.window_episodes = []
+        self.maintenance_state = ContextMaintenanceState(0, {})
+        self.recent_episodes = []
+        self.recent_limits = []
 
     async def get_active_project_semantic_window(self, **_kwargs):
         return (
@@ -136,8 +144,15 @@ class _ContextStore:
     async def get_project_context_block_supports(self, _block_ids, **_kwargs):
         return {}
 
+    async def get_project_context_maintenance_state(self, _revision_id, **_kwargs):
+        return self.maintenance_state
+
     async def get_project_semantic_window_episode_result(self, _window_id, **_kwargs):
-        return []
+        return self.window_episodes
+
+    async def get_recent_project_episodes(self, *, limit, **_kwargs):
+        self.recent_limits.append(limit)
+        return self.recent_episodes[:limit]
 
     async def get_project_semantic_window_evidence_messages(self, _window_id, **_kwargs):
         return [
@@ -152,6 +167,23 @@ class _ContextStore:
 
     async def get_project_semantic_window_assistant_source_refs(self, _window_id, **_kwargs):
         return []
+
+    async def forget_messages(self, **kwargs):
+        self.__dict__.setdefault("forget_calls", []).append(kwargs)
+        return []
+
+    async def get_episodes_with_forgotten_sources(self, **kwargs):
+        return self.__dict__.get("forgotten_episodes", [])
+
+    async def forget_graph(self, **kwargs):
+        return []
+
+    async def complete_forget_cleanup(self, **kwargs):
+        pass
+
+    async def forget_in_episode(self, **kwargs):
+        self.__dict__.setdefault("episode_forgets", []).append(kwargs)
+        return True
 
     async def commit_project_context_revision(self, **kwargs):
         self.commit_calls.append(kwargs)
@@ -355,7 +387,7 @@ async def _publish_nothing(_entity_ids):
 
 def _job(
     store, updater, *, now_ms=lambda: 1_000, projection=None, policy=None,
-    exchange_embedding_service=None,
+    exchange_embedding_service=None, maintainer=None,
 ):
     async def capture_semantic_policy():
         return policy or _policy()
@@ -369,10 +401,11 @@ def _job(
         capture_semantic_policy=capture_semantic_policy,
         context_updater=updater,
         context_projection=projection or _NoopProjection(),
-        context_entity_builder=_UnexpectedBuilder(),
-        context_relationship_extractor=_UnexpectedRelationships(),
+        entity_builder=_UnexpectedBuilder(),
+        relationship_extractor=_UnexpectedRelationships(),
         publish_committed_entity_ids=_publish_nothing,
         now_ms=now_ms,
+        context_maintainer=maintainer,
     )
 
 
@@ -383,8 +416,8 @@ def _job(
     [
         "context_updater",
         "context_projection",
-        "context_entity_builder",
-        "context_relationship_extractor",
+        "entity_builder",
+        "relationship_extractor",
     ],
 )
 def test_semantic_processor_rejects_a_missing_required_collaborator(missing):
@@ -394,8 +427,8 @@ def test_semantic_processor_rejects_a_missing_required_collaborator(missing):
     collaborators = {
         "context_updater": _NoopUpdater(),
         "context_projection": _NoopProjection(),
-        "context_entity_builder": _UnexpectedBuilder(),
-        "context_relationship_extractor": _UnexpectedRelationships(),
+        "entity_builder": _UnexpectedBuilder(),
+        "relationship_extractor": _UnexpectedRelationships(),
     }
     collaborators[missing] = None
 
@@ -426,8 +459,8 @@ def test_semantic_processor_requires_an_entity_publication_callback():
             capture_semantic_policy=capture_semantic_policy,
             context_updater=_NoopUpdater(),
             context_projection=_NoopProjection(),
-            context_entity_builder=_UnexpectedBuilder(),
-            context_relationship_extractor=_UnexpectedRelationships(),
+            entity_builder=_UnexpectedBuilder(),
+            relationship_extractor=_UnexpectedRelationships(),
             publish_committed_entity_ids=None,
         )
 
@@ -469,8 +502,8 @@ async def test_scheduler_cadence_runs_context_sync_without_semantic_work():
         capture_semantic_policy=capture_semantic_policy,
         context_updater=_NoopUpdater(),
         context_projection=projection,
-        context_entity_builder=_UnexpectedBuilder(),
-        context_relationship_extractor=_UnexpectedRelationships(),
+        entity_builder=_UnexpectedBuilder(),
+        relationship_extractor=_UnexpectedRelationships(),
         publish_committed_entity_ids=_publish_nothing,
     )
     scheduler = Scheduler("ada", "project-1")
@@ -518,8 +551,8 @@ async def test_readiness_does_not_select_and_claim_uses_one_captured_policy():
         capture_semantic_policy=capture_semantic_policy,
         context_updater=_NoopUpdater(),
         context_projection=_NoopProjection(),
-        context_entity_builder=_UnexpectedBuilder(),
-        context_relationship_extractor=_UnexpectedRelationships(),
+        entity_builder=_UnexpectedBuilder(),
+        relationship_extractor=_UnexpectedRelationships(),
         publish_committed_entity_ids=_publish_nothing,
     )
 
@@ -560,8 +593,8 @@ async def test_projection_failure_does_not_block_new_semantic_admission():
         capture_semantic_policy=capture_policy,
         context_updater=_NoopUpdater(),
         context_projection=_FailingProjection(),
-        context_entity_builder=_UnexpectedBuilder(),
-        context_relationship_extractor=_UnexpectedRelationships(),
+        entity_builder=_UnexpectedBuilder(),
+        relationship_extractor=_UnexpectedRelationships(),
         publish_committed_entity_ids=_publish_nothing,
     )
 
@@ -590,8 +623,8 @@ async def test_unresolved_user_edit_blocks_new_semantic_admission():
         capture_semantic_policy=capture_policy,
         context_updater=_NoopUpdater(),
         context_projection=_BlockedUserEditProjection(),
-        context_entity_builder=_UnexpectedBuilder(),
-        context_relationship_extractor=_UnexpectedRelationships(),
+        entity_builder=_UnexpectedBuilder(),
+        relationship_extractor=_UnexpectedRelationships(),
         publish_committed_entity_ids=_publish_nothing,
     )
 
@@ -663,8 +696,8 @@ async def test_successful_user_edit_retry_finishes_before_conversation_admission
         capture_semantic_policy=capture_policy,
         context_updater=_NoopUpdater(),
         context_projection=projection,
-        context_entity_builder=_UnexpectedBuilder(),
-        context_relationship_extractor=_UnexpectedRelationships(),
+        entity_builder=_UnexpectedBuilder(),
+        relationship_extractor=_UnexpectedRelationships(),
         publish_committed_entity_ids=_publish_nothing,
     )
     context = JobContext(user_name="ada", project_id="project-1")
@@ -920,8 +953,8 @@ async def test_save_now_flushes_admission_until_nothing_is_left():
         capture_semantic_policy=capture_policy,
         context_updater=_NoopUpdater(),
         context_projection=_RecordingProjection(),
-        context_entity_builder=_UnexpectedBuilder(),
-        context_relationship_extractor=_UnexpectedRelationships(),
+        entity_builder=_UnexpectedBuilder(),
+        relationship_extractor=_UnexpectedRelationships(),
         publish_committed_entity_ids=_publish_nothing,
     )
     context = JobContext(user_name="ada", project_id="project-1")
@@ -962,8 +995,8 @@ async def test_flush_requested_during_an_unflushed_claim_is_kept():
         capture_semantic_policy=capture_policy,
         context_updater=_NoopUpdater(),
         context_projection=_RecordingProjection(),
-        context_entity_builder=_UnexpectedBuilder(),
-        context_relationship_extractor=_UnexpectedRelationships(),
+        entity_builder=_UnexpectedBuilder(),
+        relationship_extractor=_UnexpectedRelationships(),
         publish_committed_entity_ids=_publish_nothing,
     )
     admission.job = job
@@ -975,3 +1008,104 @@ async def test_flush_requested_during_an_unflushed_claim_is_kept():
 
     assert admission.flushes == [False, True]
     assert not job.flush_pending
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_context_stage_reads_earlier_episodes_oldest_first_without_this_windows():
+    store = _ContextStore(_window())
+    store.window_episodes = [SimpleNamespace(episode_id="now", summary="now", messages=[])]
+    store.recent_episodes = [
+        EpisodeCard(episode_id=episode_id, project_id="project-1", summary=episode_id)
+        for episode_id in ("now", "third", "second", "first")
+    ]
+    updater = _Updater()
+    job = _job(store, updater)
+    job.update_settings(
+        IngestionSettings(semantic_window_tokens=1, context={"earlier_episodes": 2})
+    )
+
+    assert (await job.execute(JobContext(user_name="ada", project_id="project-1"))).success
+
+    call = updater.calls[0]
+    assert [episode.summary for episode in call["earlier_episodes"]] == ["second", "third"]
+    assert call["budget_tokens"] == 40_000
+
+
+class _Maintainer:
+    count_tokens = None
+
+    def __init__(self, *, fail=False):
+        self.builds = []
+        self.fail = fail
+
+    async def maintain(self, *, user_name, build):
+        self.builds.append(build)
+        if self.fail:
+            raise RuntimeError("maintainer model unavailable")
+        return ContextMaintenanceResult(
+            materialization=apply_context_edits(
+                build.snapshot,
+                [ContextReplace(
+                    section_key="current_state", target={"handle": "C1"},
+                    markdown="Old fact, short.",
+                )],
+                build.domain,
+                project_id="project-1",
+            ),
+            summary="Compressed an old fact",
+        )
+
+
+def _maintenance_case(*, every, episodes_since=0, fail=False):
+    old = _block("An old fact that nobody has touched in a long while.")
+    store = _ContextStore(_window(), current_snapshot=_snapshot(old))
+    store.window_episodes = [SimpleNamespace(episode_id="now", summary="now", messages=[])]
+    store.maintenance_state = ContextMaintenanceState(episodes_since, {old.block_id: 9})
+    maintainer = _Maintainer(fail=fail)
+    job = _job(store, _Updater(), maintainer=maintainer)
+    job.update_settings(IngestionSettings(
+        semantic_window_tokens=1, context={"maintain_every_episodes": every},
+    ))
+    return store, maintainer, job, old
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_maintainer_runs_once_enough_episodes_pass_and_shares_the_revision():
+    store, maintainer, job, old = _maintenance_case(every=12, episodes_since=11)
+
+    assert (await job.execute(JobContext(user_name="ada", project_id="project-1"))).success
+
+    build = maintainer.builds[0]
+    # The window's own Episode ages every block it did not write.
+    assert build.ages[old.block_id] == 10
+    assert [build.ages[b.block_id] for b in build.snapshot.blocks if b is not old] == [0]
+    commit = store.commit_calls[0]
+    assert commit["maintained"] is True
+    assert [b.markdown for b in commit["materialization"].blocks] == [
+        "Old fact, short.", "The Context stage is active.",
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_maintainer_waits_until_it_is_due():
+    store, maintainer, job, _ = _maintenance_case(every=12, episodes_since=10)
+
+    assert (await job.execute(JobContext(user_name="ada", project_id="project-1"))).success
+
+    assert maintainer.builds == []
+    assert store.commit_calls[0]["maintained"] is False
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_a_failed_maintainer_is_skipped_and_the_update_still_commits():
+    store, maintainer, job, _ = _maintenance_case(every=1, fail=True)
+
+    assert (await job.execute(JobContext(user_name="ada", project_id="project-1"))).success
+
+    assert len(maintainer.builds) == 1
+    assert store.commit_calls[0]["maintained"] is False
+    assert len(store.commit_calls[0]["materialization"].blocks) == 2

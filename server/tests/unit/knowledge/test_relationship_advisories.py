@@ -124,7 +124,7 @@ def test_advisories_do_not_promote_repetition_within_one_semantic_window():
 @pytest.mark.no_network
 def test_context_observations_from_separate_windows_create_advisory():
     context_rows = [
-        {**unknown_observation(index, index, index + 10), "evidence_origin": "context"}
+        {**unknown_observation(index, index, index + 10), "evidence_origin": "conversation"}
         for index in range(1, 4)
     ]
     advisories = build_relationship_advisories(context_rows)
@@ -151,7 +151,7 @@ def test_context_observations_in_one_window_remain_below_evidence_floor():
     context_rows = [
         {
             **unknown_observation(index, index, index + 10, semantic_window_id="one-window"),
-            "evidence_origin": "context",
+            "evidence_origin": "conversation",
         }
         for index in range(1, 4)
     ]
@@ -165,7 +165,7 @@ def test_repeated_context_extraction_of_one_pair_is_not_domain_advisory():
     rows = [
         {
             **unknown_observation(index, 101, 201),
-            "evidence_origin": "context",
+            "evidence_origin": "conversation",
         }
         for index in range(1, 4)
     ]
@@ -200,18 +200,15 @@ def test_advisory_decisions_follow_explicit_lifecycle_without_domain_mutation():
         action="dismiss",
         note="Not useful for this project",
     )
-    suppressed = apply_advisory_action(
-        dismissed,
-        pattern_key=pattern_key,
-        action="suppress",
-    )
 
     assert edited.disposition == "pending"
     assert accepted.disposition == "accepted"
     assert accepted.proposed_relationship_type == "DEPLOYS_TO"
     assert dismissed.decision_note == "Not useful for this project"
-    assert suppressed.disposition == "suppressed"
-    assert suppressed.revision == 5
+    assert dismissed.disposition == "dismissed"
+    assert dismissed.revision == 4
+    with pytest.raises(RelationshipAdvisoryDecisionError, match="Unknown advisory action"):
+        apply_advisory_action(dismissed, pattern_key=pattern_key, action="suppress")
 
 
 @pytest.mark.unit
@@ -251,3 +248,23 @@ def test_advisory_decision_rejects_the_retired_merge_action():
             action="merge",
             relationship_type="DEPLOYS_TO",
         )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_a_review_saved_as_suppressed_reads_as_dismissed():
+    from types import SimpleNamespace
+
+    from core.knowledge.db.writers.relationship_advisory_writer import (
+        RelationshipAdvisoryWriter,
+    )
+    from core.knowledge.maintenance.maintenance_reviews import RelationshipAdvisoryPlan
+
+    plan = RelationshipAdvisoryPlan(pattern_key="mentors|person|person", action="suppress")
+    review = SimpleNamespace(
+        proposed_plan=plan, status="dismissed", expected_state={"revision": 2},
+    )
+
+    decision = RelationshipAdvisoryWriter._decision_from_review(review, plan.pattern_key)
+
+    assert decision.disposition == "dismissed" and decision.last_action == "dismiss"

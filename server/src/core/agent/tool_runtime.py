@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from collections.abc import Collection
@@ -90,6 +91,11 @@ def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
         if isinstance(data, dict) and data.get("subject"):
             return "Loaded observation support", 1
         return "No observation support found", 0
+
+    if tool_name == "list_events":
+        groups = data.get("results", []) if isinstance(data, dict) else []
+        count = sum(len(g.get("events", [])) for g in groups if isinstance(g, dict))
+        return (f"Listed {count} events" if count else "No events"), count
 
     if tool_name in ("search_episodes", "read_recent_episodes"):
         if isinstance(data, dict):
@@ -201,16 +207,15 @@ async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
                         "Invalid arguments: " + "; ".join(presentation_errors),
                     )
 
-            parameter_names = set(
-                canonical_schema["function"]
-                .get("parameters", {})
-                .get("properties", {})
-            )
-            kwargs = {
-                key: value
-                for key, value in kwargs.items()
-                if key in parameter_names
-            }
+            # A misspelled name would otherwise run the tool without that
+            # filter, and the model would never learn its call was wrong.
+            # Model-supplied names are not echoed back.
+            if any(key not in known_fields for key in kwargs):
+                raise ToolExecutionError(
+                    name,
+                    "Invalid arguments: unknown argument name. Valid arguments: "
+                    + ", ".join(sorted(known_fields)),
+                )
         # Tool schemas validate the model-facing local values first. Only then
         # resolve them for the scoped backend reader/writer call.
         try:
@@ -239,6 +244,20 @@ async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
                 status="rejected",
                 error="Tool execution was rejected.",
             )
+        raise
+    except asyncio.CancelledError:
+        # A tool timeout or a stopped run cancels the call. Close the audit
+        # row rather than leaving it "started" forever.
+        if audit_id:
+            try:
+                await asyncio.shield(_safe_finish_tool_audit(
+                    tools,
+                    audit_id,
+                    status="failed",
+                    error="Tool execution was cancelled or timed out.",
+                ))
+            except asyncio.CancelledError:
+                pass
         raise
     except Exception as exc:
         if audit_id:

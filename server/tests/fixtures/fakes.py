@@ -418,6 +418,9 @@ class FakeEphemeralStore:
 
 
 class FakeKnowledgeStore:
+    async def forgotten_name_notes(self, **kwargs):
+        return []
+
     def __init__(self):
         self.saved_message_logs = []
         self.recent_project_messages = []
@@ -431,6 +434,25 @@ class FakeKnowledgeStore:
 
     async def get_session_history(self, **kwargs):
         return []
+
+    async def mark_orphaned_run_steers_undelivered(self, **kwargs):
+        del kwargs
+        count = 0
+        for steer in self.run_steers.values():
+            if steer["state"] == "pending":
+                steer["state"] = "undelivered"
+                count += 1
+        return count
+
+    async def create_closed_standalone_message(self, **kwargs):
+        from types import SimpleNamespace
+
+        message_id = kwargs["message_id"]
+        self.saved_message_logs.append(kwargs)
+        steer = kwargs.get("metadata", {}).get("run_steer")
+        if steer is not None:
+            self.run_steers[message_id] = dict(steer)
+        return SimpleNamespace(message_id=message_id, created=True)
 
     async def record_run_steer(self, *, message_id, steer, expected_state=None, **kwargs):
         del kwargs
@@ -960,8 +982,6 @@ class FakePostgresClient:
                 row["brain_revision"] += 1
             if "set is_default = true" in normalized:
                 row["is_default"] = True
-            if "last_turn_at = now()" in normalized:
-                row["last_turn_at"] = self._now()
             return
 
         if "delete from public.agents" in normalized:

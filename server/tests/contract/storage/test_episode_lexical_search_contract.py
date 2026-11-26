@@ -30,11 +30,12 @@ async def test_episode_lexical_search_vector_is_stored_and_gin_indexed(
 
     match = await real_postgres_client.fetch_one(
         """
-        SELECT search_tsvector @@ websearch_to_tsquery('simple', %s) AS matches
+        SELECT search_tsvector @@ websearch_to_tsquery('english', %s) AS matches
         FROM episodes
         WHERE episode_id = 'episode-lexical'
         """,
-        ("episodic memory",),
+        # A different word form still matches.
+        ("episodic memories selecting",),
     )
     index = await real_postgres_client.fetch_one(
         """
@@ -57,7 +58,7 @@ async def test_episode_lexical_search_vector_is_stored_and_gin_indexed(
             EXPLAIN (COSTS OFF)
             SELECT episode_id
             FROM episodes
-            WHERE search_tsvector @@ websearch_to_tsquery('simple', %s)
+            WHERE search_tsvector @@ websearch_to_tsquery('english', %s)
             """,
             ("episodic memory",),
         )

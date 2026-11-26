@@ -65,9 +65,7 @@ async def _seed_episode_merge_collision(client):
             ('distinct-episode', 'project-1', 3, 1)
         """
     )
-    window_id, revision_id, survivor_block, retired_block = (
-        uuid4() for _ in range(4)
-    )
+    window_id = uuid4()
     await client.execute(
         """
         INSERT INTO public.project_semantic_windows (
@@ -81,23 +79,6 @@ async def _seed_episode_merge_collision(client):
     )
     await client.execute(
         """
-        INSERT INTO public.project_context_revisions (
-            revision_id, project_id, revision_number, origin,
-            domain_version, content_hash
-        ) VALUES (%s, 'project-1', 2, 'conversation', 1, %s)
-        """,
-        (revision_id, "f" * 64),
-    )
-    await client.execute(
-        """
-        UPDATE public.project_semantic_windows
-        SET context_revision_id = %s
-        WHERE window_id = %s
-        """,
-        (revision_id, window_id),
-    )
-    await client.execute(
-        """
         INSERT INTO public.project_semantic_window_episodes (
             window_id, project_id, episode_id, ordinal
         ) VALUES
@@ -106,49 +87,12 @@ async def _seed_episode_merge_collision(client):
         """,
         (window_id, window_id),
     )
+    # Survivor is named in 101 and 102; Retired in 101 and 103.
     await client.execute(
         """
-        INSERT INTO public.project_context_blocks (
-            block_id, project_id, section_key, markdown, content_hash,
-            assertion_kind
-        ) VALUES
-            (%s, 'project-1', 'current_state', 'Survivor evidence.', %s,
-             'source_grounded'),
-            (%s, 'project-1', 'current_state', 'Retired evidence.', %s,
-             'source_grounded')
-        """,
-        (survivor_block, "a" * 64, retired_block, "b" * 64),
-    )
-    await client.execute(
+        INSERT INTO public.message_entity_refs (message_id, entity_id) VALUES
+            (101, 2), (102, 2), (101, 3), (103, 3)
         """
-        INSERT INTO public.project_context_revision_blocks (
-            revision_id, project_id, block_id, ordinal
-        ) VALUES (%s, 'project-1', %s, 0),
-                 (%s, 'project-1', %s, 1)
-        """,
-        (revision_id, survivor_block, revision_id, retired_block),
-    )
-    await client.execute(
-        """
-        INSERT INTO public.project_context_block_supports (
-            block_id, project_id, message_id, session_id, support_kind
-        ) VALUES
-            (%s, 'project-1', 101, 'merge-episode-session', 'user_message'),
-            (%s, 'project-1', 102, 'merge-episode-session', 'user_message'),
-            (%s, 'project-1', 101, 'merge-episode-session', 'user_message'),
-            (%s, 'project-1', 103, 'merge-episode-session', 'user_message')
-        """,
-        (survivor_block, survivor_block, retired_block, retired_block),
-    )
-    await client.execute(
-        """
-        INSERT INTO public.context_block_entities (
-            block_id, project_id, entity_id, mention_text
-        ) VALUES
-            (%s, 'project-1', 2, 'Survivor'),
-            (%s, 'project-1', 3, 'Retired')
-        """,
-        (survivor_block, retired_block),
     )
     observations = await client.fetch_all(
         """
@@ -166,17 +110,21 @@ async def _seed_episode_merge_collision(client):
         (window_id, "c" * 32, window_id, "d" * 32),
     )
     by_source = {row["source_entity_id"]: row["observation_id"] for row in observations}
-    await client.execute(
-        """
-        INSERT INTO public.relationship_observation_blocks (
-            observation_id, project_id, block_id
-        ) VALUES
-            (%s, 'project-1', %s),
-            (%s, 'project-1', %s)
-        """,
-        (by_source[2], survivor_block, by_source[3], retired_block),
-    )
-    return window_id, retired_block
+    await _support(client, by_source[2], 101, 102)
+    await _support(client, by_source[3], *RETIRED_MESSAGES)
+    return window_id
+
+
+RETIRED_MESSAGES = (101, 103)
+
+
+async def _support(client, observation_id, *message_ids):
+    for message_id in message_ids:
+        await client.execute(
+            """INSERT INTO public.relationship_observation_messages
+               (observation_id, project_id, message_id) VALUES (%s, 'project-1', %s)""",
+            (observation_id, message_id),
+        )
 
 
 async def _relationship_links(client):
@@ -292,100 +240,27 @@ async def test_global_merge_preserves_distinct_episode_support_and_rolls_back(
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
-async def test_global_merge_ignores_support_outside_episode_context_revision(
+async def test_merged_references_no_longer_claim_exact_occurrence_provenance(
     real_postgres_client,
 ):
     await _seed_episode_merge_collision(real_postgres_client)
-    stale_block = uuid4()
-    stale_revision = uuid4()
     await real_postgres_client.execute(
-        """
-        INSERT INTO public.messages (
-            user_name, session_id, message_id, project_id, role, content,
-            lifecycle_state, exchange_state, exchange_outcome,
-            exchange_closed_at_ms
-        ) VALUES ('ada', 'merge-episode-session', 104, 'project-1', 'user',
-                  'Old block only.', 'sealed', 'closed', 'user_only', 104);
-        INSERT INTO public.episode_messages (
-            episode_id, project_id, session_id, message_id, message_position
-        ) VALUES ('distinct-episode', 'project-1',
-                  'merge-episode-session', 104, 2);
-        UPDATE public.episodes SET source_message_count = 3
-        WHERE episode_id = 'distinct-episode'
-        """
-    )
-    await real_postgres_client.execute(
-        """INSERT INTO public.project_context_revisions (
-               revision_id, project_id, revision_number, origin,
-               domain_version, content_hash
-           ) VALUES (%s, 'project-1', 1, 'conversation', 1, %s)""",
-        (stale_revision, "c" * 64),
-    )
-    await real_postgres_client.execute(
-        """INSERT INTO public.project_context_blocks (
-               block_id, project_id, section_key, markdown, content_hash,
-               assertion_kind
-           ) VALUES (%s, 'project-1', 'current_state', 'Old revision evidence.',
-                     %s, 'source_grounded')""",
-        (stale_block, "0" * 64),
-    )
-    await real_postgres_client.execute(
-        """INSERT INTO public.project_context_revision_blocks (
-               revision_id, project_id, block_id, ordinal
-           ) VALUES (%s, 'project-1', %s, 0)""",
-        (stale_revision, stale_block),
-    )
-    await real_postgres_client.execute(
-        """INSERT INTO public.project_context_block_supports (
-               block_id, project_id, message_id, session_id, support_kind
-           ) VALUES (%s, 'project-1', 104, 'merge-episode-session',
-                     'user_message')""",
-        (stale_block,),
-    )
-    await real_postgres_client.execute(
-        """INSERT INTO public.context_block_entities (
-               block_id, project_id, entity_id, mention_text,
-               occurrence_provenance_complete
-           ) VALUES (%s, 'project-1', 3, 'Retired', true)""",
-        (stale_block,),
-    )
-    await real_postgres_client.execute(
-        """INSERT INTO public.message_entity_refs
-           (message_id, entity_id, occurrence_provenance_complete)
-           VALUES (104, 3, true)"""
-    )
-    await real_postgres_client.execute(
-        """UPDATE public.episode_entities
-           SET occurrence_provenance_complete = true
-           WHERE episode_id = 'distinct-episode' AND entity_id IN (2, 3)"""
+        """UPDATE public.message_entity_refs SET occurrence_provenance_complete = true;
+           UPDATE public.episode_entities SET occurrence_provenance_complete = true"""
     )
 
     await GlobalEntityMergeWriter(real_postgres_client).merge(
         user_name="ada", survivor_id=2, retired_id=3, merge_id=str(uuid4())
     )
-    assert await real_postgres_client.fetch_one(
-        """SELECT occurrence_provenance_complete FROM public.context_block_entities
-           WHERE block_id = %s AND entity_id = 2""",
-        (stale_block,),
-    ) == {"occurrence_provenance_complete": False}
+
     assert await real_postgres_client.fetch_one(
         """SELECT occurrence_provenance_complete FROM public.message_entity_refs
-           WHERE message_id = 104 AND entity_id = 2"""
+           WHERE message_id = 103 AND entity_id = 2"""
     ) == {"occurrence_provenance_complete": False}
     assert await real_postgres_client.fetch_one(
         """SELECT occurrence_provenance_complete FROM public.episode_entities
            WHERE episode_id = 'distinct-episode' AND entity_id = 2"""
     ) == {"occurrence_provenance_complete": False}
-
-    assert await real_postgres_client.fetch_one(
-        """SELECT source_message_count FROM public.episode_entities
-           WHERE episode_id = 'distinct-episode' AND entity_id = 2"""
-    ) == {"source_message_count": 2}
-    assert {
-        "episode_id": "distinct-episode",
-        "relationship_id": "project-1:2:4:uses",
-        "source_message_count": 2,
-    } in await _relationship_links(real_postgres_client)
 
 
 @pytest.mark.storage
@@ -433,9 +308,7 @@ async def test_global_merge_restores_a_collapsed_self_relationship_link(
 async def test_partial_rollback_keeps_changed_and_new_episode_links(
     real_postgres_client,
 ):
-    window_id, retired_block = await _seed_episode_merge_collision(
-        real_postgres_client
-    )
+    window_id = await _seed_episode_merge_collision(real_postgres_client)
     await real_postgres_client.execute(
         """
         INSERT INTO public.relationships (
@@ -459,12 +332,7 @@ async def test_partial_rollback_keeps_changed_and_new_episode_links(
         """,
         (window_id, "e" * 32),
     )
-    await real_postgres_client.execute(
-        """INSERT INTO public.relationship_observation_blocks
-           (observation_id, project_id, block_id)
-           VALUES (%s, 'project-1', %s)""",
-        (observation["observation_id"], retired_block),
-    )
+    await _support(real_postgres_client, observation["observation_id"], *RETIRED_MESSAGES)
     writer = GlobalEntityMergeWriter(real_postgres_client)
     merge_id = str(uuid4())
     await writer.merge(user_name="ada", survivor_id=2, retired_id=3, merge_id=merge_id)
@@ -492,12 +360,7 @@ async def test_partial_rollback_keeps_changed_and_new_episode_links(
            RETURNING observation_id""",
         (window_id, "9" * 32),
     )
-    await real_postgres_client.execute(
-        """INSERT INTO public.relationship_observation_blocks
-           (observation_id, project_id, block_id)
-           VALUES (%s, 'project-1', %s)""",
-        (new_observation["observation_id"], retired_block),
-    )
+    await _support(real_postgres_client, new_observation["observation_id"], *RETIRED_MESSAGES)
     untracked_plan = await writer.plan_rollback(
         merge_id=merge_id, user_name="ada"
     )
@@ -552,9 +415,7 @@ async def test_partial_rollback_keeps_changed_and_new_episode_links(
 async def test_global_merge_restores_a_new_relationship_and_its_episode_link(
     real_postgres_client,
 ):
-    window_id, retired_block = await _seed_episode_merge_collision(
-        real_postgres_client
-    )
+    window_id = await _seed_episode_merge_collision(real_postgres_client)
     await real_postgres_client.execute(
         """
         INSERT INTO public.relationships (
@@ -578,12 +439,7 @@ async def test_global_merge_restores_a_new_relationship_and_its_episode_link(
         """,
         (window_id, "e" * 32),
     )
-    await real_postgres_client.execute(
-        """INSERT INTO public.relationship_observation_blocks
-           (observation_id, project_id, block_id)
-           VALUES (%s, 'project-1', %s)""",
-        (observation["observation_id"], retired_block),
-    )
+    await _support(real_postgres_client, observation["observation_id"], *RETIRED_MESSAGES)
     before_links = await _relationship_links(real_postgres_client)
     writer = GlobalEntityMergeWriter(real_postgres_client)
     merge_id = str(uuid4())

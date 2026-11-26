@@ -83,33 +83,5 @@ def build_identity():
     return cases
 
 
-def build_extraction():
-    cases = []
-    for index, (alias, suffix, kind) in enumerate(NAMES):
-        name = f"{alias} {suffix}"
-        action = {
-            "Person": "is the engineer responsible for the review",
-            "Company": "is the company supplying the service",
-            "Project": "is the project delivering the migration",
-            "Database": "is the database storing the application records",
-        }[kind]
-        for known in (False, True):
-            cases.append({
-                "id": f"positive_{index}_{int(known)}", "family": f"{'known' if known else 'unknown'}_{kind}",
-                "candidate": name, "context": f"{name} {action}.",
-                "proposed_type": kind if known else None, "expected_type": kind,
-                "reason": "The sentence explicitly establishes the configured entity type.",
-            })
-        cases.append({
-            "id": f"ambiguous_{index}", "family": "ambiguous_type",
-            "candidate": alias, "context": f"{alias} appears in the report.",
-            "proposed_type": None, "expected_type": None,
-            "expected_choice": "insufficient_evidence",
-            "reason": "The generic occurrence does not establish any one configured type.",
-        })
-    return cases
-
-
 if __name__ == "__main__":
     write_packet("jev_identity_readiness_cases.json", build_identity())
-    write_packet("jev_extraction_readiness_cases.json", build_extraction())

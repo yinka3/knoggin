@@ -379,10 +379,11 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "search_episodes",
             "description": (
-                "Retrieve contextual episodic memory about a specific entity, including "
-                "compact summaries and provenance references. Use read_episode_messages when the "
-                "original source messages are needed. Results are contextual memory, not "
-                "atomic claims."
+                "Search episodic memory by topic, optionally narrowed to one entity. Returns "
+                "compact summaries with their dates, entities, relationships and events; "
+                "the words of those events are searched too. Summaries "
+                "can omit details: use read_episode_messages to read an Episode's original "
+                "source messages. Results are contextual memory, not atomic claims."
             ),
             "parameters": {
                 "type": "object",
@@ -396,6 +397,45 @@ TOOL_SCHEMAS = [
                         "minLength": 1,
                         "description": "A natural language hint describing what you're looking for.",
                     },
+                    "alternate_queries": {
+                        "type": "array",
+                        "items": {"type": "string", "minLength": 1},
+                        "maxItems": 3,
+                        "description": (
+                            "Optional rewordings searched together with query, with one merged "
+                            "result. Use other words the original chat may have used: synonyms, "
+                            "specific names or things, or a broader topic. For example, for "
+                            "'what did I buy for the kitchen' also try 'new kitchen gadget' and "
+                            "'air fryer blender purchase'. These only help find memories; they "
+                            "are not evidence."
+                        ),
+                    },
+                    "after": {
+                        "type": "string",
+                        "description": (
+                            "Optional earliest date, such as 2023-05-20. Use with before only "
+                            "when the question names a time. Work relative times out from the "
+                            "current time, and allow a day either side when they are vague."
+                        ),
+                    },
+                    "before": {
+                        "type": "string",
+                        "description": "Optional latest date, inclusive, such as 2023-05-27.",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "default": 0,
+                        "description": (
+                            "Matches to skip, for the next page of a count or complete list; "
+                            "use next_offset from the last result with the same query."
+                        ),
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Optional smaller page; the page size setting is the most.",
+                    },
                 },
                 "required": ["query"],
             },
@@ -408,7 +448,8 @@ TOOL_SCHEMAS = [
             "name": "read_episode_messages",
             "description": (
                 "Expand a retrieved episode into all of its original source messages. "
-                "Use this to verify, quote, or reconcile an episode's details."
+                "Use this to verify, quote, or reconcile an episode's details, and "
+                "before saying a summary cannot confirm something."
             ),
             "parameters": {
                 "type": "object",
@@ -424,6 +465,32 @@ TOOL_SCHEMAS = [
                 "required": ["episode_id"],
             },
             "tags": ["graph:read", "core"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "grep_project_files",
+            "description": (
+                "Find lines containing some exact text in the project's files, read "
+                "straight from disk. Use for code, config and data in workspaces, which "
+                "are not in document search, or to find every use of a name. Returns "
+                "paths with line numbers; read more with read_project_file."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Exact text to find (not a regex)."},
+                    "path_prefix": {
+                        "type": "string",
+                        "description": "Optional folder to search in, such as a workspace name.",
+                    },
+                    "case_sensitive": {"type": "boolean", "default": False},
+                    "max_results": {"type": "integer", "minimum": 1, "maximum": 100, "default": 30},
+                },
+                "required": ["text"],
+            },
+            "tags": ["core"],
         },
     },
     {
@@ -453,11 +520,57 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "list_events",
+            "description": (
+                "List things the user reported doing, by when they happened: trips, "
+                "purchases, things received, events attended, things started or "
+                "finished, moves, meetings. Each line is one mention with a date or "
+                "date range and its Episode. Use for 'what did I do last month', "
+                "'which came first', and 'how many X in a time span'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "after": {
+                        "type": "string",
+                        "description": "Optional earliest date, such as 2023-03-01.",
+                    },
+                    "before": {
+                        "type": "string",
+                        "description": "Optional latest date, inclusive, such as 2023-03-31.",
+                    },
+                    "kind": {
+                        "type": "string",
+                        "enum": [
+                            "trip", "purchase", "received", "attended", "started",
+                            "finished", "moved", "met", "other",
+                        ],
+                        "description": "Optional kind; also returns events labeled other. Leave out to see every kind.",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Optional words to match in the event description; the best matches come first.",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "default": 0,
+                        "description": "Events to skip; use next_offset from the last result.",
+                    },
+                },
+                "required": [],
+            },
+            "tags": ["graph:read", "core"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "read_recent_episodes",
             "description": (
-                "Return the most recent episode summaries by source chronology from "
-                "readable project memory without searching or requiring an episode ID. Use for "
-                "requests such as 'what was the last episode?' or 'show the last few memories'."
+                "Browse episodes newest first without searching or requiring an episode ID, "
+                "optionally within a date range. Use for requests such as 'what was the last "
+                "episode?', 'show the last few memories' or 'what happened on May 20?'."
             ),
             "parameters": {
                 "type": "object",
@@ -470,7 +583,21 @@ TOOL_SCHEMAS = [
                             "Optional number of recent episodes to return; defaults to 2 "
                             "and is bounded by the configured episode retrieval limit."
                         ),
-                    }
+                    },
+                    "after": {
+                        "type": "string",
+                        "description": "Optional earliest date, such as 2023-05-20.",
+                    },
+                    "before": {
+                        "type": "string",
+                        "description": "Optional latest date, inclusive, such as 2023-05-27.",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "default": 0,
+                        "description": "Episodes to skip; use next_offset from the last result.",
+                    },
                 },
                 "required": [],
             },
@@ -840,7 +967,9 @@ TOOL_SCHEMAS = [
             "description": (
                 "Read a bounded range of canonical text from one public web page "
                 "or one page of an external PDF. "
-                "Use a URL supplied by the user or returned by a web search. "
+                "Only URLs from the user's messages, a web search or a page read in "
+                "this run, or the project's saved links can be read, exactly as given; "
+                "for any other link, ask the user to send it. "
                 "For a large page, provide query to locate one relevant bounded "
                 "section instead of choosing start_line; for a PDF, provide "
                 "page_number instead. "
@@ -898,12 +1027,13 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "start_research_job",
+            "name": "start_background_task",
             "description": (
-                "Start research that runs in the background in its own chat, "
-                "so the user can keep talking. Its report arrives in this chat "
-                "when it finishes. Use it for research needing many searches or "
-                "page reads, or for a long list of links to read."
+                "Start a task that runs in the background in its own chat, so the "
+                "user can keep talking. Its report arrives in this chat when it "
+                "finishes. Use mode normal for ordinary work (it has this chat's "
+                "tools), research or deep_research for research needing many "
+                "searches or page reads, or a long list of links."
             ),
             "parameters": {
                 "type": "object",
@@ -913,22 +1043,25 @@ TOOL_SCHEMAS = [
                         "minLength": 1,
                         "maxLength": 4000,
                         "description": (
-                            "The complete research request, with any context "
-                            "from this chat it needs; the job cannot see this "
-                            "chat. If the user wants the findings saved, give "
-                            "the project file path to write them to."
+                            "The complete request, with any context from this "
+                            "chat it needs; the task cannot see this chat. If "
+                            "the user wants results saved, give the project "
+                            "file path to write them to."
                         ),
                     },
                     "links": {
                         "type": "array",
                         "items": {"type": "string", "minLength": 1},
-                        "description": "Links the job must read, if the user gave any.",
+                        "description": "Links the task must read, if the user gave any.",
                     },
-                    "depth": {
+                    "mode": {
                         "type": "string",
-                        "enum": ["research", "deep_research"],
-                        "default": "research",
-                        "description": "deep_research reads more sources and takes longer.",
+                        "enum": ["normal", "research", "deep_research"],
+                        "default": "normal",
+                        "description": (
+                            "normal for ordinary work; research and deep_research "
+                            "plan the work and read more sources, deep_research most."
+                        ),
                     },
                 },
                 "required": ["question"],
@@ -940,12 +1073,12 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "list_research_jobs",
+            "name": "list_background_tasks",
             "description": (
-                "List the background research jobs started from this chat and "
-                "their states. An interrupted job was cut off by a restart; "
-                "running it again starts over and costs a full job, so ask the "
-                "user before starting it again."
+                "List the background tasks started from this chat and their "
+                "states. An interrupted task was cut off by a restart; running it "
+                "again starts over and costs a full task, so ask the user before "
+                "starting it again."
             ),
             "parameters": {
                 "type": "object",
@@ -958,8 +1091,8 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "cancel_research_job",
-            "description": "Stop one background research job started from this chat.",
+            "name": "cancel_background_task",
+            "description": "Stop one background task started from this chat.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1394,6 +1527,76 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "list_command_workspaces",
+            "description": "List the current project's workspaces and show which are read-only for commands.",
+            "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+            "tags": ["project", "core", "workspace:command"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_approved_command",
+            "description": (
+                "Reach the internet from the sandbox, after the user approves the exact "
+                "command. Normal workspace commands have no network. These run in a "
+                "container that cannot see any workspace and write under /home/sandbox, "
+                "which later workspace commands can use: pip_install {package: "
+                "name==version} (importable afterwards), download_file {url, filename} "
+                "(to /home/sandbox/downloads), git_clone {url, name} (to "
+                "/home/sandbox/repos; private GitHub repos if the project allows the "
+                "GitHub login), hf_download {repo: owner/model or datasets/owner/name, "
+                "file} (to /home/sandbox/downloads/huggingface), kaggle_download "
+                "{dataset: owner/name} (unpacked to /home/sandbox/datasets/kaggle; needs "
+                "the Kaggle login), npm_install {package: name@version}."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "enum": [
+                        "pip_install", "download_file", "git_clone", "hf_download",
+                        "kaggle_download", "npm_install",
+                    ]},
+                    "args": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string", "maxLength": 2000},
+                        "description": "The command's arguments by name, e.g. {\"package\": \"colorama==0.4.6\"}.",
+                    },
+                    "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 900},
+                },
+                "required": ["name"],
+                "additionalProperties": False,
+            },
+            "tags": ["project", "core", "workspace:approved"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_workspace_command",
+            "description": (
+                "Run a non-interactive shell command in one configured project workspace. "
+                "The container has no network by default. Output is bounded and the "
+                "command has a hard time limit. Choose the workspace explicitly."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "workspace": {"type": "string", "minLength": 1, "maxLength": 100},
+                    "command": {"type": "string", "minLength": 1, "maxLength": 20000},
+                    "cwd": {"type": "string", "minLength": 1, "maxLength": 512,
+                            "description": "Existing directory relative to the workspace root (default .)."},
+                    "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 900},
+                },
+                "required": ["workspace", "command"],
+                "additionalProperties": False,
+            },
+            "tags": ["project", "core", "workspace:command"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "create_project_file",
             "description": (
                 "Create a non-empty bounded artifact in the current project's "
@@ -1570,12 +1773,18 @@ _TOOL_CAPABILITIES = {
     "propose_entity_merge": REVERSIBLE_WRITE_CAPABILITY,
     "report_relationship_conflict": REVERSIBLE_WRITE_CAPABILITY,
     "create_project_file": REVERSIBLE_WRITE_CAPABILITY,
+    "run_workspace_command": REVERSIBLE_WRITE_CAPABILITY,
+    "run_approved_command": REVERSIBLE_WRITE_CAPABILITY,
     "update_project_file": REVERSIBLE_WRITE_CAPABILITY,
     "append_project_file": REVERSIBLE_WRITE_CAPABILITY,
     "move_project_file": REVERSIBLE_WRITE_CAPABILITY,
     "delete_project_file": REVERSIBLE_WRITE_CAPABILITY,
     "create_project_folder": REVERSIBLE_WRITE_CAPABILITY,
     "save_findings": REVERSIBLE_WRITE_CAPABILITY,
+    # They start or stop work, so they are audited like other writes.
+    # Research runs and background jobs already exclude them by name.
+    "start_background_task": REVERSIBLE_WRITE_CAPABILITY,
+    "cancel_background_task": REVERSIBLE_WRITE_CAPABILITY,
 }
 
 for _schema in TOOL_SCHEMAS:
@@ -1674,6 +1883,7 @@ def _validate_schema_value(value, schema: dict, path: str) -> list[str]:
         unknown = set(value) - set(properties)
         if unknown and schema.get("additionalProperties") is False:
             errors.append(f"{path} contains {len(unknown)} unknown field(s)")
+        extra_schema = schema.get("additionalProperties")
         for key, item in value.items():
             if key in properties:
                 errors.extend(
@@ -1683,5 +1893,7 @@ def _validate_schema_value(value, schema: dict, path: str) -> list[str]:
                         f"{path}.{key}",
                     )
                 )
+            elif isinstance(extra_schema, dict):
+                errors.extend(_validate_schema_value(item, extra_schema, f"{path}.{key}"))
 
     return errors

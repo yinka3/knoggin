@@ -48,9 +48,7 @@ Context is a readable summary of a project's current state, active work, decisio
 
 Knoggin saves each Context revision in Postgres and renders the latest one as `CONTEXT.md`. A person can edit that file; Knoggin reconciles the edit into a new revision. The agent receives the committed Context in its project prompt as current working memory. It can use Episodes, messages, and documents to check details when needed.
 
-When Context changes, the knowledge stage examines the affected blocks for entity mentions and relationships. It sends their text to GLiNER to find entity spans, alongside known-alias matching and other configured extraction steps. GLiNER's entity labels and descriptions come from the project's domain configuration; Context supplies the text to examine rather than model instructions.
-
-User assertions, source-grounded information, and human edits can contribute to the project's entity contexts and graph observations; agent-derived notes are excluded from that extraction. Links to the blocks and their available evidence let Knoggin update or retire derived observations when a block is changed or removed.
+The knowledge stage builds the entity graph from each Episode's messages, one Episode per model call, with calls run in parallel. Names already in the graph are matched directly; the extraction model finds the rest and then the relationships between them, using the entity types and relationship vocabulary from the project's domain configuration. Every entity and relationship cites the messages that state it, so it disappears with those messages. A later message that changes a fact adds a newer observation; the older one stays as history. Notes you write in `CONTEXT.md` stay in Context for every agent but do not feed the graph.
 
 ### Ingestion
 
@@ -99,27 +97,51 @@ Model files download when first needed. After that, Knoggin loads them from the 
 uv run --package server python server/scripts/prefetch_models.py
 ```
 
-Each default model is pinned to the exact version Knoggin was tested with (`PINNED_REVISIONS` in `server/src/common/model_cache.py`), so a download never picks up an unreviewed change. To use a different version, set `EMBEDDING_MODEL_REVISION`, `RERANKER_MODEL_REVISION`, `GLINER_EN_MODEL_REVISION`, or `GLINER_MULTI_MODEL_REVISION` in `.env`; a version that is not cached downloads on first use. Models never run code from their repositories.
+Each default model is pinned to the exact version Knoggin was tested with (`PINNED_REVISIONS` in `server/src/common/model_cache.py`), so a download never picks up an unreviewed change. To use a different version, set `EMBEDDING_MODEL_REVISION` or `RERANKER_MODEL_REVISION` in `.env`; a version that is not cached downloads on first use. Models never run code from their repositories. Docling's PDF models are checked file by file against `server/src/common/docling_models.json`.
 
 Stop Postgres with `docker compose down`. This keeps the database volume; `docker compose down -v` deletes it.
 
 ### Running everything in Docker
 
-`docker compose up -d` also builds and starts the API on `http://127.0.0.1:8000`, after Postgres is healthy. The image is a CPU build with the default embedding, reranker, GLiNER (English and multilingual), and Docling models already inside, so the first start downloads nothing.
+`docker compose up -d` also builds and starts the API on `http://127.0.0.1:8000`, after Postgres is healthy. The image is a CPU build with the default embedding, reranker, and Docling models already inside, so the first start downloads nothing.
 
 - The API reads `.env` for `RUNTIME_USER_NAME` and provider keys. Compose points it at the `postgres` service and mounts the host folder named by `SETTINGS_DIR` (default `./config`), so `knoggin.yml` and project files are shared with a local run.
 - The container runs as UID 1000. If your user has a different UID, set `UID` in `.env` before building.
 - To use a model server on your machine, such as Ollama, set its URL to `http://host.docker.internal:11434`.
 - Start only the database with `docker compose up -d postgres`.
 
+#### Workspace commands in Compose
+
+For a single-host Linux Compose setup, the API needs access to a container runtime socket before it can run agent commands in project workspaces. Opt in with `docker-compose.sandbox.yml`; the regular Compose setup does not mount the socket. Other deployment layouts need their own runtime and project-storage wiring.
+
+Set these values in `.env` before starting the sandbox override:
+
+```dotenv
+CONTAINER_RUNTIME_SOCKET=/var/run/docker.sock
+CONTAINER_RUNTIME_GID=999
+KNOGGIN_HOST_LIBRARY_ROOT=/absolute/path/to/config/data/projects
+```
+
+Use the actual socket path and its numeric group ID (`stat -c %g /var/run/docker.sock` on the Linux host). Set `KNOGGIN_HOST_LIBRARY_ROOT` to the **host** path of `developer_settings.documents.project_library_root` under your `SETTINGS_DIR`; the default project library is `data/projects`. The path must be absolute and must point to the same files the API sees through its settings mount. If `container_runtime.socket` is explicitly set in `knoggin.yml`, use `/var/run/docker.sock`, the socket's path inside the API container. For a rootless runtime, set `UID` to the host socket owner's UID as well.
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.sandbox.yml up -d
+```
+
+The socket gives the API process control over the host container runtime. Only use the override where that access is intended. Project command containers still start with networking disabled. The override supports Linux Unix sockets; other host runtimes need a different connection setup.
+
+The agent can ask to install an exact-version Python package such as `duckdb==2.0.0`. Approval creates a temporary networked container that reaches PyPI and mounts only the project's sandbox home and temporary folders; it cannot read project workspaces. The package is saved under `/home/sandbox/python` in the project directory and stays available to later offline project commands after a container rebuild. Denying or ignoring the question leaves networking off. This first install tool does not install operating-system packages or arbitrary CLI programs.
+
+Each workspace command stops its project container when it finishes, so background work cannot survive a call. The next command restarts it with the same workspace and project home; `/tmp` is cleared after each command. The container filesystem is read-only, with writable workspace, home, and temporary folders under the project directory. Commands also refuse to start, or stop while running, when the filesystem holding the project library has less than 2 GiB free. Set `developer_settings.workspace_commands.min_free_disk_mb` and `disk_check_interval_seconds` in `knoggin.yml` to tune that guard; the defaults are 2048 MiB and 1 second. This is a safety threshold, not a disk quota: a fast write can cross it between checks.
+
 ## Where your data goes
 
-Knoggin stores your memory locally: the database, your project files, search indexes, embeddings, reranking, entity extraction (GLiNER), and document parsing all run on your machine.
+Knoggin stores your memory locally: the database, your project files, search indexes, embeddings, reranking, and document parsing all run on your machine.
 
 The language model is the exception. By default Knoggin uses OpenRouter, so this text is sent to the model provider you configure:
 
 - each agent step: the system prompt, Project Context, retrieved results, and recent conversation;
-- memory building: each conversation window, for Episodes, Context updates, and relationship extraction;
+- memory building: each conversation window, for Episodes, Context updates, and entity and relationship extraction;
 - web search queries, when web tools are enabled;
 - JEV requests, when JEV is enabled (it is off by default).
 

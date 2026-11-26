@@ -59,6 +59,7 @@ from core.agent.system_prompt import (
     get_agent_prompt_parts,
     get_fallback_summary_prompt,
 )
+from core.agent.tool_events import RESULTS, stream_tool_calls
 from core.agent.tool_references import localize_agent_tool_result
 from core.agent.tool_runtime import execute_tool, summarize_result
 from core.agent.tools.findings import findings_table
@@ -108,6 +109,16 @@ def _notebook_rejection_feedback(
             "message": message,
         },
     }
+
+
+def _add_episode_feedback(
+    ctx: AgentRun, tool_name: str, result: Dict, model_result: Dict
+) -> None:
+    """Tell the model how many returned Episodes are new to this run."""
+
+    new = ctx.note_episode_results(tool_name, result)
+    if new is not None and isinstance(model_result, dict):
+        model_result["episode_feedback"] = {"new": new}
 
 
 def _result_has_notebook_rejection(result: Dict) -> bool:
@@ -291,8 +302,11 @@ class AgentExecutor:
             await self._emit_llm_call(current_model, current_reasoning)
 
             if self._take_steer is not None:
-                steer = await self._take_steer()
-                if steer is not None:
+                # A bounded queue can accumulate while the preceding model call runs.
+                for _ in range(5):
+                    steer = await self._take_steer()
+                    if steer is None:
+                        break
                     self.ctx.user_query += "\n\n**User instruction during this run:** " + steer["instruction"]
                     yield {"event": "steer_applied", "data": {"steer_id": steer["steer_id"]}}
 
@@ -431,7 +445,10 @@ class AgentExecutor:
                         if isinstance(raw_artifact, dict) and "research_coverage" in raw_artifact:
                             # Measured runs nest coverage inside the artifact.
                             raw_artifact = dict(raw_artifact)
-                            coverage = coverage or raw_artifact.pop("research_coverage")
+                            # Always remove it: the artifact schema forbids the
+                            # key, even when top-level coverage was also given.
+                            nested_coverage = raw_artifact.pop("research_coverage")
+                            coverage = coverage or nested_coverage
                         if not coverage and self.ctx.findings:
                             coverage = self.ctx.coverage_from_findings()
                         coverage_error = self.ctx.validate_research_coverage(coverage)
@@ -704,32 +721,70 @@ class AgentExecutor:
         self.ctx.clear_last_error()
         saw_tool_calls = False
 
+        llm_events = self.llm.stream_with_tools(
+            system=system_prompt,
+            user=user_message,
+            tools=tool_schemas,
+            model=model or self.llm.agent_model,
+            temperature=self.ctx.temperature,
+            reasoning=reasoning,
+            aac_budget=self._aac_budget,
+            max_completion_tokens=self.ctx.memory_budget.response_reserve_tokens,
+        )
         try:
-            async for event in self.llm.stream_with_tools(
-                system=system_prompt,
-                user=user_message,
-                tools=tool_schemas,
-                model=model or self.llm.agent_model,
-                temperature=self.ctx.temperature,
-                reasoning=reasoning,
-                aac_budget=self._aac_budget,
-                max_completion_tokens=self.ctx.memory_budget.response_reserve_tokens,
-            ):
+            async for event in llm_events:
                 if event["event"] == "tool_calls":
                     saw_tool_calls = True
                     yield event
                 elif event["event"] == "step_completed" and not saw_tool_calls:
-                    yield {
-                        "event": "step_error",
-                        "data": {
-                            "kind": "formatting",
-                            "message": (
-                                "You must either call an investigative tool or call "
-                                "submit_answer. Do not output raw text."
-                            ),
-                            "usage": event["data"]["usage"],
-                        },
-                    }
+                    text = (event["data"].get("content") or "").strip()
+                    truncated = event["data"].get("finish_reason") == "length"
+                    # A reply cut off at the output cap is not a final answer.
+                    if not truncated and text and any(
+                        schema["function"]["name"] == "submit_answer"
+                        for schema in tool_schemas
+                    ):
+                        # A plain reply with no tool call is the final answer.
+                        yield {
+                            "event": "tool_calls",
+                            "data": {
+                                "content": "",
+                                "calls": [
+                                    {
+                                        "id": str(uuid.uuid4()),
+                                        "name": "submit_answer",
+                                        "arguments": json.dumps({"content": text}),
+                                    }
+                                ],
+                            },
+                        }
+                        yield event
+                    elif truncated:
+                        # The model spent the whole reply cap, usually on thinking.
+                        yield {
+                            "event": "step_error",
+                            "data": {
+                                "kind": "truncated",
+                                "message": (
+                                    "Your reply hit the output limit before it called a "
+                                    "tool or gave an answer. Think briefly, then call "
+                                    "a tool or answer."
+                                ),
+                                "usage": event["data"]["usage"],
+                            },
+                        }
+                    else:
+                        yield {
+                            "event": "step_error",
+                            "data": {
+                                "kind": "formatting",
+                                "message": (
+                                    "You must either call an investigative tool or "
+                                    "reply with your answer."
+                                ),
+                                "usage": event["data"]["usage"],
+                            },
+                        }
                 else:
                     yield event
         except LLMBudgetExceededError:
@@ -752,6 +807,12 @@ class AgentExecutor:
                     "message": "LLM provider unavailable",
                 },
             }
+        finally:
+            # A stopped run closes this step mid-stream; close the provider
+            # stream with it instead of leaving it to the generator finalizer.
+            close = getattr(llm_events, "aclose", None)
+            if close is not None:
+                await close()
 
     def _bounded_prompt(
         self, *, date, phase, gap_review, documents_context,
@@ -1107,12 +1168,17 @@ class AgentExecutor:
 
                 self.ctx.record_tool_call(call.name, call.args)
 
-                async with asyncio.timeout(self.ctx.limits.tool_timeout):
-                    result = await execute_tool(
-                        self.tools,
-                        call.name,
-                        call.args,
-                    )
+                async def invoke(call=call):
+                    async with asyncio.timeout(self._timeout_for_call(call)):
+                        return await execute_tool(self.tools, call.name, call.args)
+
+                async for item in stream_tool_calls([(call.call_id, call.name, invoke)]):
+                    if item["event"] != RESULTS:
+                        yield item
+                        continue
+                    result = item["data"][0]
+                if isinstance(result, Exception):
+                    raise result
 
                 # Keep the untouched backend result in the canonical notebook.
                 # Localization is a model-facing projection and must happen only
@@ -1137,6 +1203,7 @@ class AgentExecutor:
                 )
                 summary, _ = summarize_result(call.name, result)
                 model_result = localize_agent_tool_result(self.ctx, call.name, result)
+                _add_episode_feedback(self.ctx, call.name, result, model_result)
                 self.ctx.record_tool_success()
                 results_out.append({"tool": call.name, "result": model_result})
 
@@ -1200,23 +1267,20 @@ class AgentExecutor:
                 },
             }
 
-        async def invoke(call: _ToolCall):
-            try:
-                async with asyncio.timeout(self.ctx.limits.tool_timeout):
+        def invoker(call: _ToolCall):
+            async def invoke():
+                async with asyncio.timeout(self._timeout_for_call(call)):
                     return await execute_tool(self.tools, call.name, call.args)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                return exc
+            return invoke
 
-        tasks = [asyncio.create_task(invoke(call)) for call in tool_calls]
-        try:
-            outcomes = await asyncio.gather(*tasks)
-        except BaseException:
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            raise
+        outcomes: list = []
+        async for item in stream_tool_calls(
+            [(call.call_id, call.name, invoker(call)) for call in tool_calls]
+        ):
+            if item["event"] == RESULTS:
+                outcomes = item["data"]
+            else:
+                yield item
 
         for call, outcome in zip(tool_calls, outcomes, strict=True):
             if isinstance(outcome, Exception):
@@ -1225,37 +1289,54 @@ class AgentExecutor:
                 yield {"event": "tool_error", "data": failure}
                 continue
 
-            admission = self.ctx.accumulate_tool_result(call.name, outcome)
-            if not admission.accepted:
-                feedback, model_result = _notebook_rejection_feedback(admission)
-                self.ctx.note_nonfatal_error(feedback)
+            # Same failure handling as the sequential path: one result that
+            # cannot be admitted must not abort the whole run.
+            try:
+                admission = self.ctx.accumulate_tool_result(call.name, outcome)
+                if not admission.accepted:
+                    feedback, model_result = _notebook_rejection_feedback(admission)
+                    self.ctx.note_nonfatal_error(feedback)
+                    results_out.append({"tool": call.name, "result": model_result})
+                    yield {
+                        "event": "tool_end",
+                        "data": {
+                            "tool": call.name,
+                            "result": feedback,
+                            "call_id": call.call_id,
+                        },
+                    }
+                    continue
+                self.ctx.record_sources(
+                    capture_tool_source_candidates(self.ctx, call, outcome)
+                )
+                summary, _ = summarize_result(call.name, outcome)
+                model_result = localize_agent_tool_result(
+                    self.ctx, call.name, outcome
+                )
+                _add_episode_feedback(self.ctx, call.name, outcome, model_result)
+                self.ctx.record_tool_success()
                 results_out.append({"tool": call.name, "result": model_result})
                 yield {
                     "event": "tool_end",
                     "data": {
                         "tool": call.name,
-                        "result": feedback,
+                        "result": summary,
                         "call_id": call.call_id,
                     },
                 }
-                continue
-            self.ctx.record_sources(
-                capture_tool_source_candidates(self.ctx, call, outcome)
-            )
-            summary, _ = summarize_result(call.name, outcome)
-            model_result = localize_agent_tool_result(
-                self.ctx, call.name, outcome
-            )
-            self.ctx.record_tool_success()
-            results_out.append({"tool": call.name, "result": model_result})
-            yield {
-                "event": "tool_end",
-                "data": {
-                    "tool": call.name,
-                    "result": summary,
-                    "call_id": call.call_id,
-                },
-            }
+            except Exception as exc:
+                failure = await self._normalize_tool_failure(call, exc)
+                results_out.append({"tool": call.name, "error": failure["error"]})
+                yield {"event": "tool_error", "data": failure}
+
+    def _timeout_for_call(self, call: _ToolCall) -> float:
+        if call.name not in {"run_workspace_command", "run_approved_command"}:
+            return self.ctx.limits.tool_timeout
+        seconds = call.args.get("timeout_seconds", 300)
+        if not isinstance(seconds, int) or isinstance(seconds, bool) or not 1 <= seconds <= 900:
+            return self.ctx.limits.tool_timeout
+        approval_seconds = 120 if call.name == "run_approved_command" else 0
+        return max(self.ctx.limits.tool_timeout, approval_seconds + seconds + 15)
 
     async def _normalize_tool_failure(
         self,
@@ -1269,7 +1350,7 @@ class AgentExecutor:
         if isinstance(failure, TimeoutError):
             message = (
                 "Tool execution timed out after "
-                f"{self.ctx.limits.tool_timeout:g} seconds"
+                f"{self._timeout_for_call(call):g} seconds"
             )
             retryable = True
             logger.warning("Tool {}: {}", call.name, message)
@@ -1306,6 +1387,11 @@ class AgentExecutor:
                 failure,
             )
             self.ctx.record_error(message)
+
+        if retryable:
+            # Otherwise the identical retry the error invites is skipped as a
+            # duplicate call.
+            self.ctx.forget_tool_call(call.name, call.args)
 
         return {
             "tool": call.name,

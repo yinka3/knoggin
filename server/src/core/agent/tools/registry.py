@@ -1,6 +1,6 @@
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Dict, Iterable, Optional
+from typing import Dict, Iterable, List, Optional
 
 from common.conf.domain_config import CompiledDomain
 from common.exceptions import ToolExecutionError
@@ -9,9 +9,10 @@ from common.schema.agent.tool_contracts import (
     TOOL_SCHEMAS,
     get_schema_capability,
 )
+from core.agent.tools.commands import WorkspaceCommandTools
 from core.agent.tools.findings import ResearchFindingTools
 from core.agent.tools.health import HealthTools
-from core.agent.tools.jobs import ResearchJobTools
+from core.agent.tools.jobs import BackgroundTaskTools
 from core.agent.tools.maintenance import MaintenanceTools
 from core.agent.tools.memory import MemoryTools
 from core.agent.tools.search import SearchTools
@@ -59,16 +60,36 @@ _PREVIOUS_NOTEBOOK_PAGE_RUNTIME_INSTRUCTION = (
 
 _EPISODE_CHECK_RUNTIME_INSTRUCTION = (
     "[SYSTEM NOTICE: Use search_episodes for remembered history, decisions, or "
-    "developments. It returns compact, evidence-backed summaries; inspect the "
-    "returned provenance when exact or sensitive detail matters.]"
+    "developments. It returns compact, evidence-backed summaries a page at a time, "
+    "each with its dated events; it also matches the words of those events, so a "
+    "passing mention can surface an Episode about another topic. For a count or "
+    "complete list, pass next_offset as offset to see more. Read an "
+    "Episode's source messages with read_episode_messages when exact or "
+    "sensitive detail matters. Memories use the words of the original chat, which "
+    "may differ from the question; pass rewordings as alternate_queries in the "
+    "same call. If a search misses, change the angle instead of adding synonyms: "
+    "search the action (bought, visited, started), the person, the date range, or "
+    "a broader topic, and do not repeat a search that returned the same evidence. "
+    "For a named person, place, or thing, use search_knowledge_entities, then "
+    "search_episodes with its entity_id.]"
 )
 _READ_EPISODE_RUNTIME_INSTRUCTION = (
     "[SYSTEM NOTICE: Use read_episode_messages with an episode handle returned in this "
-    "run when exact wording or complete supporting detail matters.]"
+    "run when exact wording or complete supporting detail matters, or when a "
+    "summary leaves the answer uncertain, before saying you cannot confirm it.]"
 )
 _RECENT_EPISODES_RUNTIME_INSTRUCTION = (
     "[SYSTEM NOTICE: Use read_recent_episodes for the latest one or few memories "
     "when the user gives no topic or episode handle.]"
+)
+_LIST_EVENTS_RUNTIME_INSTRUCTION = (
+    "[SYSTEM NOTICE: list_events lists things the user reported doing (trips, "
+    "purchases, events attended, things started or finished) by when they "
+    "happened, one short line each; with query, the best-matching lines come "
+    "first. Use it to order events, to find what happened "
+    "in a time span, and to count. Each line is one mention, so the same event "
+    "mentioned twice appears twice: merge duplicates before counting. A kind "
+    "filter also returns events labeled other; decide whether each one fits. Read the source Episode when wording or details matter.]"
 )
 _ENTITY_RUNTIME_INSTRUCTION = (
     "[SYSTEM NOTICE: Use search_knowledge_entities to discover stable entity IDs and scoped "
@@ -121,7 +142,7 @@ _SAVE_FINDINGS_RUNTIME_INSTRUCTION = (
     "submit_answer.]"
 )
 _RESEARCH_JOB_RUNTIME_INSTRUCTION = (
-    "[SYSTEM NOTICE: start_research_job runs research in the background. Use it "
+    "[SYSTEM NOTICE: start_background_task runs research in the background. Use it "
     "when the user asks for research that needs many searches or page reads, or "
     "gives a long list of links, and not for questions a few steps can answer. "
     "After starting it, tell the user it is running and that the report will "
@@ -263,7 +284,13 @@ TOOL_DEFINITIONS = {
         default_limit=4,
         runtime_instruction=_RECENT_EPISODES_RUNTIME_INSTRUCTION,
     ),
+    "list_events": _definition(
+        "list_events",
+        default_limit=4,
+        runtime_instruction=_LIST_EVENTS_RUNTIME_INSTRUCTION,
+    ),
     "list_answer_sources": _definition("list_answer_sources", default_limit=3),
+    "grep_project_files": _definition("grep_project_files", default_limit=6),
     "read_agent_brain": _definition(
         "read_agent_brain",
         default_limit=4,
@@ -317,13 +344,13 @@ TOOL_DEFINITIONS = {
         "save_findings", default_limit=2,
         runtime_instruction=_SAVE_FINDINGS_RUNTIME_INSTRUCTION,
     ),
-    "start_research_job": _definition(
-        "start_research_job",
+    "start_background_task": _definition(
+        "start_background_task",
         default_limit=3,
         runtime_instruction=_RESEARCH_JOB_RUNTIME_INSTRUCTION,
     ),
-    "list_research_jobs": _definition("list_research_jobs", default_limit=2),
-    "cancel_research_job": _definition("cancel_research_job", default_limit=3),
+    "list_background_tasks": _definition("list_background_tasks", default_limit=2),
+    "cancel_background_task": _definition("cancel_background_task", default_limit=3),
     "set_research_plan": _definition(
         "set_research_plan", executor_protocol=True
     ),
@@ -333,6 +360,9 @@ TOOL_DEFINITIONS = {
     "propose_entity_merge": _definition("propose_entity_merge"),
     "report_relationship_conflict": _definition("report_relationship_conflict"),
     "list_project_files": _definition("list_project_files", default_limit=4),
+    "run_workspace_command": _definition("run_workspace_command", default_limit=4),
+    "run_approved_command": _definition("run_approved_command", default_limit=4),
+    "list_command_workspaces": _definition("list_command_workspaces", default_limit=2),
     "read_project_file": _definition("read_project_file", default_limit=4),
     "create_project_file": _definition(
         "create_project_file",
@@ -651,7 +681,8 @@ class Tools(
     MaintenanceTools,
     HealthTools,
     ProjectFileTools,
-    ResearchJobTools,
+    WorkspaceCommandTools,
+    BackgroundTaskTools,
     ResearchFindingTools,
     AnswerSourceTools,
 ):
@@ -671,7 +702,8 @@ class Tools(
         health_service=None,
         entity_maintenance_service: Optional[EntityMaintenanceService] = None,
         project_maintenance_service=None,
-        research_jobs=None,
+        background_tasks=None,
+        sandbox=None,
     ):
         if knowledge_store is None or postgres is None:
             raise ValueError("Tools requires explicit knowledge_store and postgres")
@@ -700,7 +732,8 @@ class Tools(
         # constructing an uncoordinated service instance here.
         self.entity_maintenance_service = entity_maintenance_service
         self.project_maintenance_service = project_maintenance_service
-        self.research_jobs = research_jobs
+        self.background_tasks = background_tasks
+        self.sandbox = sandbox
         self.agent_run = None
 
         self._http_client = None
@@ -731,9 +764,30 @@ class Tools(
             entity_id, session_id=self.session_id, hours=hours
         )
 
-    async def search_episodes(self, query: str, entity_id: Optional[int] = None):
+    async def search_episodes(
+        self,
+        query: str,
+        entity_id: Optional[int] = None,
+        after: Optional[str] = None,
+        before: Optional[str] = None,
+        alternate_queries: Optional[List[str]] = None,
+        offset: int = 0,
+        limit: Optional[int] = None,
+    ):
         return await self.knowledge_retrieval.episode_check(
-            query, session_id=self.session_id, entity_id=entity_id
+            query,
+            alternate_queries=alternate_queries,
+            offset=offset,
+            limit=limit,
+            session_id=self.session_id,
+            entity_id=entity_id,
+            after=after,
+            before=before,
+            # A run without message search must not get raw messages this way.
+            raw_fallback=(
+                self.tool_authorization is None
+                or "search_knowledge_messages" in self.tool_authorization.allowed_tools
+            ),
         )
 
     async def read_episode_messages(self, episode_id: str):
@@ -741,10 +795,36 @@ class Tools(
             episode_id, session_id=self.session_id
         )
 
-    async def read_recent_episodes(self, limit: int = 2):
+    async def read_recent_episodes(
+        self,
+        limit: int = 2,
+        after: Optional[str] = None,
+        before: Optional[str] = None,
+        offset: int = 0,
+    ):
         return await self.knowledge_retrieval.read_recent_episodes(
             session_id=self.session_id,
             limit=limit,
+            after=after,
+            before=before,
+            offset=offset,
+        )
+
+    async def list_events(
+        self,
+        after: Optional[str] = None,
+        before: Optional[str] = None,
+        kind: Optional[str] = None,
+        query: Optional[str] = None,
+        offset: int = 0,
+    ):
+        return await self.knowledge_retrieval.list_events(
+            session_id=self.session_id,
+            after=after,
+            before=before,
+            kind=kind,
+            query=query,
+            offset=offset,
         )
 
     async def find_relationship_path(self, entity_a_id: int, entity_b_id: int):
@@ -804,7 +884,7 @@ class Tools(
         """Get indexed documents for prompt context."""
         if not self.document_service:
             return []
-        documents = await self.document_service.list_project_documents()
+        documents = await self.document_service.list_documents()
         return [
             document
             for document in documents

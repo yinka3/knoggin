@@ -65,6 +65,7 @@ from .constants import (
     MAX_DOCUMENT_SIZE,
     MAX_READ_CHARACTERS,
     MAX_READ_LINES,
+    SENSITIVE_FILE_PATTERNS,
     document_extension,
 )
 from .extraction import (
@@ -74,10 +75,16 @@ from .extraction import (
 from .filesystem import ProjectFilesystem, ProjectFilesystemFactory, _MutationLease
 from .indexer import DocumentIndexer
 from .policy import DocumentIndexPolicy
-from .scanning import FolderScanPathEntry, build_folder_preview, normalize_relative_path
+from .scanning import (
+    FolderScanPathEntry,
+    build_folder_preview,
+    matches_pattern,
+    normalize_relative_path,
+)
 
 BlockingRunner = Callable[..., Awaitable[Any]]
 _RECONCILIATION_MAX_FILES = 10_000
+_GREP_MAX_FILE_BYTES = 2 * 1024 * 1024
 _RECONCILIATION_FULL_HASH_INTERVAL = 10
 
 
@@ -160,6 +167,7 @@ class DocumentService:
         filesystem_factory: ProjectFilesystemFactory | None = None,
         reconciliation_interval_seconds: int = 60,
         max_document_upload_bytes: int | Callable[[], int] = DEFAULT_DOCUMENT_SIZE,
+        max_reconciled_files: int | Callable[[], int] = _RECONCILIATION_MAX_FILES,
     ):
         self.project_id = project_id
         initial_upload_limit = (
@@ -169,6 +177,7 @@ class DocumentService:
         if not 1 <= initial_upload_limit <= MAX_DOCUMENT_SIZE:
             raise ValueError("max_document_upload_bytes is outside the supported range")
         self._document_upload_limit = max_document_upload_bytes
+        self._reconciled_file_limit = max_reconciled_files
         self._embedding = embedding_service
         self._reader = reader or DocumentReader(
             postgres_client,
@@ -219,6 +228,10 @@ class DocumentService:
                 self.reconcile_project_files,
                 interval_seconds=reconciliation_interval_seconds,
             )
+
+    def _max_reconciled_files(self) -> int:
+        value = self._reconciled_file_limit
+        return value() if callable(value) else value
 
     def _max_document_upload_bytes(self) -> int:
         value = self._document_upload_limit
@@ -285,24 +298,26 @@ class DocumentService:
         if settings != self._reconciliation_settings:
             self._reconciliation_fingerprints.clear()
         current_rows = await self._reader.list_documents_for_reconciliation(
-            limit=_RECONCILIATION_MAX_FILES + 1,
+            limit=self._max_reconciled_files() + 1,
         )
         current = {row["relative_path"]: row for row in current_rows}
-        if len(current) > _RECONCILIATION_MAX_FILES:
+        if len(current) > self._max_reconciled_files():
             raise RuntimeError(
                 "document catalog reconciliation exceeds the "
-                f"{_RECONCILIATION_MAX_FILES}-file safety limit"
+                f"{self._max_reconciled_files()}-file limit "
+                "(developer_settings.documents.max_reconciled_files)"
             )
         skip_directory = _excluded_directory_check(settings, current)
         paths = await self._run_blocking(
             lambda: list(filesystem.iter_paths(
-                limit=_RECONCILIATION_MAX_FILES + 1, skip_directory=skip_directory,
+                limit=self._max_reconciled_files() + 1, skip_directory=skip_directory,
             ))
         )
-        if len(paths) > _RECONCILIATION_MAX_FILES:
+        if len(paths) > self._max_reconciled_files():
             raise RuntimeError(
                 "project filesystem reconciliation exceeds the "
-                f"{_RECONCILIATION_MAX_FILES}-file safety limit"
+                f"{self._max_reconciled_files()}-file limit "
+                "(developer_settings.documents.max_reconciled_files)"
             )
         reserved_paths = [path for path in paths if is_controlled_context_file(path.relative_path)]
         paths = [path for path in paths if not is_controlled_context_file(path.relative_path)]
@@ -551,9 +566,9 @@ class DocumentService:
 
         settings = await self.get_scan_settings()
         current_rows = await self._reader.list_documents_for_reconciliation(
-            limit=_RECONCILIATION_MAX_FILES + 1
+            limit=self._max_reconciled_files() + 1
         )
-        if len(current_rows) > _RECONCILIATION_MAX_FILES:
+        if len(current_rows) > self._max_reconciled_files():
             raise RuntimeError("document catalog reconciliation exceeds the file safety limit")
         current = {row["relative_path"]: row for row in current_rows}
 
@@ -684,6 +699,53 @@ class DocumentService:
                     "Document catalog update failed and source rollback failed"
                 ) from restore_error
             raise
+
+    async def grep_project_files(
+        self,
+        text: str,
+        *,
+        path_prefix: Optional[str] = None,
+        case_sensitive: bool = False,
+        max_matches: int = 30,
+    ) -> Dict:
+        """Find lines containing ``text`` in the project's text files, without
+        the index, for code that is read directly. Skips excluded and hidden
+        folders, files that may hold credentials, and the Context file."""
+        if not isinstance(text, str) or not text.strip() or len(text) > 200:
+            raise ValueError("text must be 1 to 200 characters")
+        if not isinstance(max_matches, int) or isinstance(max_matches, bool) or not 1 <= max_matches <= 100:
+            raise ValueError("max_matches must be between 1 and 100")
+        filesystem = self._require_filesystem()
+        prefix = None
+        if path_prefix is not None and path_prefix.strip() not in {"", "."}:
+            prefix = normalize_relative_path(path_prefix, path_prefix).rstrip("/")
+        skip = _excluded_directory_check(await self.get_scan_settings(), {})
+        needle = text if case_sensitive else text.casefold()
+
+        def search() -> Dict:
+            matches: list[Dict] = []
+            for path in filesystem.iter_paths(skip_directory=skip):
+                relative = path.relative_path
+                if prefix is not None and relative != prefix and not relative.startswith(prefix + "/"):
+                    continue
+                if (
+                    is_controlled_context_file(relative)
+                    or matches_pattern(relative.lower(), SENSITIVE_FILE_PATTERNS)
+                    or path.size_bytes > _GREP_MAX_FILE_BYTES
+                ):
+                    continue
+                try:
+                    content = filesystem.read_bytes(relative).decode("utf-8")
+                except (UnicodeDecodeError, OSError, ValueError):
+                    continue
+                for number, line in enumerate(content.splitlines(), start=1):
+                    if needle in (line if case_sensitive else line.casefold()):
+                        matches.append({"path": relative, "line": number, "text": line[:300]})
+                        if len(matches) >= max_matches:
+                            return {"matches": matches, "truncated": True}
+            return {"matches": matches, "truncated": False}
+
+        return await self._run_blocking(search)
 
     async def list_project_files(
         self,
@@ -1291,19 +1353,28 @@ class DocumentService:
             start_line + MAX_READ_LINES - 1,
         )
         requested_end = min(requested_end, total_lines)
+        selected = lines[start_line - 1 : requested_end]
+        # Keep whole lines within the character cap, so end_line and the
+        # locator name only the lines actually returned.
+        numbered_lines: List[str] = []
+        size = 0
+        for line_number, line in enumerate(selected, start=start_line):
+            entry = f"{line_number}: {line}"
+            added = len(entry) + (1 if numbered_lines else 0)
+            if size + added > MAX_READ_CHARACTERS:
+                break
+            numbered_lines.append(entry)
+            size += added
+        character_truncated = len(numbered_lines) < len(selected)
+        if not numbered_lines:
+            # The first line alone is over the cap: return its start.
+            numbered_lines = [f"{start_line}: {selected[0]}"[:MAX_READ_CHARACTERS]]
+        requested_end = start_line + len(numbered_lines) - 1
         if extension == ".csv":
             locator["end_row"] = requested_end
         elif selected_page is None:
             locator["end_line"] = requested_end
-        selected = lines[start_line - 1 : requested_end]
-        numbered_lines = [
-            f"{line_number}: {line}"
-            for line_number, line in enumerate(selected, start=start_line)
-        ]
         content = "\n".join(numbered_lines)
-        character_truncated = len(content) > MAX_READ_CHARACTERS
-        if character_truncated:
-            content = content[:MAX_READ_CHARACTERS]
 
         result = self._public_metadata(document_metadata)
         result.update(

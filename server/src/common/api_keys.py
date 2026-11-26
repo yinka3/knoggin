@@ -1,10 +1,11 @@
-"""Provider credentials come only from the environment, never saved settings.
+"""Provider credentials: from the environment first, then saved logins.
 
-Keeping secrets out of ``knoggin.yml`` means the settings API can never write
-one, and backups or shared config files never carry one.
+Secrets never go in ``knoggin.yml``: saved logins live in their own owner-only
+file (see common.credential_store), so the settings API, shared config files
+and backups never carry one.
 """
 
-import os
+from common import credential_store
 
 LLM_API_KEY_ENV = "OPENROUTER_API_KEY"
 JEV_API_KEY_ENV = "JEV_API_KEY"
@@ -13,7 +14,7 @@ TAVILY_API_KEY_ENV = "TAVILY_API_KEY"
 
 
 def _env(name: str) -> str:
-    return os.environ.get(name, "").strip()
+    return credential_store.get(name)
 
 
 def llm_api_key() -> str:

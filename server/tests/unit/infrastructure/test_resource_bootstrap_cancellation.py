@@ -59,7 +59,6 @@ async def test_model_loaders_settle_siblings_before_returning(monkeypatch, cance
     resources.llm_service = SimpleNamespace(load_tokenizer=fail)
     resources.embedding = SimpleNamespace(load_models=delayed)
     resources.model_work = SimpleNamespace(run_blocking=AsyncMock(return_value=object()))
-    monkeypatch.setattr(resources, "get_vp01", AsyncMock())
     task = asyncio.create_task(resources._load_heavyweight_models(device=torch.device("cpu")))
     await entered.wait()
     if cancel:

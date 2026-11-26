@@ -56,6 +56,31 @@ class SemanticWindowRetrySettings(ConfigModel):
         return self
 
 
+class ContextSettings(ConfigModel):
+    """Project Context size and what each update reads."""
+
+    # Optional model overrides; otherwise both use the extraction model. The
+    # update runs once per window and decides what changed, including which
+    # user-stated rules a change triggers.
+    update_model: str | None = None
+    maintenance_model: str | None = None
+    # The size Context is kept under. The update is told how full it is.
+    max_tokens: int = Field(40_000, ge=1_000, le=1_000_000)
+    # Episodes from earlier windows the update reads as background.
+    earlier_episodes: int = Field(12, ge=0, le=100)
+    # The maintainer merges, compresses, and (over budget) drops blocks after
+    # this many Episodes from Context-changing windows, or when Context is
+    # over max_tokens.
+    maintain_every_episodes: int = Field(12, ge=1, le=1_000)
+    # The most blocks one maintainer run may remove, as a share of Context.
+    maintain_max_removed_share: float = Field(0.3, gt=0, le=1)
+
+
+class ForgetSettings(ConfigModel):
+    erase_after_days: int = Field(3, ge=0)
+    erase_interval_seconds: int = Field(86_400, ge=1)
+
+
 class IngestionSettings(ConfigModel):
     message_edit_window_seconds: int = Field(600, ge=1, le=86_400)
     # The admission-size ceiling for project-level semantic windows. A smaller
@@ -72,6 +97,8 @@ class IngestionSettings(ConfigModel):
     semantic_window_retry: SemanticWindowRetrySettings = Field(
         default_factory=SemanticWindowRetrySettings
     )
+    context: ContextSettings = Field(default_factory=ContextSettings)
+    forget: ForgetSettings = Field(default_factory=ForgetSettings)
 
 
 class DocumentIndexingSettings(ConfigModel):
@@ -84,6 +111,8 @@ class DocumentSettings(ConfigModel):
     rerank_candidates: int = Field(15, ge=1, le=50)
     max_workspaces_per_project: int = Field(3, ge=1, le=20)
     max_document_upload_bytes: int = Field(50 * 1024 * 1024, ge=1, le=512 * 1024 * 1024)
+    # Most files one project's scan will track; a scan past it fails.
+    max_reconciled_files: int = Field(10_000, ge=100, le=1_000_000)
     max_staged_folder_bytes: int = Field(2 * 1024 * 1024 * 1024, ge=1)
     max_active_folder_intakes: int = Field(2, ge=1)
     folder_intake_idle_seconds: int = Field(2 * 60 * 60, ge=1)
@@ -135,9 +164,14 @@ class JobSettings(ConfigModel):
     )
 
 
-class TextProcessorSettings(ConfigModel):
-    gliner_threshold: float = Field(0.85, ge=0.0, le=1.0)
-    llm_ner_mode: Literal["disabled", "fallback"] = "fallback"
+class ExtractionSettings(ConfigModel):
+    """Entity and relationship extraction, one Episode's messages per call."""
+
+    # Earlier Episode summaries each call reads as background; 0 turns it off.
+    vp01_episode_lookback: int = Field(1, ge=0, le=20)
+    vp02_episode_lookback: int = Field(2, ge=0, le=20)
+    # Episode calls one window runs at once.
+    max_parallel_episodes: int = Field(8, ge=1, le=64)
 
 
 class SearchSettings(ConfigModel):
@@ -148,6 +182,18 @@ class SearchSettings(ConfigModel):
     default_message_limit: int = Field(8, ge=1)
     default_entity_limit: int = Field(5, ge=1)
     default_activity_hours: int = Field(24, ge=1)
+    # Below this an Episode is only vaguely related, and it crowds out real hits.
+    episode_similarity_threshold: float = Field(0.5, ge=0.0, le=1.0)
+    # Episodes one search_episodes or read_recent_episodes page returns.
+    episode_page_size: int = Field(10, ge=1, le=50)
+    # Each search channel fetches this many pages of candidates before ranking.
+    episode_candidate_pages: int = Field(3, ge=1, le=10)
+    # Rank fusion damping: higher lets lower-ranked matches count for more.
+    episode_rank_fusion_k: int = Field(60, ge=1, le=1000)
+    # The query plus rewordings one Episode search may run.
+    episode_max_queries: int = Field(4, ge=1, le=10)
+    # Events one list_events page returns; each is one short line.
+    event_page_size: int = Field(25, ge=1, le=100)
 
 
 class EntityResolutionSettings(ConfigModel):
@@ -190,8 +236,15 @@ class LLMSettings(ConfigModel):
     # only switch it on or off. planning_only (fast default) thinks on the
     # planning and final answer steps; off disables it everywhere;
     # provider_default lets the server think on every step, which is much
-    # slower. OpenRouter keeps its own reasoning budgets.
+    # slower. OpenRouter uses the thinking-token budgets below instead.
     thinking: Literal["provider_default", "planning_only", "off"] = "planning_only"
+    # OpenRouter thinking-token caps for agent steps. Planning, replanning and
+    # the final answer use planning_thinking_tokens; tool steps use
+    # step_thinking_tokens. Each is cut to fit the agent's reply cap
+    # (prompt_memory response_reserve_tokens) with room for the answer, and a
+    # value under 1024 turns thinking off for those steps.
+    planning_thinking_tokens: int = Field(4_096, ge=0)
+    step_thinking_tokens: int = Field(1_024, ge=0)
     spending_budget: LLMSpendingBudgetSettings = Field(
         default_factory=LLMSpendingBudgetSettings
     )
@@ -216,7 +269,7 @@ class CoordinationLogSettings(ConfigModel):
     rotation_mb: int = Field(10, ge=1)
 
 
-class ResearchJobSettings(ConfigModel):
+class BackgroundTaskSettings(ConfigModel):
     # Each job makes many model calls; more at once costs more and loads the
     # machine more. Extra jobs wait their turn.
     max_running_per_project: int = Field(3, ge=1, le=100)
@@ -225,6 +278,8 @@ class ResearchJobSettings(ConfigModel):
     # A job cut off by a restart reruns from the start and pays for its model
     # calls again, so by default it waits as `interrupted` for the user.
     resume_after_restart: bool = False
+    # Tool work that keeps running after its run (a long command); per chat.
+    max_handoffs_per_chat: int = Field(1, ge=1, le=20)
 
 
 class ChatCompactionSettings(ConfigModel):
@@ -270,12 +325,29 @@ class RunEventSettings(ConfigModel):
     unwatched_run_grace_seconds: float = Field(120.0, ge=0, le=86_400, allow_inf_nan=False)
 
 
+class ContainerRuntimeSettings(ConfigModel):
+    socket: str = ""
+    host_library_root: str = ""
+
+
+class WorkspaceCommandSettings(ConfigModel):
+    enabled: bool = True
+    default_image: str = "docker.io/library/python:3.12-slim@sha256:12316debbfb86890f6b2d825820612741ba527ad5a44e3902759141d572bfe8f"
+    memory_mb: int = Field(4096, ge=256, le=262_144)
+    cpus: float = Field(2.0, gt=0, le=64)
+    pids: int = Field(512, ge=32, le=65_536)
+    idle_minutes: int = Field(30, ge=1, le=1_440)
+    check_timeout_seconds: float = Field(120.0, gt=0, le=3_600, allow_inf_nan=False)
+    min_free_disk_mb: int = Field(2048, ge=0, le=1_048_576)
+    disk_check_interval_seconds: float = Field(1.0, gt=0, le=60, allow_inf_nan=False)
+
+
 class DeveloperSettings(ConfigModel):
     ingestion: IngestionSettings = Field(default_factory=IngestionSettings)
     jobs: JobSettings = Field(default_factory=JobSettings)
     limits: AgentLimitSettings = Field(default_factory=AgentLimitSettings)
     prompt_memory: PromptMemorySettings = Field(default_factory=PromptMemorySettings)
-    research_jobs: ResearchJobSettings = Field(default_factory=ResearchJobSettings)
+    background_tasks: BackgroundTaskSettings = Field(default_factory=BackgroundTaskSettings)
     tools: ToolSettings = Field(default_factory=ToolSettings)
     chat_compaction: ChatCompactionSettings = Field(default_factory=ChatCompactionSettings)
     ingestion_notices: IngestionNoticeSettings = Field(default_factory=IngestionNoticeSettings)
@@ -283,12 +355,18 @@ class DeveloperSettings(ConfigModel):
     entity_resolution: EntityResolutionSettings = Field(
         default_factory=EntityResolutionSettings
     )
-    nlp_pipeline: TextProcessorSettings = Field(default_factory=TextProcessorSettings)
+    extraction: ExtractionSettings = Field(default_factory=ExtractionSettings)
     search: SearchSettings = Field(default_factory=SearchSettings)
     documents: DocumentSettings = Field(default_factory=DocumentSettings)
     community: CommunitySettings = Field(default_factory=CommunitySettings)
     coordination_log: CoordinationLogSettings = Field(
         default_factory=CoordinationLogSettings
+    )
+    container_runtime: ContainerRuntimeSettings = Field(
+        default_factory=ContainerRuntimeSettings
+    )
+    workspace_commands: WorkspaceCommandSettings = Field(
+        default_factory=WorkspaceCommandSettings
     )
 
 

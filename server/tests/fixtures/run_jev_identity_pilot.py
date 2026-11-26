@@ -21,9 +21,9 @@ from uuid import NAMESPACE_URL, uuid5
 from dotenv import load_dotenv
 
 from common.conf.domain_config import DomainConfig
-from common.schema.ingestion.contracts import ContextBlockMention
+from common.schema.ingestion.contracts import EntityMention
 from common.schema.jev import JevSettings
-from common.schema.settings import EntityResolutionSettings, TextProcessorSettings
+from common.schema.settings import EntityResolutionSettings, ExtractionSettings
 from core.ingestion.policy import IngestionPolicy
 from core.knowledge.entity.resolver import EntityResolver
 from infrastructure.external_model_budget import ExternalModelSpendingLedger
@@ -74,13 +74,14 @@ def load_reviewed_cases(path: Path) -> list[dict]:
 
 
 def _case_ids(case_id: str):
-    block_id = uuid5(NAMESPACE_URL, f"knoggin:jev:identity:block:{case_id}")
+    # A stable positive message ID per case.
+    message_id = uuid5(NAMESPACE_URL, f"knoggin:jev:identity:message:{case_id}").int % 2**31 + 1
     window_id = uuid5(NAMESPACE_URL, f"knoggin:jev:identity:window:{case_id}")
-    return block_id, window_id
+    return message_id, window_id
 
 
 def _gold_label(case: dict) -> dict:
-    block_id, window_id = _case_ids(case["id"])
+    message_id, window_id = _case_ids(case["id"])
     proposed = case["proposed_choice"]
     if isinstance(proposed, int) and not isinstance(proposed, bool):
         correct_entity_id = proposed
@@ -97,7 +98,7 @@ def _gold_label(case: dict) -> dict:
         "case_id": case["id"],
         "window_id": str(window_id),
         "pass_number": 1,
-        "occurrence_key": f"0:{block_id}",
+        "occurrence_key": f"0:{message_id}",
         "review_status": "reviewed",
         "correct_entity_id": correct_entity_id,
         "expected_choice": expected_choice,
@@ -173,7 +174,7 @@ def _pilot_policy(settings: JevSettings) -> IngestionPolicy:
         }
     ).compile()
     return IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(),
+        extraction=ExtractionSettings(),
         entity_resolution=EntityResolutionSettings(),
         compiled_domain=domain,
         jev=settings.capture_policy(),
@@ -196,7 +197,7 @@ async def run_pilot(cases: list[dict], api_key: str):
     observations = []
     try:
         for index, case in enumerate(cases):
-            block_id, window_id = _case_ids(case["id"])
+            message_id, window_id = _case_ids(case["id"])
             resolver = EntityResolver(
                 ReviewKnowledgeStore(_entity_rows(case)),
                 "project-1",
@@ -207,17 +208,17 @@ async def run_pilot(cases: list[dict], api_key: str):
             async def allocate_entity_id(value=90_000 + index):
                 return value
 
-            result = await resolver.resolve_context_block_mentions(
+            result = await resolver.resolve_mentions(
                 [
-                    ContextBlockMention(
-                        block_ids=(block_id,),
+                    EntityMention(
+                        message_ids=(message_id,),
                         name=case["mention"],
                         entity_type=_mention_type(case),
                         topic="Work",
                         origin="vp01",
                     )
                 ],
-                block_text_by_id={block_id: case["context"]},
+                message_text_by_id={message_id: case["context"]},
                 policy=policy,
                 allocate_entity_id=allocate_entity_id,
                 window_id=window_id,

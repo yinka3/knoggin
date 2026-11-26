@@ -52,11 +52,13 @@ class AgentOrchestrator:
         config_manager,
         entity_maintenance_service: EntityMaintenanceService | None = None,
         project_maintenance_service=None,
+        sandbox=None,
     ):
         self._agent_manager = agent_manager
         self._config_manager = config_manager
         self._entity_maintenance_service = entity_maintenance_service
         self._project_maintenance_service = project_maintenance_service
+        self._sandbox = sandbox
 
     async def resolve_run_policy(
         self, *, config, requested_agent_id: str | None,
@@ -325,7 +327,8 @@ class AgentOrchestrator:
             health_service=getattr(context, "health_service", None),
             entity_maintenance_service=self._entity_maintenance_service,
             project_maintenance_service=self._project_maintenance_service,
-            research_jobs=getattr(context, "research_jobs", None),
+            background_tasks=getattr(context, "background_tasks", None),
+            sandbox=self._sandbox,
         )
 
         return tools

@@ -11,7 +11,7 @@ from core.knowledge.store import KnowledgeStore
 
 METHODS = [
     f"list_jev_{capability}_decisions"
-    for capability in ("identity", "extraction", "classification")
+    for capability in ("identity", "classification")
 ]
 
 

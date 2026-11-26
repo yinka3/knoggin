@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from typing import Any, Protocol, TypeVar
 from uuid import UUID
 
@@ -21,7 +23,8 @@ from common.schema.context import (
     ContextSupportKind,
     LLMContextUpdate,
 )
-from common.schema.episode.models import Episode
+from common.schema.episode.models import EpisodeCard
+from core.agent.prompt_budget import token_count
 from core.knowledge.context.models import ContextBlockSupport, ContextMaterialization
 from core.knowledge.context.prompts import get_context_update_prompt
 from core.knowledge.context.render import (
@@ -42,7 +45,15 @@ class StructuredGenerator(Protocol):
         system: str,
         user: str,
         temperature: float = 1.0,
+        model: str | None = None,
     ) -> ResponseT: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ForgetRequest:
+    values: tuple[str, ...]
+    message_ids: tuple[int, ...]
+    block_ids: tuple[UUID, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +65,7 @@ class ContextUpdateResult:
     operation_count: int
     # Reasons for model operations that failed validation and were dropped.
     rejected_operations: tuple[str, ...] = ()
+    forget_requests: tuple[ForgetRequest, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,14 +131,15 @@ class ContextUpdateBuild:
     snapshot: ContextSnapshot | None
     messages: list[dict[str, Any]]
     assistant_source_refs: list[dict[str, Any]]
-    episodes: list[Episode]
+    budget_tokens: int
+    # Episodes from earlier windows, oldest first: background for judging
+    # what is recent or repeated. They cannot be cited.
+    earlier_episodes: list[EpisodeCard] = field(default_factory=list)
+    count_tokens: Callable[[str], int] | None = None
     _message_by_handle: dict[str, _MessageEvidence] = field(
         init=False, default_factory=dict
     )
     _source_by_handle: dict[str, _SourceEvidence] = field(
-        init=False, default_factory=dict
-    )
-    _episode_messages_by_handle: dict[str, tuple[_MessageEvidence, ...]] = field(
         init=False, default_factory=dict
     )
     _context_block_by_handle: dict[str, ContextBlockRecord] = field(
@@ -202,22 +215,6 @@ class ContextUpdateBuild:
             seen_sources.add(source_id)
             self._source_by_handle[f"S{index}"] = _SourceEvidence(source_id, parent)
 
-        by_pair = {
-            (message.message_id, message.session_id): message
-            for message in self._message_by_handle.values()
-        }
-        seen_episodes: set[str] = set()
-        for index, episode in enumerate(self.episodes, start=1):
-            if episode.project_id != self.project_id or episode.episode_id in seen_episodes:
-                raise ValueError("Context Episode aid is outside its project or repeated")
-            seen_episodes.add(episode.episode_id)
-            current_messages = tuple(
-                by_pair[(item.message_id, item.session_id)]
-                for item in episode.messages
-                if (item.message_id, item.session_id) in by_pair
-            )
-            self._episode_messages_by_handle[f"E{index}"] = current_messages
-
     def evidence_brief(self) -> str:
         """Render complete source catalogs without exposing durable identifiers."""
 
@@ -225,19 +222,34 @@ class ContextUpdateBuild:
             "CONTEXT SECTIONS (return one of these section_key values):",
             *(f"- {section.key}: {section.title}" for section in self.domain.context_sections),
             "",
+            f"CONTEXT SIZE: about {self._context_tokens()} of {self.budget_tokens} tokens",
+            "",
             "CURRENT CONTEXT:",
             self._current_context_text(),
+            "",
+            "EARLIER EPISODES (background, oldest first; cannot be cited):",
+            *(
+                f"- {_episode_date(episode)}{' '.join(episode.summary.split())}"
+                for episode in self.earlier_episodes
+            ),
+            *(() if self.earlier_episodes else ("(none)",)),
             "",
             "FROZEN MESSAGES:",
         ]
         for handle, message in self._message_by_handle.items():
             raw = self.messages[int(handle[1:]) - 1]
-            source_time = "unknown" if message.timestamp_ms is None else str(message.timestamp_ms)
+            source_time = (
+                "unknown"
+                if message.timestamp_ms is None
+                else datetime.fromtimestamp(
+                    message.timestamp_ms / 1000, tz=timezone.utc
+                ).strftime("%Y-%m-%d %H:%M:%S")
+            )
             content = str(raw.get("content") or "").strip()
             kind = "clarification_question" if message.is_clarification else "message"
             lines.extend(
                 (
-                    f"[{handle}] role={message.role} kind={kind} session={message.session_id} source_time_ms={source_time}",
+                    f"[{handle}] role={message.role} kind={kind} session={message.session_id} sent={source_time}",
                     "<message>",
                     content,
                     "</message>",
@@ -262,20 +274,6 @@ class ContextUpdateBuild:
                     "</source_excerpt>",
                 )
             )
-        lines.extend(("", "EPISODE INTERPRETATION AIDS:"))
-        if not self._episode_messages_by_handle:
-            lines.append("(none)")
-        for handle, messages in self._episode_messages_by_handle.items():
-            episode = self.episodes[int(handle[1:]) - 1]
-            current_handles = [
-                local
-                for local, message in self._message_by_handle.items()
-                if message in messages
-            ]
-            lines.append(
-                f"[{handle}] current_window_messages={','.join(current_handles) or '(none)'}"
-            )
-            lines.append(episode.summary)
         return "\n".join(lines)
 
     def apply(self, output: LLMContextUpdate) -> ContextUpdateResult:
@@ -306,6 +304,9 @@ class ContextUpdateBuild:
                 continue
             resolved_operations.append(resolved)
             evidence_by_operation.append(evidence)
+        forget_requests = self._resolve_forget(
+            output, rejected
+        )
 
         materialization = apply_context_edits(
             self.snapshot,
@@ -319,6 +320,7 @@ class ContextUpdateBuild:
                 edit_summary=output.edit_summary or "No Context changes",
                 operation_count=len(output.operations),
                 rejected_operations=tuple(rejected),
+                forget_requests=forget_requests,
             )
         if len(materialization.operation_new_block_ids) != len(resolved_operations):
             raise RuntimeError("Context edit application did not retain operation mapping")
@@ -338,6 +340,56 @@ class ContextUpdateBuild:
             edit_summary=output.edit_summary or "Updated project Context",
             operation_count=len(output.operations),
             rejected_operations=tuple(rejected),
+            forget_requests=forget_requests,
+        )
+
+    def _resolve_forget(
+        self, output: LLMContextUpdate, rejected: list[str]
+    ) -> tuple[ForgetRequest, ...]:
+        """Keep a request only when a user message asked for it and each value
+        is quoted from that request or a cited block: the model may say what
+        to forget, but only in words the user or their Context already used."""
+
+        requests: dict[tuple[int, ...], ForgetRequest] = {}
+        for request in output.forget:
+            requesters = [
+                self._message_by_handle[reference.handle]
+                for reference in request.evidence
+                if reference.handle in self._message_by_handle
+                and self._message_by_handle[reference.handle].role == "user"
+            ]
+            blocks = [
+                self._context_block_by_handle.get(reference.handle)
+                for reference in request.blocks
+            ]
+            if not requesters:
+                rejected.append("only a user message can ask to forget")
+                continue
+            if any(block is None for block in blocks):
+                rejected.append("forget references an unknown Context block")
+                continue
+            sources = " ".join(
+                [message.content for message in requesters]
+                + [block.markdown for block in blocks]
+            )
+            sources = " ".join(sources.split()).casefold()
+            if any(value.casefold() not in sources for value in request.values):
+                rejected.append("forget values must be quoted from the request or a cited block")
+                continue
+            message_ids = tuple(sorted({message.message_id for message in requesters}))
+            previous = requests.get(message_ids, ForgetRequest((), message_ids))
+            requests[message_ids] = ForgetRequest(
+                values=tuple(dict.fromkeys((*previous.values, *request.values))),
+                message_ids=message_ids,
+                block_ids=tuple(dict.fromkeys((*previous.block_ids, *(block.block_id for block in blocks)))),
+            )
+        return tuple(requests.values())
+
+    def _context_tokens(self) -> int:
+        if self.snapshot is None:
+            return 0
+        return sum(
+            token_count(block.markdown, self.count_tokens) for block in self.snapshot.blocks
         )
 
     def _current_context_text(self) -> str:
@@ -354,11 +406,6 @@ class ContextUpdateBuild:
                 messages.append(self._message_by_handle[handle])
             elif handle in self._source_by_handle:
                 sources.append(self._source_by_handle[handle])
-            elif handle in self._episode_messages_by_handle:
-                expanded = self._episode_messages_by_handle[handle]
-                if not expanded:
-                    raise ValueError("Context Episode aid has no current-window evidence")
-                messages.extend(expanded)
             else:
                 raise ValueError(f"Context operation references unknown evidence {handle}")
         resolved = _ResolvedEvidence(
@@ -374,6 +421,8 @@ class ContextUpdateBuild:
         ):
             raise ValueError("Clarification questions alone cannot establish Context")
         if isinstance(operation, ContextDelete):
+            if not any(message.role == "user" for message in resolved.messages):
+                raise ValueError("only a user message can remove Context")
             return resolved
         if operation.assertion_kind is AssertionKind.HUMAN_ASSERTED:
             raise ValueError("the Context model cannot create human_asserted blocks")
@@ -434,8 +483,6 @@ class ContextUpdateBuild:
         operation: ContextEditBase,
         evidence: _ResolvedEvidence,
     ) -> list[ContextBlockSupport]:
-        if isinstance(operation, ContextDelete):
-            return []
         selected: list[ContextBlockSupport] = []
         if operation.assertion_kind is AssertionKind.USER_ASSERTED:
             messages = [message for message in evidence.messages if message.role == "user"]
@@ -475,11 +522,17 @@ class ContextUpdateBuild:
         return list(dict.fromkeys(selected))
 
 
+def _episode_date(episode: EpisodeCard) -> str:
+    when = episode.last_message_at or episode.first_message_at
+    return f"{when.date().isoformat()}: " if when else ""
+
+
 class ContextUpdater:
     """Call the Context LLM once, then validate before any durable write."""
 
-    def __init__(self, *, llm: StructuredGenerator | None) -> None:
+    def __init__(self, *, llm: StructuredGenerator | None, model: str | None = None) -> None:
         self._llm = llm
+        self._model = model
 
     async def update(
         self,
@@ -490,7 +543,8 @@ class ContextUpdater:
         snapshot: ContextSnapshot | None,
         messages: list[dict[str, Any]],
         assistant_source_refs: list[dict[str, Any]],
-        episodes: list[Episode],
+        earlier_episodes: list[EpisodeCard],
+        budget_tokens: int,
     ) -> ContextUpdateResult:
         if self._llm is None:
             raise RuntimeError("ContextUpdater requires an LLM")
@@ -500,13 +554,16 @@ class ContextUpdater:
             snapshot=snapshot,
             messages=messages,
             assistant_source_refs=assistant_source_refs,
-            episodes=episodes,
+            budget_tokens=budget_tokens,
+            earlier_episodes=earlier_episodes,
+            count_tokens=getattr(self._llm, "count_tokens", None),
         )
         output = await self._llm.generate_structured(
             response_model=LLMContextUpdate,
             system=get_context_update_prompt(user_name),
             user=build.evidence_brief(),
             temperature=0.0,
+            model=self._model,
         )
         result = build.apply(output)
         for reason in result.rejected_operations:

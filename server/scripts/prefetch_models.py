@@ -26,12 +26,7 @@ from common.embedding_contract import (  # noqa: E402
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_RERANKER_MODEL,
 )
-from common.model_cache import cached_model_path, model_revision  # noqa: E402
-from core.ingestion.vp01 import (  # noqa: E402
-    GLINER25_ENGLISH_MODEL,
-    GLINER25_MULTILINGUAL_MODEL,
-    GLiNER25VP01Adapter,
-)
+from common.model_cache import model_revision  # noqa: E402
 from core.knowledge.embedding_service import EmbeddingService  # noqa: E402
 from infrastructure.model_work import ModelWorkPriority  # noqa: E402
 from infrastructure.resource_profile import ResourceProfile  # noqa: E402
@@ -56,11 +51,7 @@ async def prefetch_models(*, update_docling_manifest: bool = False) -> None:
     models = [
         (embedding_model, "EMBEDDING_MODEL_REVISION"),
         (reranker_model, "RERANKER_MODEL_REVISION"),
-        (GLINER25_ENGLISH_MODEL, "GLINER_EN_MODEL_REVISION"),
     ]
-    # The multilingual model loads on first use; only refresh it once present.
-    if cached_model_path(GLINER25_MULTILINGUAL_MODEL) is not None:
-        models.append((GLINER25_MULTILINGUAL_MODEL, "GLINER_MULTI_MODEL_REVISION"))
     for model, revision_variable in models:
         logger.info(f"Fetching {model}")
         await asyncio.to_thread(
@@ -80,11 +71,6 @@ async def prefetch_models(*, update_docling_manifest: bool = False) -> None:
         )
         await embedding.load_models()
         await embedding.load_reranker(priority=ModelWorkPriority.BACKGROUND)
-        await asyncio.to_thread(
-            GLiNER25VP01Adapter.load,
-            language="en",
-            device=str(device),
-        )
         folder = docling_models.artifacts_path()
         logger.info(f"Prefetching Docling PDF layout, table, and OCR artifacts into {folder}")
         await asyncio.to_thread(

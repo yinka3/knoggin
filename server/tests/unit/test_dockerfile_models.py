@@ -1,14 +1,10 @@
 from common.embedding_contract import DEFAULT_EMBEDDING_MODEL, DEFAULT_RERANKER_MODEL
 from common.model_cache import PINNED_REVISIONS, model_revision
-from core.ingestion.vp01 import GLINER25_ENGLISH_MODEL, GLINER25_MULTILINGUAL_MODEL
 
 
 def test_every_default_model_is_pinned_to_a_full_commit():
     # The Dockerfile bakes exactly this list.
-    assert set(PINNED_REVISIONS) == {
-        DEFAULT_EMBEDDING_MODEL, DEFAULT_RERANKER_MODEL,
-        GLINER25_ENGLISH_MODEL, GLINER25_MULTILINGUAL_MODEL,
-    }
+    assert set(PINNED_REVISIONS) == {DEFAULT_EMBEDDING_MODEL, DEFAULT_RERANKER_MODEL}
     assert all(len(revision) == 40 for revision in PINNED_REVISIONS.values())
 
 

@@ -29,11 +29,8 @@ def test_episode_generation_prompt_renders_window_source_limits():
         max_narrative_chars=4000,
         max_episode_source_messages=72,
         max_episode_source_tokens=12000,
-        max_proposals=11,
     )
 
-    assert "zero to 11" in prompt
-    assert "at most 11 new-episode proposals" in prompt
     assert "Ada" in prompt
     assert "3600" in prompt
     assert "4000" in prompt
@@ -102,3 +99,27 @@ def test_empty_window_proposals_are_the_explicit_skip_result():
 
     with pytest.raises(ValidationError, match="proposals"):
         LLMEpisodeWindowDecision.model_validate({})
+
+
+def test_message_references_keep_the_handle_and_drop_the_note_after_it():
+    decision = LLMEpisodeDecision(
+        summary="A summary.",
+        message_influences=[
+            "message:1 - user opened the chat",
+            "message:4: asked a follow-up",
+            "message:1",
+            "Messages 3, 5, 7",
+        ],
+    )
+
+    assert decision.message_influences == ["message:1", "message:4"]
+
+
+def test_proposal_with_no_usable_reference_is_dropped_not_the_whole_window():
+    good = {"summary": "Kept.", "message_influences": ["message:2 - note"]}
+    bad = {"summary": "Lost.", "message_influences": ["Messages 3, 5, 7"]}
+
+    window = LLMEpisodeWindowDecision.model_validate({"proposals": [bad, good]})
+
+    assert [p.summary for p in window.proposals] == ["Kept."]
+    assert window.proposals[0].message_influences == ["message:2"]

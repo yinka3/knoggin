@@ -15,11 +15,8 @@ from tests.fixtures.factories import make_domain_config
 @pytest.mark.requires_pgvector
 @pytest.mark.no_network
 async def test_a_project_holds_up_to_its_limit_of_workspaces(real_postgres_client, tmp_path):
-    async def get_vp01(_language):
-        return SimpleNamespace(extract_entities=lambda *_args, **_kwargs: ())
-
     manager = ProjectManager(
-        SimpleNamespace(postgres=real_postgres_client, get_vp01=get_vp01),
+        SimpleNamespace(postgres=real_postgres_client),
         user_name="ada",
         filesystem_factory=ProjectFilesystemFactory(tmp_path / "projects"),
         config_manager=SimpleNamespace(config=RootConfig()),
@@ -33,7 +30,7 @@ async def test_a_project_holds_up_to_its_limit_of_workspaces(real_postgres_clien
         await manager.add_workspace(project_id, "docs")  # over the default of 3
     with pytest.raises(ValueError):
         await manager.add_workspace(project_id, "a/b")
-    assert (await manager.get_project(project_id))["workspaces"] == [
+    assert list((await manager.get_project(project_id))["workspaces"]) == [
         "backend", "frontend", "infra",
     ]
 
@@ -52,7 +49,14 @@ async def test_a_project_holds_up_to_its_limit_of_workspaces(real_postgres_clien
         "WHERE document_id = %s",
         (document_id,),
     )
-    assert await manager.remove_workspace(project_id, "backend") == ["frontend", "infra"]
+    assert list(await manager.remove_workspace(project_id, "backend")) == ["frontend", "infra"]
     assert await manager.remove_workspace(project_id, "backend") is None
-    await manager.add_workspace(project_id, "docs")
-    assert (await manager.get_project(project_id))["workspaces"] == ["frontend", "infra", "docs"]
+    added = await manager.add_workspace(project_id, "docs", read_only=True)
+    assert list(added) == ["docs", "frontend", "infra"]  # listed by name
+    assert added["docs"].read_only is True and added["infra"].read_only is False
+
+    updated = await manager.update_workspace(project_id, "docs", {"read_only": False})
+    assert updated["docs"].read_only is False
+    assert await manager.update_workspace(project_id, "missing", {"read_only": True}) is None
+    with pytest.raises(ValueError):
+        await manager.update_workspace(project_id, "docs", {"colour": "red"})

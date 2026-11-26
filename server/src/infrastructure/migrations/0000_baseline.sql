@@ -1,5 +1,8 @@
--- The schema as of the first tracked migration. Never edit this file: put
--- each later change in the next numbered file in this folder.
+-- The schema as of the first tracked migration. Put schema changes in the
+-- next numbered file; these comments only describe the original snapshot.
+-- This is a pg_dump-style snapshot: tables come first, then their keys,
+-- indexes, foreign keys, and triggers. A later numbered migration may change
+-- or remove objects shown here.
 
 CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
 
@@ -15,6 +18,9 @@ SET client_min_messages = warning;
 SET row_security = off;
 CREATE SCHEMA IF NOT EXISTS public;
 COMMENT ON SCHEMA public IS 'standard public schema';
+-- ============================================================================
+-- Scope and identity guard functions
+-- ============================================================================
 CREATE FUNCTION public.enforce_message_entity_ref_scope() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
@@ -140,6 +146,9 @@ END;
 $$;
 SET default_tablespace = '';
 SET default_table_access_method = heap;
+-- ============================================================================
+-- Tables: agents, documents, and entity identity
+-- ============================================================================
 CREATE TABLE public.aac_discussions (
     discussion_id text NOT NULL,
     user_name text NOT NULL,
@@ -365,6 +374,9 @@ CREATE SEQUENCE public.entity_id_seq
     MINVALUE 2
     NO MAXVALUE
     CACHE 1;
+-- ============================================================================
+-- Tables: episodes, budgets, and maintenance
+-- ============================================================================
 CREATE TABLE public.episode_entities (
     episode_id text NOT NULL,
     project_id text NOT NULL,
@@ -518,6 +530,9 @@ CREATE TABLE public.maintenance_reviews (
     CONSTRAINT maintenance_reviews_scope_check CHECK ((scope = ANY (ARRAY['project'::text, 'user-global'::text]))),
     CONSTRAINT maintenance_reviews_status_check CHECK ((status = ANY (ARRAY['open'::text, 'applied'::text, 'dismissed'::text, 'stale'::text])))
 );
+-- ============================================================================
+-- Tables: messages, evidence, and revisions
+-- ============================================================================
 CREATE TABLE public.message_entity_refs (
     message_id bigint NOT NULL,
     entity_id bigint NOT NULL,
@@ -684,6 +699,9 @@ CREATE TABLE public.messages (
     CONSTRAINT messages_exchange_state_check CHECK ((exchange_state = ANY (ARRAY['open'::text, 'closed'::text]))),
     CONSTRAINT messages_exchange_user_shape_check CHECK (((role = 'user'::text) AND (((exchange_state = 'open'::text) AND (exchange_outcome IS NULL) AND (exchange_closed_at_ms IS NULL)) OR ((exchange_state = 'closed'::text) AND (exchange_outcome = ANY (ARRAY['assistant_final'::text, 'clarification'::text, 'failed'::text, 'cancelled'::text, 'user_only'::text])) AND (exchange_closed_at_ms IS NOT NULL) AND (exchange_closed_at_ms >= 0)))) OR ((role <> 'user'::text) AND (exchange_state = 'open'::text) AND (exchange_outcome IS NULL) AND (exchange_closed_at_ms IS NULL)))
 );
+-- ============================================================================
+-- Tables: projects, files, and access scopes
+-- ============================================================================
 CREATE TABLE public.project_artifact_revisions (
     artifact_id uuid NOT NULL,
     revision integer NOT NULL,
@@ -813,6 +831,9 @@ CREATE TABLE public.projects (
     CONSTRAINT projects_domain_config_check CHECK ((jsonb_typeof(domain_config) = 'object'::text)),
     CONSTRAINT projects_status_check CHECK ((status = ANY (ARRAY['active'::text, 'archived'::text, 'deleted'::text])))
 );
+-- ============================================================================
+-- Tables: semantic windows and versioned Context
+-- ============================================================================
 CREATE TABLE public.project_contexts (
     project_id text NOT NULL,
     user_name text NOT NULL,
@@ -1058,6 +1079,9 @@ CREATE TABLE public.episode_entity_occurrences (
 );
 CREATE INDEX episode_entity_occurrences_link_idx
     ON public.episode_entity_occurrences (project_id, episode_id, resolved_entity_id);
+-- ============================================================================
+-- Tables: relationships, saved links, and sessions
+-- ============================================================================
 CREATE TABLE public.relationship_observation_blocks (
     observation_id bigint NOT NULL,
     project_id text NOT NULL,
@@ -1140,6 +1164,9 @@ CREATE TABLE public.sessions (
     CONSTRAINT sessions_semantic_participation_after_message_id_check CHECK ((semantic_participation_after_message_id >= 0)),
     CONSTRAINT sessions_status_check CHECK ((status = ANY (ARRAY['open'::text, 'deleted'::text])))
 );
+-- ============================================================================
+-- Keys and sequence defaults
+-- ============================================================================
 ALTER TABLE ONLY public.entity_global_merge_mutations ALTER COLUMN mutation_id SET DEFAULT nextval('public.entity_global_merge_mutations_mutation_id_seq'::regclass);
 ALTER TABLE ONLY public.maintenance_review_events ALTER COLUMN event_id SET DEFAULT nextval('public.maintenance_review_events_event_id_seq'::regclass);
 ALTER TABLE ONLY public.relationship_observations ALTER COLUMN observation_id SET DEFAULT nextval('public.relationship_observations_observation_id_seq'::regclass);
@@ -1149,6 +1176,9 @@ ALTER TABLE ONLY public.background_work
     ADD CONSTRAINT background_work_pkey PRIMARY KEY (work_id);
 ALTER TABLE ONLY public.entity_duplicate_checks
     ADD CONSTRAINT entity_duplicate_checks_pkey PRIMARY KEY (user_name, entity_a_id, entity_b_id);
+-- ============================================================================
+-- Primary and unique keys
+-- ============================================================================
 ALTER TABLE ONLY public.aac_insight_votes
     ADD CONSTRAINT aac_insight_votes_pkey PRIMARY KEY (insight_id, voter_agent_id);
 ALTER TABLE ONLY public.aac_insights
@@ -1369,6 +1399,9 @@ ALTER TABLE ONLY public.sessions
     ADD CONSTRAINT sessions_id_project_key UNIQUE (session_id, project_id);
 ALTER TABLE ONLY public.sessions
     ADD CONSTRAINT sessions_pkey PRIMARY KEY (session_id);
+-- ============================================================================
+-- Lookup and uniqueness indexes
+-- ============================================================================
 CREATE INDEX aac_discussions_user_started_idx ON public.aac_discussions USING btree (user_name, started_at DESC);
 CREATE INDEX aac_insights_user_visibility_created_idx ON public.aac_insights USING btree (user_name, visibility, created_at DESC);
 CREATE INDEX aac_timeline_discussion_created_idx ON public.aac_timeline USING btree (discussion_id, created_at, timeline_id);
@@ -1439,10 +1472,16 @@ CREATE INDEX relationships_pair_type_idx ON public.relationships USING btree (pr
 CREATE INDEX saved_web_links_project_updated_idx ON public.saved_web_links USING btree (project_id, updated_at DESC, link_id DESC);
 CREATE UNIQUE INDEX saved_web_links_project_url_idx ON public.saved_web_links USING btree (project_id, url);
 CREATE INDEX sessions_project_idx ON public.sessions USING btree (user_name, project_id, created_at);
+-- ============================================================================
+-- Triggers: enforce scope and immutable identity
+-- ============================================================================
 CREATE TRIGGER entities_identity_immutable_trigger BEFORE UPDATE ON public.entities FOR EACH ROW EXECUTE FUNCTION public.reject_entity_identity_mutation();
 CREATE TRIGGER message_entity_refs_scope_trigger BEFORE INSERT OR UPDATE OF message_id, entity_id ON public.message_entity_refs FOR EACH ROW EXECUTE FUNCTION public.enforce_message_entity_ref_scope();
 CREATE TRIGGER context_block_entities_scope_trigger BEFORE INSERT OR UPDATE OF block_id, project_id, entity_id ON public.context_block_entities FOR EACH ROW EXECUTE FUNCTION public.enforce_context_block_entity_scope();
 CREATE TRIGGER relationships_scope_trigger BEFORE INSERT OR UPDATE OF user_name, project_id, entity_a_id, entity_b_id ON public.relationships FOR EACH ROW EXECUTE FUNCTION public.enforce_relationship_scope();
+-- ============================================================================
+-- Foreign keys: connect rows and enforce ownership
+-- ============================================================================
 ALTER TABLE ONLY public.aac_insight_votes
     ADD CONSTRAINT aac_insight_votes_insight_id_fkey FOREIGN KEY (insight_id) REFERENCES public.aac_insights(insight_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.aac_insights

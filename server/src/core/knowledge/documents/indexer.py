@@ -23,6 +23,7 @@ from core.knowledge.db.writers.document_writer import DocumentWriter
 from core.knowledge.documents.constants import (
     EXPECTED_EMBEDDING_DIMENSION,
     MAX_ERROR_MESSAGE_LENGTH,
+    READ_DIRECTLY_EXTENSIONS,
 )
 from core.knowledge.documents.extraction import (
     DocumentChunk,
@@ -123,6 +124,16 @@ class DocumentIndexer:
         metadata = rows[0] if rows else None
         if metadata is None or metadata["project_id"] != self.project_id:
             raise FileNotFoundError("Document not found")
+        if metadata["extension"] in READ_DIRECTLY_EXTENSIONS:
+            # Code in a workspace is read directly; skip it before any embedding.
+            await self._writer.apply_workspace_index_rule(
+                extensions=READ_DIRECTLY_EXTENSIONS, document_id=document_id
+            )
+            metadata = (await self._reader.fetch_documents_by_reference(
+                document_id=document_id, relative_path=None,
+            ))[0]
+            if metadata["status"] == "skipped":
+                return metadata
         if metadata["status"] == "indexed" and not force:
             return metadata
 
@@ -471,7 +482,13 @@ class DocumentIndexer:
         try:
             task.result()
         except BackgroundWorkRejected as exc:
+            # The work queue is full. Waking the drain loop now would only be
+            # refused again at once, so wake it after a backoff instead.
             logger.warning("Document indexing remains queued: {}", exc.message)
+            asyncio.get_running_loop().call_later(
+                _DRAIN_FAILURE_RETRY_SECONDS, self._request_drain
+            )
+            return
         except Exception as exc:
             logger.error("Background document indexing failed: {}", exc)
         self._request_drain()
@@ -505,10 +522,18 @@ class DocumentIndexer:
                             break
                         retry_at = await self._reader.next_index_retry_at()
                         retry_time = parse_iso_time(retry_at) if retry_at is not None else None
-                        if retry_time is not None and not self._document_tasks:
-                            timeout = max(0.01, (retry_time - get_now()).total_seconds())
-                        else:
+                        if self._document_tasks:
+                            # Each finished task wakes this loop as well.
                             timeout = _DRAIN_RETRY_SECONDS
+                        else:
+                            timeout = (
+                                (retry_time - get_now()).total_seconds()
+                                if retry_time is not None else 0
+                            )
+                            if timeout <= 0:
+                                # Work is due but none was taken: admission was
+                                # refused (queue full), so back off, not spin.
+                                timeout = _DRAIN_FAILURE_RETRY_SECONDS
                     except Exception as exc:
                         logger.error("Document index admission loop failed: {}", exc)
                         timeout = _DRAIN_FAILURE_RETRY_SECONDS
@@ -577,9 +602,15 @@ class DocumentIndexer:
             return
         try:
             result = await callback()
+            # Also catches workspaces added or removed since the last pass.
+            requeued = await self._writer.apply_workspace_index_rule(
+                extensions=READ_DIRECTLY_EXTENSIONS
+            )
         except Exception:
             logger.exception("Document filesystem reconciliation failed for {}", self.project_id)
             return
+        if requeued:
+            self._request_drain()
         if any(result.get(key, 0) for key in ("created", "changed", "deleted")):
             logger.info(
                 "Document filesystem reconciliation for {}: created={}, changed={}, deleted={}",

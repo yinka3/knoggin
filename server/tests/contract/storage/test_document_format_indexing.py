@@ -481,3 +481,43 @@ async def test_cancelled_upload_tombstones_postgres_before_removing_source(
     assert not service._filesystem.root.joinpath("cancel.md").exists()
     reconciled = await service.reconcile_project_files()
     assert reconciled["created"] == 0
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.requires_pgvector
+@pytest.mark.no_network
+async def test_code_in_a_workspace_is_kept_and_grepped_but_not_indexed(
+    real_postgres_client, tmp_path
+):
+    await real_postgres_client.execute(
+        """UPDATE public.projects SET workspaces = '{"api": {"read_only": false}}'::jsonb
+           WHERE project_id = 'project-1'"""
+    )
+    service = _document_service(real_postgres_client, tmp_path)
+
+    code = await service.submit_document(
+        content=b"def rotate_api_token():\n    return 'rotated'\n",
+        original_name="tokens.py", relative_path="api/tokens.py",
+    )
+    note = await service.submit_document(
+        content=b"How we rotate the api token each quarter.\n",
+        original_name="rotation.md", relative_path="api/rotation.md",
+    )
+
+    assert code["status"] == "skipped" and note["status"] == "indexed"
+    chunks = await real_postgres_client.fetch_all(
+        "SELECT document_id FROM public.document_chunks WHERE document_id = %s",
+        (code["document_id"],),
+    )
+    assert chunks == []
+    assert service._filesystem.read_bytes("api/tokens.py").startswith(b"def rotate")
+
+    service._filesystem.write_bytes("api/.env", b"rotate_api_token=secret\n")
+    service._filesystem.write_bytes(
+        "api/node_modules/pkg/index.js", b"rotate_api_token()\n"
+    )
+    found = await service.grep_project_files("ROTATE_API_TOKEN", path_prefix="api")
+    assert [(match["path"], match["line"]) for match in found["matches"]] == [
+        ("api/tokens.py", 1)
+    ]

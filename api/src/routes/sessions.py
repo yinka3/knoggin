@@ -12,7 +12,7 @@ from contracts.sessions import (
     SessionPreferences,
     focus_input,
 )
-from routes.project_settings import _error, _json
+from routes.project_settings import _error, _json, _project_error
 
 
 def _public(row):
@@ -179,9 +179,8 @@ async def import_exchanges(request):
     metadata = await _metadata(runtime, session_id)
     if metadata is None:
         return _error("session_not_found", "Session not found", 404)
-    project = await runtime.projects.get_project(metadata["project_id"])
-    if project is None or project["status"] != "active":
-        return _error("project_unavailable", "Project is unavailable", 409)
+    if error := await _project_error(runtime, metadata["project_id"], write=True):
+        return error
     session = await runtime.sessions.get_or_resume_session(session_id)
     if session is None:
         return _error("session_not_found", "Session not found", 404)

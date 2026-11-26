@@ -55,10 +55,10 @@ class RelationshipObservationReader:
                 relationship_observations.observed_at_ms,
                 CASE WHEN EXISTS (
                     SELECT 1
-                    FROM public.relationship_observation_blocks AS block_support
-                    WHERE block_support.observation_id = relationship_observations.observation_id
-                      AND block_support.project_id = relationship_observations.project_id
-                ) THEN 'context' ELSE 'independent' END AS evidence_origin
+                    FROM public.relationship_observation_messages AS message_support
+                    WHERE message_support.observation_id = relationship_observations.observation_id
+                      AND message_support.project_id = relationship_observations.project_id
+                ) THEN 'conversation' ELSE 'independent' END AS evidence_origin
             FROM relationship_observations
             LEFT JOIN project_entity_contexts source_context
               ON source_context.project_id = relationship_observations.project_id
@@ -74,49 +74,6 @@ class RelationshipObservationReader:
                      relationship_observations.observation_id
             """,
             (user_name, project_id),
-        )
-
-    async def get_active_context_supports(
-        self,
-        relationship_id: str,
-        *,
-        user_name: str,
-        project_id: str,
-    ) -> list[dict[str, Any]]:
-        """Return current active Context support rows for one relationship.
-
-        Retired observations are deliberately excluded.  The caller receives
-        only immutable block-version IDs and durable observation identities;
-        the Context reader remains responsible for rendering block content.
-        """
-
-        user_name = require_scope_value(
-            user_name, "user_name", "get_active_context_relationship_supports"
-        )
-        project_id = require_scope_value(
-            project_id, "project_id", "get_active_context_relationship_supports"
-        )
-        relationship_id = require_scope_value(
-            relationship_id,
-            "relationship_id",
-            "get_active_context_relationship_supports",
-        )
-        return await self.client.fetch_all(
-            """
-            SELECT observation.observation_id,
-                   observation.semantic_window_id,
-                   support.block_id
-            FROM public.relationship_observations AS observation
-            JOIN public.relationship_observation_blocks AS support
-              ON support.observation_id = observation.observation_id
-             AND support.project_id = observation.project_id
-            WHERE observation.relationship_id = %s
-              AND observation.project_id = %s
-              AND observation.user_name = %s
-              AND observation.retired_at IS NULL
-            ORDER BY observation.observation_id, support.block_id
-            """,
-            (relationship_id, project_id, user_name),
         )
 
     async def get_advisories(
@@ -183,7 +140,7 @@ class RelationshipObservationReader:
             if review.status == "applied":
                 disposition = "accepted"
             elif review.status == "dismissed":
-                disposition = "suppressed" if plan.action == "suppress" else "dismissed"
+                disposition = "dismissed"
             previous = decisions.get(plan.pattern_key)
             stored_revision = review.expected_state.get("revision")
             revision = (
@@ -197,7 +154,7 @@ class RelationshipObservationReader:
                 pattern_key=plan.pattern_key,
                 disposition=disposition,
                 proposed_relationship_type=plan.proposed_relationship_type,
-                last_action=plan.action,
+                last_action="dismiss" if plan.action == "suppress" else plan.action,
                 decision_note=plan.note,
                 revision=revision,
             )

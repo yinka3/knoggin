@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-from dataclasses import replace
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -10,9 +9,9 @@ import httpx
 import pytest
 
 from common.conf.domain_config import DomainConfig
-from common.schema.ingestion.contracts import ContextBlockMention
+from common.schema.ingestion.contracts import EntityMention
 from common.schema.jev import JevPolicy, JevResponse, JevResult, JevSettings
-from common.schema.settings import EntityResolutionSettings, TextProcessorSettings
+from common.schema.settings import EntityResolutionSettings, ExtractionSettings
 from core.ingestion.policy import IngestionPolicy
 from core.knowledge.entity.resolver import EntityResolver
 from infrastructure.external_model_budget import ExternalModelSpendingLedger
@@ -127,7 +126,7 @@ def identity_policy(
         }
     ).compile()
     return IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(),
+        extraction=ExtractionSettings(),
         entity_resolution=EntityResolutionSettings(),
         compiled_domain=domain,
         jev=JevPolicy(
@@ -141,24 +140,24 @@ def identity_policy(
 
 
 async def resolve(resolver, policy, supports, *, name="Bob", work_budget=None, timing=None):
-    block_ids = [uuid4() for _ in supports]
+    message_ids = list(range(1, len(supports) + 1))
     next_id = iter(range(900, 900 + len(supports)))
 
     async def allocate():
         return next(next_id)
 
-    return await resolver.resolve_context_block_mentions(
+    return await resolver.resolve_mentions(
         [
-            ContextBlockMention(
-                block_ids=(block_id,),
+            EntityMention(
+                message_ids=(message_id,),
                 name=name,
                 entity_type="Person",
                 topic="Work",
                 origin="vp01",
             )
-            for block_id in block_ids
+            for message_id in message_ids
         ],
-        block_text_by_id=dict(zip(block_ids, supports, strict=True)),
+        message_text_by_id=dict(zip(message_ids, supports, strict=True)),
         policy=policy,
         allocate_entity_id=allocate,
         window_id=uuid4(),
@@ -395,38 +394,6 @@ async def test_many_aliases_cannot_hide_competing_identity_from_jev():
     assert observation["candidate_set_truncated"]
     assert observation["accepted_entity_id"] is None
     assert result.entity_ids == (900,)
-
-
-@pytest.mark.parametrize("changed", [None, "evidence", "policy"])
-async def test_accepted_decision_is_carried_only_for_identical_frozen_inputs(changed):
-    jev = FakeJev(confidence=0.95, evidence_noul=0.95)
-    resolver = EntityResolver(Store([
-        entity(701, "Robert Chen", "Person"), entity(702, "Bob Smith", "Person"),
-    ]), "project-1", ["project-1"], jev_client=jev)
-    frozen = identity_policy("active", acceptance_policy_version="identity-positive-v1")
-    block_id, window_id = uuid4(), uuid4()
-    mention = ContextBlockMention(block_ids=(block_id,), name="Bob", entity_type="Person", topic="Work", origin="vp01")
-
-    async def allocate():
-        return 900
-
-    first = await resolver.resolve_context_block_mentions([mention],
-        block_text_by_id={block_id: "Bob joined the meeting."}, policy=frozen,
-        allocate_entity_id=allocate, window_id=window_id)
-    assert first.entity_ids == (701,)
-    unavailable = FakeJev(unavailable=True)
-    resolver._jev_client = unavailable
-    second = await resolver.resolve_context_block_mentions([mention],
-        block_text_by_id={block_id: "Bob reviewed an invoice." if changed == "evidence" else "Bob joined the meeting."},
-        policy=replace(frozen, candidate_fuzzy_threshold=84) if changed == "policy" else frozen,
-        allocate_entity_id=allocate, window_id=window_id, pass_number=2,
-        previous_identity_decisions=first.identity_decisions)
-    if changed is None:
-        assert second.entity_ids == (701,)
-        assert unavailable.calls == []
-    else:
-        assert second.entity_ids == (900,)
-        assert len(unavailable.calls) == 1
 
 
 @pytest.mark.no_network

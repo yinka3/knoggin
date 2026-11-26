@@ -6,10 +6,11 @@ from starlette.routing import Route
 
 from common.conf.domain_config import DomainConfig
 from common.exceptions import WorkspaceConflictError
+from contracts.projects import workspace_views
 from core.project.project_files import workspace_name
 from project_lease import project_documents
 
-from routes.project_settings import _error, _json
+from routes.project_settings import _error, _json, _project_error
 
 
 DEFAULT_DOMAIN = DomainConfig.from_mapping(
@@ -35,6 +36,17 @@ async def list_projects(request):
     return JSONResponse([_public(row) for row in rows])
 
 
+async def list_forget_records(request):
+    runtime = request.app.state.runtime
+    project_id = request.path_params["project_id"]
+    if error := await _project_error(runtime, project_id, write=False):
+        return error
+    rows = await runtime.resources.knowledge_store.list_forget_records(
+        user_name=runtime.sessions.user_name, project_id=project_id,
+    )
+    return JSONResponse(rows)
+
+
 async def get_project(request):
     row = await request.app.state.runtime.projects.get_project(
         request.path_params["project_id"]
@@ -54,7 +66,7 @@ async def create_project(request):
     try:
         row = await request.app.state.runtime.projects.create_project(
             name=body.name, description=body.description,
-            domain_config=DEFAULT_DOMAIN,
+            domain_config=DEFAULT_DOMAIN, connections=body.connections,
         )
     except ValueError:
         return _error("invalid_project", "Invalid project", 422)
@@ -133,12 +145,13 @@ async def add_workspace(request):
     if error := await _editable(request, project_id):
         return error
     try:
-        name = workspace_name(AddWorkspace.model_validate(await _json(request)).name)
+        body = AddWorkspace.model_validate(await _json(request))
+        name = workspace_name(body.name)
     except (ValidationError, ValueError):
         return _error("invalid_workspace", "Invalid workspace name", 422)
     projects = request.app.state.runtime.projects
     try:
-        workspaces = await projects.add_workspace(project_id, name)
+        workspaces = await projects.add_workspace(project_id, name, read_only=body.read_only)
     except ValueError:
         return _error(
             "workspace_unavailable",
@@ -151,7 +164,27 @@ async def add_workspace(request):
         # A file already has that name; the folder is the workspace.
         await projects.remove_workspace(project_id, name)
         return _error("invalid_workspace", "A project file already uses that name", 409)
-    return JSONResponse({"workspaces": workspaces}, status_code=201)
+    return JSONResponse({"workspaces": workspace_views(workspaces)}, status_code=201)
+
+
+async def update_workspace(request):
+    from contracts.projects import UpdateWorkspace
+
+    project_id = request.path_params["project_id"]
+    if error := await _editable(request, project_id):
+        return error
+    try:
+        changes = UpdateWorkspace.model_validate(await _json(request)).model_dump(
+            exclude_none=True
+        )
+    except ValidationError:
+        return _error("invalid_workspace", "Invalid workspace settings", 422)
+    workspaces = await request.app.state.runtime.projects.update_workspace(
+        project_id, request.path_params["name"], changes
+    )
+    if workspaces is None:
+        return _error("workspace_not_found", "Workspace not found", 404)
+    return JSONResponse({"workspaces": workspace_views(workspaces)})
 
 
 async def remove_workspace(request):
@@ -166,10 +199,11 @@ async def remove_workspace(request):
         return _error("workspace_not_empty", "Workspace still has documents", 409)
     if workspaces is None:
         return _error("workspace_not_found", "Workspace not found", 404)
-    return JSONResponse({"workspaces": workspaces})
+    return JSONResponse({"workspaces": workspace_views(workspaces)})
 
 
 routes = [
+    Route("/v1/projects/{project_id}/forget-records", list_forget_records, methods=["GET"]),
     Route("/v1/projects", list_projects, methods=["GET"]),
     Route("/v1/projects", create_project, methods=["POST"]),
     Route("/v1/projects/{project_id}", get_project, methods=["GET"]),
@@ -181,5 +215,9 @@ routes = [
     Route(
         "/v1/projects/{project_id}/workspaces/{name}", remove_workspace,
         methods=["DELETE"],
+    ),
+    Route(
+        "/v1/projects/{project_id}/workspaces/{name}", update_workspace,
+        methods=["PATCH"],
     ),
 ]

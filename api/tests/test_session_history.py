@@ -22,7 +22,7 @@ def test_history_exposes_only_public_message_metadata():
                     "idempotency_key": "private-request-key",
                     "request_fingerprint": "private-fingerprint",
                     "internal_future_field": {"secret": True},
-                    "origin": "research_job_report",
+                    "origin": "background_task_report",
                     "response_annotations": [{"message_id": 2, "start": 0, "end": 5,
                                                "quote": "Earlier", "private": "hidden"}],
                     "run_steer": {

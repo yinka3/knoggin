@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import instructor
 import pytest
+import tiktoken
 from openai import APIConnectionError, BadRequestError
 from pydantic import BaseModel
 
@@ -12,6 +13,7 @@ from common.exceptions import (
     ConfigurationError,
     LLMBudgetExceededError,
     LLMProviderError,
+    LLMRefusalError,
     LLMResponseError,
 )
 from common.schema.settings import (
@@ -361,6 +363,7 @@ async def test_stream_with_tools_preserves_ids_and_exact_usage(llm_service):
                 "cost_usd": None,
                 "approximate": False,
             },
+            "finish_reason": None,
         },
     }
 
@@ -446,6 +449,35 @@ async def test_stream_retries_only_before_output(llm_service, monkeypatch):
 
     assert raw_client.chat.completions.create.call_count == 2
     assert events[-1]["event"] == "step_completed"
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_stopping_a_stream_closes_the_provider_response(llm_service):
+    service, raw_client, _, _, _ = llm_service
+
+    class ProviderStream:
+        closed = False
+
+        def __aiter__(self):
+            return self._chunks()
+
+        async def _chunks(self):
+            yield stream_chunk(content="partial")
+            await asyncio.Event().wait()
+
+        async def close(self):
+            self.closed = True
+
+    stream = ProviderStream()
+    raw_client.chat.completions.create.return_value = stream
+    events = service.stream_with_tools(system="system", user="user", tools=[])
+
+    assert (await anext(events))["event"] == "token"
+    # What a stopped run does to this generator.
+    await events.aclose()
+
+    assert stream.closed
 
 
 @pytest.mark.unit
@@ -795,6 +827,67 @@ def test_local_thinking_switch_maps_to_reasoning_effort():
 
 @pytest.mark.unit
 @pytest.mark.no_network
+def test_openrouter_thinking_budget_fits_under_the_reply_cap():
+    with (
+        patch("infrastructure.llm_client.instructor.from_openai"),
+        patch("infrastructure.llm_client.AsyncOpenAI"),
+    ):
+        service = LLMService(api_key="key")
+    # A budget over max_completion_tokens is rejected by providers.
+    assert service._openrouter_extra_body("high", 2_000)["reasoning"] == {
+        "max_tokens": 1_488
+    }
+    assert service._openrouter_extra_body("high", None)["reasoning"] == {
+        "max_tokens": 4_096
+    }
+    # Below the 1024 minimum, skip thinking rather than send a bad request.
+    assert "reasoning" not in service._openrouter_extra_body("medium", 1_200)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_openrouter_thinking_budgets_come_from_settings():
+    with (
+        patch("infrastructure.llm_client.instructor.from_openai"),
+        patch("infrastructure.llm_client.AsyncOpenAI"),
+    ):
+        service = LLMService(
+            api_key="key", planning_thinking_tokens=6_000, step_thinking_tokens=0
+        )
+    assert service._openrouter_extra_body("high", 8_000)["reasoning"] == {
+        "max_tokens": 6_000
+    }
+    assert "reasoning" not in service._openrouter_extra_body("medium", 8_000)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_request_omits_parameters_the_listed_model_does_not_take():
+    with (
+        patch("infrastructure.llm_client.instructor.from_openai"),
+        patch("infrastructure.llm_client.AsyncOpenAI"),
+    ):
+        service = LLMService(api_key="key")
+    service._listed_parameters = {
+        "anthropic/claude-haiku-5.5": frozenset({"tools", "reasoning", "max_tokens"}),
+        "plain/model": frozenset({"temperature", "tools"}),
+    }
+
+    haiku = service._request_options(
+        "anthropic/claude-haiku-5.5", temperature=0.2, reasoning="high",
+        max_completion_tokens=2_000,
+    )
+    plain = service._request_options("plain/model", temperature=0.2, reasoning="high")
+    unknown = service._request_options("unlisted/model", temperature=0.2, reasoning=None)
+
+    assert "temperature" not in haiku
+    assert haiku["extra_body"]["reasoning"] == {"max_tokens": 1_488}
+    assert plain["temperature"] == 0.2 and "reasoning" not in plain["extra_body"]
+    assert unknown["temperature"] == 0.2
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 def test_local_models_are_fast_by_default_and_full_thinking_is_warned():
     from common.schema.settings import LLMSettings
     from infrastructure.llm_client import local_thinking_warning
@@ -909,3 +1002,93 @@ async def test_openrouter_listed_prices_price_calls_without_user_pricing(monkeyp
     with pytest.raises(ConfigurationError, match="no price for model 'openrouter/auto'"):
         await service.generate_text(system="s", user="u", model="openrouter/auto")
     await service.close()
+
+
+def _service_over_fake_http(monkeypatch, body):
+    from openai import AsyncOpenAI as RealAsyncOpenAI
+
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, json={
+            "id": "chatcmpl-1", "object": "chat.completion", "created": 0,
+            "model": "local-model",
+            "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+            **body,
+        })
+
+    monkeypatch.setattr(
+        "infrastructure.llm_client.AsyncOpenAI",
+        lambda **kwargs: RealAsyncOpenAI(
+            **kwargs, http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        ),
+    )
+    service = LLMService(
+        api_key="local", base_url="http://localhost:11434/v1",
+        agent_model="local-model", extraction_model="local-model", merge_model="local-model",
+    )
+    return service, requests
+
+
+def _reply(content):
+    return {"choices": [{"index": 0, "finish_reason": "stop", "message": {
+        "role": "assistant", "content": content}}]}
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_provider_content_block_is_a_refusal(monkeypatch):
+    # OpenRouter's shape for a Gemini PROHIBITED_CONTENT block.
+    service, requests = _service_over_fake_http(monkeypatch, {"choices": [], "error": {
+        "message": "Gemini blocked the request: PROHIBITED_CONTENT", "code": 403,
+        "metadata": {"error_type": "content_policy_violation"},
+    }})
+
+    with pytest.raises(LLMRefusalError) as raised:
+        await service.generate_structured(
+            response_model=DummyModel, system="Extract.", user="text"
+        )
+    assert raised.value.details["refusal_reason"] == "provider_content_policy"
+    assert raised.value.details["finish_reason"] == "none"
+    assert len(requests) == 1
+    await service.close()
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_model_apology_instead_of_json_is_a_refusal(monkeypatch):
+    service, _ = _service_over_fake_http(
+        monkeypatch, _reply("I'm sorry, but I cannot assist with that request.")
+    )
+
+    with pytest.raises(LLMRefusalError) as raised:
+        await service.generate_structured(
+            response_model=DummyModel, system="Extract.", user="text"
+        )
+    assert raised.value.details["refusal_reason"] == "refusal_text"
+    assert raised.value.details["finish_reason"] == "stop"
+    await service.close()
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_malformed_output_is_not_a_refusal(monkeypatch):
+    service, _ = _service_over_fake_http(monkeypatch, _reply('{"title": "wrong field"}'))
+
+    with pytest.raises(LLMResponseError) as raised:
+        await service.generate_structured(
+            response_model=DummyModel, system="Extract.", user="text"
+        )
+    assert not isinstance(raised.value, LLMRefusalError)
+    await service.close()
+
+
+def test_counting_tokens_accepts_text_that_spells_a_special_token():
+    # A message quoting a model's control token once blocked a project's memory.
+    client = object.__new__(LLMService)
+    client._tokenizer = tiktoken.get_encoding("cl100k_base")
+    text = "the model printed <|endoftext|> and stopped"
+
+    assert client.count_tokens(text) > 0
+    assert client.count_tokens_batch([text]) == [client.count_tokens(text)]

@@ -9,7 +9,7 @@ from common.conf.domain_config import CompiledDomain
 from common.schema.jev import JevPolicy
 from common.schema.settings import (
     EntityResolutionSettings,
-    TextProcessorSettings,
+    ExtractionSettings,
 )
 
 
@@ -17,8 +17,8 @@ from common.schema.settings import (
 class IngestionPolicy:
     """Runtime rules that remain stable for one in-memory ingestion batch."""
 
-    gliner_threshold: float
-    llm_ner_mode: str
+    vp01_episode_lookback: int
+    vp02_episode_lookback: int
     candidate_fuzzy_threshold: int
     resolution_threshold: float
     resolution_margin: float
@@ -35,7 +35,7 @@ class IngestionPolicy:
     def capture(
         cls,
         *,
-        text_processor: TextProcessorSettings,
+        extraction: ExtractionSettings,
         entity_resolution: EntityResolutionSettings,
         compiled_domain: CompiledDomain,
         jev: JevPolicy | None = None,
@@ -43,8 +43,8 @@ class IngestionPolicy:
         if not isinstance(compiled_domain, CompiledDomain):
             raise TypeError("IngestionPolicy requires an active CompiledDomain")
         return cls(
-            gliner_threshold=text_processor.gliner_threshold,
-            llm_ner_mode=text_processor.llm_ner_mode,
+            vp01_episode_lookback=extraction.vp01_episode_lookback,
+            vp02_episode_lookback=extraction.vp02_episode_lookback,
             candidate_fuzzy_threshold=entity_resolution.candidate_fuzzy_threshold,
             resolution_threshold=entity_resolution.resolution_threshold,
             resolution_margin=entity_resolution.resolution_margin,
@@ -61,11 +61,11 @@ class IngestionPolicy:
         )
 
     def semantic_window_snapshot(self) -> dict[str, object]:
-        """Serialize every Context-entity decision input for durable replay."""
+        """Serialize every Knowledge decision input for durable replay."""
 
         return {
-            "gliner_threshold": self.gliner_threshold,
-            "llm_ner_mode": self.llm_ner_mode,
+            "vp01_episode_lookback": self.vp01_episode_lookback,
+            "vp02_episode_lookback": self.vp02_episode_lookback,
             "candidate_fuzzy_threshold": self.candidate_fuzzy_threshold,
             "resolution_threshold": self.resolution_threshold,
             "resolution_margin": self.resolution_margin,
@@ -77,13 +77,13 @@ class IngestionPolicy:
 
     @classmethod
     def from_semantic_window_snapshot(cls, payload: object) -> "IngestionPolicy":
-        """Hydrate the exact Context-entity policy captured at admission."""
+        """Hydrate the exact Knowledge policy captured at admission."""
 
         if not isinstance(payload, Mapping):
             raise ValueError("Ingestion policy snapshot must be an object")
         expected = {
-            "gliner_threshold",
-            "llm_ner_mode",
+            "vp01_episode_lookback",
+            "vp02_episode_lookback",
             "candidate_fuzzy_threshold",
             "resolution_threshold",
             "resolution_margin",
@@ -95,8 +95,7 @@ class IngestionPolicy:
         if set(payload) not in (expected, expected | {"jev_policy"}):
             raise ValueError("Invalid ingestion policy snapshot shape")
         try:
-            gliner_threshold = payload["gliner_threshold"]
-            llm_ner_mode = payload["llm_ner_mode"]
+            lookbacks = (payload["vp01_episode_lookback"], payload["vp02_episode_lookback"])
             candidate_fuzzy_threshold = payload["candidate_fuzzy_threshold"]
             resolution_threshold = payload["resolution_threshold"]
             resolution_margin = payload["resolution_margin"]
@@ -109,9 +108,10 @@ class IngestionPolicy:
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("Invalid ingestion policy snapshot") from exc
         if (
-            not isinstance(gliner_threshold, (int, float))
-            or isinstance(gliner_threshold, bool)
-            or llm_ner_mode not in {"disabled", "fallback"}
+            any(
+                not isinstance(value, int) or isinstance(value, bool) or value < 0
+                for value in lookbacks
+            )
             or not isinstance(candidate_fuzzy_threshold, int)
             or isinstance(candidate_fuzzy_threshold, bool)
             or not isinstance(resolution_threshold, (int, float))
@@ -124,8 +124,8 @@ class IngestionPolicy:
         ):
             raise ValueError("Invalid ingestion policy snapshot values")
         return cls(
-            gliner_threshold=float(gliner_threshold),
-            llm_ner_mode=str(llm_ner_mode),
+            vp01_episode_lookback=lookbacks[0],
+            vp02_episode_lookback=lookbacks[1],
             candidate_fuzzy_threshold=candidate_fuzzy_threshold,
             resolution_threshold=float(resolution_threshold),
             resolution_margin=float(resolution_margin),

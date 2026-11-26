@@ -89,7 +89,10 @@ async def test_steer_enters_the_next_model_prompt_after_an_active_step():
     async def take_steer():
         nonlocal calls
         calls += 1
-        return None if calls == 1 else {"steer_id": "steer-1", "instruction": "Focus on recovery"}
+        return {
+            2: {"steer_id": "steer-1", "instruction": "Focus on recovery"},
+            3: {"steer_id": "steer-2", "instruction": "Check the timeline"},
+        }.get(calls)
 
     executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None), take_steer=take_steer)
     events = [event async for event in executor._execute_run()]
@@ -97,7 +100,10 @@ async def test_steer_enters_the_next_model_prompt_after_an_active_step():
     assert len(llm.calls) == 2
     assert "Focus on recovery" not in llm.calls[0]["user"]
     assert "Focus on recovery" in llm.calls[1]["user"]
-    assert [event["event"] for event in events][-2:] == ["steer_applied", "response"]
+    assert "Check the timeline" in llm.calls[1]["user"]
+    assert [event["event"] for event in events][-3:] == [
+        "steer_applied", "steer_applied", "response"
+    ]
 
 
 def tool_call_event(name, arguments, call_id):
@@ -846,11 +852,11 @@ async def test_final_synthesis_receives_episode_reversal_chronology(monkeypatch)
     assert "chronology: 2026-01-01T10:00:00+00:00" in final_prompt
     assert "chronology: 2026-02-01T10:00:00+00:00" in final_prompt
     assert (
-        "When multiple retrieved Episodes describe a change or reversal"
+        "Interpret changes using event chronology and explicit corrections"
         in llm.calls[-1]["system"]
     )
     assert (
-        "A later, supported state is the best available current state"
+        "A newer statement replaces an earlier state only\nwhen it establishes a change to the same subject"
         in llm.calls[-1]["system"]
     )
 
@@ -1448,6 +1454,44 @@ async def test_research_coverage_nested_in_the_artifact_is_accepted():
 
 
 @pytest.mark.no_network
+async def test_research_coverage_given_both_top_level_and_nested_is_accepted():
+    # The nested copy used to stay in the artifact, whose schema forbids it,
+    # so a valid answer was rejected.
+    coverage = (
+        '[{"subquestion": "What changed?", "supporting_references": [], '
+        '"unresolved_gap": "Evidence was supplied outside the run notebook."}]'
+    )
+    llm = ScriptedLLM(
+        [
+            [
+                tool_call_event(
+                    "submit_answer",
+                    '{"content": "Answer from supplied evidence.", '
+                    f'"research_coverage": {coverage}, '
+                    '"artifact": {"kind": "research_brief", "title": "Brief", '
+                    '"blocks": [{"kind": "markdown", "content": "Answer."}], '
+                    f'"research_coverage": {coverage}}}}}',
+                    "submit-both",
+                ),
+                completed_event(),
+            ]
+        ]
+    )
+    run = make_run(
+        limits=AgentRunLimits(max_attempts=1, max_calls=1),
+        research_profile=resolve_research_profile("research"),
+        initial_source_candidates=_validated_initial_source_candidates("pasted_text"),
+    )
+    assert run.set_research_plan(["What changed?"]) is None
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+
+    events = [event async for event in executor._execute_run()]
+
+    assert events[-1]["event"] == "response"
+    assert events[-1]["data"]["artifact"]["title"] == "Brief"
+
+
+@pytest.mark.no_network
 async def test_research_plan_is_frozen_before_completion():
     llm = ScriptedLLM(
         [
@@ -1940,6 +1984,38 @@ async def test_executor_loop_enforces_duplicate_tool_and_global_limits(
 
 
 @pytest.mark.no_network
+async def test_retryable_tool_failure_can_be_retried_with_the_same_arguments(
+    monkeypatch,
+):
+    run = make_run()
+    executor = AgentExecutor(run, ScriptedLLM([]), SimpleNamespace())
+    attempts = []
+
+    async def flaky_execute(_tools, _name, args):
+        attempts.append(args["query"])
+        if len(attempts) == 1:
+            raise ToolExecutionError(
+                "search_knowledge_messages", "Search is busy", retryable=True
+            )
+        return {"data": [{"id": args["query"], "message": args["query"]}]}
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", flaky_execute)
+
+    def call(call_id):
+        return ToolCall("search_knowledge_messages", {"query": "one"}, call_id=call_id)
+
+    first = [event async for event in executor._execute_tools([call("first")], [])]
+    retry = [event async for event in executor._execute_tools([call("retry")], [])]
+
+    assert first[-1]["event"] == "tool_error"
+    assert first[-1]["data"]["retryable"] is True
+    assert not any(event["event"] == "tool_error" for event in retry)
+    assert attempts == ["one", "one"]
+    # The retry still counts toward the run's call limit.
+    assert run.call_count == 2
+
+
+@pytest.mark.no_network
 async def test_fallback_summary_uses_all_canonical_evidence_categories():
     llm = ScriptedLLM([])
     run = make_run()
@@ -2411,7 +2487,11 @@ async def test_parallel_read_reports_notebook_capacity_rejection(monkeypatch):
     executor = AgentExecutor(run, ScriptedLLM([]), SimpleNamespace(document_service=None))
 
     async def result_for_query(_tools, name, args):
-        return {"data": [{"id": args["query"], "message": name}]}
+        return {
+            "data": [
+                {"id": query, "message": name} for query in args["query"].split(",")
+            ]
+        }
 
     monkeypatch.setattr("core.agent.executor.execute_tool", result_for_query)
     results = []
@@ -2420,7 +2500,11 @@ async def test_parallel_read_reports_notebook_capacity_rejection(monkeypatch):
         async for event in executor._execute_tools(
             [
                 ToolCall("search_knowledge_messages", {"query": "first"}, call_id="first"),
-                ToolCall("search_knowledge_messages", {"query": "second"}, call_id="second"),
+                ToolCall(
+                    "search_knowledge_messages",
+                    {"query": "second,third"},
+                    call_id="second",
+                ),
             ],
             results,
         )
@@ -2543,3 +2627,29 @@ async def test_feedback_errors_reach_the_model_without_ending_the_run(monkeypatc
     assert "not in what was read" in results[-1]["error"]
     assert run.consecutive_errors == 0
     assert "not in what was read" in run.last_error
+
+
+@pytest.mark.no_network
+async def test_events_a_tool_sends_while_running_reach_the_run_stream(monkeypatch):
+    from core.agent.tool_events import emit_tool_event
+
+    run = make_run(limits=AgentRunLimits(max_calls=3))
+    executor = AgentExecutor(run, ScriptedLLM([]), SimpleNamespace())
+
+    async def fake_execute(_tools, name, _args):
+        emit_tool_event("command_output", {"text": "building..."})
+        return {"data": [{"id": "ok", "message": "done"}]}
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", fake_execute)
+
+    events = [
+        event
+        async for event in executor._execute_tools(
+            [ToolCall("search_knowledge_entities", {"query": "Ada"}, call_id="c1")], []
+        )
+    ]
+
+    assert [event["event"] for event in events] == ["tool_start", "command_output", "tool_end"]
+    assert events[1]["data"] == {
+        "text": "building...", "call_id": "c1", "tool": "search_knowledge_entities",
+    }

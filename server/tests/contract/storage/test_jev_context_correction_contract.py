@@ -22,7 +22,7 @@ from core.project.maintenance_service import ProjectMaintenanceService
 @pytest.mark.no_network
 async def test_jev_context_correction_review_applies_and_protects_user_choice(real_postgres_client):
     client = real_postgres_client
-    block_id, window_id = uuid4(), uuid4()
+    window_id = uuid4()
     await client.execute(
         "INSERT INTO public.entities (entity_id, user_name, canonical_name) VALUES (2, 'ada', 'Orion')"
     )
@@ -32,10 +32,13 @@ async def test_jev_context_correction_review_applies_and_protects_user_choice(re
            VALUES ('project-1', 2, 'ada', 'Concept', 'General')"""
     )
     await client.execute(
-        """INSERT INTO public.project_context_blocks
-           (block_id, project_id, section_key, markdown, content_hash, assertion_kind)
-           VALUES (%s, 'project-1', 'current_state', 'Orion is a person.', %s, 'source_grounded')""",
-        (block_id, "a" * 64),
+        "INSERT INTO public.sessions (session_id, user_name, project_id) "
+        "VALUES ('session-1', 'ada', 'project-1')"
+    )
+    await client.execute(
+        """INSERT INTO public.messages
+           (user_name, session_id, message_id, project_id, role, content, timestamp_ms)
+           VALUES ('ada', 'session-1', 101, 'project-1', 'user', 'Orion is a person.', 1000)"""
     )
     await client.execute(
         """INSERT INTO public.project_semantic_windows
@@ -49,7 +52,7 @@ async def test_jev_context_correction_review_applies_and_protects_user_choice(re
     decision = {
         "entity_id": 2, "baseline_topic": "General",
         "suggested_topic": "General", "operational_topic": "General",
-        "record": {"evidence_block_ids": [str(block_id)]},
+        "record": {"evidence_message_ids": [101]},
     }
     await client.execute(
         """INSERT INTO public.project_jev_classification_decisions
@@ -66,9 +69,9 @@ async def test_jev_context_correction_review_applies_and_protects_user_choice(re
         async def get_jev_decision(self, *args, **kwargs):
             return await SemanticWindowReader(client).get_jev_decision(*args, **kwargs)
 
-        async def get_context_block_evidence(self, block, **kwargs):
-            return await EvidenceService(EvidenceTraversalReader(client)).for_context_block(
-                block, **kwargs,
+        async def get_message_evidence(self, message_id, **kwargs):
+            return await EvidenceService(EvidenceTraversalReader(client)).for_message(
+                message_id, **kwargs,
             )
 
     async def project_lookup(project_id):

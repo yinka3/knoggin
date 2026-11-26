@@ -76,6 +76,8 @@ async def get_notebook(request):
         return _error("notebook_not_found", "Notebook not found", 404)
     if row["view"] == "evidence_board":
         row = await runtime.projects.notebooks.evidence_board(project_id, notebook_id)
+        if row is None:  # Deleted between the two reads.
+            return _error("notebook_not_found", "Notebook not found", 404)
     return JSONResponse(_public(row))
 
 
@@ -264,11 +266,13 @@ async def confirm_board_claim(request):
             project_id, notebook_id, question_id=question_id,
             claim_id=claim_id, confirmation=body,
         )
-        row = await runtime.projects.notebooks.evidence_board(
+        row = row and await runtime.projects.notebooks.evidence_board(
             project_id, row["notebook_id"]
         )
     except NotebookConflict:
         return _error("notebook_conflict", "Board or evidence changed", 409)
+    if row is None:
+        return _error("notebook_not_found", "Notebook not found", 404)
     return JSONResponse(_public(row))
 
 

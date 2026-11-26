@@ -24,13 +24,17 @@ from common.schema.source.references import (
     SourceReference,
     SourceReferenceCandidate,
 )
-from core.knowledge.context.models import ContextMaterialization
+from core.knowledge.context.models import (
+    ContextMaintenanceState,
+    ContextMaterialization,
+)
 from core.knowledge.db.embedding_rebuilder import EmbeddingRebuilder
 from core.knowledge.db.id_allocator import IdAllocator
 from core.knowledge.db.readers.artifact_reader import ArtifactReader
 from core.knowledge.db.readers.entity_reader import EntityReader
 from core.knowledge.db.readers.episode_reader import EpisodeReader
 from core.knowledge.db.readers.evidence_traversal_reader import EvidenceTraversalReader
+from core.knowledge.db.readers.forget_reader import ForgetReader
 from core.knowledge.db.readers.graph_reader import GraphReader
 from core.knowledge.db.readers.knowledge_query_reader import KnowledgeQueryReader
 from core.knowledge.db.readers.message_reader import MessageReader
@@ -43,6 +47,7 @@ from core.knowledge.db.writers.entity_reclassification_writer import (
     HistoricalReclassificationResult,
 )
 from core.knowledge.db.writers.episode_writer import EpisodeWriter
+from core.knowledge.db.writers.forget_writer import ForgetWriter
 from core.knowledge.db.writers.graph_writer import GraphWriter
 from core.knowledge.db.writers.message_lifecycle_writer import (
     ExchangeClosure,
@@ -87,6 +92,7 @@ class KnowledgeStore:
         self._postgres_client = postgres_client
         self._id_allocator = IdAllocator(self._postgres_client)
         self._graph_writer = GraphWriter(self._postgres_client)
+        self._forget_writer = ForgetWriter(self._postgres_client)
         self._entity_reclassification_writer = EntityReclassificationWriter(
             self._postgres_client
         )
@@ -104,6 +110,7 @@ class KnowledgeStore:
         self._semantic_window_writer = SemanticWindowWriter(self._postgres_client)
         self._semantic_commit_writer = SemanticCommitWriter(self._postgres_client)
         self._entity_reader = EntityReader(self._postgres_client)
+        self._forget_reader = ForgetReader(self._postgres_client)
         self._evidence_service = EvidenceService(
             EvidenceTraversalReader(self._postgres_client)
         )
@@ -139,8 +146,44 @@ class KnowledgeStore:
             message, edit_window_seconds=edit_window_seconds
         )
 
+    async def mark_orphaned_run_steers_undelivered(self, **kwargs):
+        return await self._message_lifecycle_writer.mark_orphaned_run_steers_undelivered(**kwargs)
+
+    async def create_closed_standalone_message(self, **kwargs):
+        return await self._message_lifecycle_writer.create_closed_standalone_message(**kwargs)
+
     async def record_run_steer(self, **kwargs) -> bool:
         return await self._message_lifecycle_writer.record_run_steer(**kwargs)
+
+    async def get_episode_context_links(self, episode_ids, **kwargs) -> dict:
+        return await self._episode_reader.get_episode_context_links(episode_ids, **kwargs)
+
+    async def get_due_forget_records(self, **kwargs) -> list[dict]:
+        return await self._forget_reader.get_due_forget_records(**kwargs)
+
+    async def erase_forget_record(self, forget_id, **kwargs) -> bool:
+        return await self._forget_writer.erase_forget_record(forget_id, **kwargs)
+
+    async def list_forget_records(self, **kwargs) -> list[dict]:
+        return await self._forget_reader.list_forget_records(**kwargs)
+
+    async def forgotten_name_notes(self, **kwargs) -> list[dict]:
+        return await self._forget_reader.forgotten_name_notes(**kwargs)
+
+    async def complete_forget_cleanup(self, **kwargs) -> None:
+        await self._message_lifecycle_writer.complete_forget_cleanup(**kwargs)
+
+    async def forget_graph(self, **kwargs) -> list[int]:
+        return await self._graph_writer.forget_graph(**kwargs)
+
+    async def forget_messages(self, **kwargs) -> list[int]:
+        return await self._message_lifecycle_writer.forget_messages(**kwargs)
+
+    async def get_episodes_with_forgotten_sources(self, **kwargs) -> list[dict]:
+        return await self._episode_reader.get_episodes_with_forgotten_sources(**kwargs)
+
+    async def forget_in_episode(self, **kwargs) -> bool:
+        return await self._episode_writer.forget_in_episode(**kwargs)
 
     async def get_user_agent_exchange(
         self,
@@ -308,21 +351,6 @@ class KnowledgeStore:
 
         return await self._message_reader.get_visible_session_ids(
             user_name=user_name,
-            visible_project_ids=visible_project_ids,
-        )
-
-    async def get_message_text(
-        self,
-        message_id: int,
-        *,
-        user_name: str,
-        session_id: str,
-        visible_project_ids: List[str],
-    ) -> str:
-        return await self._message_reader.get_message_text(
-            message_id,
-            user_name=user_name,
-            session_id=session_id,
             visible_project_ids=visible_project_ids,
         )
 
@@ -518,6 +546,7 @@ class KnowledgeStore:
         domain_version: int,
         edit_summary: str,
         materialization: ContextMaterialization,
+        maintained: bool = False,
     ) -> ContextSnapshot:
         return await self._project_context_writer.commit_revision(
             user_name=user_name,
@@ -528,6 +557,14 @@ class KnowledgeStore:
             domain_version=domain_version,
             edit_summary=edit_summary,
             materialization=materialization,
+            maintained=maintained,
+        )
+
+    async def get_project_context_maintenance_state(
+        self, revision_id: str, *, user_name: str, project_id: str
+    ) -> ContextMaintenanceState:
+        return await self._project_context_reader.get_maintenance_state(
+            revision_id, user_name=user_name, project_id=project_id
         )
 
     async def claim_project_semantic_window(
@@ -749,12 +786,12 @@ class KnowledgeStore:
             offset=offset,
         )
 
-    async def list_jev_decisions_for_block(
-        self, block_id: str, *, user_name: str, project_id: str,
+    async def list_jev_decisions_for_message(
+        self, message_id: int, *, user_name: str, project_id: str,
         limit: int = 50,
     ) -> dict | None:
-        return await self._semantic_window_reader.list_jev_decisions_for_block(
-            block_id, user_name=user_name, project_id=project_id, limit=limit,
+        return await self._semantic_window_reader.list_jev_decisions_for_message(
+            message_id, user_name=user_name, project_id=project_id, limit=limit,
         )
 
     async def list_jev_decisions_for_entity(
@@ -772,25 +809,6 @@ class KnowledgeStore:
         return await self._semantic_window_reader.get_jev_decision(
             capability, window_id, pass_number, occurrence_key,
             user_name=user_name, project_id=project_id,
-        )
-
-    async def list_jev_extraction_decisions(
-        self,
-        window_id: str,
-        *,
-        user_name: str,
-        project_id: str,
-        limit: int = 100,
-        offset: int = 0,
-    ) -> list[dict]:
-        """Return private bounded-extraction records for one owned window."""
-
-        return await self._semantic_window_reader.list_jev_extraction_decisions(
-            window_id,
-            user_name=user_name,
-            project_id=project_id,
-            limit=limit,
-            offset=offset,
         )
 
     async def list_jev_classification_decisions(
@@ -1042,12 +1060,18 @@ class KnowledgeStore:
         project_id: str,
         limit: int,
         visible_project_ids: Optional[List[str]] = None,
+        after: Optional[datetime] = None,
+        before: Optional[datetime] = None,
+        offset: int = 0,
     ) -> List[EpisodeCard]:
         return await self._episode_reader.get_recent_project_episodes(
             user_name=user_name,
             project_id=project_id,
             limit=limit,
             visible_project_ids=visible_project_ids,
+            after=after,
+            before=before,
+            offset=offset,
         )
 
     async def search_project_episodes(
@@ -1058,6 +1082,8 @@ class KnowledgeStore:
         project_id: str,
         limit: int,
         visible_project_ids: Optional[List[str]] = None,
+        after: Optional[datetime] = None,
+        before: Optional[datetime] = None,
     ) -> List[EpisodeCard]:
         return await self._episode_reader.search_project_episodes(
             query,
@@ -1065,7 +1091,15 @@ class KnowledgeStore:
             project_id=project_id,
             limit=limit,
             visible_project_ids=visible_project_ids,
+            after=after,
+            before=before,
         )
+
+    async def search_project_episodes_by_events(self, query: str, **kwargs) -> List[EpisodeCard]:
+        return await self._episode_reader.search_project_episodes_by_events(query, **kwargs)
+
+    async def list_project_events(self, **kwargs) -> List[Dict]:
+        return await self._episode_reader.list_project_events(**kwargs)
 
     async def search_project_episodes_by_embedding(
         self,
@@ -1074,8 +1108,10 @@ class KnowledgeStore:
         user_name: str,
         project_id: str,
         limit: int = 10,
-        score_threshold: float = 0.35,
+        score_threshold: float,
         visible_project_ids: Optional[List[str]] = None,
+        after: Optional[datetime] = None,
+        before: Optional[datetime] = None,
     ) -> List[tuple[EpisodeCard, float]]:
         return await self._episode_reader.search_project_episodes_by_embedding(
             embedding,
@@ -1084,6 +1120,8 @@ class KnowledgeStore:
             limit=limit,
             score_threshold=score_threshold,
             visible_project_ids=visible_project_ids,
+            after=after,
+            before=before,
         )
 
     async def get_project_episode_source_messages(
@@ -1113,6 +1151,9 @@ class KnowledgeStore:
         project_id: str,
         limit: int,
         visible_project_ids: Optional[List[str]] = None,
+        after: Optional[datetime] = None,
+        before: Optional[datetime] = None,
+        offset: int = 0,
     ) -> List[EpisodeCard]:
         return await self._episode_reader.get_project_episodes_for_entities(
             entity_ids,
@@ -1120,6 +1161,9 @@ class KnowledgeStore:
             project_id=project_id,
             limit=limit,
             visible_project_ids=visible_project_ids,
+            after=after,
+            before=before,
+            offset=offset,
         )
 
     # Entity, graph, and evidence retrieval
@@ -1131,14 +1175,6 @@ class KnowledgeStore:
         self, user_name: str, aliases: Optional[List[str]] = None
     ) -> Dict:
         return await self._graph_writer.ensure_identity_entity(user_name, aliases)
-
-    async def validate_existing_ids(
-        self, ids: List[int], *, visible_project_ids: List[str]
-    ) -> Set[int]:
-        return await self._entity_reader.validate_existing_ids(
-            ids,
-            visible_project_ids=visible_project_ids,
-        )
 
     async def get_entities_by_names(
         self, names: List[str], *, visible_project_ids: List[str]
@@ -1155,13 +1191,6 @@ class KnowledgeStore:
     ) -> List[Dict]:
         return await self._entity_reader.get_visible_entities_for_resolution(
             visible_project_ids=visible_project_ids,
-        )
-
-    async def get_active_identity_corrections(
-        self, project_id: str, block_ids: list[str],
-    ) -> list[dict]:
-        return await self._entity_reader.get_active_identity_corrections(
-            project_id, block_ids,
         )
 
     async def list_entities(
@@ -1197,23 +1226,6 @@ class KnowledgeStore:
         return await self._entity_reader.get_entities_by_ids(
             entity_ids,
             visible_project_ids=visible_project_ids,
-        )
-
-    async def get_top_connected_entities(
-        self, *, visible_project_ids: List[str], limit: int = 10
-    ) -> List[Dict]:
-        return await self._entity_reader.get_top_connected_entities(
-            visible_project_ids=visible_project_ids,
-            limit=limit,
-        )
-
-    async def get_recently_active_entities(
-        self, *, visible_project_ids: List[str], days: int = 7, limit: int = 10
-    ) -> List[Dict]:
-        return await self._entity_reader.get_recently_active_entities(
-            visible_project_ids=visible_project_ids,
-            days=days,
-            limit=limit,
         )
 
     async def get_neighbor_ids_batch(
@@ -1323,6 +1335,20 @@ class KnowledgeStore:
             user_name=user_name,
             visible_project_ids=visible_project_ids,
             limits=limits,
+        )
+
+    async def get_message_evidence(
+        self,
+        message_id: int,
+        *,
+        user_name: str,
+        project_id: str,
+        limits: EvidenceTraversalLimits | None = None,
+    ) -> EvidenceBundle:
+        """Return bounded provenance for one project-owned message."""
+
+        return await self._evidence_service.for_message(
+            message_id, user_name=user_name, project_id=project_id, limits=limits,
         )
 
     async def get_context_block_evidence(

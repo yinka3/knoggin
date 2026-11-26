@@ -85,7 +85,8 @@ def _assert_parent_at_path(descriptor: int, expected: Path) -> None:
 
 def _open_file(parent: int, name: str, *, access: int = os.O_RDONLY) -> int:
     try:
-        descriptor = os.open(name, access | os.O_NOFOLLOW, dir_fd=parent)
+        # O_NONBLOCK: a FIFO must fail the regular-file check, not block.
+        descriptor = os.open(name, access | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
     except OSError as exc:
         if exc.errno == errno.ELOOP:
             raise ValueError("project file path must not be a symlink") from exc
@@ -229,6 +230,11 @@ def _remove_tree_handle(directory: int) -> None:
     for name in os.listdir(directory):
         try:
             expected = os.stat(name, dir_fd=directory, follow_symlinks=False)
+            if not stat.S_ISDIR(expected.st_mode):
+                # Unlinking removes only the name, so files, links, FIFOs and
+                # sockets need no open (which would block on a FIFO).
+                os.unlink(name, dir_fd=directory)
+                continue
             child = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
         except FileNotFoundError:
             continue
@@ -289,15 +295,24 @@ def iter_project_paths(
     def walk(directory: int, prefix: str) -> Iterator[tuple[str, int, int]]:
         entries = []
         for name in os.listdir(directory):
-            metadata = os.stat(name, dir_fd=directory, follow_symlinks=False)
+            try:
+                metadata = os.stat(name, dir_fd=directory, follow_symlinks=False)
+            except FileNotFoundError:
+                continue  # Removed after the listing.
             entries.append((name, metadata))
         for name, metadata in sorted(
             entries, key=lambda item: item[0] + ("/" if stat.S_ISDIR(item[1].st_mode) else "")
         ):
-            if stat.S_ISLNK(metadata.st_mode):
+            # Links, FIFOs, sockets and devices are never opened: opening a
+            # FIFO for reading blocks until a writer appears, hanging the scan.
+            if not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)):
                 continue
             try:
-                child = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+                # O_NONBLOCK keeps a FIFO swapped in after the stat from blocking;
+                # the identity check below then rejects the swap.
+                child = os.open(
+                    name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory
+                )
             except FileNotFoundError:
                 continue
             try:

@@ -22,7 +22,7 @@ from pydantic import (
 
 from common.schema.evidence import EvidenceBundle, EvidencePointer, EvidenceSnapshot
 from core.knowledge.conflict.conflicts import ConflictResolutionKind
-from core.knowledge.relationship_advisories import AdvisoryAction
+from core.knowledge.relationship_advisories import StoredAdvisoryAction
 
 ReviewScope = Literal["project", "user-global"]
 ReviewStatus = Literal["open", "applied", "dismissed", "stale"]
@@ -115,7 +115,7 @@ class IdentityReassignmentPlan(BaseModel):
     new_entity_name: str | None = Field(default=None, min_length=1, max_length=200)
     entity_type: str | None = Field(default=None, min_length=1, max_length=200)
     topic: str | None = Field(default=None, min_length=1, max_length=200)
-    block_ids: tuple[UUID, ...] = Field(min_length=1, max_length=8)
+    message_ids: tuple[int, ...] = Field(min_length=1, max_length=72)
 
     @model_validator(mode="after")
     def validate_target(self):
@@ -127,8 +127,10 @@ class IdentityReassignmentPlan(BaseModel):
             raise ValueError("A new identity needs an entity type and topic")
         if self.target_entity_id is not None and (self.entity_type is not None or self.topic is not None):
             raise ValueError("An existing identity keeps its current project classification")
-        if len(set(self.block_ids)) != len(self.block_ids):
-            raise ValueError("Identity correction block IDs must be unique")
+        if len(set(self.message_ids)) != len(self.message_ids) or any(
+            message_id <= 0 for message_id in self.message_ids
+        ):
+            raise ValueError("Identity correction message IDs must be unique and positive")
         return self
 
 
@@ -141,7 +143,6 @@ class EntityMergePlan(BaseModel):
     context_choices: list["EntityContextMergeChoice"] = Field(default_factory=list)
     frontier_tokens: dict[str, str] = Field(default_factory=dict)
     definition_versions: dict[str, int] = Field(default_factory=dict)
-    context_block_association_counts: dict[str, int] = Field(default_factory=dict)
     expected_state_hash: str | None = Field(default=None, min_length=1)
 
     @field_validator("retired_entity_id")
@@ -213,7 +214,7 @@ class RelationshipAdvisoryPlan(BaseModel):
     pattern_key: str = Field(min_length=1, max_length=500)
     observed_label: str | None = None
     proposed_relationship_type: str | None = None
-    action: AdvisoryAction | None = None
+    action: StoredAdvisoryAction | None = None
     note: str | None = None
 
 

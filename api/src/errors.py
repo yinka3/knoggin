@@ -1,5 +1,6 @@
 """Safe HTTP projection of engine failures."""
 
+from loguru import logger
 from pydantic import ValidationError
 from starlette.responses import JSONResponse
 
@@ -17,7 +18,7 @@ from common.exceptions import (
 )
 
 
-async def handle_error(_request, error: Exception) -> JSONResponse:
+async def handle_error(request, error: Exception) -> JSONResponse:
     if isinstance(error, (NotFoundError, FileNotFoundError)):
         status, code, message = 404, "not_found", "Resource not found"
     elif isinstance(error, PermissionError):
@@ -36,12 +37,19 @@ async def handle_error(_request, error: Exception) -> JSONResponse:
         status, code, message = 409, "maintenance_conflict", "Review or knowledge changed"
     elif isinstance(error, LLMBudgetExceededError):
         status, code, message = 402, "llm_budget_exhausted", "Model budget is exhausted"
-    elif isinstance(error, (ValidationError, ValueError, TypeError)):
+    elif isinstance(error, (ValidationError, ValueError)):
+        # TypeError is left to the 500 branch: it is a bug, not bad input.
         status, code, message = 422, "invalid_request", "Invalid request"
     elif isinstance(error, (DependencyError, StorageError)):
         status, code, message = 503, "dependency_unavailable", "Service is unavailable"
     else:
         status, code, message = 500, "internal_error", "Request could not be completed"
+    where = f"{request.method} {request.url.path}" if request is not None else "request"
+    if status >= 500:
+        logger.opt(exception=error).error("{} failed with {}", where, status)
+    elif status == 422:
+        # Kept visible: an engine bug raising ValueError also lands here.
+        logger.warning("{} rejected as invalid: {}", where, error)
     return JSONResponse(
         {"error": {"code": code, "message": message}}, status_code=status
     )

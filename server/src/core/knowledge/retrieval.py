@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from itertools import zip_longest
 from time import perf_counter
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -20,7 +21,7 @@ from common.schema.settings import SearchSettings
 from common.scoping import require_scope_value, require_visible_project_ids
 from common.utils.events import emit
 
-DEFAULT_EPISODE_RETRIEVAL_LIMIT = 5
+EPISODE_FORGET_NOTE = "This Episode was rewritten after the user asked to forget part of it."
 
 
 class KnowledgeRetrieval:
@@ -147,7 +148,25 @@ class KnowledgeRetrieval:
             visible_project_ids=self.readable_project_ids,
             limit=limit,
         )
-        return results or []
+        results = results or []
+        names = [query, *(name for row in results for name in
+                         [row.get("canonical_name", ""), *(row.get("aliases") or [])])]
+        notes = await self.knowledge_store.forgotten_name_notes(
+            user_name=self.user_name, project_id=self.project_id, names=names,
+        )
+        matched = set()
+        for row in results:
+            entity_names = {name.strip().lower() for name in
+                            [row.get("canonical_name", ""), *(row.get("aliases") or [])]}
+            reminders = [note for note in notes if note["name"].strip().lower() in entity_names]
+            if reminders:
+                row["forget_notes"] = [note["forget_note"] for note in reminders]
+                matched.update(note["name"] for note in reminders)
+        # A reminder is not a live entity and must not offer an ID-based follow-up.
+        results.extend({"name": note["name"], "forget_notes": [note["forget_note"]]}
+                       for note in notes if note["name"] not in matched
+                       and note["name"].strip().lower() == query.strip().lower())
+        return results
 
     async def get_connections(
         self,
@@ -196,25 +215,50 @@ class KnowledgeRetrieval:
         *,
         session_id: str,
         entity_id: Optional[int] = None,
+        after: Optional[str] = None,
+        before: Optional[str] = None,
+        raw_fallback: bool = True,
+        alternate_queries: Optional[List[str]] = None,
+        offset: int = 0,
+        limit: Optional[int] = None,
     ) -> Dict:
-        """Retrieve episodes, then fall back to raw durable messages."""
+        """Retrieve episodes, then optionally fall back to raw durable messages."""
+        if offset < 0:
+            raise ValueError("offset must not be negative")
+        # A caller may ask for a smaller page, never a larger one.
+        page_size = self._search_settings.episode_page_size
+        if limit is not None:
+            page_size = min(self._positive_int(limit, "episode_check limit"), page_size)
         session_id = require_scope_value(
             session_id, "session_id", "KnowledgeRetrieval.episode_check"
         )
         query = self._require_query(query, "episode_check")
         started_at = perf_counter()
+        date_range = self._episode_date_range(after, before)
 
         if entity_id is not None:
             profile = await self.entities.get_profile(entity_id)
             if profile is None:
                 return {"resolution": "exact", "results": []}
+            # One extra row says whether another page exists.
             episodes = await self.knowledge_store.get_project_episodes_for_entities(
                 [entity_id],
                 user_name=self.user_name,
                 project_id=self.project_id,
-                limit=DEFAULT_EPISODE_RETRIEVAL_LIMIT,
+                limit=page_size + 1,
+                offset=offset,
                 visible_project_ids=self.readable_project_ids,
+                **date_range,
             )
+            has_more = len(episodes) > page_size
+            episodes = episodes[:page_size]
+            if offset and not episodes:
+                return {
+                    "resolution": "no_more_episodes",
+                    "results": [],
+                    "has_more": False,
+                    "next_offset": None,
+                }
             metrics: Dict[str, int | float] = {}
             serialized = await self._serialize_episodes(episodes, metrics=metrics)
             await self._emit_episode_retrieval(
@@ -239,40 +283,74 @@ class KnowledgeRetrieval:
                         "episodes": serialized,
                     }
                 ],
+                "has_more": has_more,
+                "next_offset": offset + page_size if has_more else None,
             }
 
         # Both channels contribute: a weak semantic hit must not suppress an
         # exact keyword match. Retrieve a bounded pool before rank fusion.
-        candidate_limit = DEFAULT_EPISODE_RETRIEVAL_LIMIT * 3
-        lexical = await self.knowledge_store.search_project_episodes(
-            query,
-            user_name=self.user_name,
-            project_id=self.project_id,
-            limit=candidate_limit,
-            visible_project_ids=self.readable_project_ids,
+        candidate_limit = offset + (
+            self._search_settings.episode_page_size
+            * self._search_settings.episode_candidate_pages
         )
+        # A date range has already narrowed the Episodes, and a broad question
+        # about that day should still see them, so only the range filters then.
+        score_threshold = (
+            0.0 if date_range else self._search_settings.episode_similarity_threshold
+        )
+        queries = self._episode_queries(query, alternate_queries)
+        lexical_found = False
         semantic_matches = []
-        if self.embedding_service is not None:
+        channels: List[List] = []
+        for variant in queries:
+            lexical = await self.knowledge_store.search_project_episodes(
+                variant,
+                user_name=self.user_name,
+                project_id=self.project_id,
+                limit=candidate_limit,
+                visible_project_ids=self.readable_project_ids,
+                **date_range,
+            )
+            # Events keep passing mentions that an Episode's summary buries.
+            by_events = await self.knowledge_store.search_project_episodes_by_events(
+                variant,
+                user_name=self.user_name,
+                project_id=self.project_id,
+                limit=candidate_limit,
+                visible_project_ids=self.readable_project_ids,
+                **date_range,
+            )
+            # One keyword vote per Episode: matching its summary and its events
+            # is the same evidence, so alternate the two lists instead of adding.
+            keyword = self._interleave(lexical, by_events)
+            lexical_found = lexical_found or bool(keyword)
+            channels.append(keyword)
+            if self.embedding_service is None:
+                continue
             try:
-                embedding = await self.embedding_service.encode_query(query)
-                semantic_matches = (
-                    await self.knowledge_store.search_project_episodes_by_embedding(
-                        embedding,
-                        user_name=self.user_name,
-                        project_id=self.project_id,
-                        limit=candidate_limit,
-                        visible_project_ids=self.readable_project_ids,
-                    )
+                embedding = await self.embedding_service.encode_query(variant)
+                matches = await self.knowledge_store.search_project_episodes_by_embedding(
+                    embedding,
+                    user_name=self.user_name,
+                    project_id=self.project_id,
+                    limit=candidate_limit,
+                    score_threshold=score_threshold,
+                    visible_project_ids=self.readable_project_ids,
+                    **date_range,
                 )
             except Exception as exc:
                 logger.warning(
                     "Episode semantic search unavailable; using lexical results: {}",
                     exc,
                 )
+                continue
+            semantic_matches.extend(matches)
+            channels.append([episode for episode, _ in matches])
 
+        fusion_k = self._search_settings.episode_rank_fusion_k
         scores = {}
         by_id = {}
-        for channel in (lexical, [episode for episode, _ in semantic_matches]):
+        for channel in channels:
             seen = set()
             for rank, episode in enumerate(channel, start=1):
                 key = episode.episode_id
@@ -280,26 +358,25 @@ class KnowledgeRetrieval:
                     continue
                 seen.add(key)
                 by_id[key] = episode
-                scores[key] = scores.get(key, 0.0) + 1.0 / (60 + rank)
+                scores[key] = scores.get(key, 0.0) + 1.0 / (fusion_k + rank)
         # Stable ties preserve lexical candidates first, without imposing a
         # blanket recency penalty on legitimate historical questions.
-        episodes = [by_id[key] for key in sorted(scores, key=lambda key: -scores[key])][
-            :DEFAULT_EPISODE_RETRIEVAL_LIMIT
-        ]
+        ranked = [by_id[key] for key in sorted(scores, key=lambda key: -scores[key])]
+        page_end = offset + page_size
+        episodes = ranked[offset:page_end]
+        has_more = len(ranked) > page_end
         if episodes:
             metrics: Dict[str, int | float] = {}
             serialized = await self._serialize_episodes(
                 episodes,
-                similarity_by_episode={
-                    episode.episode_id: score for episode, score in semantic_matches
-                },
+                similarity_by_episode=self._best_similarity(semantic_matches),
                 metrics=metrics,
             )
             strategy = (
                 "hybrid"
-                if lexical and semantic_matches
+                if lexical_found and semantic_matches
                 else "lexical"
-                if lexical
+                if lexical_found
                 else "semantic"
             )
             await self._emit_episode_retrieval(
@@ -313,7 +390,23 @@ class KnowledgeRetrieval:
             return {
                 "resolution": strategy,
                 "results": [{"query": query, "episodes": serialized}],
+                "has_more": has_more,
+                "next_offset": page_end if has_more else None,
             }
+
+        if offset:
+            # Paging past the last match is not a miss worth a fallback.
+            return {
+                "resolution": "no_more_episodes",
+                "results": [],
+                "has_more": False,
+                "next_offset": None,
+            }
+        if date_range:
+            # Raw message search cannot honor the range.
+            return {"resolution": "no_episodes_in_range", "results": []}
+        if not raw_fallback:
+            return {"resolution": "no_episodes", "results": []}
 
         fallback = await self.search_messages(query, session_id=session_id)
         await self._emit_episode_retrieval(
@@ -325,6 +418,62 @@ class KnowledgeRetrieval:
             metrics={"used_raw_message_fallback": 1},
         )
         return {"resolution": "fallback", "results": fallback}
+
+    @staticmethod
+    def _interleave(first: List, second: List) -> List:
+        merged, seen = [], set()
+        for pair in zip_longest(first, second):
+            for episode in pair:
+                if episode is not None and episode.episode_id not in seen:
+                    seen.add(episode.episode_id)
+                    merged.append(episode)
+        return merged
+
+    def _episode_queries(
+        self, query: str, alternate_queries: Optional[List[str]]
+    ) -> List[str]:
+        """The query first, then distinct rewordings up to the configured count."""
+
+        queries: Dict[str, str] = {query.strip().casefold(): query}
+        for alternate in alternate_queries or []:
+            text = alternate.strip() if isinstance(alternate, str) else ""
+            if text:
+                queries.setdefault(text.casefold(), text)
+        return list(queries.values())[: self._search_settings.episode_max_queries]
+
+    @staticmethod
+    def _best_similarity(matches: List[tuple]) -> Dict[str, float]:
+        best: Dict[str, float] = {}
+        for episode, score in matches:
+            best[episode.episode_id] = max(score, best.get(episode.episode_id, score))
+        return best
+
+    @staticmethod
+    def _episode_date_range(
+        after: Optional[str], before: Optional[str]
+    ) -> Dict[str, datetime]:
+        """Read inclusive date bounds; a bare date covers that whole UTC day."""
+
+        def bound(value: str, name: str, *, day_end: bool) -> datetime:
+            text = value.strip()
+            try:
+                parsed = datetime.fromisoformat(text)
+            except ValueError as exc:
+                raise ValueError(f"{name} must be an ISO date such as 2023-05-20") from exc
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            if day_end and len(text) == 10:
+                parsed += timedelta(days=1) - timedelta(microseconds=1)
+            return parsed
+
+        date_range: Dict[str, datetime] = {}
+        if after:
+            date_range["after"] = bound(after, "after", day_end=False)
+        if before:
+            date_range["before"] = bound(before, "before", day_end=True)
+        if len(date_range) == 2 and date_range["after"] > date_range["before"]:
+            raise ValueError("after must not be later than before")
+        return date_range
 
     async def read_episode(self, episode_id: str, *, session_id: str) -> List[Dict]:
         session_id = require_scope_value(
@@ -359,24 +508,51 @@ class KnowledgeRetrieval:
                 ),
             },
         )
-        return [
+        result = [
             self._as_message_evidence(source, fallback_session_id=session_id)
             for source in sources
         ]
+        links = await self.knowledge_store.get_episode_context_links(
+            [episode.episode_id], user_name=self.user_name, project_id=self.project_id,
+            visible_project_ids=self.readable_project_ids,
+        )
+        metadata = {"episode_id": episode.episode_id,
+                    **{key: value for key, value in links[episode.episode_id].items() if value}}
+        if episode.generator_metadata.get("forgotten_rewritten_at"):
+            metadata["forget_note"] = EPISODE_FORGET_NOTE
+        if len(metadata) > 1:
+            result.insert(0, metadata)
+        return result
 
-    async def read_recent_episodes(self, *, session_id: str, limit: int = 2) -> Dict:
+    async def read_recent_episodes(
+        self,
+        *,
+        session_id: str,
+        limit: int = 2,
+        after: Optional[str] = None,
+        before: Optional[str] = None,
+        offset: int = 0,
+    ) -> Dict:
         session_id = require_scope_value(
             session_id, "session_id", "KnowledgeRetrieval.read_recent_episodes"
         )
         limit = self._positive_int(limit, "read_recent_episodes limit")
-        effective_limit = min(limit, DEFAULT_EPISODE_RETRIEVAL_LIMIT)
+        effective_limit = min(limit, self._search_settings.episode_page_size)
+        if offset < 0:
+            raise ValueError("offset must not be negative")
+        date_range = self._episode_date_range(after, before)
         started_at = perf_counter()
+        # One extra row says whether another page exists.
         episodes = await self.knowledge_store.get_recent_project_episodes(
             user_name=self.user_name,
             project_id=self.project_id,
-            limit=effective_limit,
+            limit=effective_limit + 1,
+            offset=offset,
             visible_project_ids=self.readable_project_ids,
+            **date_range,
         )
+        has_more = len(episodes) > effective_limit
+        episodes = episodes[:effective_limit]
         metrics: Dict[str, int | float] = {}
         serialized = await self._serialize_episodes(episodes, metrics=metrics)
         await self._emit_episode_retrieval(
@@ -389,6 +565,8 @@ class KnowledgeRetrieval:
         )
         return {
             "resolution": "recent",
+            "has_more": has_more,
+            "next_offset": offset + effective_limit if has_more else None,
             "results": [
                 {
                     "query": f"{effective_limit} most recent episodes by source chronology",
@@ -396,6 +574,62 @@ class KnowledgeRetrieval:
                 }
             ],
         }
+
+    async def list_events(
+        self,
+        *,
+        session_id: str,
+        after: Optional[str] = None,
+        before: Optional[str] = None,
+        kind: Optional[str] = None,
+        query: Optional[str] = None,
+        offset: int = 0,
+    ) -> Dict:
+        """List event mentions by when they happened, one page at a time."""
+
+        require_scope_value(session_id, "session_id", "KnowledgeRetrieval.list_events")
+        if offset < 0:
+            raise ValueError("offset must not be negative")
+        page = self._search_settings.event_page_size
+        # One extra row says whether another page exists.
+        rows = await self.knowledge_store.list_project_events(
+            user_name=self.user_name,
+            project_id=self.project_id,
+            visible_project_ids=self.readable_project_ids,
+            limit=page + 1,
+            offset=offset,
+            kind=kind,
+            query=query,
+            **self._episode_date_range(after, before),
+        )
+        has_more = len(rows) > page
+        dated = bool(after or before)
+        events = [
+            {
+                "episode_id": row["episode_id"],
+                "what": row["what"],
+                "kind": row["kind"],
+                "when": self._event_when(row["start_date"], row["end_date"]),
+                "precision": row["precision"],
+                "date_text": row["date_text"],
+                **({"in_range": row["in_range"]} if dated else {}),
+            }
+            for row in rows[:page]
+        ]
+        return {
+            "resolution": "events",
+            "has_more": has_more,
+            "next_offset": offset + page if has_more else None,
+            "results": [{"events": events}],
+        }
+
+    @staticmethod
+    def _event_when(start, end) -> str:
+        if start is None:
+            return "date unknown"
+        if end is None or end == start:
+            return start.isoformat()
+        return f"{start.isoformat()} to {end.isoformat()}"
 
     async def find_relationship_path(
         self, entity_a_id: int, entity_b_id: int, *, session_id: str
@@ -849,6 +1083,11 @@ class KnowledgeRetrieval:
         metrics: Optional[Dict[str, int | float]] = None,
     ) -> List[Dict]:
         serialized = []
+        links = await self.knowledge_store.get_episode_context_links(
+            [episode.episode_id for episode in episodes or []],
+            user_name=self.user_name, project_id=self.project_id,
+            visible_project_ids=self.readable_project_ids,
+        ) if episodes else {}
         for episode in episodes or []:
             sources_consulted = (
                 await self.knowledge_store.get_project_episode_source_refs(
@@ -877,6 +1116,7 @@ class KnowledgeRetrieval:
                 "entities": [
                     {
                         "entity_id": entity.entity_id,
+                        "name": entity.name,
                         "source_message_count": entity.source_message_count,
                         "first_seen_at": entity.first_seen_at.isoformat()
                         if entity.first_seen_at
@@ -890,9 +1130,21 @@ class KnowledgeRetrieval:
                 "relationships": [
                     {
                         "relationship_id": relationship.relationship_id,
+                        "source": relationship.source,
+                        "relationship_type": relationship.relationship_type,
+                        "target": relationship.target,
                         "source_message_count": relationship.source_message_count,
                     }
                     for relationship in episode.relationships
+                ],
+                "events": [
+                    {
+                        "what": event.what,
+                        "kind": event.kind,
+                        "when": self._event_when(event.start_date, event.end_date),
+                        "date_text": event.date_text,
+                    }
+                    for event in episode.events
                 ],
                 # Source messages are intentionally omitted from discovery;
                 # read_episode is the explicit hydration follow-up.
@@ -904,6 +1156,9 @@ class KnowledgeRetrieval:
                     for source in sources_consulted
                 ],
             }
+            item.update({key: value for key, value in links[episode.episode_id].items() if value})
+            if episode.generator_metadata.get("forgotten_rewritten_at"):
+                item["forget_note"] = EPISODE_FORGET_NOTE
             if similarity_by_episode and episode.episode_id in similarity_by_episode:
                 item["similarity"] = similarity_by_episode[episode.episode_id]
             serialized.append(item)

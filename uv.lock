@@ -199,6 +199,23 @@ wheels = [
 ]
 
 [[package]]
+name = "api"
+version = "0.1.0"
+source = { editable = "api" }
+dependencies = [
+    { name = "server" },
+    { name = "starlette" },
+    { name = "uvicorn" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "server", editable = "server" },
+    { name = "starlette", specifier = ">=0.52.1,<1" },
+    { name = "uvicorn", specifier = ">=0.41.0,<1" },
+]
+
+[[package]]
 name = "ast-serialize"
 version = "0.6.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1159,30 +1176,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/a5/d3/8650919bc3c7c6e90ee3fa7fd618bf373cbbe55dff043bd67353dbb20cd8/ftfy-6.3.1.tar.gz", hash = "sha256:9b3c3d90f84fb267fe64d375a07b7f8912d817cf86009ae134aa03e1819506ec", size = 308927, upload-time = "2024-10-26T00:50:35.149Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ab/6e/81d47999aebc1b155f81eca4477a616a70f238a2549848c38983f3c22a82/ftfy-6.3.1-py3-none-any.whl", hash = "sha256:7c70eb532015cd2f9adb53f101fb6c7945988d023a085d127d1573dc49dd0083", size = 44821, upload-time = "2024-10-26T00:50:33.425Z" },
-]
-
-[[package]]
-name = "gliner2"
-version = "2.0.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "pydantic" },
-    { name = "requests" },
-    { name = "tqdm" },
-    { name = "urllib3" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/b2/a8/2dcfdb8862dbeb488b6b86047075a213cc101ca592eae1a43b824cca74dd/gliner2-2.0.0.tar.gz", hash = "sha256:82b149f893ba0f6adf75ef1db599b6dbecd9811cca34dbd0bac7cd9e90b90ce4", size = 565826, upload-time = "2026-08-24T15:13:43.439Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/00/44/87d2803c5c5c6c0bd22bce4d52c66c965dacae29e0121d7e04c9883711df/gliner2-2.0.0-py3-none-any.whl", hash = "sha256:6f7c4cba0ef3173636d8bd9404aa94d4e0ccf36d4b4b9a0d27d740dd2d3236c3", size = 326214, upload-time = "2026-08-24T15:13:41.09Z" },
-]
-
-[package.optional-dependencies]
-local = [
-    { name = "numpy" },
-    { name = "peft" },
-    { name = "safetensors" },
-    { name = "torch" },
-    { name = "transformers" },
 ]
 
 [[package]]
@@ -2816,27 +2809,6 @@ wheels = [
 ]
 
 [[package]]
-name = "peft"
-version = "0.20.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "accelerate" },
-    { name = "huggingface-hub" },
-    { name = "numpy" },
-    { name = "packaging" },
-    { name = "psutil" },
-    { name = "pyyaml" },
-    { name = "safetensors" },
-    { name = "torch" },
-    { name = "tqdm" },
-    { name = "transformers" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/b4/08/02541a2c29be7c78698f73d438bc0e733b214f3f35ec5db79fca8da8fc61/peft-0.20.0.tar.gz", hash = "sha256:4769c8093a4ca145fd6fb3fd4dd50449675f5fe46434ad1e98b285a132d4b1d0", size = 880503, upload-time = "2026-07-28T13:46:01.85Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/28/79/13bcabb8048126422d5c4b880575d40886c726f354db88cfeed4325525bb/peft-0.20.0-py3-none-any.whl", hash = "sha256:0fbba16ffebfad3de96e06f2da6860fd860292324b85b6141909fa1e26ea9233", size = 775777, upload-time = "2026-07-28T13:45:59.809Z" },
-]
-
-[[package]]
 name = "pfzy"
 version = "0.3.4"
 source = { registry = "https://pypi.org/simple" }
@@ -4143,23 +4115,6 @@ onnx = [
 ]
 
 [[package]]
-name = "api"
-version = "0.1.0"
-source = { editable = "api" }
-dependencies = [
-    { name = "server" },
-    { name = "starlette" },
-    { name = "uvicorn" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "server", editable = "server" },
-    { name = "starlette", specifier = ">=0.52.1,<1" },
-    { name = "uvicorn", specifier = ">=0.41.0,<1" },
-]
-
-[[package]]
 name = "server"
 version = "0.1.0"
 source = { editable = "server" }
@@ -4169,7 +4124,6 @@ dependencies = [
     { name = "ddgs" },
     { name = "docling" },
     { name = "duckduckgo-search" },
-    { name = "gliner2", extra = ["local"] },
     { name = "httpcore" },
     { name = "httpx" },
     { name = "huggingface-hub", extra = ["cli"] },
@@ -4232,7 +4186,6 @@ requires-dist = [
     { name = "ddgs", specifier = ">=9.11.3" },
     { name = "docling", specifier = ">=2.129.0,<3.0.0" },
     { name = "duckduckgo-search", specifier = ">=8.0.0" },
-    { name = "gliner2", extras = ["local"], specifier = ">=2.0.0" },
     { name = "httpcore", specifier = ">=1.0.9" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "huggingface-hub", extras = ["cli"], specifier = ">=0.36.0" },

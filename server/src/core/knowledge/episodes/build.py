@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from common.schema.episode.generation import (
@@ -16,6 +17,7 @@ from common.schema.episode.generation import (
 )
 from common.schema.episode.models import (
     Episode,
+    EpisodeEvent,
     EpisodeNarrativeLimitError,
     MessageEpisode,
 )
@@ -24,9 +26,6 @@ from core.knowledge.episodes.policy import (
     EpisodeGenerationPolicy,
     estimate_source_tokens,
 )
-
-# Small windows may still hold a few separate threads.
-MIN_EPISODE_PROPOSALS = 3
 
 
 @dataclass(slots=True)
@@ -43,16 +42,6 @@ class ProjectEpisodeBuild:
     final_episodes: list[Episode] = field(default_factory=list)
     # Reasons for model proposals that failed validation and were dropped.
     rejected_proposals: list[str] = field(default_factory=list)
-
-    @property
-    def max_proposals(self) -> int:
-        """Allow enough Episodes for a full window to fit the per-Episode size cap.
-
-        A fixed count would leave most of a large window with no Episode.
-        """
-
-        needed = -(-estimate_source_tokens(self.messages) // self.policy.max_episode_source_tokens)
-        return max(MIN_EPISODE_PROPOSALS, needed)
 
     @property
     def message_ids(self) -> list[int]:
@@ -97,7 +86,8 @@ class ProjectEpisodeBuild:
             if role == "ASSISTANT" and message.get("exchange_outcome") == "clarification":
                 role = "ASSISTANT CLARIFICATION (UNRESOLVED QUESTION)"
             content = " ".join(str(message.get("content") or "").split())
-            lines.append(f"[{local}] source-position={position} {role}: {content}")
+            sent_at = self._sent_at(message)
+            lines.append(f"[{local}] source-position={position}{sent_at} {role}: {content}")
             if message.get("user_msg_id"):
                 paired_local = self.local_message_ids.get(int(message["user_msg_id"]))
                 if paired_local:
@@ -113,23 +103,19 @@ class ProjectEpisodeBuild:
         used_sources: set[int] = set()
         source_ids = set(self.message_ids)
         self.rejected_proposals = []
-        max_proposals = self.max_proposals
         for index, proposal in enumerate(output.proposals):
             # One invalid proposal must not discard the valid ones or fail the
             # whole window; its messages simply get no Episode this time.
-            if index >= max_proposals:
-                self.rejected_proposals.append(
-                    f"proposal {index + 1} exceeds the {max_proposals}-proposal limit"
-                )
-                continue
             try:
+                influences = [
+                    int(resolve_local_id(item, self.message_ids_by_local))
+                    for item in proposal.message_influences
+                ]
                 decision = EpisodeDecision.model_validate(
                     {
-                        **proposal.model_dump(),
-                        "message_influences": [
-                            int(resolve_local_id(item, self.message_ids_by_local))
-                            for item in proposal.message_influences
-                        ],
+                        **proposal.model_dump(exclude={"events"}),
+                        "message_influences": influences,
+                        "events": self._resolve_events(index, proposal.events, influences),
                     }
                 )
                 # Narrative overflow is repaired by the generator, not dropped.
@@ -157,6 +143,31 @@ class ProjectEpisodeBuild:
         self.decisions = decisions
         return decisions
 
+    def _resolve_events(
+        self, index: int, events: list, influences: list[int]
+    ) -> list[EpisodeEvent]:
+        """Keep events whose sources are this Episode's own messages."""
+
+        kept = []
+        for number, event in enumerate(events, start=1):
+            try:
+                sources = [
+                    int(resolve_local_id(item, self.message_ids_by_local))
+                    for item in event.sources
+                ]
+                if not set(sources).issubset(influences):
+                    raise ValueError("cites a message outside its Episode")
+                kept.append(
+                    EpisodeEvent.model_validate(
+                        {**event.model_dump(exclude={"sources"}), "source_message_ids": sources}
+                    )
+                )
+            except ValueError as exc:
+                self.rejected_proposals.append(
+                    f"proposal {index + 1} event {number}: {exc}"
+                )
+        return kept
+
     def _validate_source_limits(self, source_messages: list[dict[str, Any]]) -> None:
         if not source_messages:
             raise ValueError("episode proposals require source messages")
@@ -178,6 +189,14 @@ class ProjectEpisodeBuild:
             raise ValueError(
                 "episode proposal exceeds the configured source token limit"
             )
+
+    @staticmethod
+    def _sent_at(message: dict[str, Any]) -> str:
+        timestamp_ms = message.get("timestamp_ms")
+        if timestamp_ms is None:
+            return ""
+        sent = datetime.fromtimestamp(int(timestamp_ms) / 1000, tz=timezone.utc)
+        return f" sent={sent:%Y-%m-%d %H:%M:%S}"
 
     @staticmethod
     def _source_order_key(message: dict[str, Any]) -> tuple[bool, int, int]:
@@ -242,6 +261,7 @@ class ProjectEpisodeBuild:
                     updates=decision.updates,
                     unresolved=decision.unresolved,
                     messages=current,
+                    events=decision.events,
                     generator_metadata={"episode_policy": self.policy.metadata()},
                 )
             )

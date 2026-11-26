@@ -10,11 +10,9 @@ def get_episode_generation_prompt(
     max_narrative_chars: int,
     max_episode_source_messages: int,
     max_episode_source_tokens: int,
-    max_proposals: int,
 ) -> str:
     return load_named_prompt(
         "generate_episode",
-        max_proposals=max_proposals,
         user_name=user_name,
         prompt_narrative_chars=prompt_narrative_chars,
         max_narrative_chars=max_narrative_chars,
@@ -31,3 +29,7 @@ def get_episode_narrative_repair_prompt(
         user_name=user_name,
         max_narrative_chars=max_narrative_chars,
     )
+
+
+def get_episode_forget_prompt(user_name: str) -> str:
+    return load_named_prompt("forget_episode_content", user_name=user_name)

@@ -209,14 +209,15 @@ async def test_current_project_jobs_and_config_subscriptions_are_registered(
         project_semantic_processor=semantic,
     )
 
-    assert list(project_state.scheduler._jobs) == ["project_semantic"]
+    assert list(project_state.scheduler._jobs) == ["project_semantic", "forget_erase"]
     assert [path for _, path in config_manager.subscriptions] == [
         "developer_settings.entity_resolution",
-        "developer_settings.nlp_pipeline",
+        "developer_settings.extraction",
+        "developer_settings.ingestion.forget",
         "developer_settings.ingestion",
         "developer_settings.jobs.episode",
     ]
-    assert len(project_state.unsubscribers) == 4
+    assert len(project_state.unsubscribers) == 5
 
 
 @pytest.mark.runtime
@@ -251,7 +252,7 @@ async def test_config_updates_fan_out_only_to_current_runtime_components(
 
     marker = object()
     config_manager.emit("developer_settings.entity_resolution", marker)
-    config_manager.emit("developer_settings.nlp_pipeline", marker)
+    config_manager.emit("developer_settings.extraction", marker)
     config_manager.emit("developer_settings.ingestion", marker)
     config_manager.emit("developer_settings.jobs.episode", marker)
 
@@ -267,7 +268,7 @@ async def test_project_semantic_processor_is_registered_with_its_settings(
 ):
     config_manager = RecordingConfigManager()
     factory = ProjectRuntimeFactory(
-        resources=SimpleNamespace(),
+        resources=SimpleNamespace(knowledge_store=object()),
         user_name="ada",
     )
     state = RecordingProjectRuntime()
@@ -286,10 +287,11 @@ async def test_project_semantic_processor_is_registered_with_its_settings(
         project_semantic_processor=semantic,
     )
 
-    assert list(state.scheduler._jobs) == ["project_semantic"]
+    assert list(state.scheduler._jobs) == ["project_semantic", "forget_erase"]
     assert [path for _, path in config_manager.subscriptions] == [
         "developer_settings.entity_resolution",
-        "developer_settings.nlp_pipeline",
+        "developer_settings.extraction",
+        "developer_settings.ingestion.forget",
         "developer_settings.ingestion",
         "developer_settings.jobs.episode",
     ]
@@ -302,7 +304,7 @@ async def test_conflict_discovery_job_is_registered_with_its_policy_subscription
 ):
     config_manager = RecordingConfigManager()
     maintenance_service = object()
-    resources = SimpleNamespace(llm_service=object())
+    resources = SimpleNamespace(llm_service=object(), knowledge_store=object())
     factory = ProjectRuntimeFactory(
         resources=resources,
         user_name="ada",
@@ -329,12 +331,13 @@ async def test_conflict_discovery_job_is_registered_with_its_policy_subscription
     )
 
     assert list(state.scheduler._jobs) == [
-        "project_semantic", "relationship_advisories", "conflict_discovery"
+        "project_semantic", "forget_erase", "relationship_advisories", "conflict_discovery"
     ]
     assert state.scheduler._jobs["relationship_advisories"].maintenance_service is maintenance_service
     assert [path for _, path in config_manager.subscriptions] == [
         "developer_settings.entity_resolution",
-        "developer_settings.nlp_pipeline",
+        "developer_settings.extraction",
+        "developer_settings.ingestion.forget",
         "developer_settings.ingestion",
         "developer_settings.jobs.episode",
         "developer_settings.jobs.conflict_discovery",
@@ -350,7 +353,7 @@ async def test_conflict_discovery_job_is_registered_with_its_policy_subscription
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-def test_project_semantic_factory_wires_committed_entity_publication(monkeypatch):
+async def test_project_semantic_factory_wires_committed_entity_publication(monkeypatch):
     config_manager = RecordingConfigManager()
     context_filesystem = object()
     filesystem_factory = SimpleNamespace(
@@ -358,8 +361,9 @@ def test_project_semantic_factory_wires_committed_entity_publication(monkeypatch
     )
     captured_context = {}
 
-    async def publisher(_entity_ids):
-        return None
+    publications = []
+    async def publisher(entity_ids):
+        publications.append(entity_ids)
 
     def count_tokens_batch(values):
         return [1 for _ in values]
@@ -370,6 +374,7 @@ def test_project_semantic_factory_wires_committed_entity_publication(monkeypatch
         capture_semantic_policy=lambda: None,
         text_processor=object(),
         entities=entities,
+        add_config_unsubscriber=lambda _unsubscribe: None,
     )
     resources = SimpleNamespace(
         postgres=object(),
@@ -400,12 +405,15 @@ def test_project_semantic_factory_wires_committed_entity_publication(monkeypatch
         "ProjectContextReader",
         "ProjectContextWriter",
         "ContextUpdater",
-        "ContextEntityBuildService",
-        "ContextRelationshipExtractor",
+        "EntityBuildService",
     ):
         monkeypatch.setattr(
             "runtime.project_factory." + symbol, lambda *args, **kwargs: object()
         )
+    monkeypatch.setattr(
+        "runtime.project_factory.RelationshipExtractor",
+        lambda *args, **kwargs: SimpleNamespace(update_settings=lambda _settings: None),
+    )
     monkeypatch.setattr(
         "runtime.project_factory.ContextProjection",
         lambda **kwargs: captured_context.update(kwargs) or object(),
@@ -416,7 +424,8 @@ def test_project_semantic_factory_wires_committed_entity_publication(monkeypatch
 
     job = factory._create_project_semantic_processor(runtime, resources=resources)
 
-    assert job.kwargs["publish_committed_entity_ids"] is publisher
+    await job.kwargs["publish_committed_entity_ids"]((42,))
+    assert publications == [(42,)]
     assert job.kwargs["capture_semantic_policy"] is runtime.capture_semantic_policy
     assert captured_context["filesystem"] is context_filesystem
     assert captured_admission["token_counter_batch"] is count_tokens_batch
@@ -493,9 +502,6 @@ async def test_runtime_start_synchronizes_context_before_other_project_work(
     events = []
     captured = {}
 
-    async def get_vp01(_language):
-        return object()
-
     resources = SimpleNamespace(
         postgres=object(),
         embedding=object(),
@@ -505,7 +511,6 @@ async def test_runtime_start_synchronizes_context_before_other_project_work(
         background_work=None,
         model_work=object(),
         spacy=object(),
-        get_vp01=get_vp01,
     )
     resources.require_ready = lambda: resources
     factory = ProjectRuntimeFactory(
@@ -593,9 +598,6 @@ async def test_runtime_start_synchronizes_context_before_other_project_work(
 async def test_bootstrap_cleanup_failure_preserves_original_startup_error(monkeypatch):
     config_manager = RecordingConfigManager()
 
-    async def get_vp01(_language):
-        return object()
-
     resources = SimpleNamespace(
         postgres=object(),
         embedding=object(),
@@ -605,7 +607,6 @@ async def test_bootstrap_cleanup_failure_preserves_original_startup_error(monkey
         background_work=None,
         model_work=object(),
         spacy=object(),
-        get_vp01=get_vp01,
         require_ready=lambda: resources,
     )
     factory = ProjectRuntimeFactory(

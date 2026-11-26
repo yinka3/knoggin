@@ -82,17 +82,38 @@ async def test_waits_through_every_window_until_the_flush_is_spent():
 
 @pytest.mark.unit
 @pytest.mark.no_network
-async def test_a_failed_window_raises_with_its_details():
+async def test_a_window_with_no_retry_left_raises_with_its_details():
     failed = SimpleNamespace(
         window_id="w-1",
         stage=SemanticWindowStage.CLAIMED,
         last_failure_stage="episode",
         last_failure_code="provider_error",
+        next_retry_at_ms=None,
     )
     runtime, _ = _runtime(_Store(failed=[failed]), windows=1)
 
     with pytest.raises(RuntimeError, match="w-1 .*episode/provider_error"):
         await runtime.wait_for_semantic_idle(timeout_s=5, poll_interval_s=0)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_a_window_waiting_to_retry_is_still_in_progress():
+    store = _Store(failed=[SimpleNamespace(next_retry_at_ms=1_000)])
+    runtime, _ = _runtime(store, windows=2)
+    # The retry succeeds on a later pass, clearing the failure.
+    processor = runtime.project_semantic_processor
+    original = processor.run_once
+
+    def run_once():
+        original()
+        store.failed = []
+
+    processor.run_once = run_once
+
+    assert await runtime.wait_for_semantic_idle(
+        timeout_s=5, poll_interval_s=0
+    ) is store.revision
 
 
 @pytest.mark.unit

@@ -23,7 +23,6 @@ dependencies = [
     "transformers>=4.44.0,<5",
     "xformers>=0.0.29.post3",
     "scikit-learn>=1.8.0",
-    "gliner2[local]>=2.0.0",
     "spacy>=3.8.11",
     "wordfreq>=3.1.1",
     "huggingface-hub[cli]>=0.36.0",
@@ -98,6 +97,7 @@ markers = [
     "requires_postgres: requires a real Postgres service",
     "requires_pgvector: requires pgvector support",
     "requires_async_psycopg: requires psycopg async support in this OS/event loop",
+    "requires_container: requires a reachable Podman or Docker socket",
     "model: requires local model assets and may perform model inference",
     "no_network: test is expected to make no external network calls",
 ]

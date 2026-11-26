@@ -97,7 +97,8 @@ async def test_evidence_service_reads_one_observation_across_visible_projects():
     assert len(client.calls) == 1
     query, params = client.calls[0]
     assert "observation.project_id = ANY(%s)" in query
-    assert params == ("ada", ["project-1", "project-2"], [7], 17)
+    # The per-observation row limit binds first, inside the LATERAL subquery.
+    assert params == (17, "ada", ["project-1", "project-2"], [7])
 
 
 @pytest.mark.unit
@@ -163,7 +164,8 @@ async def test_evidence_reader_uses_one_query_for_a_bounded_observation_list():
 
     assert len(client.calls) == 1
     _, params = client.calls[0]
-    assert params == ("ada", "project-1", [7, 9], 25)
+    # Each observation gets its own row limit (bound first, in the subquery).
+    assert params == (25, "ada", "project-1", [7, 9])
 
 
 @pytest.mark.unit

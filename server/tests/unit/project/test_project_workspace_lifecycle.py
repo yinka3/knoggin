@@ -70,8 +70,6 @@ class Resources:
     def __init__(self, postgres):
         self.postgres = postgres
 
-    async def get_vp01(self, _language):
-        return type("VP01", (), {"extract_entities": lambda *_args, **_kwargs: []})()
 
 
 def _manager_without_filesystem() -> ProjectManager:

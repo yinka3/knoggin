@@ -199,6 +199,10 @@ class LLMResponseError(LLMError):
         super().__init__(message, code="llm_response_error", details=details)
 
 
+class LLMRefusalError(LLMResponseError):
+    """The provider blocked the request or the model declined to answer."""
+
+
 class LLMBudgetExceededError(LLMError):
     """Raised before an external LLM attempt after the shared budget is spent."""
 

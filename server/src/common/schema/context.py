@@ -13,13 +13,20 @@ from enum import StrEnum
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import Field, field_validator, model_validator
+from loguru import logger
+from pydantic import (
+    Field,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from common.schema.config import ConfigModel
 from common.schema.llm import StructuredLLMOutput, normalize_optional_text
 
 _LOCAL_BLOCK_REF = re.compile(r"C[1-9][0-9]*$")
-_LOCAL_EVIDENCE_REF = re.compile(r"[MSE][1-9][0-9]*$")
+_LOCAL_EVIDENCE_REF = re.compile(r"[MS][1-9][0-9]*$")
 _SECTION_KEY = re.compile(r"[a-z][a-z0-9_]{0,39}$")
 
 
@@ -59,10 +66,26 @@ class ContextBlockReference(ConfigModel):
     block_id: UUID
 
 
+def _bare_handle(value: object) -> object:
+    """Read a bare "M1" or "C1" as {"handle": ...}. Some models drop the object
+    around a handle; the citation means the same, and rejecting it would drop
+    the whole edit it belongs to."""
+
+    if isinstance(value, str):
+        logger.info("Read bare Context handle {!r} as a handle object", value)
+        return {"handle": value}
+    return value
+
+
 class LocalContextBlockReference(ConfigModel):
     """A revision-local model/debug handle; never a durable identifier."""
 
     handle: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_bare_handle(cls, value: object) -> object:
+        return _bare_handle(value)
 
     @field_validator("handle")
     @classmethod
@@ -74,20 +97,25 @@ class LocalContextBlockReference(ConfigModel):
 
 
 class LocalContextEvidenceReference(ConfigModel):
-    """A request-local message, assistant-source, or Episode handle.
+    """A request-local message or assistant-source handle.
 
-    ``M1``, ``S1``, and ``E1`` are deliberately distinct from durable IDs. The
-    updater resolves them only against the frozen catalog for one window.
+    ``M1`` and ``S1`` are deliberately distinct from durable IDs. The updater
+    resolves them only against the frozen catalog for one window.
     """
 
     handle: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_bare_handle(cls, value: object) -> object:
+        return _bare_handle(value)
 
     @field_validator("handle")
     @classmethod
     def require_local_handle(cls, value: str) -> str:
         value = value.strip()
         if not _LOCAL_EVIDENCE_REF.fullmatch(value):
-            raise ValueError("Context evidence handle must have the form M1, S1, or E1")
+            raise ValueError("Context evidence handle must have the form M1 or S1")
         return value
 
 
@@ -171,6 +199,19 @@ class ContextProjectionState(ConfigModel):
     projection_failure_at: datetime | None = None
 
 
+_MAX_EDIT_EVIDENCE = 8
+_MAX_USER_QUOTE = 1_000
+
+
+def _keep_quote_start(value: object) -> object:
+    # Models quote whole passages; the start is still the user's own words,
+    # so it passes the updater's quote check where rejection would fail the
+    # whole window.
+    if isinstance(value, str):
+        return value[:_MAX_USER_QUOTE]
+    return value
+
+
 class ContextEditBase(ConfigModel):
     """Shared bounded shape for updater edit commands."""
 
@@ -179,13 +220,23 @@ class ContextEditBase(ConfigModel):
     dependencies: list[LocalContextBlockReference] = Field(default_factory=list)
     evidence: list[LocalContextEvidenceReference] = Field(
         default_factory=list,
-        max_length=8,
+        max_length=_MAX_EDIT_EVIDENCE,
     )
+
+    @field_validator("evidence", mode="before")
+    @classmethod
+    def keep_first_evidence(cls, values: object) -> object:
+        # Models cite every message behind a block from a long chat and ignore
+        # the schema's limit; rejecting the edit would fail the whole window.
+        if isinstance(values, list):
+            return values[:_MAX_EDIT_EVIDENCE]
+        return values
 
     @field_validator("section_key")
     @classmethod
     def require_section_key(cls, value: str) -> str:
-        value = value.strip()
+        # Models sometimes return the heading ("Current State") for its key.
+        value = re.sub(r"[\s-]+", "_", value.strip().lower())
         if not _SECTION_KEY.fullmatch(value):
             raise ValueError("section_key must be a normalized Context section key")
         return value
@@ -206,8 +257,10 @@ class ContextAdd(ContextEditBase):
     markdown: str = Field(min_length=1, max_length=50_000)
     assertion_kind: AssertionKind = AssertionKind.AGENT_DERIVED
     # Exact words from a cited user message; required for user_asserted.
-    user_quote: str | None = Field(default=None, max_length=1_000)
+    user_quote: str | None = Field(default=None, max_length=_MAX_USER_QUOTE)
     source_time_ms: int | None = Field(default=None, ge=0)
+
+    _quote = field_validator("user_quote", mode="before")(_keep_quote_start)
 
 
 class ContextReplace(ContextEditBase):
@@ -217,8 +270,10 @@ class ContextReplace(ContextEditBase):
     target: LocalContextBlockReference
     markdown: str = Field(min_length=1, max_length=50_000)
     assertion_kind: AssertionKind = AssertionKind.AGENT_DERIVED
-    user_quote: str | None = Field(default=None, max_length=1_000)
+    user_quote: str | None = Field(default=None, max_length=_MAX_USER_QUOTE)
     source_time_ms: int | None = Field(default=None, ge=0)
+
+    _quote = field_validator("user_quote", mode="before")(_keep_quote_start)
 
 
 class ContextDelete(ContextEditBase):
@@ -226,35 +281,200 @@ class ContextDelete(ContextEditBase):
     target: LocalContextBlockReference
 
 
+# The per-window update deletes only what a user message asks it to forget;
+# the updater rejects any other delete. A finished plan is replaced with its
+# outcome.
 ContextUpdateOperation = Annotated[
     ContextAdd | ContextReplace | ContextDelete,
     Field(discriminator="operation"),
 ]
 
 
+_OPERATION: TypeAdapter[ContextAdd | ContextReplace | ContextDelete] = TypeAdapter(
+    ContextUpdateOperation
+)
+
+
+def _operation_rejection(operation: ContextEditBase) -> str | None:
+    """Rules only the model can break; the server owns these values."""
+
+    if not operation.evidence:
+        return "Context operations require at least one evidence handle"
+    if isinstance(operation, (ContextAdd, ContextReplace)):
+        if operation.assertion_kind is AssertionKind.HUMAN_ASSERTED:
+            return "the Context model cannot create human_asserted blocks"
+    return None
+
+
+class ContextForget(ConfigModel):
+    """A user's request to forget something. Every message that contains one
+    of ``values``, and the request's own exchange, stop being memory evidence.
+
+    Each value must appear word for word in the cited request or in a cited
+    block, so the model cannot point at history the user did not name.
+    """
+
+    values: list[str] = Field(min_length=1, max_length=8)
+    evidence: list[LocalContextEvidenceReference] = Field(
+        min_length=1, max_length=_MAX_EDIT_EVIDENCE
+    )
+    blocks: list[LocalContextBlockReference] = Field(default_factory=list, max_length=16)
+
+    @field_validator("values")
+    @classmethod
+    def require_specific_values(cls, values: list[str]) -> list[str]:
+        values = [" ".join(value.split()) for value in values]
+        # A very short value would match unrelated messages everywhere.
+        if any(len(value) < 3 or len(value) > 200 for value in values):
+            raise ValueError("forget values must be 3 to 200 characters")
+        return values
+
+
 class LLMContextUpdate(StructuredLLMOutput):
     """The bounded local-reference operation set returned by the Context LLM."""
 
     operations: list[ContextUpdateOperation] = Field(default_factory=list, max_length=64)
+    forget: list[ContextForget] = Field(default_factory=list, max_length=8)
     edit_summary: str | None = Field(default=None, max_length=2_000)
 
-    @field_validator("edit_summary")
+    @model_validator(mode="before")
     @classmethod
-    def normalize_edit_summary(cls, value: str | None) -> str | None:
+    def move_misplaced_forget(cls, data: object) -> object:
+        # Some models list a forget request among the edits; it is still the
+        # user's request, so keep it where it belongs instead of dropping it.
+        if not isinstance(data, dict) or not isinstance(data.get("operations"), list):
+            return data
+        misplaced = [
+            item for item in data["operations"]
+            if isinstance(item, dict) and item.get("operation") == "forget"
+        ]
+        if not misplaced:
+            return data
+        forget = data.get("forget")
+        return {
+            **data,
+            "operations": [item for item in data["operations"] if item not in misplaced],
+            "forget": [*(forget if isinstance(forget, list) else []), *(
+                {key: item[key] for key in ("values", "evidence", "blocks") if key in item}
+                for item in misplaced
+            )],
+        }
+
+    @field_validator("operations", mode="before")
+    @classmethod
+    def keep_valid_operations(cls, values: object) -> object:
+        # Check each edit alone: one bad edit must not reject the others and
+        # fail the whole window. ContextUpdateBuild.apply drops edits that
+        # break later rules the same way.
+        if not isinstance(values, list):
+            return values
+        kept = []
+        for value in values:
+            if isinstance(value, dict):
+                # The server computes source time; ignore a model-set value.
+                value = {k: v for k, v in value.items() if k != "source_time_ms"}
+            try:
+                operation = _OPERATION.validate_python(value)
+            except ValidationError as exc:
+                error = exc.errors()[0]
+                logger.warning(
+                    "Dropped malformed Context operation at {}: {} (got {})",
+                    ".".join(str(part) for part in error["loc"]),
+                    error["msg"],
+                    repr(error.get("input"))[:200],
+                )
+                continue
+            if reason := _operation_rejection(operation):
+                logger.warning("Dropped invalid Context operation: {}", reason)
+                continue
+            kept.append(operation)
+        return kept
+
+    @field_validator("forget", mode="before")
+    @classmethod
+    def keep_valid_forget(cls, values: object) -> object:
+        # Like edits: one bad request must not fail the whole window.
+        if not isinstance(values, list):
+            return values
+        kept = []
+        for value in values:
+            try:
+                kept.append(ContextForget.model_validate(value))
+            except ValidationError as exc:
+                logger.warning(
+                    "Dropped malformed forget request: {}", exc.errors()[0]["msg"]
+                )
+        return kept
+
+    @field_validator("edit_summary", mode="before")
+    @classmethod
+    def normalize_edit_summary(cls, value: object) -> str | None:
+        if isinstance(value, str):
+            value = value[:2_000]
         return normalize_optional_text(value, field_name="edit_summary")
 
     @model_validator(mode="after")
     def validate_operations(self) -> "LLMContextUpdate":
-        markdown_chars = 0
-        for operation in self.operations:
-            if not operation.evidence:
-                raise ValueError("Context operations require at least one evidence handle")
-            if isinstance(operation, (ContextAdd, ContextReplace)):
-                if operation.assertion_kind is AssertionKind.HUMAN_ASSERTED:
-                    raise ValueError("the Context model cannot create human_asserted blocks")
-                if operation.source_time_ms is not None:
-                    raise ValueError("the server computes Context block source_time_ms")
-                markdown_chars += len(operation.markdown)
+        markdown_chars = sum(
+            len(operation.markdown)
+            for operation in self.operations
+            if isinstance(operation, (ContextAdd, ContextReplace))
+        )
         if markdown_chars > 100_000:
             raise ValueError("Context model output exceeds the 100000-character limit")
         return self
+
+
+class ContextMaintenanceEdit(ConfigModel):
+    """One maintainer change: merge near-duplicates, compress one block, or
+    drop one block. The server checks budget, size, and removal limits."""
+
+    operation: Literal["merge", "compress", "drop"]
+    targets: list[LocalContextBlockReference] = Field(min_length=1, max_length=16)
+    markdown: str | None = Field(default=None, max_length=50_000)
+
+    @model_validator(mode="after")
+    def validate_shape(self) -> "ContextMaintenanceEdit":
+        handles = [target.handle for target in self.targets]
+        if len(handles) != len(set(handles)):
+            raise ValueError("maintenance targets must not repeat")
+        if self.operation == "merge" and len(handles) < 2:
+            raise ValueError("merge needs two or more targets")
+        if self.operation != "merge" and len(handles) != 1:
+            raise ValueError(f"{self.operation} takes exactly one target")
+        if self.operation == "drop":
+            if self.markdown is not None:
+                raise ValueError("drop takes no markdown")
+        elif not (self.markdown or "").strip():
+            raise ValueError(f"{self.operation} needs markdown")
+        return self
+
+
+_MAINTENANCE_EDIT = TypeAdapter(ContextMaintenanceEdit)
+
+
+class LLMContextMaintenance(StructuredLLMOutput):
+    """The maintainer's proposed edits for one Context."""
+
+    edits: list[ContextMaintenanceEdit] = Field(default_factory=list, max_length=64)
+    summary: str | None = Field(default=None, max_length=2_000)
+
+    @field_validator("edits", mode="before")
+    @classmethod
+    def keep_valid_edits(cls, values: object) -> object:
+        if not isinstance(values, list):
+            return values
+        kept = []
+        for value in values:
+            try:
+                kept.append(_MAINTENANCE_EDIT.validate_python(value))
+            except ValidationError as exc:
+                logger.warning(
+                    "Dropped malformed Context maintenance edit: {}", exc.errors()[0]["msg"]
+                )
+        return kept
+
+    @field_validator("summary", mode="before")
+    @classmethod
+    def normalize_summary(cls, value: object) -> object:
+        return value[:2_000] if isinstance(value, str) else value

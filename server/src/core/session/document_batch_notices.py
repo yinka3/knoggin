@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from core.session.session_manager import SessionManager
 
 _MAX_LISTED_FAILURES = 20
+_PENDING_REPORT_STATES = frozenset({"queued", "starting", "running"})
 
 
 class DocumentBatchNotices:
@@ -113,15 +114,24 @@ class DocumentBatchNotices:
                 await asyncio.sleep(settings.poll_seconds)
                 waited += settings.poll_seconds
             text = _report_text(label, document_ids, rows)
-            if not await self._report(work_id, session_id, label, text):
+            session = await self._sessions.get_or_resume_session(session_id)
+            if session is None:
                 await self._store.delete(work_id)  # The chat was deleted.
                 return
+            queued = await session.queue_report(
+                text, origin="folder_ingestion_report",
+                metadata={"label": label[:200], "work_id": work_id},
+            )
             # Queued only in memory until the turn runs; the next start checks
             # the chat and sends it again if a restart came first.
             await self._store.save(
                 "folder_notice", work_id, project_id=project_id, session_id=session_id,
                 state="reported", payload={"label": label, "document_ids": document_ids},
             )
+            if queued is not None:
+                await self._forget_once_delivered(
+                    work_id, session_id, session, queued["queue_id"], settings.poll_seconds,
+                )
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -136,22 +146,23 @@ class DocumentBatchNotices:
             (project_id, document_ids),
         )
 
-    async def _report(self, work_id: str, session_id: str, label: str, text: str) -> bool:
-        """Queue the notice; False when the chat is gone (the documents are
-        still in the project)."""
+    async def _forget_once_delivered(
+        self, work_id: str, session_id: str, session, queue_id: str, poll_seconds: float,
+    ) -> None:
+        """Drop the record once the report turn is saved in the chat, so
+        finished notices do not pile up until the next restart."""
 
-        session = await self._sessions.get_or_resume_session(session_id)
-        if session is None:
-            return False
-        await session.queue_report(
-            text, origin="folder_ingestion_report",
-            metadata={"label": label[:200], "work_id": work_id},
-        )
-        return True
+        while True:
+            item = await session.get_follow_up(queue_id)
+            if item is None or item["state"] not in _PENDING_REPORT_STATES:
+                break
+            await asyncio.sleep(poll_seconds)
+        if await self._store.report_in_chat(session_id, "work_id", work_id):
+            await self._store.delete(work_id)
 
 
 def _finished(row: dict) -> bool:
-    return row["status"] in {"indexed", "deleted"} or (
+    return row["status"] in {"indexed", "skipped", "deleted"} or (
         row["status"] == "failed" and row["next_index_retry_at"] is None
     )
 
@@ -164,12 +175,18 @@ def _report_text(label: str, document_ids: list[str], rows: list[dict] | None) -
             "still running and that the documents list shows each file's status."
         )
     indexed = [row for row in rows if row["status"] == "indexed"]
+    skipped = [row for row in rows if row["status"] == "skipped"]
     failed = [row for row in rows if row["status"] == "failed"]
     missing = len(document_ids) - len(rows) + sum(row["status"] == "deleted" for row in rows)
     lines = [
         f"Folder import \"{label}\" finished indexing: {len(indexed)} of "
         f"{len(document_ids)} files are ready to search."
     ]
+    if skipped:
+        lines.append(
+            f"{len(skipped)} code, config or data files sit in a workspace, so they are "
+            "read directly instead of searched."
+        )
     if failed:
         lines.append(f"{len(failed)} failed:")
         lines += [

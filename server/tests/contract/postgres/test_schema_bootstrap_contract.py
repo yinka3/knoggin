@@ -110,9 +110,16 @@ async def test_schema_bootstraps_a_fresh_database_with_vector():
             "maintenance_review_resolutions",
             "project_entity_contexts",
             "project_jev_identity_decisions",
-            "project_jev_extraction_decisions",
             "project_jev_classification_decisions",
+            "message_entity_occurrences",
+            "relationship_observation_messages",
         } <= table_names
+        assert not {
+            "context_block_entities",
+            "context_block_entity_occurrences",
+            "relationship_observation_blocks",
+            "project_jev_extraction_decisions",
+        } & table_names
         assert {
             "entity_merge_audits",
             "entity_merge_proposals",

@@ -4,9 +4,31 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from routes.runs import _events, _request_focus, start_run
+from runtime.session_runtime import SteerQueueFull
 from routes.runs import _selected_notebook
 from common.schema.settings import RunEventSettings
 from run_events import RunEvents
+
+
+def test_command_events_reach_sse_with_stream_and_status():
+    async def raw():
+        yield {"event": "command_output", "data": {
+            "tool": "run_workspace_command", "call_id": "call-1",
+            "stream": "stderr", "text": "problem\n",
+        }}
+        yield {"event": "command_status", "data": {
+            "tool": "run_workspace_command", "call_id": "call-1",
+            "message": "Command is still running", "timeout_seconds": 300,
+        }}
+
+    async def exercise():
+        frames = [frame async for frame in _events(raw(), "run-1")]
+        assert b"event: command_output" in frames[1]
+        assert b'"stream":"stderr"' in frames[1]
+        assert b"event: command_status" in frames[2]
+        assert b'"timeout_seconds":300' in frames[2]
+
+    asyncio.run(exercise())
 
 
 def test_run_continues_after_event_subscriber_disconnects():
@@ -58,6 +80,31 @@ def test_cancelled_process_owned_run_reports_a_terminal_event():
         replay = [frame async for frame in events.stream(run, after=0)]
         assert len(replay) == 1
         assert b"run_cancelled" in replay[0]
+        await events.close()
+
+    asyncio.run(exercise())
+
+
+def test_a_run_whose_stream_never_starts_is_stopped_after_the_grace_period():
+    # A client that disconnects before its response body starts never runs
+    # the stream; the run used to go on spending with no stop scheduled.
+    async def exercise():
+        settings = RunEventSettings(
+            max_buffered_events=10, max_buffered_bytes=4096, max_retained_runs=2,
+            unwatched_run_grace_seconds=0.05,
+        )
+        events = RunEvents(lambda: settings)
+
+        async def frames():
+            yield b'event: run_started\ndata: {"sequence":0}\n\n'
+            await asyncio.Event().wait()
+
+        events.start("session-1", "never-watched", frames())
+        run = events.get("session-1", "never-watched")
+        await asyncio.wait_for(asyncio.gather(run.task, return_exceptions=True), 1)
+        assert run.task.cancelled()
+        replay = [frame async for frame in events.stream(run, after=0)]
+        assert b'"reason": "unwatched"' in replay[0]
         await events.close()
 
     asyncio.run(exercise())
@@ -415,7 +462,14 @@ def test_run_steer_and_stop_routes_target_only_the_active_run(monkeypatch, tmp_p
         async def get_run_status(self, run_id):
             return {"run_id": run_id, "state": "cancelled" if self.stopped else "running", "steer": None} if run_id == "run-1" else None
 
+        def answer_decision(self, run_id, decision_id, choice):
+            if choice not in {"approve", "deny"}:
+                raise ValueError("choice must be one of approve, deny")
+            return run_id == "run-1" and decision_id == "d1" and not self.stopped
+
         async def submit_steer(self, run_id, instruction, *, annotations=None):
+            if instruction == "full":
+                raise SteerQueueFull("Steer queue is full")
             if annotations:
                 assert annotations == [{"message_id": 12, "start": 4, "end": 7, "quote": "two"}]
                 # The session adds the excerpt; the route passes the user's words.
@@ -502,6 +556,16 @@ def test_run_steer_and_stop_routes_target_only_the_active_run(monkeypatch, tmp_p
                 annotation = {"message_id": 12, "start": 4, "end": 7, "quote": "two"}
                 assert (await client.post(base + "/steers", json={"instruction": "Focus", "annotations": [annotation]})).status_code == 202
                 assert (await client.post(base + "/steers", json={"instruction": " "})).status_code == 422
+                full = await client.post(base + "/steers", json={"instruction": "full"})
+                assert full.status_code == 409
+                assert full.json()["error"]["code"] == "steer_queue_full"
+                answered = await client.post(base + "/decisions/d1", json={"choice": "approve"})
+                assert answered.json() == {"decision_id": "d1", "choice": "approve"}
+                bad = await client.post(base + "/decisions/d1", json={"choice": "maybe"})
+                assert bad.status_code == 422
+                assert (await client.post(base + "/decisions/d1", json={})).status_code == 422
+                gone = await client.post(base + "/decisions/d9", json={"choice": "deny"})
+                assert gone.json()["error"]["code"] == "decision_not_found"
                 assert (await client.post(base + "/follow-ups", json={"query": " "})).status_code == 422
                 queued = await client.post(base + "/follow-ups", json={"query": " Later question "})
                 assert queued.status_code == 202
@@ -516,3 +580,23 @@ def test_run_steer_and_stop_routes_target_only_the_active_run(monkeypatch, tmp_p
                 assert (await client.post("/v1/sessions/session-1/runs/old/follow-ups", json={"query": "Later question"})).status_code == 409
 
     asyncio.run(exercise())
+
+
+def test_a_tool_question_reaches_the_client_stream():
+    async def raw():
+        yield {"event": "decision_required", "data": {
+            "decision_id": "d1", "question": "Allow network?", "options": ["approve", "deny"],
+            "default": "deny", "timeout_seconds": 60, "tool": "run_command", "call_id": "c1",
+            "internal": "dropped",
+        }}
+        yield {"event": "decision_resolved", "data": {"decision_id": "d1", "choice": "approve"}}
+
+    async def collect():
+        return [frame async for frame in _events(raw(), "run-1")]
+
+    frames = asyncio.run(collect())
+    asked = json.loads(frames[1].decode().split("data: ", 1)[1])
+    assert frames[1].startswith(b"event: decision_required")
+    assert asked["question"] == "Allow network?" and asked["options"] == ["approve", "deny"]
+    assert "internal" not in asked
+    assert frames[2].startswith(b"event: decision_resolved")

@@ -550,7 +550,7 @@ def test_agent_run_records_runtime_diagnostics_and_releases_handles():
 @pytest.mark.no_network
 def test_agent_run_finalization_seals_direct_state_and_rejects_more_work():
     run = make_run()
-    run.record_tool_result({"messages": [{"id": "message-1"}]})
+    run.record_tool_success()
 
     run.finalize("A concise answer.")
 
@@ -753,12 +753,12 @@ def test_research_runs_cannot_start_background_jobs():
     research = make_run(research_profile=resolve_research_profile("research"))
     chosen = make_run(
         research_profile=resolve_research_profile("deep_research"),
-        enabled_tools=["read_web_page", "start_research_job"],
+        enabled_tools=["read_web_page", "start_background_task"],
     )
 
-    assert {"start_research_job", "edit_agent_brain", "delete_project_file"} <= tool_names(normal)
+    assert {"start_background_task", "edit_agent_brain", "delete_project_file"} <= tool_names(normal)
     assert not tool_names(research) & {
-        "start_research_job", "list_research_jobs", "edit_agent_brain",
+        "start_background_task", "list_background_tasks", "edit_agent_brain",
         "restore_agent_brain_section", "propose_entity_merge",
         "report_relationship_conflict", "update_project_file",
         "move_project_file", "delete_project_file",
@@ -767,7 +767,27 @@ def test_research_runs_cannot_start_background_jobs():
     assert {"search_web", "read_agent_brain", "create_project_file",
             "append_project_file", "create_project_folder"} <= tool_names(research)
     assert "read_web_page" in tool_names(chosen)
-    assert "start_research_job" not in tool_names(chosen)
+    assert "start_background_task" not in tool_names(chosen)
+
+
+@pytest.mark.no_network
+def test_tools_that_start_or_stop_background_work_are_audited_as_writes():
+    # As "read" tools they ran without an audit row.
+    from common.schema.agent.tool_contracts import (
+        READ_CAPABILITY,
+        REVERSIBLE_WRITE_CAPABILITY,
+        TOOL_SCHEMAS_BY_NAME,
+        get_schema_capability,
+    )
+
+    assert {
+        name: get_schema_capability(TOOL_SCHEMAS_BY_NAME[name])
+        for name in ("start_background_task", "cancel_background_task", "list_background_tasks")
+    } == {
+        "start_background_task": REVERSIBLE_WRITE_CAPABILITY,
+        "cancel_background_task": REVERSIBLE_WRITE_CAPABILITY,
+        "list_background_tasks": READ_CAPABILITY,
+    }
 
 
 @pytest.mark.no_network
@@ -823,7 +843,7 @@ def test_core_group_has_no_web_or_maintenance_until_research_adds_web():
     assert "search_knowledge_messages" in normal.enabled_tools
     assert not {"search_web", "read_web_page", "get_engine_health"} & set(normal.enabled_tools)
     assert {"search_web", "search_news", "read_web_page"} <= set(research.enabled_tools)
-    assert "start_research_job" not in research.enabled_tools
+    assert "start_background_task" not in research.enabled_tools
     assert "get_engine_health" not in research.enabled_tools
 
 

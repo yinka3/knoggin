@@ -36,19 +36,21 @@ def test_evidence_pointers_validate_closed_identifier_shapes():
 @pytest.mark.no_network
 def test_evidence_edges_reject_semantically_invalid_endpoints():
     block = EvidencePointer(kind="context_block", identifier=str(uuid4()))
+    message = EvidencePointer(kind="message", identifier="7")
     observation = EvidencePointer.for_observation(9)
     assert EvidenceEdge(
-        source=block,
+        source=message,
         target=observation,
         relation="supports_relationship_observation",
     ).target == observation
 
-    with pytest.raises(ValidationError, match="endpoints"):
-        EvidenceEdge(
-            source=observation,
-            target=block,
-            relation="supports_relationship_observation",
-        )
+    for source, target in ((observation, message), (block, observation)):
+        with pytest.raises(ValidationError, match="endpoints"):
+            EvidenceEdge(
+                source=source,
+                target=target,
+                relation="supports_relationship_observation",
+            )
 
 
 @pytest.mark.unit

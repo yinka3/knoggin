@@ -415,10 +415,15 @@ class SemanticWindowWriter:
                 assistants = [
                     member for member in exchange_members if member.role == "assistant"
                 ]
-                if len(users) != 1 or len(assistants) > 1:
+                paired = len(users) == 1 and len(assistants) <= 1
+                assistant_only = (
+                    not users and len(assistants) == 1
+                    and assistants[0].message_id == exchange_id
+                )
+                if not (paired or assistant_only):
                     raise ValueError(
-                        "conversation membership must contain one user and at most "
-                        "one assistant per exchange"
+                        "conversation membership requires a user anchor or one "
+                        "standalone assistant"
                     )
 
     @staticmethod
@@ -506,6 +511,18 @@ class SemanticWindowWriter:
                     raise ValueError(
                         "Non-final exchanges cannot include assistant membership"
                     )
+            elif member.message_id == member.exchange_user_message_id:
+                if (
+                    row["lifecycle_state"] != "sealed"
+                    or row["exchange_state"] != "closed"
+                    or row["exchange_outcome"] != "assistant_only"
+                    or row["exchange_closed_at_ms"] is None
+                    or row["user_msg_id"] is not None
+                    or row["session_status"] != "open"
+                    or not bool(row["semantic_participation_enabled"])
+                    or member.message_id <= int(row["semantic_participation_after_message_id"])
+                ):
+                    raise ValueError("Standalone assistant is no longer eligible")
             elif (
                 row["lifecycle_state"] != "sealed"
                 or int(row["user_msg_id"] or 0) != member.exchange_user_message_id

@@ -27,19 +27,9 @@ PIPELINE_PROMPTS: Dict[str, PromptDefinition] = {
         "Extract Entities",
         frozenset({"user_name"}),
     ),
-    "extract_context_entities": PromptDefinition(
-        "prompts/extraction.md",
-        "Extract Context Entities",
-        frozenset({"user_name"}),
-    ),
     "extract_relationships": PromptDefinition(
         "prompts/extraction.md",
         "Extract Relationships",
-        frozenset({"user_name"}),
-    ),
-    "extract_context_relationships": PromptDefinition(
-        "prompts/extraction.md",
-        "Extract Context Relationships",
         frozenset({"user_name"}),
     ),
     "generate_episode": PromptDefinition(
@@ -51,7 +41,6 @@ PIPELINE_PROMPTS: Dict[str, PromptDefinition] = {
                 "prompt_narrative_chars",
                 "max_narrative_chars",
                 "max_episode_source_messages",
-                "max_proposals",
                 "max_episode_source_tokens",
             }
         ),
@@ -61,9 +50,19 @@ PIPELINE_PROMPTS: Dict[str, PromptDefinition] = {
         "Repair Episode Narrative",
         frozenset({"user_name", "max_narrative_chars"}),
     ),
+    "forget_episode_content": PromptDefinition(
+        "prompts/episode.md",
+        "Forget Episode Content",
+        frozenset({"user_name"}),
+    ),
     "update_context": PromptDefinition(
         "prompts/context.md",
         "Update Context",
+        frozenset({"user_name"}),
+    ),
+    "maintain_context": PromptDefinition(
+        "prompts/context.md",
+        "Maintain Context",
         frozenset({"user_name"}),
     ),
 }

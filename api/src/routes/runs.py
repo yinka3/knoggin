@@ -22,8 +22,8 @@ from core.project.notebook_store import NotebookConflict
 
 from contracts.sessions import QueueFollowUp, StartRun, SteerRun
 from annotations import resolve_annotations, with_annotations
-from runtime.session_runtime import FollowUpQueueFull
-from routes.project_settings import _error, _json
+from runtime.session_runtime import FollowUpQueueFull, SteerQueueFull
+from routes.project_settings import _error, _json, _project_error
 
 
 def _stream_response(frames: AsyncIterator[bytes]) -> StreamingResponse:
@@ -65,6 +65,31 @@ async def _events(raw: AsyncIterator, run_id: str, *, runtime=None, session=None
                 }
             elif name == "steer_applied":
                 event, public = "steer_applied", {"steer_id": data["steer_id"]}
+            elif name == "decision_required":
+                event, public = "decision_required", {
+                    key: data.get(key) for key in (
+                        "decision_id", "question", "options", "default",
+                        "timeout_seconds", "tool", "call_id",
+                    )
+                }
+            elif name == "decision_resolved":
+                event, public = "decision_resolved", {
+                    "decision_id": data.get("decision_id"), "choice": data.get("choice"),
+                }
+            elif name == "command_output":
+                event, public = "command_output", {
+                    "tool": str(data.get("tool", "")),
+                    "call_id": str(data.get("call_id", "")),
+                    "stream": str(data.get("stream", "")),
+                    "text": str(data.get("text", "")),
+                }
+            elif name == "command_status":
+                event, public = "command_status", {
+                    "tool": str(data.get("tool", "")),
+                    "call_id": str(data.get("call_id", "")),
+                    "message": str(data.get("message", "")),
+                    "timeout_seconds": data.get("timeout_seconds"),
+                }
             elif name in {"tool_start", "tool_end", "tool_error"}:
                 event = "tool"
                 public = {"name": str(data.get("tool", "")), "state": name}
@@ -161,9 +186,8 @@ async def start_run(request):
     metadata = (await runtime.sessions.list_sessions()).get(session_id)
     if metadata is None:
         return _error("session_not_found", "Session not found", 404)
-    project = await runtime.projects.get_project(metadata["project_id"])
-    if project is None or project["status"] != "active":
-        return _error("project_unavailable", "Project is unavailable", 409)
+    if error := await _project_error(runtime, metadata["project_id"], write=True):
+        return error
     try:
         session = await runtime.sessions.get_or_resume_session(session_id)
         if session is None:
@@ -324,6 +348,26 @@ async def run_events(request):
     return _stream_response(events.stream(run, after=after))
 
 
+async def answer_decision(request):
+    """Answer a question a tool in the active run is waiting on."""
+    body = await _json(request)
+    choice = body.get("choice") if isinstance(body, dict) else None
+    if not isinstance(choice, str) or not choice or len(choice) > 100:
+        return _error("invalid_decision", "Give a choice", 422)
+    session = await _active_session(request)
+    if session is None:
+        return _error("decision_not_found", "Nothing is waiting for that answer", 404)
+    try:
+        delivered = session.answer_decision(
+            request.path_params["run_id"], request.path_params["decision_id"], choice
+        )
+    except ValueError as exc:
+        return _error("invalid_decision", str(exc), 422)
+    if not delivered:
+        return _error("decision_not_found", "Nothing is waiting for that answer", 404)
+    return JSONResponse({"decision_id": request.path_params["decision_id"], "choice": choice})
+
+
 async def steer_run(request):
     try:
         body = SteerRun.model_validate(await _json(request))
@@ -335,10 +379,10 @@ async def steer_run(request):
     try:
         annotations = await resolve_annotations(request.app.state.runtime, session.session_id, session.project_id, body.annotations)
         result = await session.submit_steer(request.path_params["run_id"], body.instruction, annotations=annotations)
+    except SteerQueueFull:
+        return _error("steer_queue_full", "Wait for pending instructions to be applied", 409)
     except ValueError:
         return _error("invalid_annotation", "Selected response text is unavailable or changed", 422)
-    except SessionBusyError:
-        return _error("steer_exists", "This run already has an instruction", 409)
     if result is None:
         return _error("run_not_active", "Run is no longer active", 409)
     return JSONResponse(result, status_code=202)
@@ -367,10 +411,10 @@ async def queue_follow_up(request):
     try:
         annotations = await resolve_annotations(request.app.state.runtime, session.session_id, session.project_id, body.annotations)
         result = await session.queue_follow_up(request.path_params["run_id"], body.query, annotations=annotations)
-    except ValueError:
-        return _error("invalid_annotation", "Selected response text is unavailable or changed", 422)
     except FollowUpQueueFull:
         return _error("follow_up_queue_full", "Follow-up queue is full", 409)
+    except ValueError:
+        return _error("invalid_annotation", "Selected response text is unavailable or changed", 422)
     if result is None:
         return _error("run_not_active", "Run is no longer active", 409)
     return JSONResponse(result, status_code=202)
@@ -434,6 +478,10 @@ routes = [
     Route("/v1/sessions/{session_id}/runs/{run_id}/events", run_events, methods=["GET"]),
     Route("/v1/sessions/{session_id}/runs/{run_id}", stop_run, methods=["DELETE"]),
     Route("/v1/sessions/{session_id}/runs/{run_id}/steers", steer_run, methods=["POST"]),
+    Route(
+        "/v1/sessions/{session_id}/runs/{run_id}/decisions/{decision_id}", answer_decision,
+        methods=["POST"],
+    ),
     Route("/v1/sessions/{session_id}/runs/{run_id}/follow-ups", queue_follow_up, methods=["POST"]),
     Route("/v1/sessions/{session_id}/follow-ups", list_follow_ups, methods=["GET"]),
     Route("/v1/sessions/{session_id}/follow-ups/{queue_id}", get_follow_up, methods=["GET"]),

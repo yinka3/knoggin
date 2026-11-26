@@ -26,12 +26,19 @@ from common.schema.agent.stream import AgentExecutionEvent
 from common.schema.artifacts import ArtifactDraft
 from common.schema.document import DocumentFocus
 from common.schema.message_origins import BACKGROUND_REPORT_ORIGINS
-from common.schema.primitives import ImportedExchange, Message
+from common.schema.primitives import ImportedAssistantTurn, ImportedExchange, Message
 from common.schema.settings import RootConfig
 from common.schema.source.references import SourceReferenceCandidate
 from common.utils.events import emit
 from common.utils.time_utils import get_now
 from core.agent.run import AgentIdentity
+from core.agent.tool_events import (
+    DecisionBroker,
+    bind_decision_broker,
+    bind_handoffs,
+    unbind_decision_broker,
+    unbind_handoffs,
+)
 from core.knowledge.documents import DocumentService
 from core.session.chat_compaction import ChatCompaction
 from runtime.project_runtime import ProjectRuntime
@@ -40,7 +47,15 @@ from runtime.resources import RuntimeResources
 _REQUEST_FINGERPRINT_METADATA_KEY = "request_fingerprint"
 
 
+# Queued follow-ups and background reports a session keeps a status for.
+_MAX_TRACKED_FOLLOW_UPS = 100
+
+
 class FollowUpQueueFull(ValueError):
+    pass
+
+
+class SteerQueueFull(ValueError):
     pass
 
 
@@ -149,10 +164,10 @@ class SessionRuntime:
         health_service: Any | None = None,
         agent_orchestrator: Any | None = None,
         config_manager: ConfigManager | None = None,
-        research_jobs: Any | None = None,
+        background_tasks: Any | None = None,
     ):
         self.resources = resources
-        self.research_jobs = research_jobs
+        self.background_tasks = background_tasks
         self.health_service = health_service
         self.agent_orchestrator = agent_orchestrator
         self._config_manager = config_manager
@@ -173,12 +188,16 @@ class SessionRuntime:
         self._active_agent_task: Optional[asyncio.Task] = None
         self._active_agent_stream: _AdmittedAgentStream | None = None
         self._active_idempotency_key: str | None = None
+        self._active_decisions: DecisionBroker | None = None
+        self._run_stop_requested = False
+        # Set by the session manager; work handed off outlives this runtime.
+        self._tool_handoffs = None
         self._active_request_fingerprint: str | None = None
         self._active_run_id: str | None = None
         self._active_user_message_id: int | None = None
         self._last_run_status: dict[str, Any] | None = None
         self._active_run_state: str | None = None
-        self._active_steer: dict[str, str] | None = None
+        self._active_steers: list[dict[str, Any]] = []
         self._follow_up_queue: deque[str] = deque()
         self._follow_ups: dict[str, dict[str, Any]] = {}
         self._follow_up_task: asyncio.Task | None = None
@@ -213,6 +232,9 @@ class SessionRuntime:
                 return False
             task = self._active_agent_task
             stream = self._active_agent_stream
+            # The user asked to stop, so tool work stops too instead of
+            # moving to the background.
+            self._run_stop_requested = True
         if stream is not None and not stream.closed:
             await stream.aclose()
             return True
@@ -247,7 +269,8 @@ class SessionRuntime:
         return {
             "run_id": self._active_run_id,
             "state": self._active_run_state,
-            "steer": deepcopy(self._active_steer),
+            "steer": deepcopy(self._active_steers[-1]) if self._active_steers else None,
+            "steers": deepcopy(self._active_steers),
         }
 
     async def queue_follow_up(self, run_id: str, query: str, *, annotations: list[dict] | None = None) -> dict[str, Any] | None:
@@ -266,11 +289,7 @@ class SessionRuntime:
                 return None
             if len(self._follow_up_queue) >= 5:
                 raise FollowUpQueueFull("Follow-up queue is full")
-            if len(self._follow_ups) >= 100:
-                for old_id, old in list(self._follow_ups.items()):
-                    if old["state"] in {"completed", "clarification", "failed", "cancelled"}:
-                        del self._follow_ups[old_id]
-                        break
+            self._make_room_for_follow_up()
             queue_id = str(uuid4())
             item = {
                 "queue_id": queue_id, "after_run_id": run_id,
@@ -302,6 +321,9 @@ class SessionRuntime:
         async with self._agent_run_lock:
             if self._agent_runs_closed or self._closed:
                 return None
+            # Reports bypass the queue limit, so they must also evict old
+            # entries, or a report-heavy chat grows this record without bound.
+            self._make_room_for_follow_up()
             queue_id = str(uuid4())
             item = {
                 "queue_id": queue_id, "after_run_id": None,
@@ -315,6 +337,16 @@ class SessionRuntime:
             if self._follow_up_task is None or self._follow_up_task.done():
                 self._follow_up_task = asyncio.create_task(self._drain_follow_ups())
             return self._public_follow_up(item)
+
+    def _make_room_for_follow_up(self) -> None:
+        """Keep the record of queued turns bounded, dropping the oldest
+        finished ones; queued and running items are never dropped."""
+
+        for old_id, old in list(self._follow_ups.items()):
+            if len(self._follow_ups) < _MAX_TRACKED_FOLLOW_UPS:
+                return
+            if old["state"] in {"completed", "clarification", "failed", "cancelled"}:
+                del self._follow_ups[old_id]
 
     @staticmethod
     def _public_follow_up(item: dict[str, Any]) -> dict[str, Any]:
@@ -357,80 +389,111 @@ class SessionRuntime:
                 item["state"] = "starting"
                 self._follow_up_starting = True
                 self._run_idle.clear()
-            stream = None
+            # Each item runs in its own task. Stopping that run cancels only
+            # the child, so later items still drain; shutdown cancels this
+            # task, and asyncio carries that cancel into the child.
+            run = asyncio.create_task(self._run_follow_up(item))
             try:
-                stream = await self.open_agent_run_stream(
-                    Message(content=item["query"], metadata=item.get("metadata", {})),
-                    run_id=item["run_id"],
-                    _from_follow_up=True,
-                )
-                async with self._agent_run_lock:
-                    self._follow_up_starting = False
-                    item["state"] = "running"
-                async for event in stream:
-                    if event["event"] == "response":
-                        item["assistant_message_id"] = event["data"].get("assistant_message_id")
-                        item["state"] = "completed"
-                    elif event["event"] == "clarification":
-                        item["assistant_message_id"] = event["data"].get("assistant_message_id")
-                        item["state"] = "clarification"
-                    elif event["event"] == "error":
-                        item["state"] = "failed"
-                        code = event["data"].get("code")
-                        item["error_code"] = (
-                            code if code in {"llm_budget_exhausted", "workspace_conflict"}
-                            else "run_failed"
-                        )
-                if item["state"] == "running":
-                    item["state"] = "failed"
-                    item["error_code"] = "run_failed"
+                await run
             except asyncio.CancelledError:
-                item["state"] = "cancelled"
-                raise
-            except Exception:
-                logger.exception("Queued follow-up failed for session {}", self.session_id)
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise
+
+    async def _run_follow_up(self, item: dict[str, Any]) -> None:
+        stream = None
+        try:
+            stream = await self.open_agent_run_stream(
+                Message(content=item["query"], metadata=item.get("metadata", {})),
+                run_id=item["run_id"],
+                _from_follow_up=True,
+            )
+            async with self._agent_run_lock:
+                self._follow_up_starting = False
+                item["state"] = "running"
+            async for event in stream:
+                if event["event"] == "response":
+                    item["assistant_message_id"] = event["data"].get("assistant_message_id")
+                    item["state"] = "completed"
+                elif event["event"] == "clarification":
+                    item["assistant_message_id"] = event["data"].get("assistant_message_id")
+                    item["state"] = "clarification"
+                elif event["event"] == "error":
+                    item["state"] = "failed"
+                    code = event["data"].get("code")
+                    item["error_code"] = (
+                        code if code in {"llm_budget_exhausted", "workspace_conflict"}
+                        else "run_failed"
+                    )
+            if item["state"] == "running":
                 item["state"] = "failed"
                 item["error_code"] = "run_failed"
-            finally:
-                item.pop("query", None)
-                if stream is not None:
-                    await stream.aclose()
-                async with self._agent_run_lock:
-                    self._follow_up_starting = False
-                    if not self._agent_run_reserved:
-                        self._run_idle.set()
+        except asyncio.CancelledError:
+            item["state"] = "cancelled"
+            raise
+        except Exception:
+            logger.exception("Queued follow-up failed for session {}", self.session_id)
+            item["state"] = "failed"
+            item["error_code"] = "run_failed"
+        finally:
+            item.pop("query", None)
+            if stream is not None:
+                await stream.aclose()
+            async with self._agent_run_lock:
+                self._follow_up_starting = False
+                if not self._agent_run_reserved:
+                    self._run_idle.set()
 
-    async def submit_steer(self, run_id: str, instruction: str, *, annotations: list[dict] | None = None) -> dict[str, str] | None:
+    async def submit_steer(
+        self, run_id: str, instruction: str, *, annotations: list[dict] | None = None
+    ) -> dict[str, str] | None:
         if not instruction or not instruction.strip() or len(instruction) > 4000:
             raise ValueError("Steer instruction must contain 1 to 4000 characters")
         async with self._agent_run_lock:
             if run_id != self._active_run_id or self._active_run_state != "running":
                 return None
-            if self._active_steer is not None:
-                raise SessionBusyError()
+            if (sum(item["state"] == "pending" for item in self._active_steers) >= 5
+                    or len(self._active_steers) >= 100):
+                raise SteerQueueFull("Steer queue is full")
+            steer_id = str(uuid4())
             steer = {
-                "steer_id": str(uuid4()),
-                "instruction": instruction.strip(),
-                "response_annotations": annotations or [],
-                "state": "pending",
+                "steer_id": steer_id, "instruction": instruction.strip(),
+                "response_annotations": annotations or [], "state": "pending",
             }
-            if self._active_user_message_id is None or not await self.knowledge_store.record_run_steer(
+            at = get_now()
+            accepted = await self.knowledge_store.create_closed_standalone_message(
                 user_name=self.user_name, project_id=self.project_id,
-                session_id=self.session_id, message_id=self._active_user_message_id,
-                steer=steer,
-            ):
-                return None
-            self._active_steer = steer
-            return {"steer_id": steer["steer_id"], "state": "pending"}
+                session_id=self.session_id,
+                message_id=await self.knowledge_store.allocate_message_id(),
+                role="user", content=steer["instruction"],
+                timestamp_ms=int(at.timestamp() * 1000),
+                acceptance_key=f"steer:{steer_id}",
+                metadata={"origin": "steer", "run_id": run_id, "run_steer": steer},
+            )
+            steer["message_id"] = accepted.message_id
+            self._active_steers.append(steer)
+            self._signal_exchange_closed()
+            return {"steer_id": steer_id, "state": "pending"}
+
+    def answer_decision(self, run_id: str, decision_id: str, choice: str) -> bool:
+        """Deliver the user's choice to a tool waiting in the active run;
+        False when that run or question is no longer waiting. Raises
+        ValueError for a choice that was not offered."""
+        if run_id != self._active_run_id or self._active_decisions is None:
+            return False
+        return self._active_decisions.answer(decision_id, choice)
 
     async def _take_steer(self) -> dict[str, str] | None:
         async with self._agent_run_lock:
-            steer = self._active_steer
-            if steer is None or steer["state"] != "pending":
+            steer = next(
+                (item for item in self._active_steers if item["state"] == "pending"),
+                None,
+            )
+            if steer is None:
                 return None
             if not await self.knowledge_store.record_run_steer(
                 user_name=self.user_name, project_id=self.project_id,
-                session_id=self.session_id, message_id=self._active_user_message_id,
+                session_id=self.session_id, message_id=steer["message_id"],
                 steer={**steer, "state": "applied"}, expected_state="pending",
             ):
                 raise RuntimeError("Steer could not be recorded before delivery")
@@ -544,7 +607,7 @@ class SessionRuntime:
             self._run_idle.clear()
             self._active_run_id = run_id or str(uuid4())
             self._active_run_state = "admitting"
-            self._active_steer = None
+            self._active_steers = []
             self._active_user_message_id = None
             self._active_idempotency_key = normalized_idempotency_key
             self._active_request_fingerprint = request_fingerprint
@@ -706,81 +769,96 @@ class SessionRuntime:
                 raise RuntimeError("Session has no application-owned AgentOrchestrator")
 
             response_seen = False
-            async for event in orchestrator.run_stream(
-                user_query=accepted.content.strip(),
-                context=self,
-                user_timezone=user_timezone,
-                model=model,
-                agent_id=agent_id,
-                enabled_tools=enabled_tools,
-                request_document_focus=document_focus,
-                conversation_history=history,
-                history_summary=history_summary,
-                user_message_id=accepted.id,
-                pasted_text_spans=pasted_text_spans,
-                research_mode=research_mode,
-                selected_notebook=selected_notebook,
-                run_settings=run_settings,
-                run_id=run_id,
-                take_steer=self._take_steer,
-            ):
-                if event["event"] == "response":
-                    if response_seen:
-                        raise RuntimeError(
-                            "Agent stream emitted multiple final responses"
+            # Tools in this run can ask the user something and wait for it.
+            decisions = self._active_decisions = DecisionBroker()
+            decision_binding = bind_decision_broker(decisions)
+            self._run_stop_requested = False
+            handoff_binding = bind_handoffs(
+                self._tool_handoffs, project_id=self.project_id, session_id=self.session_id,
+                may_hand_off=lambda: not self._run_stop_requested and not self._closed,
+            ) if self._tool_handoffs is not None else None
+            try:
+                async for event in orchestrator.run_stream(
+                    user_query=accepted.content.strip(),
+                    context=self,
+                    user_timezone=user_timezone,
+                    model=model,
+                    agent_id=agent_id,
+                    enabled_tools=enabled_tools,
+                    request_document_focus=document_focus,
+                    conversation_history=history,
+                    history_summary=history_summary,
+                    user_message_id=accepted.id,
+                    pasted_text_spans=pasted_text_spans,
+                    research_mode=research_mode,
+                    selected_notebook=selected_notebook,
+                    run_settings=run_settings,
+                    run_id=run_id,
+                    take_steer=self._take_steer,
+                ):
+                    if event["event"] == "response":
+                        if response_seen:
+                            raise RuntimeError(
+                                "Agent stream emitted multiple final responses"
+                            )
+                        response_seen = True
+                        response = event["data"]
+                        resolved_agent_id = response.get("resolved_agent_id")
+                        commit = await self.add_assistant_turn(
+                            content=response["content"],
+                            timestamp=get_now(),
+                            metadata=self._assistant_response_metadata(response),
+                            user_msg_id=accepted.id,
+                            source_candidates=self._response_source_candidates(response),
+                            artifact=self._response_artifact(response),
+                            readable_project_ids=captured_readable_project_ids,
                         )
-                    response_seen = True
-                    response = event["data"]
-                    resolved_agent_id = response.get("resolved_agent_id")
-                    commit = await self.add_assistant_turn(
-                        content=response["content"],
-                        timestamp=get_now(),
-                        metadata=self._assistant_response_metadata(response),
-                        user_msg_id=accepted.id,
-                        source_candidates=self._response_source_candidates(response),
-                        artifact=self._response_artifact(response),
-                        readable_project_ids=captured_readable_project_ids,
-                    )
-                    exchange_outcome = "assistant_final"
-                    await self._record_durable_agent_turn(
-                        orchestrator,
-                        agent_id=(
-                            resolved_agent_id
-                            if isinstance(resolved_agent_id, str)
-                            and resolved_agent_id.strip()
-                            else agent_id or run_settings.agent_id
-                        ),
-                    )
-                    response = dict(response)
-                    response.pop("resolved_agent_id", None)
-                    response["assistant_message_id"] = commit["message_id"]
-                    response["source_ref_ids"] = commit["source_ref_ids"]
-                    event = {"event": "response", "data": response}
-                    exchange_outcome = "assistant_final"
-                elif event["event"] == "clarification":
-                    clarification = dict(event["data"])
-                    commit = await self.add_assistant_turn(
-                        content=str(clarification["question"]),
-                        timestamp=get_now(),
-                        metadata=self._assistant_clarification_metadata(clarification),
-                        user_msg_id=accepted.id,
-                        source_candidates=self._response_source_candidates(
-                            clarification
-                        ),
-                        readable_project_ids=captured_readable_project_ids,
-                        outcome="clarification",
-                    )
-                    clarification["assistant_message_id"] = commit["message_id"]
-                    clarification["source_ref_ids"] = commit["source_ref_ids"]
-                    event = {"event": "clarification", "data": clarification}
-                    exchange_outcome = "clarification"
-                elif event["event"] == "error":
-                    exchange_outcome = "failed"
-                    terminal_error = self._terminal_error_record(event.get("data"))
-                yield event
-                if event["event"] in {"response", "clarification", "error"}:
-                    return
+                        exchange_outcome = "assistant_final"
+                        await self._record_durable_agent_turn(
+                            orchestrator,
+                            agent_id=(
+                                resolved_agent_id
+                                if isinstance(resolved_agent_id, str)
+                                and resolved_agent_id.strip()
+                                else agent_id or run_settings.agent_id
+                            ),
+                        )
+                        response = dict(response)
+                        response.pop("resolved_agent_id", None)
+                        response["assistant_message_id"] = commit["message_id"]
+                        response["source_ref_ids"] = commit["source_ref_ids"]
+                        event = {"event": "response", "data": response}
+                        exchange_outcome = "assistant_final"
+                    elif event["event"] == "clarification":
+                        clarification = dict(event["data"])
+                        commit = await self.add_assistant_turn(
+                            content=str(clarification["question"]),
+                            timestamp=get_now(),
+                            metadata=self._assistant_clarification_metadata(clarification),
+                            user_msg_id=accepted.id,
+                            source_candidates=self._response_source_candidates(
+                                clarification
+                            ),
+                            readable_project_ids=captured_readable_project_ids,
+                            outcome="clarification",
+                        )
+                        clarification["assistant_message_id"] = commit["message_id"]
+                        clarification["source_ref_ids"] = commit["source_ref_ids"]
+                        event = {"event": "clarification", "data": clarification}
+                        exchange_outcome = "clarification"
+                    elif event["event"] == "error":
+                        exchange_outcome = "failed"
+                        terminal_error = self._terminal_error_record(event.get("data"))
+                    yield event
+                    if event["event"] in {"response", "clarification", "error"}:
+                        return
 
+            finally:
+                if handoff_binding is not None:
+                    unbind_handoffs(handoff_binding)
+                unbind_decision_broker(decision_binding)
+                decisions.close()
+                self._active_decisions = None
             if not response_seen and exchange_outcome == "failed":
                 logger.error(
                     "Agent stream ended without a final response for session {}",
@@ -837,14 +915,17 @@ class SessionRuntime:
             if task is None or self._active_agent_task is task:
                 self._active_agent_task = None
             if self._active_run_id is not None:
-                if self._active_steer is not None and self._active_steer["state"] == "pending":
-                    self._active_steer["state"] = "undelivered"
+                for steer in self._active_steers:
+                    if steer["state"] != "pending":
+                        continue
                     try:
-                        await self.knowledge_store.record_run_steer(
+                        if await self.knowledge_store.record_run_steer(
                             user_name=self.user_name, project_id=self.project_id,
-                            session_id=self.session_id, message_id=self._active_user_message_id,
-                            steer=self._active_steer, expected_state="pending",
-                        )
+                            session_id=self.session_id, message_id=steer["message_id"],
+                            steer={**steer, "state": "undelivered"},
+                            expected_state="pending",
+                        ):
+                            steer["state"] = "undelivered"
                     except Exception:
                         logger.exception("Failed to record undelivered steer for {}", self.session_id)
                 if self._active_run_state in {"admitting", "accepted", "running"}:
@@ -855,7 +936,7 @@ class SessionRuntime:
             self._active_run_id = None
             self._active_user_message_id = None
             self._active_run_state = None
-            self._active_steer = None
+            self._active_steers = []
             self._active_idempotency_key = None
             self._active_request_fingerprint = None
             self._active_agent_stream = None
@@ -1266,13 +1347,8 @@ class SessionRuntime:
                     )
                     raise
 
-    async def close_user_only_turn(self, user_message_id: int) -> None:
-        """Explicitly close a canonical user-only exchange for non-agent callers."""
-
-        await self._close_user_exchange(user_message_id, outcome="user_only")
-
     async def import_exchanges(
-        self, exchanges: List[ImportedExchange]
+        self, exchanges: List[ImportedExchange | ImportedAssistantTurn]
     ) -> list[dict[str, Any]]:
         """Store recorded exchanges at their original times without running the agent.
 
@@ -1289,7 +1365,36 @@ class SessionRuntime:
             self._require_message_ingestion_ready()
             if self._agent_run_reserved:
                 raise SessionBusyError()
-            return [await self._import_exchange(exchange) for exchange in exchanges]
+            results = []
+            for exchange in exchanges:
+                if isinstance(exchange, ImportedAssistantTurn):
+                    results.append(await self._import_assistant_turn(exchange))
+                else:
+                    results.append(await self._import_exchange(exchange))
+            return results
+
+    async def _import_assistant_turn(
+        self, turn: ImportedAssistantTurn
+    ) -> dict[str, Any]:
+        timestamp_ms = int(turn.assistant_timestamp.timestamp() * 1000)
+        key = hashlib.sha256(
+            f"assistant:{self.session_id}:{turn.assistant_content}:{turn.assistant_timestamp.isoformat()}".encode()
+        ).hexdigest()
+        accepted = await self.knowledge_store.create_closed_standalone_message(
+            user_name=self.user_name, project_id=self.project_id,
+            session_id=self.session_id,
+            message_id=await self.knowledge_store.allocate_message_id(),
+            role="assistant", content=turn.assistant_content,
+            timestamp_ms=timestamp_ms, acceptance_key=f"import:{key}",
+            metadata={"origin": "import"},
+        )
+        if accepted.created:
+            self._signal_exchange_closed()
+        return {
+            "user_message_id": None,
+            "assistant_message_id": accepted.message_id,
+            "created": accepted.created,
+        }
 
     async def _import_exchange(self, exchange: ImportedExchange) -> dict[str, Any]:
         accepted, created = await self._accept_user_message(
@@ -1480,9 +1585,15 @@ class SessionRuntime:
 
         results = []
         for turn in turns:
+            metadata = turn.get("metadata") or {}
+            if metadata.get("origin") == "steer" and (
+                metadata.get("run_steer") or {}
+            ).get("state") != "applied":
+                continue
             content = turn["content"]
             steer = (turn.get("metadata") or {}).get("run_steer")
-            if (turn["role"] == "user" and isinstance(steer, dict)
+            if (turn["role"] == "user" and (turn.get("metadata") or {}).get("origin") != "steer"
+                    and isinstance(steer, dict)
                     and steer.get("state") == "applied"
                     and isinstance(steer.get("instruction"), str)):
                 instruction = with_annotations(

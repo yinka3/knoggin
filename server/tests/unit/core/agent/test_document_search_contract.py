@@ -1171,3 +1171,18 @@ async def test_search_names_files_in_scope_that_are_still_indexing():
     notes = [item["info"] for item in results if "info" in item]
     assert any("docs/changed.md" in note for note in notes)
     assert not any("other/elsewhere.md" in note for note in notes)
+
+
+@pytest.mark.no_network
+async def test_prompt_document_manifest_lists_the_indexed_project_documents():
+    from core.agent.tools.registry import Tools
+
+    tools = Tools(
+        "ada", "project-1", "session-1",
+        document_service=ReadOnlyDocumentService(),
+        knowledge_store=object(), postgres=object(), knowledge_retrieval=object(),
+    )
+
+    assert [doc["document_id"] for doc in await tools.get_document_manifest()] == [
+        "file-1"
+    ]

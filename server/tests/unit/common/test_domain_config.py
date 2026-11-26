@@ -78,7 +78,6 @@ def test_domain_config_compiles_canonical_lookups():
     )
     assert compiled.context_section("active_work").title == "Active Work"
     assert compiled.extraction_guidance == ""
-    assert compiled.vp01_language == "en"
     assert type(compiled).from_dict(compiled.to_dict()) == compiled
 
 
@@ -320,8 +319,6 @@ def test_domain_context_configuration_is_ordered_and_separate_from_extraction_gu
         {"key": "later", "title": "Later"},
     ]
     payload["extraction_guidance"] = "People must be active project contributors."
-    payload["vp01_language"] = "multilingual"
-
     compiled = DomainConfig.from_mapping(payload).compile()
 
     assert [section.title for section in compiled.context_sections] == ["Now", "Later"]
@@ -331,7 +328,6 @@ def test_domain_context_configuration_is_ordered_and_separate_from_extraction_gu
         section.title != compiled.extraction_guidance
         for section in compiled.context_sections
     )
-    assert compiled.vp01_language == "multilingual"
 
 
 @pytest.mark.unit
@@ -356,16 +352,27 @@ def test_domain_context_configuration_is_ordered_and_separate_from_extraction_gu
             {"context_sections": [{"key": "current", "title": "Current", "bad": True}]},
             "Unknown fields for context section",
         ),
-        ({"vp01_language": "fr"}, "vp01_language must be 'en' or 'multilingual'"),
     ],
 )
-def test_domain_context_configuration_rejects_invalid_sections_and_language(
+def test_domain_context_configuration_rejects_invalid_sections(
     update, message
 ):
     payload = domain_payload()
     payload.update(update)
 
     with pytest.raises(DomainConfigError, match=message):
+        DomainConfig.from_mapping(payload)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_stored_domain_with_the_removed_model_language_still_loads():
+    payload = domain_payload() | {"vp01_language": "en"}
+
+    stored = DomainConfig.from_persisted_mapping(payload)
+
+    assert "vp01_language" not in stored.to_dict()
+    with pytest.raises(DomainConfigError, match="vp01_language"):
         DomainConfig.from_mapping(payload)
 
 

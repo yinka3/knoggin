@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -477,28 +478,26 @@ def test_executor_rejects_duplicate_tool_call_correlation_ids():
     )
 
 
-@pytest.mark.no_network
-async def test_step_completed_without_tool_calls_yields_formatting_step_error():
+_USAGE = {
+    "prompt_tokens": 4,
+    "completion_tokens": 2,
+    "total_tokens": 6,
+    "approximate": True,
+}
+
+
+async def _plain_reply_events(content: str, finish_reason: str = "stop") -> list[dict]:
     llm = StreamingLLM(
         [
-            {"event": "token", "data": {"content": "raw answer"}},
+            {"event": "token", "data": {"content": content}},
             {
                 "event": "step_completed",
-                "data": {
-                    "content": "raw answer",
-                    "usage": {
-                        "prompt_tokens": 4,
-                        "completion_tokens": 2,
-                        "total_tokens": 6,
-                        "approximate": True,
-                    },
-                },
+                "data": {"content": content, "usage": _USAGE, "finish_reason": finish_reason},
             },
         ]
     )
     executor = make_executor(llm)
-
-    events = [
+    return [
         event
         async for event in executor._step(
             date="now",
@@ -510,6 +509,21 @@ async def test_step_completed_without_tool_calls_yields_formatting_step_error():
             last_result=None,
         )
     ]
+
+
+@pytest.mark.no_network
+async def test_plain_reply_without_tool_calls_becomes_the_submitted_answer():
+    events = await _plain_reply_events("raw answer")
+
+    calls = next(e for e in events if e["event"] == "tool_calls")["data"]["calls"]
+    assert [call["name"] for call in calls] == ["submit_answer"]
+    assert json.loads(calls[0]["arguments"]) == {"content": "raw answer"}
+    assert events[-1]["event"] == "step_completed"
+
+
+@pytest.mark.no_network
+async def test_empty_reply_without_tool_calls_yields_formatting_step_error():
+    events = await _plain_reply_events("   ")
 
     assert events[-1]["event"] == "step_error"
     assert events[-1]["data"]["kind"] == "formatting"
@@ -594,3 +608,29 @@ async def test_final_response_carries_validated_structured_artifact():
 
     assert event["data"]["artifact"]["kind"] == "research_brief"
     assert event["data"]["artifact"]["blocks"][0]["content"] == "Finding"
+
+
+@pytest.mark.no_network
+async def test_reply_cut_off_by_the_output_limit_is_reported_as_cut_off():
+    events = await _plain_reply_events("", finish_reason="length")
+
+    error = next(e for e in events if e["event"] == "step_error")["data"]
+    assert error["kind"] == "truncated"
+    assert "output limit" in error["message"]
+
+
+@pytest.mark.no_network
+async def test_text_reply_cut_off_by_the_output_limit_is_not_submitted_as_the_answer():
+    events = await _plain_reply_events("The answer is", finish_reason="length")
+
+    assert not any(e["event"] == "tool_calls" for e in events)
+    error = next(e for e in events if e["event"] == "step_error")["data"]
+    assert error["kind"] == "truncated"
+
+
+@pytest.mark.no_network
+async def test_empty_reply_that_finished_normally_is_still_a_formatting_error():
+    events = await _plain_reply_events("", finish_reason="stop")
+
+    error = next(e for e in events if e["event"] == "step_error")["data"]
+    assert error["kind"] == "formatting"

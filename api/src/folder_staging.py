@@ -15,6 +15,10 @@ import anyio
 
 from core.knowledge.documents.scanning import FolderScanPathEntry, normalize_relative_path
 
+class IntakeNotFound(KeyError):
+    """The intake or one of its files does not exist (or expired)."""
+
+
 class IntakeConflict(Exception):
     pass
 
@@ -33,6 +37,7 @@ class _File:
     content_hash: str | None = None
     result: dict | None = None
     error: dict | None = None
+    receiving: bool = False
 
     def public(self) -> dict:
         return {
@@ -61,6 +66,13 @@ class _Intake:
     last_activity: float = field(default_factory=time.monotonic)
     session_id: str | None = None
     announced_document_ids: set[str] = field(default_factory=set)
+    # Serializes preview, commit and delete of this intake only; uploads
+    # stream without it so one slow client never blocks other intakes.
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, compare=False)
+    active_uploads: int = 0
+
+    def busy(self) -> bool:
+        return self.active_uploads > 0 or self.lock.locked()
 
     def public(self) -> dict:
         return {
@@ -89,6 +101,8 @@ class FolderStaging:
     async def _expire(self) -> None:
         now = time.monotonic()
         for intake_id, intake in tuple(self._intakes.items()):
+            if intake.busy():
+                continue
             if now - intake.last_activity > self._settings().folder_intake_idle_seconds:
                 self._intakes.pop(intake_id)
                 await asyncio.to_thread(shutil.rmtree, intake.directory, ignore_errors=True)
@@ -96,9 +110,21 @@ class FolderStaging:
     def _get(self, project_id: str, intake_id: str) -> _Intake:
         intake = self._intakes.get(intake_id)
         if intake is None or intake.project_id != project_id:
-            raise KeyError(intake_id)
+            raise IntakeNotFound(intake_id)
         intake.last_activity = time.monotonic()
         return intake
+
+    async def _enter(self, project_id: str, intake_id: str) -> _Intake:
+        async with self._lock:
+            await self._expire()
+            return self._get(project_id, intake_id)
+
+    def _require_current(self, intake: _Intake) -> None:
+        """Fail if the intake was deleted or expired while the caller waited."""
+
+        if self._intakes.get(intake.intake_id) is not intake:
+            raise IntakeNotFound(intake.intake_id)
+        intake.last_activity = time.monotonic()
 
     async def create(self, project_id: str, payload) -> dict:
         async with self._lock:
@@ -162,9 +188,12 @@ class FolderStaging:
             await self._expire()
             intake = self._get(project_id, intake_id)
             self._intakes.pop(intake_id)
+        # Let a preview or commit reading these files finish first.
+        async with intake.lock:
             await asyncio.to_thread(shutil.rmtree, intake.directory, ignore_errors=True)
 
     async def upload(self, project_id: str, intake_id: str, file_id: str, stream) -> dict:
+        # Reserve the file, then stream without holding any shared lock.
         async with self._lock:
             await self._expire()
             intake = self._get(project_id, intake_id)
@@ -172,21 +201,29 @@ class FolderStaging:
                 raise IntakeConflict("Folder has already been previewed")
             item = intake.files.get(file_id)
             if item is None:
-                raise KeyError(file_id)
-            digest = hashlib.sha256()
-            size = 0
-            temporary_path = item.disk_path.with_suffix(".part")
-            try:
-                async with await anyio.open_file(temporary_path, "wb") as output:
-                    async for chunk in stream:
-                        size += len(chunk)
-                        if size > item.size_bytes:
-                            raise IntakeTooLarge("Uploaded file exceeds its declared size")
-                        digest.update(chunk)
-                        await output.write(chunk)
-                if size != item.size_bytes:
-                    raise ValueError("Uploaded file size does not match the manifest")
-                content_hash = digest.hexdigest()
+                raise IntakeNotFound(file_id)
+            if item.receiving:
+                raise IntakeConflict("This file is already being uploaded")
+            item.receiving = True
+            intake.active_uploads += 1
+        digest = hashlib.sha256()
+        size = 0
+        temporary_path = item.disk_path.with_name(f"{item.file_id}.{uuid4().hex}.part")
+        try:
+            async with await anyio.open_file(temporary_path, "wb") as output:
+                async for chunk in stream:
+                    size += len(chunk)
+                    if size > item.size_bytes:
+                        raise IntakeTooLarge("Uploaded file exceeds its declared size")
+                    digest.update(chunk)
+                    await output.write(chunk)
+            if size != item.size_bytes:
+                raise ValueError("Uploaded file size does not match the manifest")
+            content_hash = digest.hexdigest()
+            async with self._lock:
+                self._require_current(intake)
+                if intake.status != "uploading":
+                    raise IntakeConflict("Folder has already been previewed")
                 if item.status == "uploaded":
                     if item.content_hash != content_hash:
                         raise IntakeConflict("Uploaded file differs from the first upload")
@@ -195,18 +232,24 @@ class FolderStaging:
                     item.content_hash = content_hash
                     item.status = "uploaded"
                 return item.public()
-            finally:
-                temporary_path.unlink(missing_ok=True)
+        finally:
+            item.receiving = False
+            intake.active_uploads -= 1
+            intake.last_activity = time.monotonic()
+            temporary_path.unlink(missing_ok=True)
 
     async def preview(self, project_id: str, intake_id: str, service):
-        async with self._lock:
-            await self._expire()
-            intake = self._get(project_id, intake_id)
+        intake = await self._enter(project_id, intake_id)
+        async with intake.lock:
+            self._require_current(intake)
             if intake.preview is not None:
                 return intake.preview
             if intake.status != "uploading":
                 raise IntakeConflict("Folder has already been previewed")
-            if any(item.status != "uploaded" for item in intake.files.values()):
+            if any(
+                item.status != "uploaded" or item.receiving
+                for item in intake.files.values()
+            ):
                 raise IntakeConflict("Upload every file before previewing")
             settings = await service.get_scan_settings()
             by_path = {item.relative_path: item for item in intake.files.values()}
@@ -261,9 +304,9 @@ class FolderStaging:
             return intake.session_id, intake.folder_name, document_ids
 
     async def commit(self, project_id: str, intake_id: str, service, *, retry_failed: bool):
-        async with self._lock:
-            await self._expire()
-            intake = self._get(project_id, intake_id)
+        intake = await self._enter(project_id, intake_id)
+        async with intake.lock:
+            self._require_current(intake)
             if intake.status not in {"previewed", "committing", "complete"}:
                 raise IntakeConflict("Preview the complete folder before committing")
             if await service.get_scan_settings() != intake.scan_settings:

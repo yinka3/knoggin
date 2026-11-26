@@ -39,7 +39,7 @@ def jev_api_key(monkeypatch):
 
 
 def setup_client(handler, **updates):
-    settings = JevSettings(extraction_mode="observe", **updates)
+    settings = JevSettings(classification_mode="observe", **updates)
     ledger = ExternalModelSpendingLedger(
         LLMSpendingBudgetSettings(
             model_pricing={
@@ -59,7 +59,7 @@ async def evaluate(client, policy, budget=None):
     return await client.evaluate(
         state={"text": "Alex"},
         questions=QUESTIONS,
-        capability="extraction",
+        capability="classification",
         policy=policy,
         work_budget=budget or JevWorkBudget(policy.max_calls_per_window),
     )
@@ -88,6 +88,19 @@ async def test_valid_choice_noul_and_shared_accounting():
     await client.close()
 
 
+async def test_ledger_charges_the_cost_the_provider_reported():
+    # Settings price this at about $0.0000042; the provider billed $0.25.
+    payload = deepcopy(RESPONSE)
+    payload["usage"]["cost"] = 0.25
+    client, policy, ledger = setup_client(lambda _: httpx.Response(200, json=payload))
+
+    result = await evaluate(client, policy)
+
+    assert result.cost_usd == pytest.approx(0.25)
+    assert (await ledger.snapshot())["spent_usd"] == pytest.approx(0.25)
+    await client.close()
+
+
 async def test_disabled_missing_key_and_closed_make_no_requests(monkeypatch):
     def handler(_):
         pytest.fail("No network work expected")
@@ -95,7 +108,7 @@ async def test_disabled_missing_key_and_closed_make_no_requests(monkeypatch):
     client, policy, _ = setup_client(handler)
     assert client._client is None
     result = await evaluate(
-        client, policy.model_copy(update={"extraction_mode": "disabled"})
+        client, policy.model_copy(update={"classification_mode": "disabled"})
     )
     assert result.reason == "disabled"
     monkeypatch.delenv("JEV_API_KEY")

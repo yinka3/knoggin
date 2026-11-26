@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from common.schema.ingestion.contracts import ContextBlockMention
+from common.schema.ingestion.contracts import EntityMention
 from common.schema.jev import (
     ChoiceAnswer,
     ChoiceQuestion,
@@ -24,7 +24,7 @@ class IdentityOption:
 
 
 def prepare_identity_request(
-    mention: ContextBlockMention,
+    mention: EntityMention,
     support_text: str,
     options: list[IdentityOption],
     snapshot: EntityCandidateSnapshot,

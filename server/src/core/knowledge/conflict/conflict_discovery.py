@@ -71,6 +71,7 @@ class ConflictPacketBuilder:
         final_prompt = ""
         final_bundles: tuple[EvidenceBundle, ...] = ()
         final_estimated_tokens = 0
+        last_skipped_seed_id: int | None = None
 
         for seed in seeds:
             seed_id = int(seed["observation_id"])
@@ -155,6 +156,7 @@ class ConflictPacketBuilder:
                         estimated_tokens,
                         max_tokens,
                     )
+                    last_skipped_seed_id = max(seed_id, last_skipped_seed_id or seed_id)
                     continue
                 break
 
@@ -165,7 +167,18 @@ class ConflictPacketBuilder:
             final_estimated_tokens = estimated_tokens
 
         if not accepted_seeds:
-            return None
+            if last_skipped_seed_id is None:
+                return None
+            # Every seed was too large to ever fit. Move the cursor past them
+            # with an empty package; otherwise each run rereads the same
+            # seeds and later observations are never reviewed.
+            return ConflictDiscoveryPackage(
+                cursor=cursor,
+                observations=(),
+                next_observation_id=last_skipped_seed_id,
+                prompt="",
+                estimated_tokens=0,
+            )
         records = self._ordered_rows(
             (*accepted_seeds.values(), *retained_neighbors.values())
         )

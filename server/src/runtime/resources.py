@@ -21,7 +21,6 @@ from common.embedding_contract import DEFAULT_EMBEDDING_MODEL, DEFAULT_RERANKER_
 from common.exceptions import ConfigurationError, DependencyError
 from common.utils.coordination_log import configure_coordination_log
 from common.utils.lifecycle import settle_owned_task
-from core.ingestion.vp01 import GLiNER25VP01Adapter
 from core.knowledge.db.embedding_rebuilder import EmbeddingRebuilder
 from core.knowledge.embedding_service import EmbeddingService
 from core.knowledge.store import KnowledgeStore
@@ -64,10 +63,7 @@ class ReadyRuntimeResources(Protocol):
     background_work: BackgroundWorkCoordinator
     model_work: ModelWorkCoordinator
     resource_profile: ResourceProfile
-    vp01: GLiNER25VP01Adapter
     spacy: Any
-
-    async def get_vp01(self, language: str) -> GLiNER25VP01Adapter: ...
 
 
 class RuntimeResources:
@@ -83,10 +79,6 @@ class RuntimeResources:
         self.background_work: Optional[BackgroundWorkCoordinator] = None
         self.model_work: Optional[ModelWorkCoordinator] = None
         self.resource_profile: Optional[ResourceProfile] = None
-        self.vp01: Optional[GLiNER25VP01Adapter] = None
-        self._vp01_by_language: dict[str, GLiNER25VP01Adapter] = {}
-        self._vp01_load_lock = asyncio.Lock()
-        self._vp01_device: str | None = None
         self.spacy: Optional[Any] = None
         self.config_unsubscribers: list[Any] = []
         self._started = False
@@ -144,39 +136,6 @@ class RuntimeResources:
             raise RuntimeError("Runtime resources are not ready")
         return cast(ReadyRuntimeResources, self)
 
-    async def get_vp01(self, language: str) -> GLiNER25VP01Adapter:
-        """Return the domain-selected local VP-01 model, loading multi on demand."""
-
-        if language not in {"en", "multilingual"}:
-            raise ValueError("VP-01 language must be 'en' or 'multilingual'")
-        if self._closing:
-            raise RuntimeError("Runtime resources are shutting down")
-        if self.model_work is None:
-            raise RuntimeError("VP-01 model work coordinator is unavailable")
-        existing = self._vp01_by_language.get(language)
-        if existing is not None:
-            return existing
-        async with self._vp01_load_lock:
-            if self._closing:
-                raise RuntimeError("Runtime resources are shutting down")
-            existing = self._vp01_by_language.get(language)
-            if existing is not None:
-                return existing
-            model = await self.model_work.run_blocking(
-                lambda: GLiNER25VP01Adapter.load(
-                    language=language,
-                    device=self._vp01_device,
-                ),
-                priority=ModelWorkPriority.BACKGROUND,
-                name=f"vp01-{language}-model-load",
-            )
-            if self._closing:
-                raise RuntimeError("Runtime resources are shutting down")
-            self._vp01_by_language[language] = model
-            if language == "en":
-                self.vp01 = model
-            logger.info("Loaded GLiNER2.5 {} VP-01 model", language)
-            return model
 
     def _configure_startup(self, *, thread_workers: int | None) -> torch.device:
         load_dotenv()
@@ -273,6 +232,8 @@ class RuntimeResources:
             base_url=llm_config.base_url,
             request_timeout_seconds=llm_config.request_timeout_seconds,
             thinking=llm_config.thinking,
+            planning_thinking_tokens=llm_config.planning_thinking_tokens,
+            step_thinking_tokens=llm_config.step_thinking_tokens,
             trace_logger=trace_logger,
             postgres_client=self.postgres,
         )
@@ -301,7 +262,6 @@ class RuntimeResources:
     async def _load_heavyweight_models(self, *, device: torch.device) -> None:
         if self.llm_service is None or self.embedding is None or self.model_work is None:
             raise RuntimeError("Runtime model dependencies are unavailable")
-        self._vp01_device = str(device)
 
         async def load_spacy() -> None:
             processor = await self.model_work.run_blocking(
@@ -312,14 +272,10 @@ class RuntimeResources:
             self.spacy = processor
             logger.info("Initialized blank English spaCy tokenizer for alias matching")
 
-        async def load_vp01() -> None:
-            await self.get_vp01("en")
-
         loaders = asyncio.gather(
                 self.llm_service.load_tokenizer(),
                 self.embedding.load_models(),
                 load_spacy(),
-                load_vp01(),
                 return_exceptions=True,
             )
         try:
@@ -410,9 +366,6 @@ class RuntimeResources:
 
         if failures:
             return tuple(failures)
-        self.vp01 = None
-        self._vp01_by_language.clear()
-        self._vp01_device = None
         self.spacy = None
         self.knowledge_store = None
         self.resource_profile = None

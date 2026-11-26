@@ -449,40 +449,6 @@ class MessageReader:
             terminal_error=terminal_error,
         )
 
-    async def get_message_text(
-        self,
-        message_id: int,
-        *,
-        user_name: str,
-        session_id: str,
-        visible_project_ids: List[str],
-    ) -> str:
-        """Return one scoped canonical message body or normal absence."""
-
-        user_name = require_scope_value(user_name, "user_name", "get_message_text")
-        session_id = require_scope_value(session_id, "session_id", "get_message_text")
-        visible_project_ids = require_visible_project_ids(
-            visible_project_ids,
-            "get_message_text",
-        )
-        try:
-            row = await self.client.fetch_one(
-                """
-                SELECT content
-                FROM messages
-                WHERE user_name = %s
-                  AND session_id = %s
-                  AND message_id = %s
-                  AND project_id = ANY(%s)
-                """,
-                (user_name, session_id, message_id, visible_project_ids),
-            )
-        except Exception as exc:
-            self._raise_storage_read("get_message_text", exc)
-        if not row:
-            return ""
-        return row["content"]
-
     async def get_messages_by_ids(
         self,
         ids: List[int],
@@ -587,6 +553,15 @@ class MessageReader:
         FROM messages
         WHERE user_name = %s
         AND project_id = %s
+        AND lifecycle_state = 'sealed'
+        AND EXISTS (
+            SELECT 1
+            FROM sessions
+            WHERE sessions.session_id = messages.session_id
+              AND sessions.project_id = messages.project_id
+              AND sessions.user_name = messages.user_name
+              AND sessions.status = 'open'
+        )
         {before_clause}
         ORDER BY message_id DESC
         LIMIT %s

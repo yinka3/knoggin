@@ -1,7 +1,8 @@
 import asyncio
 import json
 import math
-from contextlib import asynccontextmanager
+import re
+from contextlib import aclosing, asynccontextmanager
 from typing import (
     Any,
     AsyncIterator,
@@ -32,6 +33,7 @@ from common.exceptions import (
     LLMBudgetExceededError,
     LLMContextTruncatedError,
     LLMProviderError,
+    LLMRefusalError,
     LLMResponseError,
 )
 from common.schema.agent.stream import (
@@ -54,6 +56,11 @@ TRANSPORT_RETRIES = 3
 VALIDATION_RETRIES = 3
 TRACE_MAX_CHARS = 20_000
 CLIENT_SHUTDOWN_TIMEOUT = 5.0
+# Providers reject a thinking budget under 1024; keep room for the answer.
+# An apology where JSON was asked for: the standard refusal of OpenAI models.
+_REFUSAL_TEXT = re.compile(r"\s*(I'm sorry|I’m sorry|I am sorry|I can't|I can’t|I cannot)\b")
+_MIN_THINKING_TOKENS = 1024
+_MIN_ANSWER_TOKENS = 512
 ResponseT = TypeVar("ResponseT")
 
 
@@ -78,6 +85,14 @@ def _reported_window(row: Any) -> int | None:
         if isinstance(value, int) and value > 0:
             return value
     return None
+
+
+def _listed_parameters(row: Any) -> frozenset[str] | None:
+    # OpenRouter lists the request parameters each model accepts.
+    values = getattr(row, "supported_parameters", None)
+    if not isinstance(values, list):
+        return None
+    return frozenset(str(value) for value in values)
 
 
 def _listed_price(row: Any) -> LLMModelPricing | None:
@@ -157,12 +172,18 @@ class LLMService:
         postgres_client=None,
         request_timeout_seconds: float = 300.0,
         thinking: str = "planning_only",
+        planning_thinking_tokens: int = 4_096,
+        step_thinking_tokens: int = 1_024,
     ):
         self._api_key = (api_key or "").strip()
         self._base_url = base_url or OPENROUTER_BASE_URL
         self._is_openrouter = "openrouter.ai" in self._base_url
         self._request_timeout_seconds = request_timeout_seconds
         self._thinking = thinking
+        self._thinking_tokens = {
+            "high": planning_thinking_tokens,
+            "medium": step_thinking_tokens,
+        }
         self._trace = trace_logger
         self._agent_model = agent_model
         self._extraction_model = extraction_model
@@ -180,6 +201,7 @@ class LLMService:
         self._client_usage: dict[AsyncOpenAI, int] = {}
         # Context sizes from the provider's model list, fetched once.
         self._listed_windows: dict[str, int | None] | None = None
+        self._listed_parameters: dict[str, frozenset[str]] | None = None
         self._serves_ollama_ps: bool | None = None
         self._active_requests: set[asyncio.Task] = set()
         self._closed = False
@@ -359,6 +381,10 @@ class LLMService:
         self._base_url = base_url
         self._is_openrouter = "openrouter.ai" in self._base_url
         self._request_timeout_seconds = settings.request_timeout_seconds
+        self._thinking_tokens = {
+            "high": settings.planning_thinking_tokens,
+            "medium": settings.step_thinking_tokens,
+        }
         if settings.thinking != self._thinking:
             self._thinking = settings.thinking
             if self.thinking_warning:
@@ -368,6 +394,7 @@ class LLMService:
             self._raw_client = replacement_raw
             self._client = replacement_instructor
             self._listed_windows = None
+            self._listed_parameters = None
             self._spending_ledger.set_listed_prices({})
             self._serves_ollama_ps = None
             self._retire_client(previous_raw)
@@ -437,11 +464,40 @@ class LLMService:
 
         return local_thinking_warning(self._base_url, self._thinking)
 
-    def _provider_extra_body(self, reasoning: Optional[str]) -> Dict[str, Any] | None:
+    def _request_options(
+        self,
+        model: str,
+        *,
+        temperature: float,
+        reasoning: Optional[str],
+        max_completion_tokens: int | None = None,
+    ) -> Dict[str, Any]:
+        """Sampling and provider fields this model accepts.
+
+        OpenRouter is asked to require every sent parameter, so one the model
+        rejects (newer Anthropic models take no temperature) leaves no
+        provider at all. A model the list does not describe gets them all.
+        """
+
+        supported = (self._listed_parameters or {}).get(model)
+        options: Dict[str, Any] = {}
+        if supported is None or "temperature" in supported:
+            options["temperature"] = temperature
+        if max_completion_tokens is not None:
+            options["max_completion_tokens"] = max_completion_tokens
+        if supported is not None and "reasoning" not in supported:
+            reasoning = None
+        if extra_body := self._provider_extra_body(reasoning, max_completion_tokens):
+            options["extra_body"] = extra_body
+        return options
+
+    def _provider_extra_body(
+        self, reasoning: Optional[str], max_completion_tokens: int | None = None
+    ) -> Dict[str, Any] | None:
         """Provider-specific request fields, including thinking control."""
 
         if self._is_openrouter:
-            return self._openrouter_extra_body(reasoning)
+            return self._openrouter_extra_body(reasoning, max_completion_tokens)
         # Local servers expose thinking only as on/off via reasoning_effort.
         if self._thinking == "off" or (
             self._thinking == "planning_only" and reasoning != "high"
@@ -449,20 +505,26 @@ class LLMService:
             return {"reasoning_effort": "none"}
         return None
 
-    @staticmethod
     def _openrouter_extra_body(
+        self,
         reasoning: Optional[str] = "low",
+        max_completion_tokens: int | None = None,
     ) -> Dict[str, Any]:
         """Extra body parameters for OpenRouter."""
         body: Dict[str, Any] = {
             "provider": {"require_parameters": True},
         }
-        if reasoning == "high":
-            body["reasoning"] = {"max_tokens": 4096}
-        elif reasoning == "medium":
-            body["reasoning"] = {"max_tokens": 1024}
-        elif reasoning not in (None, "low"):
+        if reasoning in (None, "low"):
+            return body
+        if reasoning not in self._thinking_tokens:
             raise ValueError(f"Unsupported reasoning level: {reasoning}")
+        budget = self._thinking_tokens[reasoning]
+        # Thinking counts against the reply cap; a budget over it is rejected.
+        # Leave room for the answer, and skip thinking below the 1024 minimum.
+        if max_completion_tokens is not None:
+            budget = min(budget, max_completion_tokens - _MIN_ANSWER_TOKENS)
+        if budget >= _MIN_THINKING_TOKENS:
+            body["reasoning"] = {"max_tokens": budget}
         return body
 
     async def context_window(self, model: str) -> int | None:
@@ -494,6 +556,11 @@ class LLMService:
         self._listed_windows = {
             str(row.id): _reported_window(row) for row in page.data
         }
+        self._listed_parameters = {
+            str(row.id): params
+            for row in page.data
+            if (params := _listed_parameters(row)) is not None
+        }
         prices = {str(row.id): price for row in page.data if (price := _listed_price(row))}
         self._spending_ledger.set_listed_prices(prices)
 
@@ -523,7 +590,8 @@ class LLMService:
         if not self._tokenizer:
             # Fallback to rough estimation if tokenizer failed to load
             return (len(text) + 3) // 4
-        return len(self._tokenizer.encode(text))
+        # Messages may quote a control token such as <|endoftext|>; it is text here.
+        return len(self._tokenizer.encode(text, disallowed_special=()))
 
     def count_tokens_batch(self, texts: list[str]) -> list[int]:
         """Count independent rendered prefixes with the same tokenizer rule."""
@@ -531,7 +599,9 @@ class LLMService:
             return [(len(value) + 3) // 4 for value in texts]
         return [
             len(tokens)
-            for tokens in self._tokenizer.encode_batch(texts, num_threads=4)
+            for tokens in self._tokenizer.encode_batch(
+                texts, num_threads=4, disallowed_special=()
+            )
         ]
 
     async def _reserve_external_attempt(
@@ -578,7 +648,10 @@ class LLMService:
             if declared_approximate is not None
             else prompt_tokens is None or completion_tokens is None
         )
-        if approximate:
+        if approximate and failed:
+            # A failed request with no provider usage is not charged an estimate.
+            prompt_tokens = completion_tokens = 0
+        elif approximate:
             prompt_tokens = (
                 self.count_tokens(f"{system}\n{user}")
                 + max(additional_prompt_tokens, 0)
@@ -700,11 +773,10 @@ class LLMService:
                             system_message,
                             {"role": "user", "content": user},
                         ],
-                        "temperature": temperature,
+                        **self._request_options(
+                            model, temperature=temperature, reasoning=reasoning
+                        ),
                     }
-
-                    if extra_body := self._provider_extra_body(reasoning):
-                        create_kwargs["extra_body"] = extra_body
 
                     response = await raw_client.chat.completions.create(**create_kwargs)
                     if not response.choices:
@@ -808,20 +880,23 @@ class LLMService:
         model = model or self._extraction_model
         system_message = self._system_message(system)
         system = system_text(system)
+        if self._is_openrouter:
+            # The options below depend on what the listing says the model takes.
+            await self._load_model_list()
         create_kwargs: Dict[str, Any] = {
             "model": model,
             "messages": [
                 system_message,
                 {"role": "user", "content": user},
             ],
-            "temperature": temperature,
             "response_model": response_model,
             # Validation retries are controlled below so each provider request
             # receives its own budget reservation and usage record.
             "max_retries": 0,
+            **self._request_options(
+                model, temperature=temperature, reasoning=reasoning
+            ),
         }
-        if extra_body := self._provider_extra_body(reasoning):
-            create_kwargs["extra_body"] = extra_body
 
         async with self._client_snapshot() as (_, instructor_client):
             response = None
@@ -891,6 +966,21 @@ class LLMService:
                             details={"model": model, "error": str(provider_exc)},
                             transient=self._is_transient_provider_error(provider_exc),
                         ) from exc
+                    refusal_reason = self._refusal_reason(completion)
+                    if refusal_reason is not None:
+                        details = self._structured_validation_error_details(model, exc)
+                        details["refusal_reason"] = refusal_reason
+                        details["finish_reason"] = self._completion_finish_reason(completion) or "none"
+                        logger.warning(
+                            "LLM structured request declined model={} reason={} "
+                            "finish_reason={} validation_error={}",
+                            model, refusal_reason, details["finish_reason"],
+                            details.get("validation_error_type"),
+                        )
+                        raise LLMRefusalError(
+                            "LLM declined the structured request",
+                            details=details,
+                        ) from exc
                     if validation_failures < VALIDATION_RETRIES:
                         validation_failures += 1
                         logger.warning(
@@ -952,9 +1042,20 @@ class LLMService:
                             aac_budget=aac_budget,
                         )
                         recorded = True
-                    raise LLMResponseError(
+                    raw_response = getattr(exc, "raw_response", None)
+                    refusal_reason = self._refusal_reason(raw_response)
+                    error = LLMRefusalError if refusal_reason else LLMResponseError
+                    details = {"model": model, "error": str(exc)}
+                    if refusal_reason:
+                        details["refusal_reason"] = refusal_reason
+                        details["finish_reason"] = self._completion_finish_reason(raw_response) or "none"
+                        logger.warning(
+                            "LLM structured request declined model={} reason={} finish_reason={}",
+                            model, refusal_reason, details["finish_reason"],
+                        )
+                    raise error(
                         "LLM structured generation failed",
-                        details={"model": model, "error": str(exc)},
+                        details=details,
                     ) from exc
                 finally:
                     if not recorded:
@@ -989,6 +1090,41 @@ class LLMService:
         return None
 
     @staticmethod
+    def _is_refusal(completion: Any) -> bool:
+        """A provider content block, or a model that declined instead of answering."""
+
+        return LLMService._refusal_reason(completion) is not None
+
+    @staticmethod
+    def _completion_finish_reason(completion: Any) -> str | None:
+        choices = getattr(completion, "choices", None) or ()
+        return getattr(choices[0], "finish_reason", None) if choices else None
+
+    @staticmethod
+    def _refusal_reason(completion: Any) -> str | None:
+        """Return a safe category without retaining response text in logs."""
+
+        error = getattr(completion, "error", None)
+        if isinstance(error, dict):
+            metadata = error.get("metadata") or {}
+            return (
+                "provider_content_policy"
+                if metadata.get("error_type") == "content_policy_violation"
+                else None
+            )
+        choices = getattr(completion, "choices", None) or ()
+        if not choices:
+            return None
+        if getattr(choices[0], "finish_reason", None) == "content_filter":
+            return "content_filter"
+        message = getattr(choices[0], "message", None)
+        if getattr(message, "refusal", None):
+            return "message_refusal"
+        if _REFUSAL_TEXT.match(getattr(message, "content", None) or ""):
+            return "refusal_text"
+        return None
+
+    @staticmethod
     def _is_transient_provider_error(exc: Exception) -> bool:
         """Retry dropped connections, timeouts, rate limits, and provider 5xx."""
 
@@ -1003,6 +1139,11 @@ class LLMService:
         """Preserve bounded model-output diagnostics for retry handling."""
 
         details = {"model": model, "error": str(exc)}
+        attempts = getattr(exc, "failed_attempts", None) or ()
+        if attempts:
+            validation_error = getattr(attempts[-1], "exception", None)
+            if validation_error is not None:
+                details["validation_error_type"] = type(validation_error).__name__
         last_completion = getattr(exc, "last_completion", None)
         if last_completion is not None:
             excerpt = str(last_completion)
@@ -1025,7 +1166,10 @@ class LLMService:
         model = model or self._agent_model
         is_openrouter = self._is_openrouter
         async with self._client_snapshot() as (raw_client, _):
-            async for event in self._stream_with_client(
+            # Closing this generator must close the inner one right away, so
+            # its cleanup (closing the provider stream, recording spend) does
+            # not wait for the event loop's generator finalizer.
+            async with aclosing(self._stream_with_client(
                 raw_client=raw_client,
                 system=system_text(system),
                 system_message=self._system_message(system),
@@ -1037,8 +1181,9 @@ class LLMService:
                 is_openrouter=is_openrouter,
                 aac_budget=aac_budget,
                 max_completion_tokens=max_completion_tokens,
-            ):
-                yield event
+            )) as events:
+                async for event in events:
+                    yield event
 
     async def _stream_with_client(
         self,
@@ -1064,6 +1209,7 @@ class LLMService:
             tool_calls_detected = False
             emitted_output = False
             usage: Optional[StreamUsage] = None
+            finish_reason: Optional[str] = None
             try:
                 self._check_aac_budget(aac_budget)
                 reservation = await self._reserve_external_attempt(
@@ -1085,6 +1231,7 @@ class LLMService:
                 }
                 return
             recorded = False
+            response = None
 
             try:
                 create_kwargs: Dict[str, Any] = dict(
@@ -1095,16 +1242,17 @@ class LLMService:
                     ],
                     tools=tools,
                     tool_choice="auto",
-                    temperature=temperature,
                     stream=True,
+                    **self._request_options(
+                        model,
+                        temperature=temperature,
+                        reasoning=reasoning,
+                        max_completion_tokens=max_completion_tokens,
+                    ),
                 )
-                if max_completion_tokens is not None:
-                    create_kwargs["max_completion_tokens"] = max_completion_tokens
                 # Standard OpenAI option, also honored by Ollama, vLLM, and
                 # LM Studio; usage is needed for accounting and truncation checks.
                 create_kwargs["stream_options"] = {"include_usage": True}
-                if extra_body := self._provider_extra_body(reasoning):
-                    create_kwargs["extra_body"] = extra_body
 
                 response = await raw_client.chat.completions.create(**create_kwargs)
 
@@ -1123,6 +1271,7 @@ class LLMService:
                         continue
 
                     delta = chunk.choices[0].delta
+                    finish_reason = getattr(chunk.choices[0], "finish_reason", None) or finish_reason
 
                     if delta.content:
                         content += delta.content
@@ -1234,6 +1383,7 @@ class LLMService:
                     "data": {
                         "content": content,
                         "usage": usage,
+                        "finish_reason": finish_reason,
                     },
                 }
                 return
@@ -1299,6 +1449,18 @@ class LLMService:
                 }
                 return
             finally:
+                if response is not None:
+                    # A stopped run or a failure leaves the provider stream
+                    # open; close it so the connection (and possibly the
+                    # generation) does not run on until garbage collection.
+                    close = getattr(response, "close", None) or getattr(
+                        response, "aclose", None
+                    )
+                    try:
+                        if close is not None:
+                            await close()
+                    except Exception as close_error:
+                        logger.debug(f"Closing the LLM stream failed: {close_error}")
                 if not recorded:
                     await self._record_external_attempt(
                         reservation,

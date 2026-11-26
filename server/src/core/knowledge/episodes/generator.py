@@ -11,17 +11,22 @@ from typing import Protocol, TypeVar
 
 from loguru import logger
 
-from common.schema.episode.generation import LLMEpisodeWindowDecision
+from common.schema.episode.generation import (
+    LLMEpisodeForgetRewrite,
+    LLMEpisodeWindowDecision,
+)
 from common.schema.episode.models import EpisodeNarrativeLimitError
 from common.utils.diagnostic_context import diagnostic_scope
 from core.knowledge.episodes.build import ProjectEpisodeBuild
 from core.knowledge.episodes.embedding import (
     EpisodeEmbeddingEncoder,
     build_episode_embedding_text,
+    build_episode_embedding_text_from_fields,
     encode_episode_embedding_texts,
 )
 from core.knowledge.episodes.policy import EpisodeGenerationPolicy
 from core.knowledge.episodes.prompts import (
+    get_episode_forget_prompt,
     get_episode_generation_prompt,
     get_episode_narrative_repair_prompt,
 )
@@ -117,7 +122,6 @@ class EpisodeGenerator:
                     max_narrative_chars=policy.max_narrative_chars,
                     max_episode_source_messages=policy.max_episode_source_messages,
                     max_episode_source_tokens=policy.max_episode_source_tokens,
-                    max_proposals=build.max_proposals,
                 ),
                 user=build.evidence_brief(),
                 temperature=0.0,
@@ -145,6 +149,15 @@ class EpisodeGenerator:
                     raise ValueError(
                         "episode narrative repair changed proposal source references"
                     )
+                # Repair only shortens prose; events pass through unchanged.
+                repaired = repaired.model_copy(
+                    update={
+                        "proposals": [
+                            after.model_copy(update={"events": before.events})
+                            for before, after in zip(output.proposals, repaired.proposals)
+                        ]
+                    }
+                )
                 build.apply_llm_output(repaired)
             for reason in build.rejected_proposals:
                 logger.warning("Dropped invalid Episode proposal: {}", reason)
@@ -157,3 +170,41 @@ class EpisodeGenerator:
                     )
                 )
         return build
+
+    async def rewrite_without(
+        self,
+        *,
+        user_name: str,
+        episode: dict,
+        forgotten_texts: list[str],
+    ) -> tuple[LLMEpisodeForgetRewrite, list[float]]:
+        """Rewrite one Episode's narrative without what the user asked to
+        forget, and embed the result."""
+
+        if self.llm is None or self.embedding_service is None:
+            raise RuntimeError("EpisodeGenerator requires an LLM and embedding service")
+        current = build_episode_embedding_text_from_fields(
+            episode["summary"],
+            list(episode["new_developments"]),
+            list(episode["updates"]),
+            list(episode["unresolved"]),
+        )
+        forgotten = "\n".join(f"- {text}" for text in forgotten_texts)
+        rewrite = await self.llm.generate_structured(
+            response_model=LLMEpisodeForgetRewrite,
+            system=get_episode_forget_prompt(user_name),
+            user=f"EPISODE:\n{current}\n\nFORGOTTEN MESSAGES:\n{forgotten}",
+            temperature=0.0,
+        )
+        [embedding] = await encode_episode_embedding_texts(
+            self.embedding_service,
+            [
+                build_episode_embedding_text_from_fields(
+                    rewrite.summary,
+                    rewrite.new_developments,
+                    rewrite.updates,
+                    rewrite.unresolved,
+                )
+            ],
+        )
+        return rewrite, embedding

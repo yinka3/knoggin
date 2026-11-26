@@ -6,7 +6,6 @@ import os
 import pytest
 
 from common.conf.manager import ConfigManager
-from core.ingestion import vp01
 from infrastructure.model_work import ModelWorkPriority
 from runtime.resources import RuntimeResources
 
@@ -53,12 +52,6 @@ async def real_resource_manager(monkeypatch, tmp_path, test_database_url):
         ),
         revision_env="SEMANTIC_SMOKE_RERANKER_REVISION",
     )
-    vp01_model = _local_snapshot(
-        huggingface_hub,
-        os.environ.get("VP01_MODEL", "fastino/gliner2.5-base-v1"),
-        revision_env="VP01_REVISION",
-    )
-    monkeypatch.setattr(vp01, "GLINER25_ENGLISH_MODEL", vp01_model)
 
     monkeypatch.setenv("DATABASE_URL", test_database_url)
     monkeypatch.setenv("EMBEDDING_MODEL", embedding_model)
@@ -98,7 +91,6 @@ async def test_real_runtime_shutdown_cancels_background_and_drains_model_work(
     assert manager.embedding is not None
     assert manager.embedding.embedding_dim > 0
     assert manager.spacy is not None
-    assert manager.vp01 is not None
     assert manager.work_snapshot()["background_work"]["queued"] == 0
 
     ingestion_started = asyncio.Event()

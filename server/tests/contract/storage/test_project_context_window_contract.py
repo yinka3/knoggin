@@ -29,7 +29,7 @@ from common.schema.semantic_window import (
 from common.schema.settings import (
     EntityResolutionSettings,
     EpisodeSettings,
-    TextProcessorSettings,
+    ExtractionSettings,
 )
 from core.agent.notebook import RunNotebook
 from core.agent.notebook_renderer import render_notebook
@@ -85,7 +85,7 @@ def _materialization(*blocks: ContextBlockRecord, supports=()) -> ContextMateria
 
 def _ingestion_policy() -> IngestionPolicy:
     return IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(gliner_threshold=0.42),
+        extraction=ExtractionSettings(vp01_episode_lookback=3),
         entity_resolution=EntityResolutionSettings(resolution_threshold=0.71),
         compiled_domain=_domain(),
     )
@@ -972,7 +972,7 @@ async def test_window_local_episodes_reach_notebook_synthesis_with_reversal_hist
     assert "Deployment policy reversed: deploy through CI." in rendered_notebook
     assert "chronology:" in rendered_notebook
     assert "CURRENT_CONTEXT: deployment through CI is current." in synthesis_prompt
-    assert "When multiple retrieved Episodes describe a change or reversal" in synthesis_prompt
+    assert "Interpret changes using event chronology and explicit corrections" in synthesis_prompt
 
 
 @pytest.mark.storage
@@ -1683,7 +1683,7 @@ async def test_context_revision_retry_and_projection_import_are_durable(
         """,
         (imported.reconciliation_window_id,),
     )
-    assert policy_row["policy_snapshot"]["ingestion_policy"]["gliner_threshold"] == 0.42
+    assert policy_row["policy_snapshot"]["ingestion_policy"]["vp01_episode_lookback"] == 3
     assert (
         policy_row["policy_snapshot"]["ingestion_policy"]["compiled_domain"]
         == policy_row["policy_snapshot"]["compiled_domain"]
@@ -2039,3 +2039,120 @@ async def test_exchange_columns_enforce_user_only_closure_shape(real_postgres_cl
             )
             """
         )
+
+
+async def _seed_more_messages(client, *message_ids: int) -> None:
+    for message_id in message_ids:
+        await client.execute(
+            """
+            INSERT INTO public.messages (
+                user_name, session_id, message_id, project_id, role, content,
+                lifecycle_state, exchange_state, exchange_outcome, exchange_closed_at_ms
+            ) VALUES ('ada', 'session-1', %s, 'project-1', 'user', 'More project text',
+                      'sealed', 'closed', 'user_only', %s)
+            """,
+            (message_id, message_id),
+        )
+
+
+async def _record_window_episodes(client, window_id, count: int) -> None:
+    for ordinal in range(count):
+        episode_id = f"episode-{window_id}-{ordinal}"
+        await client.execute(
+            "INSERT INTO public.episodes (episode_id, project_id, summary) "
+            "VALUES (%s, 'project-1', 'An Episode.')",
+            (episode_id,),
+        )
+        await client.execute(
+            "INSERT INTO public.project_semantic_window_episodes "
+            "(window_id, project_id, episode_id, ordinal) VALUES (%s, 'project-1', %s, %s)",
+            (window_id, episode_id, ordinal),
+        )
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_context_maintenance_state_counts_episodes_and_carries_evidence(
+    real_postgres_client,
+):
+    client = real_postgres_client
+    await _seed_messages(client)
+    await _seed_more_messages(client, 102, 103, 104)
+    writer = ProjectContextWriter(client)
+    reader = ProjectContextReader(client)
+    windows = SemanticWindowWriter(client)
+    await writer.ensure_context(user_name="ada", project_id="project-1")
+
+    async def claim(message_id):
+        window = _window()
+        assert (await windows.claim_window(window, _membership(message_id))).claimed
+        return window
+
+    async def complete(window):
+        await client.execute(
+            "UPDATE public.project_semantic_windows SET stage = 'completed', "
+            "completed_at = now() WHERE window_id = %s",
+            (window.window_id,),
+        )
+
+    def support(block, message_id):
+        return ContextBlockSupport(
+            block_id=block.block_id, message_id=message_id,
+            session_id="session-1", support_kind=ContextSupportKind.USER_MESSAGE,
+        )
+
+    async def commit(parent, window, blocks, new, supports, *, maintained=False):
+        return await writer.commit_revision(
+            user_name="ada", project_id="project-1",
+            expected_parent_revision_id=parent,
+            window_id=window.window_id,
+            origin=ContextRevisionOrigin.CONVERSATION, domain_version=1,
+            edit_summary="Context change",
+            materialization=ContextMaterialization(
+                blocks=tuple(blocks),
+                content_hash=context_document_hash(tuple(blocks), _domain()),
+                new_block_ids=frozenset(block.block_id for block in new),
+                supports=tuple(supports),
+            ),
+            maintained=maintained,
+        )
+
+    first_window = await claim(101)
+    first = _context_block("Ada plans a kitchen.")
+    one = await commit(None, first_window, [first], [first], [support(first, 101)])
+    await _record_window_episodes(client, first_window.window_id, 2)
+    await complete(first_window)
+
+    second_window = await claim(102)
+    second = _context_block("Ada hired Hanna.")
+    two = await commit(
+        one.revision_id, second_window, [first, second], [second], [support(second, 102)]
+    )
+    await _record_window_episodes(client, second_window.window_id, 3)
+    await complete(second_window)
+
+    state = await reader.get_maintenance_state(
+        two.revision_id, user_name="ada", project_id="project-1"
+    )
+    assert state.episodes_since_maintenance == 5
+    assert state.block_ages == {first.block_id: 3, second.block_id: 0}
+
+    third_window = await claim(103)
+    stray = _context_block("Evidence never seen by Context.")
+    with pytest.raises(ValueError, match="must belong to its semantic window"):
+        await commit(
+            two.revision_id, third_window, [first, second, stray], [stray],
+            [support(stray, 104)],
+        )
+    merged = _context_block("Ada plans a kitchen with Hanna.")
+    three = await commit(
+        two.revision_id, third_window, [merged], [merged],
+        [support(merged, 101), support(merged, 102)], maintained=True,
+    )
+
+    state = await reader.get_maintenance_state(
+        three.revision_id, user_name="ada", project_id="project-1"
+    )
+    assert state.episodes_since_maintenance == 0
+    assert state.block_ages == {merged.block_id: 0}

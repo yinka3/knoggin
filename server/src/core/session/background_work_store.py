@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any, Literal
 
-BackgroundKind = Literal["research_job", "folder_notice"]
+BackgroundKind = Literal["background_task", "folder_notice", "tool_handoff"]
 
 
 class BackgroundWorkStore:

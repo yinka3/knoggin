@@ -226,9 +226,11 @@ async def test_hot_topic_context_is_current_project_and_uses_entity_mentions():
         }
     }
     query, params = client.calls[0][1:]
-    assert "LEFT JOIN message_entity_refs mention" in query
-    assert "context.project_id = %s" in query
-    assert params == (["Identity"], "project-1")
+    assert "FROM message_entity_refs mention" in query
+    assert "context.project_id = %(project_id)s" in query
+    # Bounded in SQL, not after loading every mention of every entity.
+    assert "ranked.rank <= 3" in query and "LIMIT %(msg_limit)s" in query
+    assert params == {"topics": ["Identity"], "project_id": "project-1", "msg_limit": 5}
 
 
 @pytest.mark.storage

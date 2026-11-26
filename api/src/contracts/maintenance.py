@@ -19,7 +19,7 @@ class Decision(BaseModel):
 class AdvisoryDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    action: Literal["accept", "edit", "dismiss", "reopen", "suppress"]
+    action: Literal["accept", "edit", "dismiss", "reopen"]
     relationship_type: str | None = Field(default=None, max_length=40)
     note: str | None = Field(default=None, max_length=2000)
 
@@ -40,7 +40,7 @@ class RollbackSelection(BaseModel):
 class FlagJevContextDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    capability: Literal["extraction", "classification"]
+    capability: Literal["classification"]
     window_id: UUID
     pass_number: int = Field(ge=1, le=2)
     occurrence_key: str = Field(min_length=1, max_length=500)
