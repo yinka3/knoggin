@@ -1436,7 +1436,7 @@ def test_notebook_global_lines_handle_carriage_return_at_cell_boundary():
     second = extraction.chunks[1]
     # A lone carriage return does not end a line (only a newline does), so
     # the line numbers agree with editors and with read_document.
-    assert (second.start_line, second.end_line) == (4, 4)
+    assert (second.start_line, second.end_line) == (5, 5)
     assert split_lines(extraction.snapshot.text)[second.start_line - 1] == "second"
 
 
