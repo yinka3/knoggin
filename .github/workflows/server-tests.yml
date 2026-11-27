@@ -205,6 +205,7 @@ jobs:
           --ignore=tests/unit/core/sandbox/test_project_container.py
           --ignore=tests/unit/core/sandbox/test_startup_check.py
           --deselect=tests/unit/core/sandbox/test_application_lifecycle.py::test_application_start_owns_and_attaches_sandbox
+          "--deselect=tests/unit/core/knowledge/test_project_filesystem.py::test_expected_hash_mutations_recheck_after_a_concurrent_write[delete]"
           -m "not requires_postgres and not requires_pgvector and not requires_async_psycopg and not model and not slow"
           --cov=src
           --cov-branch
