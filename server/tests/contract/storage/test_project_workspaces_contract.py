@@ -60,3 +60,25 @@ async def test_a_project_holds_up_to_its_limit_of_workspaces(real_postgres_clien
     assert await manager.update_workspace(project_id, "missing", {"read_only": True}) is None
     with pytest.raises(ValueError):
         await manager.update_workspace(project_id, "docs", {"colour": "red"})
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_an_archived_project_keeps_its_workspaces_unchanged(real_postgres_client, tmp_path):
+    manager = ProjectManager(
+        SimpleNamespace(postgres=real_postgres_client),
+        user_name="ada",
+        filesystem_factory=ProjectFilesystemFactory(tmp_path / "projects"),
+        config_manager=SimpleNamespace(config=RootConfig()),
+    )
+    project = await manager.create_project("Repos", domain_config=make_domain_config(version=0))
+    project_id = project["id"]
+    await manager.add_workspace(project_id, "backend")
+    await manager.archive_project(project_id)
+
+    with pytest.raises(ValueError, match="not active"):
+        await manager.add_workspace(project_id, "frontend")
+    assert await manager.update_workspace(project_id, "backend", {"read_only": True}) is None
+    assert await manager.remove_workspace(project_id, "backend") is None
+    assert list((await manager.get_project(project_id))["workspaces"]) == ["backend"]

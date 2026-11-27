@@ -30,6 +30,7 @@ from common.schema.primitives import ImportedAssistantTurn, ImportedExchange, Me
 from common.schema.settings import RootConfig
 from common.schema.source.references import SourceReferenceCandidate
 from common.utils.events import emit
+from common.utils.lifecycle import settle_owned_task
 from common.utils.time_utils import get_now
 from core.agent.run import AgentIdentity
 from core.agent.tool_events import (
@@ -604,6 +605,7 @@ class SessionRuntime:
             pasted_text_spans = deepcopy(pasted_text_spans)
             selected_notebook = deepcopy(selected_notebook)
             self._agent_run_reserved = True
+            self._run_stop_requested = False
             self._run_idle.clear()
             self._active_run_id = run_id or str(uuid4())
             self._active_run_state = "admitting"
@@ -772,7 +774,6 @@ class SessionRuntime:
             # Tools in this run can ask the user something and wait for it.
             decisions = self._active_decisions = DecisionBroker()
             decision_binding = bind_decision_broker(decisions)
-            self._run_stop_requested = False
             handoff_binding = bind_handoffs(
                 self._tool_handoffs, project_id=self.project_id, session_id=self.session_id,
                 may_hand_off=lambda: not self._run_stop_requested and not self._closed,
@@ -804,7 +805,7 @@ class SessionRuntime:
                         response_seen = True
                         response = event["data"]
                         resolved_agent_id = response.get("resolved_agent_id")
-                        commit = await self.add_assistant_turn(
+                        commit, cancelled = await self._save_turn(self.add_assistant_turn(
                             content=response["content"],
                             timestamp=get_now(),
                             metadata=self._assistant_response_metadata(response),
@@ -812,8 +813,10 @@ class SessionRuntime:
                             source_candidates=self._response_source_candidates(response),
                             artifact=self._response_artifact(response),
                             readable_project_ids=captured_readable_project_ids,
-                        )
+                        ))
                         exchange_outcome = "assistant_final"
+                        if cancelled:
+                            raise asyncio.CancelledError
                         await self._record_durable_agent_turn(
                             orchestrator,
                             agent_id=(
@@ -831,7 +834,7 @@ class SessionRuntime:
                         exchange_outcome = "assistant_final"
                     elif event["event"] == "clarification":
                         clarification = dict(event["data"])
-                        commit = await self.add_assistant_turn(
+                        commit, cancelled = await self._save_turn(self.add_assistant_turn(
                             content=str(clarification["question"]),
                             timestamp=get_now(),
                             metadata=self._assistant_clarification_metadata(clarification),
@@ -841,7 +844,10 @@ class SessionRuntime:
                             ),
                             readable_project_ids=captured_readable_project_ids,
                             outcome="clarification",
-                        )
+                        ))
+                        if cancelled:
+                            exchange_outcome = "clarification"
+                            raise asyncio.CancelledError
                         clarification["assistant_message_id"] = commit["message_id"]
                         clarification["source_ref_ids"] = commit["source_ref_ids"]
                         event = {"event": "clarification", "data": clarification}
@@ -907,6 +913,21 @@ class SessionRuntime:
                 )
             finally:
                 await self._release_agent_run(task)
+
+    @staticmethod
+    async def _save_turn(write) -> tuple[dict, bool]:
+        """Run one turn save to the end even if the run is cancelled meanwhile.
+
+        Returns (result, cancelled). A cancel that lands while the reply is
+        being committed waits for the save, so the caller records the outcome
+        the database actually has, then re-raises the cancel itself. A save
+        that fails raises as usual.
+        """
+        task = asyncio.ensure_future(write)
+        try:
+            return await asyncio.shield(task), False
+        except asyncio.CancelledError:
+            return await settle_owned_task(task), True
 
     async def _release_agent_run(self, task: Optional[asyncio.Task]) -> None:
         async with self._agent_run_lock:

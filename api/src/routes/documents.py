@@ -13,7 +13,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from common.document_limits import MAX_DOCUMENT_UPLOAD_BODY_BYTES
-from common.exceptions import SavedWebLinkAlreadyExistsError
+from common.exceptions import DocumentNotReadyError, SavedWebLinkAlreadyExistsError
 from common.schema.document import FolderUploadEntry
 from core.knowledge.documents.scanning import normalize_relative_path
 
@@ -219,10 +219,8 @@ async def read_document(request):
             return _error("document_not_found", "Document not found", 404)
         except ValueError:
             return _error("invalid_read_range", "Invalid document page or line range", 422)
-        except RuntimeError as exc:
-            if str(exc) == "Document has not been indexed":
-                return _error("document_not_ready", "Document text is not ready", 409)
-            raise
+        except DocumentNotReadyError:
+            return _error("document_not_ready", "Document text is not ready", 409)
     return JSONResponse(_public(row, CONTENT_FIELDS))
 
 
@@ -269,6 +267,13 @@ async def _into_workspace(request, payload):
     })
 
 
+# The one-shot JSON folder upload is capped like a single document upload;
+# larger folders go through the staged intake (/folders/intakes).
+_ONE_SHOT_FOLDER_TOO_LARGE = (
+    "Folder upload is too large for one request; use the staged folder intake"
+)
+
+
 async def _folder_manifest(request):
     # A bounded JSON upload keeps folder intake comparable to existing document uploads.
     ceiling = min(_base64_limit(_document_limit(request)) + 64 * 1024,
@@ -277,7 +282,7 @@ async def _folder_manifest(request):
     async for chunk in request.stream():
         body.extend(chunk)
         if len(body) > ceiling:
-            return _error("payload_too_large", "Folder upload is too large", 413)
+            return _error("payload_too_large", _ONE_SHOT_FOLDER_TOO_LARGE, 413)
     try:
         payload = FolderIntake.model_validate(json.loads(body))
     except (ValidationError, ValueError, TypeError):
@@ -292,7 +297,7 @@ async def _folder_manifest(request):
             content = base64.b64decode(item.content_base64, validate=True)
             total_bytes += len(content)
             if total_bytes > _document_limit(request):
-                return _error("payload_too_large", "Folder upload is too large", 413)
+                return _error("payload_too_large", _ONE_SHOT_FOLDER_TOO_LARGE, 413)
             files.append(FolderUploadEntry(relative_path=item.relative_path, content=content))
     except (ValidationError, ValueError, TypeError):
         return _error("invalid_folder", "Invalid folder manifest", 422)

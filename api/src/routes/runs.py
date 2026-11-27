@@ -10,6 +10,7 @@ from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
 from common.exceptions import (
+    DependencyError,
     IdempotencyConflictError,
     RequestInProgressError,
     SessionBusyError,
@@ -217,9 +218,15 @@ async def start_run(request):
     except ValueError:
         return _error("invalid_run", "Invalid run request", 422)
     events = request.app.state.run_events
-    events.start(session_id, run_id, ClosingAsyncIterator(
-        _events(raw, run_id, runtime=runtime, session=session, selected_notebook=selected_notebook), raw,
-    ))
+    try:
+        events.start(session_id, run_id, ClosingAsyncIterator(
+            _events(raw, run_id, runtime=runtime, session=session, selected_notebook=selected_notebook), raw,
+        ))
+    except BaseException:
+        # The run is admitted; closing it releases the session, which would
+        # otherwise stay busy with no stream to finish it.
+        await raw.aclose()
+        raise
     return _stream_response(events.stream(events.get(session_id, run_id)))
 
 
@@ -455,7 +462,8 @@ async def _request_focus(session, body):
         return None
     service = session.document_service
     if service is None:
-        raise RuntimeError("Session document service is unavailable")
+        # 503 through the global handler, not a 500: the service is missing.
+        raise DependencyError("Session document service is unavailable")
     target = await service.resolve_focus_target(
         document_id=requested.document_id if requested.target_type == "document" else None,
         path_prefix=requested.path_prefix if requested.target_type == "subtree" else None,

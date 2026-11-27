@@ -1,5 +1,7 @@
 """Durable session metadata routes."""
 
+import json
+
 from pydantic import ValidationError
 from starlette.responses import JSONResponse
 from starlette.routing import Route
@@ -84,6 +86,15 @@ async def _metadata(runtime, session_id):
     return (await runtime.sessions.list_sessions()).get(session_id)
 
 
+async def _editable_session(runtime, session_id):
+    """An error response unless the session exists in an active project:
+    archived projects stay readable, but their chats cannot change."""
+    metadata = await _metadata(runtime, session_id)
+    if metadata is None:
+        return _error("session_not_found", "Session not found", 404)
+    return await _project_error(runtime, metadata["project_id"], write=True)
+
+
 async def list_sessions(request):
     rows = await request.app.state.runtime.sessions.list_sessions()
     project_id = request.query_params.get("project_id")
@@ -98,11 +109,8 @@ async def create_session(request):
         body = CreateSession.model_validate(await _json(request))
     except ValidationError:
         return _error("invalid_session", "Invalid session", 422)
-    project = await request.app.state.runtime.projects.get_project(body.project_id)
-    if project is None or project["status"] == "deleted":
-        return _error("project_not_found", "Project not found", 404)
-    if project["status"] != "active":
-        return _error("project_archived", "Archived project cannot be changed", 409)
+    if error := await _project_error(request.app.state.runtime, body.project_id, write=True):
+        return error
     try:
         session = await request.app.state.runtime.sessions.create_session(
             **body.model_dump()
@@ -122,8 +130,8 @@ async def get_session(request):
 
 async def update_session(request):
     session_id = request.path_params["session_id"]
-    if await _metadata(request.app.state.runtime, session_id) is None:
-        return _error("session_not_found", "Session not found", 404)
+    if error := await _editable_session(request.app.state.runtime, session_id):
+        return error
     try:
         body = SessionPreferences.model_validate(await _json(request))
     except ValidationError:
@@ -141,8 +149,8 @@ async def update_session(request):
 
 async def delete_session(request):
     session_id = request.path_params["session_id"]
-    if await _metadata(request.app.state.runtime, session_id) is None:
-        return _error("session_not_found", "Session not found", 404)
+    if error := await _editable_session(request.app.state.runtime, session_id):
+        return error
     await request.app.state.runtime.sessions.delete_session(session_id)
     return JSONResponse({"session_id": session_id, "deleted": True})
 
@@ -163,11 +171,32 @@ async def history(request):
     return JSONResponse([_public_history_message(row) for row in rows])
 
 
+# Read before JSON decoding, so a huge body is refused without being parsed.
+# Generous for real imports; split anything larger into several requests.
+_MAX_IMPORT_BODY_BYTES = 64 * 1024 * 1024
+
+
+async def _bounded_import_json(request):
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > _MAX_IMPORT_BODY_BYTES:
+            return None, _error(
+                "payload_too_large", "Import is too large; split it into smaller requests", 413,
+            )
+    try:
+        return json.loads(body), None
+    except (ValueError, UnicodeDecodeError):
+        return None, None
+
+
 async def import_exchanges(request):
     """Add recorded chat turns at their original times; they become memory."""
     runtime = request.app.state.runtime
     session_id = request.path_params["session_id"]
-    payload = await _json(request)
+    payload, too_large = await _bounded_import_json(request)
+    if too_large is not None:
+        return too_large
     if isinstance(payload, dict) and isinstance(payload.get("exchanges"), list):
         maximum = runtime.config_manager.config.developer_settings.ingestion.max_import_exchanges
         if len(payload["exchanges"]) > maximum:
@@ -234,6 +263,8 @@ async def get_focus(request):
 
 
 async def set_focus(request):
+    if error := await _editable_session(request.app.state.runtime, request.path_params["session_id"]):
+        return error
     try:
         body = focus_input.validate_python(await _json(request))
     except ValidationError:
@@ -252,6 +283,8 @@ async def set_focus(request):
 
 
 async def clear_focus(request):
+    if error := await _editable_session(request.app.state.runtime, request.path_params["session_id"]):
+        return error
     try:
         await request.app.state.runtime.sessions.clear_document_focus(
             request.path_params["session_id"]

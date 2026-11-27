@@ -514,6 +514,17 @@ class MemoryCursor:
             raise self.postgres.write_error
         normalized = " ".join(query.split())
 
+        if normalized.startswith(
+            "UPDATE public.project_documents AS pd SET status = 'skipped'"
+        ) or normalized.startswith(
+            "UPDATE public.project_documents AS pd SET status = 'queued', updated_at"
+        ):
+            # The workspace index rule: a no-op here, as it was before it ran
+            # in one transaction (no fake document sits in a workspace).
+            self.rowcount = 0
+            self.result = None
+            return
+
         if normalized.startswith("UPDATE public.project_documents AS document") and "snapshot.parser_fingerprint" in normalized:
             (
                 project_id,
@@ -3233,6 +3244,9 @@ async def test_linked_readable_document_cannot_be_indexed_by_another_project(tmp
         (ToolExecutionError("document", "temporary", retryable=True), ("transient_dependency", True)),
         (ToolExecutionError("document", "invalid", retryable=False), ("invalid_content", False)),
         (TimeoutError(), ("transient_dependency", True)),
+        # A file missing mid-move or locked by another program is retried.
+        (FileNotFoundError("Document content is missing"), ("transient_dependency", True)),
+        (PermissionError("in use"), ("transient_dependency", True)),
         (ValueError("bad document"), ("invalid_content", False)),
     ],
 )
@@ -4637,3 +4651,48 @@ async def test_the_scan_file_limit_is_a_live_setting(tmp_path):
         await service.reconcile_project_files()
     limit["files"] = 100
     assert (await service.reconcile_project_files())["created"] == 8
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_a_code_file_deleted_while_its_rule_applies_is_not_found(
+    monkeypatch, document_harness
+):
+    service, _postgres = document_harness
+    uploaded = await service.add_document(content=b"print('hi')\n", original_name="tool.py")
+    reader = service.indexer._reader
+    real_fetch = reader.fetch_documents_by_reference
+    calls = []
+
+    async def deleted_after_first_read(**kwargs):
+        calls.append(kwargs)
+        return await real_fetch(**kwargs) if len(calls) == 1 else []
+
+    monkeypatch.setattr(reader, "fetch_documents_by_reference", deleted_after_first_read)
+
+    with pytest.raises(FileNotFoundError, match="Document not found"):
+        await service.indexer.index_document(document_id=uploaded["document_id"])
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_the_first_reconcile_removes_scratch_left_by_a_crashed_write(
+    document_harness, tmp_path
+):
+    import os as _os
+    import time as _time
+
+    service, _postgres = document_harness
+    root = tmp_path / "projects" / "project-1"
+    (root / "notes").mkdir(parents=True)
+    stale = root / "notes" / ".knoggin-0123abcd.tmp"
+    fresh = root / ".knoggin-move-4567.tmp"
+    stale.write_bytes(b"half written")
+    fresh.write_bytes(b"in progress")
+    two_hours_ago = _time.time() - 2 * 3600
+    _os.utime(stale, (two_hours_ago, two_hours_ago))
+
+    await service.reconcile_project_files()
+
+    assert not stale.exists()
+    assert fresh.exists()  # young enough that a live write may own it

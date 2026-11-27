@@ -30,6 +30,48 @@ ROOT_RUNTIME_WARNING = (
 )
 
 
+def _recover_sandbox_homes(library_root: Path) -> None:
+    """Repair what a killed network command can leave in each sandbox home:
+    a pip_install swap cut off between its two renames, and partial
+    downloads. Links in the home are the sandbox's own and are never
+    followed; a link where a folder is expected is simply removed."""
+
+    for project in library_root.iterdir() if library_root.is_dir() else ():
+        home = project / ".sandbox" / "home"
+        if project.is_symlink() or not home.is_dir() or home.is_symlink():
+            continue
+        try:
+            _recover_python_swap(home)
+            _remove_partial_downloads(home / "downloads")
+        except OSError:
+            logger.exception("Could not repair sandbox home {}", home)
+
+
+def _recover_python_swap(home: Path) -> None:
+    python, staged, previous = home / "python", home / ".python-next", home / ".python-old"
+    if not python.exists() and not python.is_symlink():
+        # Killed between "python -> .python-old" and ".python-next -> python":
+        # the staged copy is complete (it is only renamed once finished).
+        for candidate in (staged, previous):
+            if candidate.is_dir() and not candidate.is_symlink():
+                os.replace(candidate, python)
+                break
+    for leftover in (staged, previous):
+        if leftover.is_symlink() or leftover.is_file():
+            leftover.unlink()
+        elif leftover.is_dir():
+            shutil.rmtree(leftover)
+
+
+def _remove_partial_downloads(downloads: Path) -> None:
+    if downloads.is_symlink() or not downloads.is_dir():
+        return
+    for folder, _directories, files in os.walk(downloads, followlinks=False):
+        for name in files:
+            if name.endswith(".part"):
+                os.unlink(os.path.join(folder, name))
+
+
 class SandboxManager:
     def __init__(
         self,
@@ -91,6 +133,13 @@ class SandboxManager:
             except Exception as exc:
                 if self._status["available"]:
                     self._status = self._result(False, "container_failed", str(exc))
+        if self._status["available"]:
+            # After the leftover install containers are gone, so nothing is
+            # still writing into a sandbox home.
+            try:
+                await asyncio.to_thread(_recover_sandbox_homes, self.library_root)
+            except Exception:
+                logger.exception("Sandbox home recovery failed")
         if self._status["available"] and self._idle_task is None:
             self._idle_task = asyncio.create_task(self._idle_loop())
 

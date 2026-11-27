@@ -1,6 +1,8 @@
 import asyncio
+import fnmatch
 import hashlib
 import json
+import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -21,6 +23,7 @@ from loguru import logger
 from pydantic import TypeAdapter
 
 from common.document_limits import DEFAULT_DOCUMENT_SIZE
+from common.exceptions import DocumentNotReadyError
 from common.schema.document import (
     DocumentExtractionMode,
     DocumentExtractionStrategy,
@@ -147,6 +150,32 @@ def _settle_file_operation(method: Callable[..., Awaitable[Any]]):
     return wrapped
 
 
+# Hidden temp files of atomic writes and moves (".knoggin-<hex>.tmp",
+# ".knoggin-move-<hex>.tmp"). They live for milliseconds, so an hour-old one
+# was left by a crash. Scans skip hidden files, so nothing else removes them.
+_WRITE_SCRATCH_PATTERN = ".knoggin-*.tmp"
+_WRITE_SCRATCH_STALE_NS = 60 * 60 * 1_000_000_000
+
+
+def _remove_stale_write_scratch(filesystem, lease) -> int:
+    cutoff = time.time_ns() - _WRITE_SCRATCH_STALE_NS
+    stale = [
+        path.relative_path for path in filesystem.iter_paths()
+        if fnmatch.fnmatchcase(PurePosixPath(path.relative_path).name, _WRITE_SCRATCH_PATTERN)
+        and path.modified_ns < cutoff
+    ]
+    removed = 0
+    for relative_path in stale:
+        try:
+            filesystem.delete_file(relative_path, _lease=lease)
+            removed += 1
+        except (OSError, ValueError):
+            logger.warning("Could not remove stale write scratch {}", relative_path)
+    if removed:
+        logger.info("Removed {} stale write scratch file(s)", removed)
+    return removed
+
+
 class DocumentService:
     """Project-scoped storage and retrieval boundary for documents."""
 
@@ -192,6 +221,7 @@ class DocumentService:
         ] = {}
         self._reconciliation_settings: FolderScanSettings | None = None
         self._reconciliation_run_count = 0
+        self._scratch_swept = False
         if indexer is None:
             indexing_policy = DocumentIndexPolicy.capture(
                 inline_index_max_bytes=inline_index_max_bytes,
@@ -289,6 +319,11 @@ class DocumentService:
         filesystem = self._filesystem
         if filesystem is None:
             return {"created": 0, "changed": 0, "deleted": 0, "excluded": 0}
+        if not self._scratch_swept:
+            # Once per process, before the scan's generation is read: only an
+            # earlier, crashed process leaves atomic-write scratch behind.
+            self._scratch_swept = True
+            await self._run_blocking(_remove_stale_write_scratch, filesystem, lease)
 
         scan_generation = await self._run_blocking(
             filesystem.get_mutation_generation, _lease=lease
@@ -1229,7 +1264,7 @@ class DocumentService:
             content_hash=document["content_hash"],
         )
         if snapshot is None:
-            raise RuntimeError("Document has not been indexed")
+            raise DocumentNotReadyError("Document has not been indexed")
         payload = snapshot.get("snapshot")
         if not isinstance(payload, dict) or not isinstance(payload.get("text"), str):
             raise RuntimeError("Document parse snapshot is invalid")

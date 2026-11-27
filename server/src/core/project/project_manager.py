@@ -880,7 +880,35 @@ class ProjectManager:
         self, project_id: str, name: str, *, read_only: bool = False
     ) -> dict[str, WorkspaceSettings]:
         """Name a top-level folder as a workspace; raises ValueError for a bad
-        name, a duplicate, or a project already at the workspace limit."""
+        name, a duplicate, a project already at the workspace limit, or a
+        project that is not active."""
+        return await self._mutate_project(
+            self._add_workspace_locked, project_id, name, read_only=read_only,
+        )
+
+    async def update_workspace(
+        self, project_id: str, name: str, changes: dict
+    ) -> dict[str, WorkspaceSettings] | None:
+        """Change some of a workspace's settings; None when it does not exist
+        or the project is not active. Raises ValueError for an unknown setting
+        or a bad value."""
+        return await self._mutate_project(
+            self._update_workspace_locked, project_id, name, changes,
+        )
+
+    async def remove_workspace(
+        self, project_id: str, name: str
+    ) -> dict[str, WorkspaceSettings] | None:
+        """Forget a workspace whose folder holds no documents; None when the
+        project has no workspace by that name or is not active. The folder
+        itself stays."""
+        return await self._mutate_project(self._remove_workspace_locked, project_id, name)
+
+    # The three run under the project mutation lock, so they cannot race a
+    # delete, archive or each other; the updates also require an active project.
+    async def _add_workspace_locked(
+        self, project_id: str, name: str, *, read_only: bool = False
+    ) -> dict[str, WorkspaceSettings]:
         name = workspace_name(name)
         settings = WorkspaceSettings(read_only=read_only)
         limit = (
@@ -891,6 +919,7 @@ class ProjectManager:
                SET workspaces = workspaces || jsonb_build_object(%(name)s, %(settings)s::jsonb),
                    updated_at = now()
                WHERE user_name = %(user_name)s AND project_id = %(project_id)s
+                 AND status = 'active'
                  AND NOT workspaces ? %(name)s
                  AND (SELECT count(*) FROM jsonb_object_keys(workspaces)) < %(limit)s
                RETURNING workspaces""",
@@ -898,14 +927,14 @@ class ProjectManager:
              "settings": settings.model_dump_json(), "limit": limit},
         )
         if row is None:
-            raise ValueError(f"Workspace exists or the project has {limit} already")
+            raise ValueError(
+                f"Workspace exists, the project has {limit} already, or it is not active"
+            )
         return parse_workspaces(row["workspaces"])
 
-    async def update_workspace(
+    async def _update_workspace_locked(
         self, project_id: str, name: str, changes: dict
     ) -> dict[str, WorkspaceSettings] | None:
-        """Change some of a workspace's settings; None when it does not exist.
-        Raises ValueError for an unknown setting or a bad value."""
         current = (await self._workspaces(project_id)).get(name)
         if current is None:
             return None
@@ -915,6 +944,7 @@ class ProjectManager:
                SET workspaces = jsonb_set(workspaces, ARRAY[%(name)s], %(settings)s::jsonb),
                    updated_at = now()
                WHERE user_name = %(user_name)s AND project_id = %(project_id)s
+                 AND status = 'active'
                  AND workspaces ? %(name)s
                RETURNING workspaces""",
             {"user_name": self.user_name, "project_id": project_id, "name": name,
@@ -929,11 +959,9 @@ class ProjectManager:
         )
         return {} if row is None else parse_workspaces(row["workspaces"])
 
-    async def remove_workspace(
+    async def _remove_workspace_locked(
         self, project_id: str, name: str
     ) -> dict[str, WorkspaceSettings] | None:
-        """Forget a workspace whose folder holds no documents; None when the
-        project has no workspace by that name. The folder itself stays."""
         row = await self.pg.fetch_one(
             """SELECT EXISTS (
                    SELECT 1 FROM public.project_documents
@@ -948,6 +976,7 @@ class ProjectManager:
             """UPDATE public.projects
                SET workspaces = workspaces - %(name)s, updated_at = now()
                WHERE user_name = %(user_name)s AND project_id = %(project_id)s
+                 AND status = 'active'
                  AND workspaces ? %(name)s
                RETURNING workspaces""",
             {"user_name": self.user_name, "project_id": project_id, "name": name},
@@ -1001,6 +1030,9 @@ class ProjectManager:
             validated_allowed = await self._validate_allowed_project_ids(
                 project_id, allowed_projects
             )
+            # Shut down before writing: if shutdown fails the scope stays as
+            # it was, so a running runtime never serves a stale scope. A failed
+            # write afterwards is harmless (no leases; it restarts on next use).
             if active_state:
                 await active_state.shutdown()
                 del self.active_projects[project_id]

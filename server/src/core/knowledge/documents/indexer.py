@@ -129,9 +129,12 @@ class DocumentIndexer:
             await self._writer.apply_workspace_index_rule(
                 extensions=READ_DIRECTLY_EXTENSIONS, document_id=document_id
             )
-            metadata = (await self._reader.fetch_documents_by_reference(
+            rows = await self._reader.fetch_documents_by_reference(
                 document_id=document_id, relative_path=None,
-            ))[0]
+            )
+            if not rows:  # deleted while the rule was applied
+                raise FileNotFoundError("Document not found")
+            metadata = rows[0]
             if metadata["status"] == "skipped":
                 return metadata
         if metadata["status"] == "indexed" and not force:
@@ -312,7 +315,10 @@ class DocumentIndexer:
             )
         if isinstance(
             exc,
-            (ConnectionError, TimeoutError, DependencyError, StorageError, LLMProviderError),
+            # OSError covers a file missing mid-move or locked by another
+            # program: worth retrying. A file that is really gone is
+            # tombstoned by the next reconcile; bad content raises ValueError.
+            (OSError, DependencyError, StorageError, LLMProviderError),
         ):
             return "transient_dependency", True
         return "invalid_content", False

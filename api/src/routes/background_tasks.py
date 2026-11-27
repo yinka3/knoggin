@@ -46,6 +46,8 @@ async def list_jobs(request):
 
 
 async def cancel_job(request):
+    # Stopping work is always allowed, even in an archived project or after
+    # the chat was deleted, so spending can be halted; only ownership counts.
     jobs = request.app.state.runtime.sessions.background_tasks
     job = jobs.get(request.path_params["job_id"])
     if job is None or job["parent_session_id"] != request.path_params["session_id"]:
@@ -78,6 +80,7 @@ async def list_handoffs(request):
 
 
 async def stop_handoff(request):
+    # Like cancel_job: stopping is always allowed for the item's own chat.
     item = await request.app.state.runtime.sessions.tool_handoffs.stop(
         request.path_params["item_id"], session_id=request.path_params["session_id"]
     )

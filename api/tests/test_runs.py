@@ -3,6 +3,8 @@ import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
+
 from routes.runs import _events, _request_focus, start_run
 from runtime.session_runtime import SteerQueueFull
 from routes.runs import _selected_notebook
@@ -600,3 +602,68 @@ def test_a_tool_question_reaches_the_client_stream():
     assert asked["question"] == "Allow network?" and asked["options"] == ["approve", "deny"]
     assert "internal" not in asked
     assert frames[2].startswith(b"event: decision_resolved")
+
+
+def test_a_run_whose_event_buffer_cannot_start_releases_its_session():
+    closed = []
+
+    class Raw:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+        async def aclose(self):
+            closed.append(True)
+
+    class Session:
+        async def open_agent_run_stream(self, message, **kwargs):
+            return Raw()
+
+    class Projects:
+        async def get_project(self, project_id):
+            return {"status": "active"}
+
+    class Sessions:
+        user_name = "ada"
+
+        async def list_sessions(self):
+            return {"session-1": {"project_id": "project-1"}}
+
+        async def get_or_resume_session(self, session_id):
+            return Session()
+
+    class BrokenEvents:
+        def start(self, *_args):
+            raise RuntimeError("buffer settings unreadable")
+
+    class Request:
+        path_params = {"session_id": "session-1"}
+        app = SimpleNamespace(state=SimpleNamespace(
+            runtime=SimpleNamespace(projects=Projects(), sessions=Sessions()),
+            run_events=BrokenEvents(),
+        ))
+
+        async def json(self):
+            return {"query": "hello"}
+
+    async def exercise():
+        with pytest.raises(RuntimeError, match="buffer settings unreadable"):
+            await start_run(Request())
+        assert closed == [True]
+
+    asyncio.run(exercise())
+
+
+def test_a_focus_without_a_document_service_is_a_dependency_error():
+    from common.exceptions import DependencyError
+    from contracts.sessions import StartRun
+
+    body = StartRun.model_validate({
+        "query": "q",
+        "document_focus": {"target_type": "subtree", "path_prefix": "docs"},
+    })
+
+    with pytest.raises(DependencyError):
+        asyncio.run(_request_focus(SimpleNamespace(document_service=None), body))

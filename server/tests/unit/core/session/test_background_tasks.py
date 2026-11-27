@@ -244,3 +244,30 @@ async def test_a_normal_task_has_the_chats_tools_and_cannot_start_another_task()
     # The task's own chat cannot start one of its own.
     with pytest.raises(ValueError, match="cannot start another"):
         await jobs.start(project_id="project-1", parent_session_id="job-chat-1", question="More")
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_resuming_an_interrupted_job_removes_its_cut_off_chat():
+    sessions = _Sessions([_answer("never")], [_answer("done")], gate=asyncio.Event())
+    deleted = []
+
+    async def delete_session(session_id):
+        deleted.append(session_id)
+
+    sessions.delete_session = delete_session
+    jobs = _jobs(sessions)
+    job = await jobs.start(project_id="project-1", parent_session_id="parent", question="q")
+    await asyncio.sleep(0)
+    jobs._closed = True  # a shutdown cuts the run off mid-research
+    await jobs.cancel(job["job_id"])
+    jobs._closed = False
+    first_chat = jobs.get(job["job_id"])["session_id"]
+    assert first_chat == "job-chat-1"
+
+    sessions._gate.set()
+    await jobs.resume_job(job["job_id"])
+    await _finish(jobs)
+
+    assert deleted == ["job-chat-1"]
+    assert jobs.get(job["job_id"])["session_id"] == "job-chat-2"

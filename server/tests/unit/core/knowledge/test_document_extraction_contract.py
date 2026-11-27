@@ -1500,3 +1500,29 @@ def test_empty_image_ocr_is_rejected(monkeypatch):
 
     with pytest.raises(ValueError, match="no readable text"):
         extraction_module.extract_and_split_document(build_png_bytes(), ".png")
+
+
+@pytest.mark.no_network
+async def test_a_failed_input_write_still_removes_the_docling_work_folder(monkeypatch, tmp_path):
+    from pathlib import Path
+
+    from core.knowledge.documents import extraction
+
+    made = []
+
+    def make_folder(prefix):
+        folder = tmp_path / f"{prefix}work"
+        folder.mkdir()
+        made.append(folder)
+        return str(folder)
+
+    def disk_full(self, _data):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(extraction.tempfile, "mkdtemp", make_folder)
+    monkeypatch.setattr(Path, "write_bytes", disk_full)
+
+    with pytest.raises(OSError, match="No space left"):
+        await extraction._extract_and_split_docling_document_unlocked(b"%PDF", ".pdf", "standard")
+
+    assert made and not made[0].exists()

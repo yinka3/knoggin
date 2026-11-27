@@ -143,13 +143,26 @@ fi
 exec git clone --depth 1 -- "$1" "/home/sandbox/repos/$2"
 """
 
-_PIP_SCRIPT = (
-    "python -m pip --isolated install --no-input --disable-pip-version-check "
-    "--no-cache-dir --index-url https://pypi.org/simple "
-    "--target /tmp/knoggin-python-install \"$1\" "
-    "&& mkdir -p /home/sandbox/python "
-    "&& cp -a /tmp/knoggin-python-install/. /home/sandbox/python/"
-)
+# The package lands in a complete copy of the import folder that is swapped
+# in with two renames, so a kill leaves the old folder or the new one, never a
+# half-copied package. The copy hard-links unchanged files (no extra disk), and
+# --remove-destination replaces files instead of writing through those links.
+# SandboxManager finishes or undoes a swap cut off between the renames.
+_PIP_SCRIPT = r"""set -e
+home=/home/sandbox
+python -m pip --isolated install --no-input --disable-pip-version-check \
+    --no-cache-dir --index-url https://pypi.org/simple \
+    --target /tmp/knoggin-python-install "$1"
+rm -rf "$home/.python-next" "$home/.python-old"
+mkdir -p "$home/python"
+cp -al "$home/python" "$home/.python-next" 2>/dev/null \
+    || { rm -rf "$home/.python-next"; cp -a "$home/python" "$home/.python-next"; }
+cp -a --remove-destination /tmp/knoggin-python-install/. "$home/.python-next/"
+mv "$home/python" "$home/.python-old"
+mv "$home/.python-next" "$home/python"
+rm -rf "$home/.python-old"
+"""
+
 
 @dataclass(frozen=True)
 class CommandTemplate:

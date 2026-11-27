@@ -42,6 +42,7 @@ async def stream_tool_calls(
             return exc
 
     tasks = [asyncio.create_task(run(*call)) for call in calls]
+    waiter: asyncio.Future | None = None
     try:
         while True:
             waiter = asyncio.ensure_future(queue.get())
@@ -60,9 +61,12 @@ async def stream_tool_calls(
             yield queue.get_nowait()
         yield {"event": RESULTS, "data": [task.result() for task in tasks]}
     finally:
-        for task in tasks:
+        # The queue waiter too: a stream cancelled mid-wait would otherwise
+        # leave it pending ("Task was destroyed but it is pending").
+        pending = [*tasks, *([waiter] if waiter is not None else [])]
+        for task in pending:
             task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(*pending, return_exceptions=True)
 
 
 class DecisionBroker:

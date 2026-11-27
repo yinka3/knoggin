@@ -591,3 +591,40 @@ async def test_aac_participants_cannot_reexpose_project_tools_from_agent_setting
         "update_project_file",
         "append_project_file",
     }.isdisjoint(visible_tools)
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_shutdown_does_not_wait_for_a_slow_seeder_answer():
+    resources = FakeResources()
+    manager = AgentManager(resources, user_name="ada")
+    agent = await manager.create_agent("Researcher", "Careful")
+    await manager.set_aac_enabled(agent.id, True)
+    context = await AACReadContext.create(
+        user_name="ada", postgres=resources.postgres,
+        knowledge_store=resources.knowledge_store,
+        embedding_service=resources.embedding,
+    )
+    runtime = AACRuntime(
+        user_name="ada", resources=resources, agent_manager=manager,
+        read_context=context, store=AACStore(resources.postgres), config_provider=_provider(),
+        seeder=FakeSeeder(SeedDecision("START", "Topic")),
+    )
+    entered, cancelled = asyncio.Event(), asyncio.Event()
+
+    async def never_answers(*, budget):
+        entered.set()
+        try:
+            await asyncio.Event().wait()  # a model call that does not return
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    runtime.seeder.decide = never_answers
+    admission = asyncio.create_task(runtime.trigger_discussion())
+    await entered.wait()
+
+    await asyncio.wait_for(runtime.shutdown(), 2)  # no release needed
+
+    assert (await admission).reason == "shutting_down"
+    assert cancelled.is_set()

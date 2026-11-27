@@ -196,6 +196,9 @@ class LLMService:
         self._tokenizer = None
         self._retired_clients: set[AsyncOpenAI] = set()
         self._retirement_tasks: dict[AsyncOpenAI, asyncio.Task] = {}
+        # Budget updates scheduled from synchronous settings callbacks; kept so
+        # they are not garbage-collected mid-run and their errors are logged.
+        self._budget_update_tasks: set[asyncio.Task] = set()
         # Process-lifetime prompt cache counters per model, for visibility.
         self._prompt_cache: dict[str, dict[str, int]] = {}
         self._client_usage: dict[AsyncOpenAI, int] = {}
@@ -432,10 +435,19 @@ class LLMService:
         except RuntimeError:
             self._spending_ledger.replace_settings_without_lock(settings)
             return
-        loop.create_task(
+        task = loop.create_task(
             self._spending_ledger.update_settings(settings),
             name="llm-spending-budget-update",
         )
+        self._budget_update_tasks.add(task)
+        task.add_done_callback(self._budget_update_finished)
+
+    def _budget_update_finished(self, task: asyncio.Task) -> None:
+        self._budget_update_tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            logger.opt(exception=task.exception()).error(
+                "Could not apply the new LLM spending budget"
+            )
 
     def _system_message(self, system: SystemPrompt) -> Dict[str, Any]:
         """Mark reusable system text for provider prompt caching.

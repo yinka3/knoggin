@@ -106,3 +106,60 @@ def test_workspaces_are_added_removed_and_shown_on_documents(monkeypatch, tmp_pa
                 assert (await client.delete(base + "/frontend")).status_code == 404
 
     asyncio.run(exercise())
+
+
+def test_a_failed_folder_always_undoes_the_workspace(monkeypatch, tmp_path):
+    workspaces, removed = {}, []
+    state = SimpleNamespace(folder_error=RuntimeError("disk gone"), undo_fails=False)
+
+    class Documents:
+        async def create_project_folder(self, path):
+            raise state.folder_error
+
+    class Projects:
+        async def get_project(self, project_id):
+            return {"id": "p1", "name": "Repos", "status": "active", "workspaces": workspaces}
+
+        async def add_workspace(self, project_id, name, *, read_only=False):
+            workspaces[name] = {"read_only": read_only}
+            return dict(workspaces)
+
+        async def remove_workspace(self, project_id, name):
+            removed.append(name)
+            if state.undo_fails:
+                raise RuntimeError("database down")
+            workspaces.pop(name, None)
+            return dict(workspaces)
+
+        async def acquire_project_for_session(self, project_id, lease_id):
+            return SimpleNamespace(document_service=Documents())
+
+        async def release_project_for_session(self, project_id, lease_id):
+            pass
+
+    async def start(**_kwargs):
+        async def shutdown():
+            pass
+        return SimpleNamespace(projects=Projects(), shutdown=shutdown)
+
+    monkeypatch.setattr("app.ApplicationRuntime.start", start)
+    app = create_app(user_name="ada", config_dir=tmp_path)
+
+    async def exercise():
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+                base_url="http://test",
+            ) as client:
+                base = "/v1/projects/p1/workspaces"
+                # An unexpected failure is a 500, but the workspace is undone.
+                assert (await client.post(base, json={"name": "backend"})).status_code == 500
+                assert removed == ["backend"] and workspaces == {}
+
+                # A failed undo is logged; the name clash still answers 409.
+                state.folder_error, state.undo_fails = NotADirectoryError("x"), True
+                response = await client.post(base, json={"name": "notes"})
+                assert response.status_code == 409
+                assert removed == ["backend", "notes"]
+
+    asyncio.run(exercise())

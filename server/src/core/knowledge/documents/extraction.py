@@ -1309,8 +1309,9 @@ async def _extract_and_split_docling_document_unlocked(
     input_path = work_directory / "source.bin"
     result_path = work_directory / "result.pickle"
     stderr_path = work_directory / "stderr.log"
-    input_path.write_bytes(content)
     try:
+        # Inside the try: a failed write (disk full) still removes the folder.
+        input_path.write_bytes(content)
         with stderr_path.open("wb") as stderr_file:
             start_process = asyncio.create_task(
                 asyncio.create_subprocess_exec(

@@ -139,6 +139,16 @@ class BackgroundTasks:
         return self._public(job)
 
     async def _requeue(self, job: dict[str, Any]) -> None:
+        # The job starts over in a fresh chat, so the cut-off one would only
+        # sit beside it as a half-finished duplicate.
+        if job.get("session_id"):
+            try:
+                await self._sessions.delete_session(job["session_id"])
+            except Exception:
+                logger.exception(
+                    "Could not remove the earlier session of background task {}",
+                    job["job_id"],
+                )
         job.update(state="queued", session_id=None, error_code=None)
         self._remember(job)
         await self._persist(job)

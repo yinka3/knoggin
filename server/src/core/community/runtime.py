@@ -250,6 +250,25 @@ class AACRuntime:
         if failures:
             raise RuntimeError("AAC discussion finalization failed") from failures[0]
 
+    async def _decide_unless_stopping(self, budget):
+        """Ask the seeder, but give up as soon as shutdown starts.
+
+        The call runs under the ownership lock, which shutdown waits on, so a
+        slow model call would otherwise hold shutdown until it answered.
+        Returns None when shutdown won.
+        """
+        decide = asyncio.create_task(self.seeder.decide(budget=budget))
+        stop = asyncio.create_task(self._shutdown_event.wait())
+        try:
+            done, _ = await asyncio.wait({decide, stop}, return_when=asyncio.FIRST_COMPLETED)
+            if decide in done:
+                return decide.result()
+            return None
+        finally:
+            for task in (decide, stop):
+                task.cancel()
+            await asyncio.gather(decide, stop, return_exceptions=True)
+
     async def trigger_discussion(self) -> AACAdmission:
         """Run one seed check and admit at most one local discussion."""
 
@@ -268,7 +287,9 @@ class AACRuntime:
                 return AACAdmission(AACAdmissionOutcome.SKIPPED, "no_enabled_agents")
 
             budget = AACTokenBudget(self._community_settings().token_budget)
-            decision = await self.seeder.decide(budget=budget)
+            decision = await self._decide_unless_stopping(budget)
+            if decision is None:
+                return AACAdmission(AACAdmissionOutcome.SKIPPED, "shutting_down")
             if decision.action != "START" or not decision.topic:
                 return AACAdmission(AACAdmissionOutcome.SKIPPED, "no_seed")
 

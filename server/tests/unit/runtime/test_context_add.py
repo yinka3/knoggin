@@ -2088,3 +2088,61 @@ async def test_tool_work_outlives_an_unwatched_run_but_not_a_stop(context, how):
         await asyncio.gather(consumer, return_exceptions=True)
         assert work_cancelled.is_set()
         assert handoffs.list(session_id=ctx.session_id) == []
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_a_cancel_during_the_reply_save_keeps_the_saved_outcome(context, monkeypatch):
+    ctx, _resources = context
+    saving = asyncio.Event()
+    finish_save = asyncio.Event()
+    closed = []
+
+    async def slow_save(**_kwargs):
+        saving.set()
+        await finish_save.wait()  # the commit lands while the cancel is pending
+        return {"message_id": 99, "source_ref_ids": []}
+
+    async def record_close(user_message_id, *, outcome, terminal_error=None):
+        closed.append(outcome)
+
+    monkeypatch.setattr(ctx, "add_assistant_turn", slow_save)
+    monkeypatch.setattr(ctx, "_close_user_exchange", record_close)
+
+    async def handler(_kwargs):
+        yield _response_event("saved reply")
+
+    task = asyncio.create_task(
+        _collect_turn(ctx, Message(content="save me"), _FakeTurnOrchestrator(handler))
+    )
+    await saving.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    finish_save.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # The reply was saved, so the turn is not closed again as cancelled.
+    assert closed == []
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_a_stop_pressed_while_history_loads_is_not_forgotten(context, monkeypatch):
+    ctx, _resources = context
+    seen = []
+    real_history = ctx._recent_history_within
+
+    async def stop_during_history(*args, **kwargs):
+        ctx._run_stop_requested = True  # the user presses stop right here
+        return await real_history(*args, **kwargs)
+
+    monkeypatch.setattr(ctx, "_recent_history_within", stop_during_history)
+
+    async def handler(_kwargs):
+        seen.append(ctx._run_stop_requested)
+        yield _response_event("done")
+
+    await _collect_turn(ctx, Message(content="hello"), _FakeTurnOrchestrator(handler))
+
+    assert seen == [True]

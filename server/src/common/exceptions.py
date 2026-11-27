@@ -32,6 +32,14 @@ class DependencyError(EngineError):
         super().__init__(message, code="dependency_error", details=details)
 
 
+class DocumentNotReadyError(RuntimeError):
+    """A document has no indexed text yet, so it cannot be read.
+
+    A RuntimeError subclass so existing broad handlers keep working; callers
+    that care match this type instead of the message.
+    """
+
+
 class NotFoundError(EngineError):
     """Raised when a requested user-owned resource does not exist."""
 

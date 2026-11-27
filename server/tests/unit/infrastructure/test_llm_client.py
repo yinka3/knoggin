@@ -1092,3 +1092,27 @@ def test_counting_tokens_accepts_text_that_spells_a_special_token():
 
     assert client.count_tokens(text) > 0
     assert client.count_tokens_batch([text]) == [client.count_tokens(text)]
+
+
+@pytest.mark.no_network
+async def test_a_hot_budget_update_is_kept_until_done_and_its_failure_logged(llm_service):
+    from loguru import logger
+
+    service = llm_service[0]
+
+    async def failing_update(_settings):
+        raise RuntimeError("ledger offline")
+
+    service._spending_ledger.update_settings = failing_update
+    messages = []
+    sink = logger.add(lambda message: messages.append(str(message)), level="ERROR")
+    try:
+        service._schedule_budget_settings_update(object())
+        assert len(service._budget_update_tasks) == 1  # held, not left to the GC
+        await asyncio.gather(*service._budget_update_tasks, return_exceptions=True)
+        await asyncio.sleep(0)
+    finally:
+        logger.remove(sink)
+
+    assert service._budget_update_tasks == set()
+    assert any("Could not apply the new LLM spending budget" in m for m in messages)

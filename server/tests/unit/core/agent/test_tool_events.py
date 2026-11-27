@@ -105,3 +105,31 @@ async def test_an_unanswered_or_abandoned_question_gets_the_default():
     await asyncio.sleep(0)
     broker.close()  # the run finished first
     assert await waiting == "b"
+
+
+@pytest.mark.no_network
+async def test_cancelling_the_stream_mid_wait_leaves_no_pending_waiter():
+    import asyncio as _asyncio
+
+    from core.agent.tool_events import stream_tool_calls
+
+    started = _asyncio.Event()
+
+    async def slow():
+        started.set()
+        await _asyncio.Event().wait()
+
+    async def consume():
+        async for _event in stream_tool_calls([("c1", "slow_tool", slow)]):
+            pass
+
+    before = set(_asyncio.all_tasks())
+    consumer = _asyncio.create_task(consume())
+    await started.wait()
+    await _asyncio.sleep(0)
+    consumer.cancel()
+    await _asyncio.gather(consumer, return_exceptions=True)
+    await _asyncio.sleep(0)
+
+    leftover = [task for task in _asyncio.all_tasks() - before if not task.done()]
+    assert leftover == []
