@@ -1116,3 +1116,22 @@ async def test_a_hot_budget_update_is_kept_until_done_and_its_failure_logged(llm
 
     assert service._budget_update_tasks == set()
     assert any("Could not apply the new LLM spending budget" in m for m in messages)
+
+
+@pytest.mark.no_network
+async def test_a_failed_model_list_is_not_fetched_again_on_every_call(llm_service):
+    service, raw_client, *_ = llm_service
+    service._raw_client = raw_client
+    service._listed_windows = None
+    raw_client.models.list = AsyncMock(side_effect=ConnectionError("provider down"))
+
+    # Concurrent callers share one fetch, and later calls back off.
+    await asyncio.gather(*(service._load_model_list() for _ in range(5)))
+    await service._load_model_list()
+    assert raw_client.models.list.await_count == 1
+
+    service._model_list_retry_at = 0.0  # the back-off has passed
+    raw_client.models.list = AsyncMock(return_value=MagicMock(data=[]))
+    await service._load_model_list()
+    assert raw_client.models.list.await_count == 1
+    assert service._listed_windows == {}

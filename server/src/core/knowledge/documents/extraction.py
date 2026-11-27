@@ -55,6 +55,7 @@ from core.knowledge.documents.constants import (
     CHUNK_SIZE_TOKENS,
     IMAGE_EXTENSIONS,
 )
+from core.knowledge.documents.lines import split_lines
 
 # Module-level splitter — constructing SentenceSplitter loads a tokenizer,
 # so we create it once rather than on every split_text() call.
@@ -1399,7 +1400,7 @@ def _split_text_with_lines(
 ) -> List[DocumentChunk]:
     """Split prose on whole lines, preserving exact one-based line spans."""
 
-    lines = text.splitlines()
+    lines = split_lines(text)
     if not lines:
         raise ValueError("Document produced no non-empty chunks")
 
@@ -1462,7 +1463,7 @@ def _line_chunk(
 def _split_markdown(text: str) -> List[DocumentChunk]:
     """Keep Markdown chunks inside their active heading path."""
 
-    lines = text.splitlines()
+    lines = split_lines(text)
     if not lines:
         raise ValueError("Document produced no non-empty chunks")
     chunks: List[DocumentChunk] = []
@@ -1640,10 +1641,7 @@ def _split_notebook(text: str) -> List[DocumentChunk]:
             raise ValueError("Notebook cell content is incomplete")
         content = text[match.end() : end]
         position = end
-        lines_before_position = lines_before_source + sum(
-            part.endswith(("\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"))
-            for part in content.splitlines(keepends=True)
-        )
+        lines_before_position = lines_before_source + content.count("\n")
         if position < len(text):
             if not text.startswith("\n\n", position):
                 raise ValueError("Notebook cell separator is invalid")
@@ -1654,7 +1652,7 @@ def _split_notebook(text: str) -> List[DocumentChunk]:
             continue
         try:
             if cell_type == "code":
-                lines = content.splitlines()
+                lines = split_lines(content)
                 non_empty = [index for index, line in enumerate(lines) if line.strip()]
                 first, last = non_empty[0], non_empty[-1]
                 cell_chunks = _split_code_sections(
@@ -1885,7 +1883,7 @@ def _tree_sitter_node_text(node, source: bytes) -> str:
 
 
 def _split_code_with_regex(text: str, language: str) -> List[DocumentChunk]:
-    lines = text.splitlines()
+    lines = split_lines(text)
     if not lines:
         raise ValueError("Document produced no non-empty chunks")
     boundaries = []
@@ -1906,7 +1904,7 @@ def _split_code_sections(
     *,
     line_offset: int = 0,
 ) -> List[DocumentChunk]:
-    lines = text.splitlines()
+    lines = split_lines(text)
     if not lines:
         raise ValueError("Document produced no non-empty chunks")
     section_starts = [(0, None)]

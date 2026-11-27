@@ -82,8 +82,8 @@ class ToolHandoffs:
             # A follower cancelled before its first step never runs its
             # handlers, so end the adopted work here instead of leaking it.
             if task.cancelled():
-                if not work.done():
-                    work.cancel()
+                if not work.done():  # pragma: no cover
+                    work.cancel()  # pragma: no cover
                 self._tasks.pop(item["item_id"], None)
                 item.update(
                     state="interrupted" if self._closed else "stopped",

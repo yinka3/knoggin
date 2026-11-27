@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -1034,9 +1035,10 @@ async def test_run_agent_stream_persists_the_final_answer_and_sources_before_res
     persisted = False
     source_handoffs = []
 
-    async def history(limit, up_to_msg_id=None):
+    async def history(*, limit, up_to_msg_id=None, **_scope):
         history_calls.append((limit, up_to_msg_id))
-        return [{"role": "assistant", "content": "A prior durable answer."}]
+        return [{"role": "assistant", "content": "A prior durable answer.",
+                 "timestamp": 1000, "metadata": {}}]
 
     async def persist_assistant(
         message, candidates, *, readable_project_ids, artifact=None
@@ -1062,7 +1064,7 @@ async def test_run_agent_stream_persists_the_final_answer_and_sources_before_res
             "data": {"message": "must not follow a response"},
         }
 
-    ctx.get_conversation_context = history
+    resources.knowledge_store.get_session_history = history
     resources.knowledge_store.finalize_assistant_exchange = persist_assistant
     orchestrator = _FakeTurnOrchestrator(handler)
     events = []
@@ -1079,9 +1081,10 @@ async def test_run_agent_stream_persists_the_final_answer_and_sources_before_res
     # History is read in pages, newest first, only as far as the budget needs.
     assert history_calls == [(200, 0)]
     assert orchestrator.calls[0]["user_query"] == "What did we decide?"
-    assert orchestrator.calls[0]["conversation_history"] == [
-        {"role": "assistant", "content": "A prior durable answer."}
-    ]
+    assert [
+        {key: turn[key] for key in ("role", "content")}
+        for turn in orchestrator.calls[0]["conversation_history"]
+    ] == [{"role": "assistant", "content": "A prior durable answer."}]
     assert orchestrator.calls[0]["user_message_id"] == 1
     assistant_message, candidates, readable_project_ids = source_handoffs[0]
     assert assistant_message["content"] == "Durable final answer"
@@ -1946,15 +1949,17 @@ async def test_history_pages_stop_once_they_could_fill_the_budget():
     ctx = object.__new__(SessionRuntime)
     calls = []
 
-    async def history(limit, up_to_msg_id=None):
+    async def history(*, limit, up_to_msg_id=None, **_scope):
         calls.append(up_to_msg_id)
         newest = up_to_msg_id
         return [
-            {"message_id": message_id, "content": "x" * 100}
+            {"message_id": message_id, "content": "x" * 100, "role": "user",
+             "timestamp": 1000, "metadata": {}}
             for message_id in range(newest - limit + 1, newest + 1)
         ]
 
-    ctx.get_conversation_context = history
+    ctx.user_name, ctx.session_id = "ada", "s1"
+    ctx.resources = SimpleNamespace(knowledge_store=SimpleNamespace(get_session_history=history))
 
     # 1,000 tokens is about 4,000 characters, so one 200-message page of
     # 100 characters each already could fill it.
@@ -2146,3 +2151,119 @@ async def test_a_stop_pressed_while_history_loads_is_not_forgotten(context, monk
     await _collect_turn(ctx, Message(content="hello"), _FakeTurnOrchestrator(handler))
 
     assert seen == [True]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_hidden_steers_do_not_end_history_paging_early(context, monkeypatch):
+    ctx, resources = context
+    monkeypatch.setattr(type(ctx), "_HISTORY_PAGE", 3)
+    rows = [
+        {"message_id": index, "role": "user", "content": f"turn {index}",
+         "timestamp": index * 1000, "metadata": {}}
+        for index in range(1, 7)
+    ]
+    # The newest page holds an undelivered steer, which the prompt hides.
+    rows[4]["metadata"] = {"origin": "steer", "run_steer": {"state": "undelivered"}}
+
+    async def history(*, limit, up_to_msg_id, **_kwargs):
+        visible = [row for row in rows if row["message_id"] <= up_to_msg_id]
+        return visible[-limit:]
+
+    resources.knowledge_store.get_session_history = history
+
+    turns = await ctx._recent_history_within(10_000, up_to_msg_id=6)
+
+    assert [turn["message_id"] for turn in turns] == [1, 2, 3, 4, 6]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_make_room_for_follow_up_returns_early_when_under_limit(context):
+    ctx, _ = context
+    for index in range(5):
+        ctx._follow_ups[f"old-{index}"] = {
+            "queue_id": f"old-{index}", "after_run_id": None, "run_id": f"run-{index}",
+            "state": "completed", "assistant_message_id": None, "error_code": None,
+        }
+    before = set(ctx._follow_ups)
+    ctx._make_room_for_follow_up()
+    assert set(ctx._follow_ups) == before
+    await ctx.shutdown()
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_follow_up_records_clarification_state(context):
+    ctx, resources = context
+
+    async def handler(kwargs):
+        if kwargs["user_query"] == "follow-up-question":
+            yield {
+                "event": "clarification",
+                "data": {
+                    "question": "Can you clarify?",
+                    "usage": {
+                        "prompt_tokens": 2,
+                        "completion_tokens": 0,
+                        "total_tokens": 2,
+                        "approximate": False,
+                    },
+                },
+            }
+            return
+        yield _response_event("Done")
+
+    async def finalize_with_outcome(
+        message, candidates, *, readable_project_ids, artifact=None, outcome="assistant_final"
+    ):
+        resources.knowledge_store.saved_message_logs.append([message])
+        return message["id"], [], True
+
+    resources.knowledge_store.finalize_assistant_exchange = finalize_with_outcome
+    ctx.agent_orchestrator = _FakeTurnOrchestrator(handler)
+    first = await ctx.open_agent_run_stream(Message(content="first"))
+    queued = await ctx.queue_follow_up(first.run_id, "follow-up-question")
+    await _collect_stream(first)
+
+    async def settled():
+        while (await ctx.get_follow_up(queued["queue_id"]))["state"] not in {
+            "clarification", "failed", "completed", "cancelled"
+        }:
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(settled(), 2)
+    assert (await ctx.get_follow_up(queued["queue_id"]))["state"] == "clarification"
+    await ctx.shutdown()
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_follow_up_records_recognized_error_code(context):
+    ctx, _ = context
+
+    async def handler(kwargs):
+        if kwargs["user_query"] == "follow-up-error":
+            yield {
+                "event": "error",
+                "data": {"code": "llm_budget_exhausted", "message": "Budget exceeded"},
+            }
+            return
+        yield _response_event("Done")
+
+    ctx.agent_orchestrator = _FakeTurnOrchestrator(handler)
+    first = await ctx.open_agent_run_stream(Message(content="first"))
+    queued = await ctx.queue_follow_up(first.run_id, "follow-up-error")
+    await _collect_stream(first)
+
+    async def settled():
+        while (await ctx.get_follow_up(queued["queue_id"]))["state"] not in {
+            "failed", "completed", "cancelled", "clarification"
+        }:
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(settled(), 2)
+    result = await ctx.get_follow_up(queued["queue_id"])
+    assert result["state"] == "failed"
+    assert result["error_code"] == "llm_budget_exhausted"
+    await ctx.shutdown()

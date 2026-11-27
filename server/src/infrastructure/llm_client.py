@@ -2,6 +2,7 @@ import asyncio
 import json
 import math
 import re
+import time
 from contextlib import aclosing, asynccontextmanager
 from typing import (
     Any,
@@ -154,6 +155,10 @@ def prompt_cache_tokens(usage: Any) -> tuple[int, int]:
     return max(cached - written, 0), written
 
 
+# After a failed model-list fetch, calls skip it for this long.
+_MODEL_LIST_RETRY_SECONDS = 60.0
+
+
 class LLMService:
     @property
     def spending_ledger(self) -> ExternalModelSpendingLedger:
@@ -204,6 +209,10 @@ class LLMService:
         self._client_usage: dict[AsyncOpenAI, int] = {}
         # Context sizes from the provider's model list, fetched once.
         self._listed_windows: dict[str, int | None] | None = None
+        # One fetch at a time, and none for a while after a failure: during an
+        # outage every call would otherwise wait on its own models.list().
+        self._model_list_lock = asyncio.Lock()
+        self._model_list_retry_at = 0.0
         self._listed_parameters: dict[str, frozenset[str]] | None = None
         self._serves_ollama_ps: bool | None = None
         self._active_requests: set[asyncio.Task] = set()
@@ -398,6 +407,7 @@ class LLMService:
             self._client = replacement_instructor
             self._listed_windows = None
             self._listed_parameters = None
+            self._model_list_retry_at = 0.0
             self._spending_ledger.set_listed_prices({})
             self._serves_ollama_ps = None
             self._retire_client(previous_raw)
@@ -557,14 +567,25 @@ class LLMService:
     async def _load_model_list(self) -> None:
         """Fetch the provider's model list once: context sizes and prices."""
 
-        client = self._raw_client
-        if client is None or self._listed_windows is not None:
+        if self._listed_windows is not None or time.monotonic() < self._model_list_retry_at:
             return
-        try:
-            page = await client.models.list()
-        except Exception as exc:
-            logger.debug("LLMService: model list unavailable ({})", exc)
-            return
+        async with self._model_list_lock:
+            client = self._raw_client
+            if (
+                client is None
+                or self._listed_windows is not None
+                or time.monotonic() < self._model_list_retry_at
+            ):
+                return  # another caller fetched it, or just failed to
+            try:
+                page = await client.models.list()
+            except Exception as exc:
+                self._model_list_retry_at = time.monotonic() + _MODEL_LIST_RETRY_SECONDS
+                logger.debug("LLMService: model list unavailable ({})", exc)
+                return
+            self._store_model_list(page)
+
+    def _store_model_list(self, page) -> None:
         self._listed_windows = {
             str(row.id): _reported_window(row) for row in page.data
         }

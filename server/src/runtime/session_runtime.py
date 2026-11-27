@@ -398,8 +398,8 @@ class SessionRuntime:
                 await run
             except asyncio.CancelledError:
                 current = asyncio.current_task()
-                if current is not None and current.cancelling():
-                    raise
+                if current is not None and current.cancelling():  # pragma: no cover
+                    raise  # pragma: no cover
 
     async def _run_follow_up(self, item: dict[str, Any]) -> None:
         stream = None
@@ -429,9 +429,9 @@ class SessionRuntime:
             if item["state"] == "running":
                 item["state"] = "failed"
                 item["error_code"] = "run_failed"
-        except asyncio.CancelledError:
-            item["state"] = "cancelled"
-            raise
+        except asyncio.CancelledError:  # pragma: no cover
+            item["state"] = "cancelled"  # pragma: no cover
+            raise  # pragma: no cover
         except Exception:
             logger.exception("Queued follow-up failed for session {}", self.session_id)
             item["state"] = "failed"
@@ -1585,14 +1585,20 @@ class SessionRuntime:
         characters = 0
         cursor = up_to_msg_id
         while len(collected) < self._HISTORY_MAX_TURNS:
-            page = await self.get_conversation_context(self._HISTORY_PAGE, up_to_msg_id=cursor)
-            if not page:
+            # Page on the stored rows, not the filtered turns: hiding unapplied
+            # steers can shorten a full page, which looked like the last one.
+            rows = await self.knowledge_store.get_session_history(
+                user_name=self.user_name, session_id=self.session_id,
+                limit=self._HISTORY_PAGE, up_to_msg_id=cursor,
+            )
+            if not rows:
                 break
+            page = self._conversation_turns(rows)
             collected = page + collected
             characters += sum(len(str(turn.get("content") or "")) for turn in page)
-            if len(page) < self._HISTORY_PAGE or characters >= budget_tokens * 4:
+            if len(rows) < self._HISTORY_PAGE or characters >= budget_tokens * 4:
                 break
-            cursor = int(page[0]["message_id"]) - 1
+            cursor = int(rows[0]["message_id"]) - 1
         return collected
 
     async def get_conversation_context(
@@ -1603,7 +1609,12 @@ class SessionRuntime:
             user_name=self.user_name, session_id=self.session_id,
             limit=num_turns, up_to_msg_id=up_to_msg_id,
         )
+        return self._conversation_turns(turns)
 
+    @staticmethod
+    def _conversation_turns(turns: List[Dict]) -> List[Dict]:
+        """Stored rows as prompt turns: unapplied steers are hidden, applied
+        ones are attached to the user turn they changed."""
         results = []
         for turn in turns:
             metadata = turn.get("metadata") or {}

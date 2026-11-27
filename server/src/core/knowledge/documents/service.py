@@ -46,6 +46,7 @@ from common.utils.lifecycle import settle_owned_task
 from common.utils.time_utils import get_now_iso
 from core.knowledge.db.readers.document_reader import DocumentReader
 from core.knowledge.db.writers.document_writer import DocumentWriter
+from core.knowledge.documents.lines import split_lines
 from core.knowledge.embedding_service import EmbeddingService
 from core.project.project_files import (
     CONTEXT_FILE_PATH,
@@ -773,7 +774,7 @@ class DocumentService:
                     content = filesystem.read_bytes(relative).decode("utf-8")
                 except (UnicodeDecodeError, OSError, ValueError):
                     continue
-                for number, line in enumerate(content.splitlines(), start=1):
+                for number, line in enumerate(split_lines(content), start=1):
                     if needle in (line if case_sensitive else line.casefold()):
                         matches.append({"path": relative, "line": number, "text": line[:300]})
                         if len(matches) >= max_matches:
@@ -862,7 +863,7 @@ class DocumentService:
             text = content.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise ValueError("project file is not UTF-8 text") from exc
-        lines = text.splitlines(keepends=True) or [text]
+        lines = split_lines(text, keepends=True) or [text]
         if start_line > len(lines):
             raise ValueError(f"start_line {start_line} exceeds document length {len(lines)}")
         requested_end = min(
@@ -1368,14 +1369,14 @@ class DocumentService:
                 "end_row": end_line,
             }
         elif selected_page is None:
-            lines = text.splitlines() or [text]
+            lines = split_lines(text) or [text]
             locator = {
                 "kind": "text_lines",
                 "start_line": start_line,
                 "end_line": end_line,
             }
         else:
-            lines = text.splitlines() or [text]
+            lines = split_lines(text) or [text]
 
         total_lines = len(lines)
         if start_line > total_lines:

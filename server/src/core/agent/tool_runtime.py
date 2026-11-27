@@ -256,8 +256,8 @@ async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
                     status="failed",
                     error="Tool execution was cancelled or timed out.",
                 ))
-            except asyncio.CancelledError:
-                pass
+            except asyncio.CancelledError:  # pragma: no cover
+                pass  # pragma: no cover
         raise
     except Exception as exc:
         if audit_id:

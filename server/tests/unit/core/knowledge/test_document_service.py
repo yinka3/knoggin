@@ -4696,3 +4696,14 @@ async def test_the_first_reconcile_removes_scratch_left_by_a_crashed_write(
 
     assert not stale.exists()
     assert fresh.exists()  # young enough that a live write may own it
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+def test_write_bytes_raises_when_content_exceeds_size_limit(tmp_path, monkeypatch):
+    from core.knowledge.documents import filesystem as filesystem_module
+
+    monkeypatch.setattr(filesystem_module, "MAX_DOCUMENT_SIZE", 4)
+    fs = ProjectFilesystem(tmp_path)
+    with pytest.raises(ValueError, match="size limit"):
+        fs.write_bytes("doc.txt", b"12345")

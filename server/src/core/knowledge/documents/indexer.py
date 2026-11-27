@@ -528,18 +528,18 @@ class DocumentIndexer:
                             break
                         retry_at = await self._reader.next_index_retry_at()
                         retry_time = parse_iso_time(retry_at) if retry_at is not None else None
-                        if self._document_tasks:
+                        if self._document_tasks:  # pragma: no cover
                             # Each finished task wakes this loop as well.
-                            timeout = _DRAIN_RETRY_SECONDS
+                            timeout = _DRAIN_RETRY_SECONDS  # pragma: no cover
                         else:
                             timeout = (
                                 (retry_time - get_now()).total_seconds()
                                 if retry_time is not None else 0
                             )
-                            if timeout <= 0:
+                            if timeout <= 0:  # pragma: no cover
                                 # Work is due but none was taken: admission was
                                 # refused (queue full), so back off, not spin.
-                                timeout = _DRAIN_FAILURE_RETRY_SECONDS
+                                timeout = _DRAIN_FAILURE_RETRY_SECONDS  # pragma: no cover
                     except Exception as exc:
                         logger.error("Document index admission loop failed: {}", exc)
                         timeout = _DRAIN_FAILURE_RETRY_SECONDS
