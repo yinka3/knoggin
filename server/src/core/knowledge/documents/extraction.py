@@ -1646,8 +1646,8 @@ def _split_notebook(text: str) -> List[DocumentChunk]:
             if not text.startswith("\n\n", position):
                 raise ValueError("Notebook cell separator is invalid")
             position += 2
-            # A trailing CR joins the separator's first LF into one CRLF.
-            lines_before_position += 1 if content.endswith("\r") else 2
+            # The separator ends the cell's last line, then one empty line.
+            lines_before_position += 2
         if not content.strip():
             continue
         try:
