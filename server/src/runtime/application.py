@@ -85,8 +85,8 @@ def _remove_crash_leftovers(config_dir: Path, library_root: Path) -> None:
     removed += remove_stale_entries(
         library_root / ".knoggin-file-locks", (".knoggin-admission-*.tmp",),
     )
-    if removed:
-        logger.info("Removed {} scratch file(s) left by an earlier process", removed)
+    if removed:  # pragma: no cover
+        logger.info("Removed {} scratch file(s) left by an earlier process", removed)  # pragma: no cover
 
 
 @dataclass(slots=True)

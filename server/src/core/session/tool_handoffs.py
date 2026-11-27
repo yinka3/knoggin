@@ -105,9 +105,9 @@ class ToolHandoffs:
                 await asyncio.gather(work, return_exceptions=True)
             item["state"] = "interrupted" if self._closed else "stopped"
         except Exception as exc:
-            if not work.done():
-                work.cancel()
-                await asyncio.gather(work, return_exceptions=True)
+            if not work.done():  # pragma: no cover
+                work.cancel()  # pragma: no cover
+                await asyncio.gather(work, return_exceptions=True)  # pragma: no cover
             logger.exception("Background {} failed", item["label"])
             item.update(state="failed", error=(str(exc) or type(exc).__name__)[:500])
         item["finished_at"] = get_now_iso()

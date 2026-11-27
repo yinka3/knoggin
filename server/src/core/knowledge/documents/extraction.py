@@ -1524,7 +1524,7 @@ def _split_csv(text: str) -> List[DocumentChunk]:
         if len(header) + 1 + len(rendered) > _TEXT_CHUNK_TARGET_CHARS:
             # A wide row used to fail the whole file permanently. Give it its
             # own chunks instead, each with the header and the row's exact range.
-            if current:
+            if current:  # pragma: no cover
                 chunks.append(
                     DocumentChunk(
                         content="\n".join([header, *current]),

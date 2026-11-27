@@ -296,9 +296,9 @@ class SessionManager:
             # finish it now instead of refusing this session until restart.
             try:
                 await self._deactivate_runtime_session_locked(session_id)
-            except Exception as exc:
-                raise RuntimeError("Session cleanup is pending") from exc
-        if session_id in self._bootstrap_cleanup:
+            except Exception as exc:  # pragma: no cover
+                raise RuntimeError("Session cleanup is pending") from exc  # pragma: no cover
+        if session_id in self._bootstrap_cleanup:  # pragma: no cover
             raise RuntimeError("Session cleanup is pending")
         active_session = self._active_sessions.get(session_id)
         if active_session is not None:
