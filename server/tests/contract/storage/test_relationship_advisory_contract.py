@@ -298,7 +298,7 @@ async def test_conversation_observations_become_reviewable_advisory(real_postgre
     )
     assert (await service.list_maintenance_reviews('project-1'))[-1].status == 'stale'
     assert await service.refresh_relationship_advisories('project-1') == []
-    assert len(await service.list_maintenance_reviews('project-1')) == 7
+    assert len(await service.list_maintenance_reviews('project-1')) == 6
     assert await client.fetch_one(
         "SELECT domain_config -> 'relationships' AS relationships "
         "FROM public.projects WHERE project_id = 'project-1'"

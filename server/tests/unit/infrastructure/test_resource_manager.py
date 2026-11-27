@@ -75,6 +75,7 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
                     merge_model="merge",
                 )
             )
+            self.config_dir = tmp_path
 
         def subscribe(self, callback, path=None):
             subscribe_calls.append((callback, path))
@@ -376,7 +377,9 @@ async def test_resource_manager_resolves_gpu_cuda(monkeypatch, tmp_path):
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
 
     monkeypatch.setattr(
-        resources_module.ConfigManager, "get", lambda: MagicMock(config=RootConfig())
+        resources_module.ConfigManager,
+        "get",
+        lambda: MagicMock(config=RootConfig(), config_dir=tmp_path),
     )
     monkeypatch.setattr(resources_module, "KnowledgeStore", FakeKnowledgeStore)
     monkeypatch.setattr(resources_module, "PostgresClient", FakePostgresClient)
@@ -457,7 +460,9 @@ async def test_resource_manager_resolves_gpu_mps(monkeypatch, tmp_path):
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
 
     monkeypatch.setattr(
-        resources_module.ConfigManager, "get", lambda: MagicMock(config=RootConfig())
+        resources_module.ConfigManager,
+        "get",
+        lambda: MagicMock(config=RootConfig(), config_dir=tmp_path),
     )
     monkeypatch.setattr(resources_module, "KnowledgeStore", FakeKnowledgeStore)
     monkeypatch.setattr(resources_module, "PostgresClient", FakePostgresClient)
@@ -519,7 +524,9 @@ async def test_resource_manager_resolves_cpu_when_gpu_false(monkeypatch, tmp_pat
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)  # Should ignore this
 
     monkeypatch.setattr(
-        resources_module.ConfigManager, "get", lambda: MagicMock(config=RootConfig())
+        resources_module.ConfigManager,
+        "get",
+        lambda: MagicMock(config=RootConfig(), config_dir=tmp_path),
     )
     monkeypatch.setattr(resources_module, "KnowledgeStore", FakeKnowledgeStore)
     monkeypatch.setattr(resources_module, "PostgresClient", FakePostgresClient)
