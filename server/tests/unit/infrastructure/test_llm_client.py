@@ -453,6 +453,35 @@ async def test_stream_retries_only_before_output(llm_service, monkeypatch):
 
 @pytest.mark.unit
 @pytest.mark.no_network
+async def test_stopping_a_stream_closes_the_provider_response(llm_service):
+    service, raw_client, _, _, _ = llm_service
+
+    class ProviderStream:
+        closed = False
+
+        def __aiter__(self):
+            return self._chunks()
+
+        async def _chunks(self):
+            yield stream_chunk(content="partial")
+            await asyncio.Event().wait()
+
+        async def close(self):
+            self.closed = True
+
+    stream = ProviderStream()
+    raw_client.chat.completions.create.return_value = stream
+    events = service.stream_with_tools(system="system", user="user", tools=[])
+
+    assert (await anext(events))["event"] == "token"
+    # What a stopped run does to this generator.
+    await events.aclose()
+
+    assert stream.closed
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 async def test_stream_does_not_retry_after_output(llm_service):
     service, raw_client, _, _, _ = llm_service
 
@@ -1063,3 +1092,46 @@ def test_counting_tokens_accepts_text_that_spells_a_special_token():
 
     assert client.count_tokens(text) > 0
     assert client.count_tokens_batch([text]) == [client.count_tokens(text)]
+
+
+@pytest.mark.no_network
+async def test_a_hot_budget_update_is_kept_until_done_and_its_failure_logged(llm_service):
+    from loguru import logger
+
+    service = llm_service[0]
+
+    async def failing_update(_settings):
+        raise RuntimeError("ledger offline")
+
+    service._spending_ledger.update_settings = failing_update
+    messages = []
+    sink = logger.add(lambda message: messages.append(str(message)), level="ERROR")
+    try:
+        service._schedule_budget_settings_update(object())
+        assert len(service._budget_update_tasks) == 1  # held, not left to the GC
+        await asyncio.gather(*service._budget_update_tasks, return_exceptions=True)
+        await asyncio.sleep(0)
+    finally:
+        logger.remove(sink)
+
+    assert service._budget_update_tasks == set()
+    assert any("Could not apply the new LLM spending budget" in m for m in messages)
+
+
+@pytest.mark.no_network
+async def test_a_failed_model_list_is_not_fetched_again_on_every_call(llm_service):
+    service, raw_client, *_ = llm_service
+    service._raw_client = raw_client
+    service._listed_windows = None
+    raw_client.models.list = AsyncMock(side_effect=ConnectionError("provider down"))
+
+    # Concurrent callers share one fetch, and later calls back off.
+    await asyncio.gather(*(service._load_model_list() for _ in range(5)))
+    await service._load_model_list()
+    assert raw_client.models.list.await_count == 1
+
+    service._model_list_retry_at = 0.0  # the back-off has passed
+    raw_client.models.list = AsyncMock(return_value=MagicMock(data=[]))
+    await service._load_model_list()
+    assert raw_client.models.list.await_count == 1
+    assert service._listed_windows == {}

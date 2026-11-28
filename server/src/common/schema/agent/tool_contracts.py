@@ -1536,23 +1536,38 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "install_python_package",
+            "name": "run_approved_command",
             "description": (
-                "Ask the user to approve installing one exact-version Python package "
-                "through a temporary networked container. Install into the project's "
-                "persistent home volume; the normal command container stays offline."
+                "Reach the internet from the sandbox, after the user approves the exact "
+                "command. Normal workspace commands have no network. These run in a "
+                "container that cannot see any workspace and write under /home/sandbox, "
+                "which later workspace commands can use: pip_install {package: "
+                "name==version} (importable afterwards), download_file {url, filename} "
+                "(to /home/sandbox/downloads), git_clone {url, name} (to "
+                "/home/sandbox/repos; private GitHub repos if the project allows the "
+                "GitHub login), hf_download {repo: owner/model or datasets/owner/name, "
+                "file} (to /home/sandbox/downloads/huggingface), kaggle_download "
+                "{dataset: owner/name} (unpacked to /home/sandbox/datasets/kaggle; needs "
+                "the Kaggle login), npm_install {package: name@version}."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "package": {"type": "string", "minLength": 4, "maxLength": 260,
-                                "description": "Exact package and version, e.g. colorama==0.4.6."},
+                    "name": {"type": "string", "enum": [
+                        "pip_install", "download_file", "git_clone", "hf_download",
+                        "kaggle_download", "npm_install",
+                    ]},
+                    "args": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string", "maxLength": 2000},
+                        "description": "The command's arguments by name, e.g. {\"package\": \"colorama==0.4.6\"}.",
+                    },
                     "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 900},
                 },
-                "required": ["package"],
+                "required": ["name"],
                 "additionalProperties": False,
             },
-            "tags": ["project", "core", "workspace:install"],
+            "tags": ["project", "core", "workspace:approved"],
         },
     },
     {
@@ -1759,13 +1774,17 @@ _TOOL_CAPABILITIES = {
     "report_relationship_conflict": REVERSIBLE_WRITE_CAPABILITY,
     "create_project_file": REVERSIBLE_WRITE_CAPABILITY,
     "run_workspace_command": REVERSIBLE_WRITE_CAPABILITY,
-    "install_python_package": REVERSIBLE_WRITE_CAPABILITY,
+    "run_approved_command": REVERSIBLE_WRITE_CAPABILITY,
     "update_project_file": REVERSIBLE_WRITE_CAPABILITY,
     "append_project_file": REVERSIBLE_WRITE_CAPABILITY,
     "move_project_file": REVERSIBLE_WRITE_CAPABILITY,
     "delete_project_file": REVERSIBLE_WRITE_CAPABILITY,
     "create_project_folder": REVERSIBLE_WRITE_CAPABILITY,
     "save_findings": REVERSIBLE_WRITE_CAPABILITY,
+    # They start or stop work, so they are audited like other writes.
+    # Research runs and background jobs already exclude them by name.
+    "start_background_task": REVERSIBLE_WRITE_CAPABILITY,
+    "cancel_background_task": REVERSIBLE_WRITE_CAPABILITY,
 }
 
 for _schema in TOOL_SCHEMAS:
@@ -1864,6 +1883,7 @@ def _validate_schema_value(value, schema: dict, path: str) -> list[str]:
         unknown = set(value) - set(properties)
         if unknown and schema.get("additionalProperties") is False:
             errors.append(f"{path} contains {len(unknown)} unknown field(s)")
+        extra_schema = schema.get("additionalProperties")
         for key, item in value.items():
             if key in properties:
                 errors.extend(
@@ -1873,5 +1893,7 @@ def _validate_schema_value(value, schema: dict, path: str) -> list[str]:
                         f"{path}.{key}",
                     )
                 )
+            elif isinstance(extra_schema, dict):
+                errors.extend(_validate_schema_value(item, extra_schema, f"{path}.{key}"))
 
     return errors

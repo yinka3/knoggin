@@ -50,6 +50,7 @@ async def test_application_start_owns_and_attaches_sandbox(monkeypatch, tmp_path
     config = RootConfig()
     config_manager = SimpleNamespace(
         config=config,
+        config_dir=tmp_path,
         resolve_path=lambda _path: tmp_path / "projects",
     )
     monkeypatch.setattr(

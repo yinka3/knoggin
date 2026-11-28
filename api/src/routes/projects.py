@@ -1,5 +1,6 @@
 """Project metadata and lifecycle routes."""
 
+from loguru import logger
 from pydantic import ValidationError
 from starlette.responses import JSONResponse
 from starlette.routing import Route
@@ -66,7 +67,7 @@ async def create_project(request):
     try:
         row = await request.app.state.runtime.projects.create_project(
             name=body.name, description=body.description,
-            domain_config=DEFAULT_DOMAIN,
+            domain_config=DEFAULT_DOMAIN, connections=body.connections,
         )
     except ValueError:
         return _error("invalid_project", "Invalid project", 422)
@@ -119,7 +120,12 @@ async def reactivate_project(request):
     project = await request.app.state.runtime.projects.get_project(project_id)
     if project is None or project["status"] == "deleted":
         return _error("project_not_found", "Project not found", 404)
-    row = await request.app.state.runtime.projects.reactivate_project(project_id)
+    try:
+        row = await request.app.state.runtime.projects.reactivate_project(project_id)
+    except ValueError:  # deleted after the check above
+        row = None
+    if row is None:
+        return _error("project_not_found", "Project not found", 404)
     return JSONResponse(_public(row))
 
 
@@ -160,10 +166,17 @@ async def add_workspace(request):
     try:
         async with project_documents(request.app.state.runtime, project_id) as service:
             await service.create_project_folder(name)
-    except (OSError, ValueError, WorkspaceConflictError):
-        # A file already has that name; the folder is the workspace.
-        await projects.remove_workspace(project_id, name)
-        return _error("invalid_workspace", "A project file already uses that name", 409)
+    except Exception as exc:
+        # Any failure undoes the workspace, so it never outlives its folder;
+        # a failed undo is logged instead of hiding the original error.
+        try:
+            await projects.remove_workspace(project_id, name)
+        except Exception:
+            logger.exception("Could not undo workspace {} in project {}", name, project_id)
+        if isinstance(exc, (OSError, ValueError, WorkspaceConflictError)):
+            # A file already has that name; the folder is the workspace.
+            return _error("invalid_workspace", "A project file already uses that name", 409)
+        raise
     return JSONResponse({"workspaces": workspace_views(workspaces)}, status_code=201)
 
 

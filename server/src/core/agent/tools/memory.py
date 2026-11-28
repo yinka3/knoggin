@@ -32,33 +32,28 @@ class MemoryTools:
                 "read_agent_brain", "No durable agent identity is active"
             )
 
-        try:
-            rows = await self.postgres.fetch_all(
-                """
-                SELECT brain, persona, brain_revision
-                FROM public.agents
-                WHERE user_name = %(user_name)s AND agent_id = %(agent_id)s
-                """,
-                {"user_name": self.user_name, "agent_id": target_agent},
+        rows = await self.postgres.fetch_all(
+            """
+            SELECT brain, persona, brain_revision
+            FROM public.agents
+            WHERE user_name = %(user_name)s AND agent_id = %(agent_id)s
+            """,
+            {"user_name": self.user_name, "agent_id": target_agent},
+        )
+        if not rows:
+            raise ToolExecutionError(
+                "read_agent_brain", "Active agent identity was not found"
             )
-            if not rows:
-                raise ToolExecutionError(
-                    "read_agent_brain", "Active agent identity was not found"
-                )
-            row = rows[0]
-            return {
-                "content": normalize_agent_brain_for_read(
-                    row.get("brain") or "",
-                    row.get("persona") or "",
-                ),
-                "revision": row.get("brain_revision", 1),
-                "editable_sections": list(EDITABLE_BRAIN_SECTIONS),
-                "snapshot_policy": BRAIN_SNAPSHOT_POLICY,
-            }
-        except ToolExecutionError:
-            raise
-        except Exception:
-            raise
+        row = rows[0]
+        return {
+            "content": normalize_agent_brain_for_read(
+                row.get("brain") or "",
+                row.get("persona") or "",
+            ),
+            "revision": row.get("brain_revision", 1),
+            "editable_sections": list(EDITABLE_BRAIN_SECTIONS),
+            "snapshot_policy": BRAIN_SNAPSHOT_POLICY,
+        }
 
     async def list_agent_brain_snapshots(self) -> Dict:
         """List available restore points for the active durable Brain."""
@@ -68,46 +63,41 @@ class MemoryTools:
                 "list_agent_brain_snapshots", "No durable agent identity is active"
             )
 
-        try:
-            current_rows = await self.postgres.fetch_all(
-                """
-                SELECT brain_revision
-                FROM public.agents
-                WHERE user_name = %(user_name)s AND agent_id = %(agent_id)s
-                """,
-                {"user_name": self.user_name, "agent_id": target_agent},
+        current_rows = await self.postgres.fetch_all(
+            """
+            SELECT brain_revision
+            FROM public.agents
+            WHERE user_name = %(user_name)s AND agent_id = %(agent_id)s
+            """,
+            {"user_name": self.user_name, "agent_id": target_agent},
+        )
+        if not current_rows:
+            raise ToolExecutionError(
+                "list_agent_brain_snapshots",
+                "Active agent identity was not found",
             )
-            if not current_rows:
-                raise ToolExecutionError(
-                    "list_agent_brain_snapshots",
-                    "Active agent identity was not found",
-                )
-            snapshot_rows = await self.postgres.fetch_all(
-                """
-                SELECT
-                    revision,
-                    edited_by,
-                    change_type,
-                    changed_section,
-                    change_summary,
-                    restored_from_revision,
-                    created_at
-                FROM public.agent_brain_snapshots
-                WHERE user_name = %(user_name)s AND agent_id = %(agent_id)s
-                ORDER BY revision DESC
-                """,
-                {"user_name": self.user_name, "agent_id": target_agent},
-            )
-            return {
-                "current_revision": int(current_rows[0].get("brain_revision", 1)),
-                "snapshot_interval": BRAIN_SNAPSHOT_INTERVAL,
-                "snapshot_policy": BRAIN_SNAPSHOT_POLICY,
-                "snapshots": snapshot_rows,
-            }
-        except ToolExecutionError:
-            raise
-        except Exception:
-            raise
+        snapshot_rows = await self.postgres.fetch_all(
+            """
+            SELECT
+                revision,
+                edited_by,
+                change_type,
+                changed_section,
+                change_summary,
+                restored_from_revision,
+                created_at
+            FROM public.agent_brain_snapshots
+            WHERE user_name = %(user_name)s AND agent_id = %(agent_id)s
+            ORDER BY revision DESC
+            """,
+            {"user_name": self.user_name, "agent_id": target_agent},
+        )
+        return {
+            "current_revision": int(current_rows[0].get("brain_revision", 1)),
+            "snapshot_interval": BRAIN_SNAPSHOT_INTERVAL,
+            "snapshot_policy": BRAIN_SNAPSHOT_POLICY,
+            "snapshots": snapshot_rows,
+        }
 
     async def read_agent_brain_snapshot(self, revision: int) -> Dict:
         """Read one stored Brain restore point."""
@@ -117,40 +107,35 @@ class MemoryTools:
                 "read_agent_brain_snapshot", "No durable agent identity is active"
             )
 
-        try:
-            rows = await self.postgres.fetch_all(
-                """
-                SELECT
-                    revision,
-                    content,
-                    edited_by,
-                    change_type,
-                    changed_section,
-                    change_summary,
-                    restored_from_revision,
-                    created_at
-                FROM public.agent_brain_snapshots
-                WHERE user_name = %(user_name)s
-                  AND agent_id = %(agent_id)s
-                  AND revision = %(revision)s
-                """,
-                {
-                    "user_name": self.user_name,
-                    "agent_id": target_agent,
-                    "revision": revision,
-                },
+        rows = await self.postgres.fetch_all(
+            """
+            SELECT
+                revision,
+                content,
+                edited_by,
+                change_type,
+                changed_section,
+                change_summary,
+                restored_from_revision,
+                created_at
+            FROM public.agent_brain_snapshots
+            WHERE user_name = %(user_name)s
+              AND agent_id = %(agent_id)s
+              AND revision = %(revision)s
+            """,
+            {
+                "user_name": self.user_name,
+                "agent_id": target_agent,
+                "revision": revision,
+            },
+        )
+        if not rows:
+            raise ToolExecutionError(
+                "read_agent_brain_snapshot", "Brain snapshot was not found"
             )
-            if not rows:
-                raise ToolExecutionError(
-                    "read_agent_brain_snapshot", "Brain snapshot was not found"
-                )
-            row = rows[0]
-            row["content"] = normalize_agent_brain_for_read(row.get("content") or "")
-            return row
-        except ToolExecutionError:
-            raise
-        except Exception:
-            raise
+        row = rows[0]
+        row["content"] = normalize_agent_brain_for_read(row.get("content") or "")
+        return row
 
     async def edit_agent_brain(
         self,

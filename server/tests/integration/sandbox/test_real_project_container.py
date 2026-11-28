@@ -6,6 +6,7 @@ from uuid import uuid4
 import pytest
 
 from common.schema.settings import ContainerRuntimeSettings, WorkspaceCommandSettings
+from core.sandbox.approved_commands import get_approved_command
 from core.sandbox.manager import SandboxManager
 from infrastructure.container_runtime import discover
 
@@ -337,18 +338,21 @@ async def test_real_approved_style_python_install_is_persistent_and_offline(tmp_
             return await original_create(name, config)
 
         manager._runtime.create_container = capture_install
-        missing = await manager.install_python_package(
-            project_id, f"knoggin-no-such-package-{uuid4().hex}==0.0.1",
-            timeout_seconds=30,
+        pip_install = get_approved_command("pip_install")
+        missing_argv, _ = pip_install.build(
+            {"package": f"knoggin-no-such-package-{uuid4().hex}==0.0.1"}
         )
-        assert not missing["installed"] and not missing["persists_after_rebuild"]
+        missing = await manager.run_approved(
+            project_id, missing_argv, timeout_seconds=30,
+        )
+        assert missing["exit_code"] != 0
         check = await manager.run_command(project_id, "api", "test ! -e /home/sandbox/python")
         assert check["exit_code"] == 0
-        install = await manager.install_python_package(
-            project_id, "colorama==0.4.6", timeout_seconds=90,
+        install_argv, _ = pip_install.build({"package": "colorama==0.4.6"})
+        install = await manager.run_approved(
+            project_id, install_argv, timeout_seconds=90,
         )
-        assert install["installed"], install["stderr"]
-        assert install["persists_after_rebuild"]
+        assert install["exit_code"] == 0, install["stderr"]
         assert not any((tmp_path / project_id / ".sandbox" / "tmp").iterdir())
         assert len(install_configs) == 2
         for config in install_configs:

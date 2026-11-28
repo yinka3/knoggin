@@ -103,12 +103,42 @@ def test_import_passes_validated_exchanges_and_returns_their_ids(monkeypatch, tm
 
                 projects.status = "archived"
                 archived = await client.post(_URL, json={"exchanges": [_EXCHANGE]})
-                assert archived.json()["error"]["code"] == "project_unavailable"
+                # The same code every route uses for an archived project.
+                assert archived.status_code == 409
+                assert archived.json()["error"]["code"] == "project_archived"
 
                 missing = await client.post(
                     "/v1/sessions/other/imports", json={"exchanges": [_EXCHANGE]}
                 )
                 assert missing.status_code == 404
                 assert len(imported) == 1
+
+    asyncio.run(exercise())
+
+
+def test_an_oversized_import_is_refused_before_it_is_parsed(monkeypatch, tmp_path):
+    class Sessions:
+        async def list_sessions(self):
+            return {"session-1": {"session_id": "session-1", "project_id": "project-1"}}
+
+    async def start(**_kwargs):
+        async def shutdown():
+            pass
+        return SimpleNamespace(sessions=Sessions(), shutdown=shutdown,
+                               config_manager=SimpleNamespace(config=SimpleNamespace(
+                                   developer_settings=SimpleNamespace(ingestion=IngestionSettings()))))
+
+    monkeypatch.setattr("app.ApplicationRuntime.start", start)
+    monkeypatch.setattr("routes.sessions._MAX_IMPORT_BODY_BYTES", 1024)
+    app = create_app(user_name="ada", config_dir=tmp_path)
+
+    async def exercise():
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                response = await client.post(_URL, content=b"x" * 2048)
+                assert response.status_code == 413
+                assert response.json()["error"]["code"] == "payload_too_large"
 
     asyncio.run(exercise())

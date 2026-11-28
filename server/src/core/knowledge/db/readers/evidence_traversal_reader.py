@@ -97,18 +97,25 @@ class EvidenceTraversalReader:
             JOIN public.projects AS project
               ON project.project_id = observation.project_id
              AND project.user_name = observation.user_name
-            JOIN public.relationship_observation_messages AS support
-              ON support.observation_id = observation.observation_id
-             AND support.project_id = observation.project_id
-            JOIN public.messages AS message
-              ON message.message_id = support.message_id
+            -- The row limit applies per observation: a shared LIMIT let a few
+            -- message-heavy observations crowd the rest of a batch out, and
+            -- those came back as "missing" evidence.
+            CROSS JOIN LATERAL (
+                SELECT message.message_id, message.role, message.timestamp_ms
+                FROM public.relationship_observation_messages AS support
+                JOIN public.messages AS message
+                  ON message.message_id = support.message_id
+                WHERE support.observation_id = observation.observation_id
+                  AND support.project_id = observation.project_id
+                ORDER BY message.message_id
+                LIMIT %s
+            ) AS message
             WHERE observation.user_name = %s
               AND {project_predicate}
               AND observation.observation_id = ANY(%s)
             ORDER BY observation.observation_id, message.message_id
-            LIMIT %s
             """,
-            (user_name, project_scope, ids, row_limit),
+            (row_limit, user_name, project_scope, ids),
         )
 
     async def get_message_rows(

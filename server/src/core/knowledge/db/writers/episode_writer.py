@@ -290,6 +290,12 @@ class EpisodeWriter:
                 JOIN public.episode_messages AS episode_message
                   ON episode_message.episode_id = membership.episode_id
                  AND episode_message.project_id = membership.project_id
+                -- This window's Context stage may already have forgotten
+                -- some of its messages; they support no link.
+                JOIN public.messages AS message
+                  ON message.message_id = episode_message.message_id
+                 AND message.project_id = episode_message.project_id
+                 AND message.lifecycle_state <> 'forgotten'
                 JOIN public.relationship_observation_messages AS support
                   ON support.message_id = episode_message.message_id
                  AND support.project_id = episode_message.project_id
@@ -373,13 +379,58 @@ class EpisodeWriter:
             )
             if await cur.fetchone() is None:
                 return False
+            # Drop an event only forgotten messages supported, or one whose
+            # wording repeats a value the user asked to forget. An event a
+            # retained message also supports stays, without the forgotten
+            # sources; dropping every event citing one lost real memory.
             await cur.execute(
                 """
-                DELETE FROM episode_events
-                WHERE episode_id = %s AND project_id = %s
-                  AND source_message_ids && %s::bigint[]
+                DELETE FROM episode_events AS event
+                WHERE event.episode_id = %(episode_id)s
+                  AND event.project_id = %(project_id)s
+                  AND event.source_message_ids && %(forgotten)s::bigint[]
+                  AND (
+                      NOT EXISTS (
+                          SELECT 1 FROM messages AS message
+                          WHERE message.message_id = ANY(event.source_message_ids)
+                            AND message.project_id = event.project_id
+                            AND message.lifecycle_state <> 'forgotten'
+                            AND message.message_id <> ALL(%(forgotten)s::bigint[])
+                      )
+                      OR EXISTS (
+                          SELECT 1
+                          FROM project_forget_records AS record,
+                               unnest(record.values) AS value
+                          WHERE record.project_id = event.project_id
+                            AND record.message_ids && %(forgotten)s::bigint[]
+                            AND strpos(
+                                lower(event.what || ' ' || coalesce(event.date_text, '')),
+                                lower(value)
+                            ) > 0
+                      )
+                  )
                 """,
-                (episode_id, project_id, forgotten_message_ids),
+                {
+                    "episode_id": episode_id,
+                    "project_id": project_id,
+                    "forgotten": forgotten_message_ids,
+                },
+            )
+            await cur.execute(
+                """
+                UPDATE episode_events
+                SET source_message_ids = ARRAY(
+                    SELECT source_id FROM unnest(source_message_ids) AS source_id
+                    WHERE source_id <> ALL(%(forgotten)s::bigint[])
+                )
+                WHERE episode_id = %(episode_id)s AND project_id = %(project_id)s
+                  AND source_message_ids && %(forgotten)s::bigint[]
+                """,
+                {
+                    "episode_id": episode_id,
+                    "project_id": project_id,
+                    "forgotten": forgotten_message_ids,
+                },
             )
             await cur.execute(
                 """

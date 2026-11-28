@@ -550,7 +550,7 @@ def test_agent_run_records_runtime_diagnostics_and_releases_handles():
 @pytest.mark.no_network
 def test_agent_run_finalization_seals_direct_state_and_rejects_more_work():
     run = make_run()
-    run.record_tool_result({"messages": [{"id": "message-1"}]})
+    run.record_tool_success()
 
     run.finalize("A concise answer.")
 
@@ -768,6 +768,26 @@ def test_research_runs_cannot_start_background_jobs():
             "append_project_file", "create_project_folder"} <= tool_names(research)
     assert "read_web_page" in tool_names(chosen)
     assert "start_background_task" not in tool_names(chosen)
+
+
+@pytest.mark.no_network
+def test_tools_that_start_or_stop_background_work_are_audited_as_writes():
+    # As "read" tools they ran without an audit row.
+    from common.schema.agent.tool_contracts import (
+        READ_CAPABILITY,
+        REVERSIBLE_WRITE_CAPABILITY,
+        TOOL_SCHEMAS_BY_NAME,
+        get_schema_capability,
+    )
+
+    assert {
+        name: get_schema_capability(TOOL_SCHEMAS_BY_NAME[name])
+        for name in ("start_background_task", "cancel_background_task", "list_background_tasks")
+    } == {
+        "start_background_task": REVERSIBLE_WRITE_CAPABILITY,
+        "cancel_background_task": REVERSIBLE_WRITE_CAPABILITY,
+        "list_background_tasks": READ_CAPABILITY,
+    }
 
 
 @pytest.mark.no_network

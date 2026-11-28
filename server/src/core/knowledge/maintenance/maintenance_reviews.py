@@ -22,7 +22,7 @@ from pydantic import (
 
 from common.schema.evidence import EvidenceBundle, EvidencePointer, EvidenceSnapshot
 from core.knowledge.conflict.conflicts import ConflictResolutionKind
-from core.knowledge.relationship_advisories import AdvisoryAction
+from core.knowledge.relationship_advisories import StoredAdvisoryAction
 
 ReviewScope = Literal["project", "user-global"]
 ReviewStatus = Literal["open", "applied", "dismissed", "stale"]
@@ -214,7 +214,7 @@ class RelationshipAdvisoryPlan(BaseModel):
     pattern_key: str = Field(min_length=1, max_length=500)
     observed_label: str | None = None
     proposed_relationship_type: str | None = None
-    action: AdvisoryAction | None = None
+    action: StoredAdvisoryAction | None = None
     note: str | None = None
 
 

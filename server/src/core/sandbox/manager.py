@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from loguru import logger
 
+from common import credential_store
 from common.schema.settings import ContainerRuntimeSettings, WorkspaceCommandSettings
 from infrastructure.container_runtime import (
     ContainerRuntime,
@@ -27,6 +28,48 @@ if TYPE_CHECKING:
 ROOT_RUNTIME_WARNING = (
     "The container runtime runs as root; anything that can use its socket has root on this machine."
 )
+
+
+def _recover_sandbox_homes(library_root: Path) -> None:
+    """Repair what a killed network command can leave in each sandbox home:
+    a pip_install swap cut off between its two renames, and partial
+    downloads. Links in the home are the sandbox's own and are never
+    followed; a link where a folder is expected is simply removed."""
+
+    for project in library_root.iterdir() if library_root.is_dir() else ():
+        home = project / ".sandbox" / "home"
+        if project.is_symlink() or not home.is_dir() or home.is_symlink():
+            continue
+        try:
+            _recover_python_swap(home)
+            _remove_partial_downloads(home / "downloads")
+        except OSError:
+            logger.exception("Could not repair sandbox home {}", home)
+
+
+def _recover_python_swap(home: Path) -> None:
+    python, staged, previous = home / "python", home / ".python-next", home / ".python-old"
+    if not python.exists() and not python.is_symlink():
+        # Killed between "python -> .python-old" and ".python-next -> python":
+        # the staged copy is complete (it is only renamed once finished).
+        for candidate in (staged, previous):
+            if candidate.is_dir() and not candidate.is_symlink():
+                os.replace(candidate, python)
+                break
+    for leftover in (staged, previous):
+        if leftover.is_symlink() or leftover.is_file():
+            leftover.unlink()
+        elif leftover.is_dir():
+            shutil.rmtree(leftover)
+
+
+def _remove_partial_downloads(downloads: Path) -> None:
+    if downloads.is_symlink() or not downloads.is_dir():
+        return
+    for folder, _directories, files in os.walk(downloads, followlinks=False):
+        for name in files:
+            if name.endswith(".part"):
+                os.unlink(os.path.join(folder, name))
 
 
 class SandboxManager:
@@ -90,6 +133,13 @@ class SandboxManager:
             except Exception as exc:
                 if self._status["available"]:
                     self._status = self._result(False, "container_failed", str(exc))
+        if self._status["available"]:
+            # After the leftover install containers are gone, so nothing is
+            # still writing into a sandbox home.
+            try:
+                await asyncio.to_thread(_recover_sandbox_homes, self.library_root)
+            except Exception:
+                logger.exception("Sandbox home recovery failed")
         if self._status["available"] and self._idle_task is None:
             self._idle_task = asyncio.create_task(self._idle_loop())
 
@@ -103,6 +153,15 @@ class SandboxManager:
     async def _check(self) -> dict:
         if not self.command_settings.enabled:
             self._status = self._result(False, "disabled", "Workspace commands are disabled")
+            return self.status()
+
+        if not hasattr(os, "getuid"):
+            # Containers run as the host uid, and discovery only knows Unix sockets.
+            self._status = self._result(
+                False,
+                "unsupported_platform",
+                "The sandbox is not supported on native Windows; run the server in Docker or WSL",
+            )
             return self.status()
 
         if self._runtime is None:
@@ -335,6 +394,56 @@ class SandboxManager:
         relative_cwd = Path(cwd)
         if relative_cwd.is_absolute() or ".." in relative_cwd.parts:
             raise ValueError("cwd must stay inside the workspace")
+        return await self._run_in_workspace(
+            project_id, workspace, ["sh", "-c", command], relative_cwd=relative_cwd,
+            timeout_seconds=timeout_seconds, on_event=on_event,
+        )
+
+    async def run_approved(
+        self, project_id: str, argv: list[str], *, timeout_seconds: int = 300,
+        on_event: Callable[[str, dict], None] | None = None,
+        env: dict[str, str] | None = None,
+    ) -> dict:
+        """Run one user-approved network command template in a temporary
+        container that has network but sees only the sandbox home."""
+        if not isinstance(argv, list) or not argv or not all(isinstance(part, str) for part in argv):
+            raise ValueError("argv must be a non-empty list of strings")
+        if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool) or not 1 <= timeout_seconds <= 900:
+            raise ValueError("timeout_seconds must be between 1 and 900")
+        return await self._run_networked(
+            project_id, argv, timeout_seconds=timeout_seconds, on_event=on_event, env=env,
+        )
+
+    async def connection_env(
+        self, project_id: str, service: str, *, required: bool,
+    ) -> dict[str, str]:
+        """The saved login a network command may use, as environment values.
+
+        {} when the project does not allow the service or no login is saved,
+        unless the command cannot work without one: then ValueError says what
+        to set up.
+        """
+        project = await self.project_manager.get_project(project_id)
+        allowed = project is not None and service in (project.get("connections") or [])
+        values = credential_store.values(service) if allowed else {}
+        if required and not values:
+            label = credential_store.SERVICES[service].label
+            raise ValueError(
+                f"This command needs a {label} login. Save one in your profile and "
+                f"allow {label} in this project's settings."
+                if not allowed else
+                f"This command needs a {label} login. Save one in your profile."
+            )
+        return values
+
+    async def _run_in_workspace(
+        self, project_id: str, workspace: str, argv: list[str], *, relative_cwd: Path,
+        timeout_seconds: int, on_event: Callable[[str, dict], None] | None,
+    ) -> dict:
+        if not isinstance(workspace, str) or not workspace or workspace.startswith(".") or any(
+            char in workspace for char in "/\\\x00"
+        ):
+            raise ValueError("workspace must name one configured workspace")
         if not self._status["available"] or self._runtime is None:
             raise RuntimeError(f"Sandbox unavailable: {self._status['message']}")
 
@@ -353,7 +462,7 @@ class SandboxManager:
             try:
                 result = await self._exec_locked(
                     container_id,
-                    ["sh", "-c", command],
+                    argv,
                     workdir=container_cwd,
                     timeout_seconds=timeout_seconds,
                     on_event=on_event,
@@ -371,6 +480,7 @@ class SandboxManager:
     async def _exec_locked(
         self, container_id: str, command: list[str], *, workdir: str,
         timeout_seconds: int, on_event: Callable[[str, dict], None] | None,
+        env: dict[str, str] | None = None,
     ) -> dict:
         """Run one exec while the caller owns the container lifecycle lock."""
         runtime = self._runtime
@@ -384,6 +494,7 @@ class SandboxManager:
             container_id,
             ["timeout", "--kill-after=5", str(timeout_seconds), *command],
             workdir,
+            env,
         )
         output = {"stdout": bytearray(), "stderr": bytearray()}
         output_limit = 16 * 1024
@@ -404,6 +515,7 @@ class SandboxManager:
             if on_event is not None:
                 on_event("command_status", {"message": "Command is still running", "timeout_seconds": timeout_seconds})
 
+        started = self._clock()
         notice_task = asyncio.create_task(status_notice())
         disk_task = asyncio.create_task(watch_disk())
         try:
@@ -423,14 +535,27 @@ class SandboxManager:
             if result.get("Running") or result.get("ExitCode") is None:
                 raise ContainerRuntimeError("Exec stream ended before the command exited")
             exit_code = result["ExitCode"]
-            timed_out = exit_code in (124, 137)
-            return {
+            # `timeout` exits 124 when the limit hits, or 137 after --kill-after.
+            # A SIGKILL (137) before the limit is not a timeout: in this
+            # memory-capped container it is almost always the OOM killer.
+            elapsed = self._clock() - started
+            timed_out = exit_code == 124 or (exit_code == 137 and elapsed >= timeout_seconds)
+            killed = exit_code == 137 and not timed_out
+            payload = {
                 "stdout": output["stdout"].decode("utf-8", errors="replace"),
                 "stderr": output["stderr"].decode("utf-8", errors="replace"),
                 "exit_code": exit_code,
                 "timed_out": timed_out,
+                "killed": killed,
                 "output_truncated": truncated,
             }
+            if killed:
+                payload["kill_reason"] = (
+                    "Command was killed before its time limit, most likely for exceeding "
+                    f"the sandbox memory limit of {self.command_settings.memory_mb} MiB. "
+                    "Use less memory instead of a longer timeout."
+                )
+            return payload
         finally:
             notice_task.cancel()
             disk_task.cancel()
@@ -448,12 +573,13 @@ class SandboxManager:
             for name, settings in sorted(project["workspaces"].items())
         ]
 
-    async def install_python_package(
-        self, project_id: str, package: str, *, timeout_seconds: int = 300,
-        on_event: Callable[[str, dict], None] | None = None,
+    async def _run_networked(
+        self, project_id: str, argv: list[str], *, timeout_seconds: int,
+        on_event: Callable[[str, dict], None] | None,
+        env: dict[str, str] | None = None,
     ) -> dict:
-        """Install one pinned package into the durable project home, with temporary network."""
-        self.validate_python_package(package, timeout_seconds)
+        """Run in a temporary container with network that mounts only the
+        sandbox home and temp folders, never a workspace."""
         if not self._status["available"] or self._runtime is None:
             raise RuntimeError(f"Sandbox unavailable: {self._status['message']}")
 
@@ -464,7 +590,7 @@ class SandboxManager:
             labels = {
                 "knoggin.owner": self.user_name,
                 "knoggin.project": project_id,
-                "knoggin.install": "true",
+                "knoggin.install": "true",  # start() removes leftovers by this label
             }
             await self._prepare_project_storage(
                 project_id, {"knoggin.owner": self.user_name, "knoggin.project": project_id}
@@ -475,49 +601,20 @@ class SandboxManager:
                 if ":/home/sandbox:" in bind or ":/tmp:" in bind
             ]
             config["HostConfig"].pop("NetworkMode")  # runtime default, only for this helper
-            config["WorkingDir"] = "/"
+            config["WorkingDir"] = "/home/sandbox"
             runtime = self._runtime
             container_id = await runtime.create_container(f"knoggin-install-{uuid4().hex}", config)
             try:
                 await runtime.start(container_id)
-                result = await self._exec_locked(
-                    container_id,
-                    [
-                        "sh", "-c",
-                        "python -m pip --isolated install --no-input "
-                        "--disable-pip-version-check --no-cache-dir "
-                        "--index-url https://pypi.org/simple "
-                        "--target /tmp/knoggin-python-install \"$1\" "
-                        "&& mkdir -p /home/sandbox/python "
-                        "&& cp -a /tmp/knoggin-python-install/. /home/sandbox/python/",
-                        "install", package,
-                    ],
-                    workdir="/",
-                    timeout_seconds=timeout_seconds,
-                    on_event=on_event,
+                return await self._exec_locked(
+                    container_id, argv, workdir="/home/sandbox",
+                    timeout_seconds=timeout_seconds, on_event=on_event, env=env,
                 )
-                return {
-                    **result,
-                    "package": package,
-                    "installed": result["exit_code"] == 0,
-                    "location": "/home/sandbox/python",
-                    "persists_after_rebuild": result["exit_code"] == 0,
-                }
             finally:
                 try:
                     await runtime.remove(container_id, force=True)
                 finally:
                     await self._clear_temporary_storage(project_id)
-
-    @staticmethod
-    def validate_python_package(package: str, timeout_seconds: int) -> None:
-        if not isinstance(package, str) or not re.fullmatch(
-            r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}==[A-Za-z0-9][A-Za-z0-9._+!-]{0,127}",
-            package,
-        ):
-            raise ValueError("package must be a name and exact version, such as colorama==0.4.6")
-        if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool) or not 1 <= timeout_seconds <= 900:
-            raise ValueError("timeout_seconds must be between 1 and 900")
 
     def _project_config(
         self, project_id: str, workspaces: dict, labels: dict[str, str]

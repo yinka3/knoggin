@@ -97,3 +97,31 @@ def test_project_control_scopes_reads_and_future_only_selection(monkeypatch, tmp
     assert ("inspect", "project-1", 21) in calls
     # The archived project is refused before the service is asked.
     assert calls.count(("flush", "project-1")) == 1
+
+
+def test_reactivating_a_project_deleted_meanwhile_is_not_found(monkeypatch, tmp_path):
+    class Projects:
+        async def get_project(self, project_id):
+            return {"id": project_id, "status": "archived"}
+
+        async def reactivate_project(self, project_id):
+            raise ValueError("Deleted project cannot be reactivated")
+
+    async def start(**_kwargs):
+        async def shutdown():
+            pass
+        return SimpleNamespace(projects=Projects(), shutdown=shutdown)
+
+    monkeypatch.setattr("app.ApplicationRuntime.start", start)
+    app = create_app(user_name="ada", config_dir=tmp_path)
+
+    async def exercise():
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                response = await client.post("/v1/projects/p1/reactivate")
+                assert response.status_code == 404
+                assert response.json()["error"]["code"] == "project_not_found"
+
+    asyncio.run(exercise())

@@ -43,3 +43,20 @@ def test_storage_failure_is_redacted_at_http_boundary():
         assert b"dependency_unavailable" in response.body
 
     asyncio.run(exercise())
+
+
+def test_type_error_is_a_logged_server_error_not_bad_input():
+    from loguru import logger
+
+    messages = []
+    sink = logger.add(lambda message: messages.append(str(message)), level="WARNING")
+    try:
+        bug = asyncio.run(handle_error(None, TypeError("unexpected keyword")))
+        invalid = asyncio.run(handle_error(None, ValueError("limit must be positive")))
+    finally:
+        logger.remove(sink)
+
+    assert bug.status_code == 500 and b"internal_error" in bug.body
+    assert invalid.status_code == 422 and b"invalid_request" in invalid.body
+    assert any("failed with 500" in message and "TypeError" in message for message in messages)
+    assert any("limit must be positive" in message for message in messages)

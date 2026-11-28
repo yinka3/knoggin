@@ -152,6 +152,7 @@ class DocumentReader:
                     SELECT COUNT(*)::INTEGER
                     FROM public.document_chunks AS dc
                     WHERE dc.document_id = pd.document_id
+                      AND dc.snapshot_id = pd.current_snapshot_id
                 ) AS chunk_count
             FROM public.project_documents AS pd
             WHERE """

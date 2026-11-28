@@ -196,7 +196,7 @@ class RelationshipAdvisoryWriter:
             note=note,
         )
         status = "open" if decision.disposition == "pending" else (
-            "dismissed" if decision.disposition in {"dismissed", "suppressed"} else "applied"
+            "dismissed" if decision.disposition == "dismissed" else "applied"
         )
         if current_review is not None and current_review.status == "open":
             await self.reviews.transition(
@@ -262,12 +262,12 @@ class RelationshipAdvisoryWriter:
         if review.status == "applied":
             disposition = "accepted"
         elif review.status == "dismissed":
-            disposition = "suppressed" if action == "suppress" else "dismissed"
+            disposition = "dismissed"
         return RelationshipAdvisoryDecision(
             pattern_key=pattern_key,
             disposition=disposition,
             proposed_relationship_type=proposed,
-            last_action=action,
+            last_action="dismiss" if action == "suppress" else action,  # legacy suppress
             decision_note=getattr(plan, "note", None),
             revision=int(review.expected_state.get("revision", 0)),
         )

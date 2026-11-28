@@ -96,10 +96,18 @@ async def delete_note(request):
 async def read_local_file(request):
     runtime = request.app.state.runtime
     project_id = request.path_params["project_id"]
-    if error := await _project_error(runtime, project_id, write=False):
+    # The file is read for review before a discard, which needs a running
+    # (active) project, so archived projects get the same 409 as the writes.
+    if error := await _project_error(runtime, project_id, write=True):
         return error
-    async with project_runtime(runtime, project_id) as project:
-        local = project.project_semantic_processor.read_context_file()
+    try:
+        async with project_runtime(runtime, project_id) as project:
+            local = project.project_semantic_processor.read_context_file()
+    except ValueError:
+        # Archived or removed between the check and the lease.
+        return await _project_error(runtime, project_id, write=True) or _error(
+            "project_unavailable", "Project is unavailable", 409
+        )
     if local is None:
         return JSONResponse({"content": None, "content_hash": None})
     content, content_hash = local

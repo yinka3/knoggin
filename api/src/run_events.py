@@ -56,6 +56,10 @@ class RunEvents:
         )
         self._runs[(session_id, run_id)] = run
         run.task = asyncio.create_task(self._collect(run, frames))
+        # A run is unwatched until a stream attaches. Otherwise a client that
+        # disconnects before its response body starts never schedules this
+        # stop, and the run keeps spending to completion with no one watching.
+        run.unwatched_stop = asyncio.create_task(self._stop_when_unwatched(run))
 
     async def _collect(self, run: _Run, frames: AsyncIterator[bytes]) -> None:
         sequence = 0

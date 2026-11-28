@@ -2,7 +2,8 @@ import asyncio
 import json
 import math
 import re
-from contextlib import asynccontextmanager
+import time
+from contextlib import aclosing, asynccontextmanager
 from typing import (
     Any,
     AsyncIterator,
@@ -154,6 +155,10 @@ def prompt_cache_tokens(usage: Any) -> tuple[int, int]:
     return max(cached - written, 0), written
 
 
+# After a failed model-list fetch, calls skip it for this long.
+_MODEL_LIST_RETRY_SECONDS = 60.0
+
+
 class LLMService:
     @property
     def spending_ledger(self) -> ExternalModelSpendingLedger:
@@ -196,11 +201,18 @@ class LLMService:
         self._tokenizer = None
         self._retired_clients: set[AsyncOpenAI] = set()
         self._retirement_tasks: dict[AsyncOpenAI, asyncio.Task] = {}
+        # Budget updates scheduled from synchronous settings callbacks; kept so
+        # they are not garbage-collected mid-run and their errors are logged.
+        self._budget_update_tasks: set[asyncio.Task] = set()
         # Process-lifetime prompt cache counters per model, for visibility.
         self._prompt_cache: dict[str, dict[str, int]] = {}
         self._client_usage: dict[AsyncOpenAI, int] = {}
         # Context sizes from the provider's model list, fetched once.
         self._listed_windows: dict[str, int | None] | None = None
+        # One fetch at a time, and none for a while after a failure: during an
+        # outage every call would otherwise wait on its own models.list().
+        self._model_list_lock = asyncio.Lock()
+        self._model_list_retry_at = 0.0
         self._listed_parameters: dict[str, frozenset[str]] | None = None
         self._serves_ollama_ps: bool | None = None
         self._active_requests: set[asyncio.Task] = set()
@@ -395,6 +407,7 @@ class LLMService:
             self._client = replacement_instructor
             self._listed_windows = None
             self._listed_parameters = None
+            self._model_list_retry_at = 0.0
             self._spending_ledger.set_listed_prices({})
             self._serves_ollama_ps = None
             self._retire_client(previous_raw)
@@ -432,10 +445,19 @@ class LLMService:
         except RuntimeError:
             self._spending_ledger.replace_settings_without_lock(settings)
             return
-        loop.create_task(
+        task = loop.create_task(
             self._spending_ledger.update_settings(settings),
             name="llm-spending-budget-update",
         )
+        self._budget_update_tasks.add(task)
+        task.add_done_callback(self._budget_update_finished)
+
+    def _budget_update_finished(self, task: asyncio.Task) -> None:
+        self._budget_update_tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            logger.opt(exception=task.exception()).error(
+                "Could not apply the new LLM spending budget"
+            )
 
     def _system_message(self, system: SystemPrompt) -> Dict[str, Any]:
         """Mark reusable system text for provider prompt caching.
@@ -545,14 +567,25 @@ class LLMService:
     async def _load_model_list(self) -> None:
         """Fetch the provider's model list once: context sizes and prices."""
 
-        client = self._raw_client
-        if client is None or self._listed_windows is not None:
+        if self._listed_windows is not None or time.monotonic() < self._model_list_retry_at:
             return
-        try:
-            page = await client.models.list()
-        except Exception as exc:
-            logger.debug("LLMService: model list unavailable ({})", exc)
-            return
+        async with self._model_list_lock:
+            client = self._raw_client
+            if (
+                client is None
+                or self._listed_windows is not None
+                or time.monotonic() < self._model_list_retry_at
+            ):
+                return  # another caller fetched it, or just failed to
+            try:
+                page = await client.models.list()
+            except Exception as exc:
+                self._model_list_retry_at = time.monotonic() + _MODEL_LIST_RETRY_SECONDS
+                logger.debug("LLMService: model list unavailable ({})", exc)
+                return
+            self._store_model_list(page)
+
+    def _store_model_list(self, page) -> None:
         self._listed_windows = {
             str(row.id): _reported_window(row) for row in page.data
         }
@@ -648,7 +681,10 @@ class LLMService:
             if declared_approximate is not None
             else prompt_tokens is None or completion_tokens is None
         )
-        if approximate:
+        if approximate and failed:
+            # A failed request with no provider usage is not charged an estimate.
+            prompt_tokens = completion_tokens = 0
+        elif approximate:
             prompt_tokens = (
                 self.count_tokens(f"{system}\n{user}")
                 + max(additional_prompt_tokens, 0)
@@ -1163,7 +1199,10 @@ class LLMService:
         model = model or self._agent_model
         is_openrouter = self._is_openrouter
         async with self._client_snapshot() as (raw_client, _):
-            async for event in self._stream_with_client(
+            # Closing this generator must close the inner one right away, so
+            # its cleanup (closing the provider stream, recording spend) does
+            # not wait for the event loop's generator finalizer.
+            async with aclosing(self._stream_with_client(
                 raw_client=raw_client,
                 system=system_text(system),
                 system_message=self._system_message(system),
@@ -1175,8 +1214,9 @@ class LLMService:
                 is_openrouter=is_openrouter,
                 aac_budget=aac_budget,
                 max_completion_tokens=max_completion_tokens,
-            ):
-                yield event
+            )) as events:
+                async for event in events:
+                    yield event
 
     async def _stream_with_client(
         self,
@@ -1224,6 +1264,7 @@ class LLMService:
                 }
                 return
             recorded = False
+            response = None
 
             try:
                 create_kwargs: Dict[str, Any] = dict(
@@ -1441,6 +1482,18 @@ class LLMService:
                 }
                 return
             finally:
+                if response is not None:
+                    # A stopped run or a failure leaves the provider stream
+                    # open; close it so the connection (and possibly the
+                    # generation) does not run on until garbage collection.
+                    close = getattr(response, "close", None) or getattr(
+                        response, "aclose", None
+                    )
+                    try:
+                        if close is not None:
+                            await close()
+                    except Exception as close_error:
+                        logger.debug(f"Closing the LLM stream failed: {close_error}")
                 if not recorded:
                     await self._record_external_attempt(
                         reservation,

@@ -34,6 +34,8 @@ class ProjectView(BaseModel):
         return value
     allowed_projects: list[str] = Field(default_factory=list)
     workspaces: list[WorkspaceView] = Field(default_factory=list)
+    # Saved logins this project's approved sandbox commands may use.
+    connections: list[str] = Field(default_factory=list)
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -43,6 +45,7 @@ class CreateProject(BaseModel):
 
     name: str = Field(min_length=1, max_length=200)
     description: str | None = Field(default=None, max_length=10_000)
+    connections: list[str] = Field(default_factory=list, max_length=20)
 
     @field_validator("name")
     @classmethod
@@ -59,6 +62,7 @@ class UpdateProject(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     description: str | None = Field(default=None, max_length=10_000)
     allowed_projects: list[str] | None = None
+    connections: list[str] | None = Field(default=None, max_length=20)
 
     @field_validator("name")
     @classmethod

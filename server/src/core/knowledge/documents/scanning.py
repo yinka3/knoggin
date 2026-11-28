@@ -14,6 +14,7 @@ from common.schema.document import (
     FolderUploadEntry,
 )
 from core.knowledge.documents.constants import (
+    ACCEPTED_EXTENSIONS,
     ARCHIVE_EXTENSIONS,
     AUDIO_EXTENSIONS,
     BINARY_TEXT_EXEMPT_EXTENSIONS,
@@ -502,6 +503,14 @@ def build_folder_preview(
                 "project_filter",
                 True,
             )
+            continue
+
+        # Last of the filters, so the rules above keep their more useful
+        # reasons; before the limits, so these files use none of the budget.
+        # Admission and extraction reject them, so including them only produced
+        # per-file upload failures and catalog rows that never index.
+        if extension not in ACCEPTED_EXTENSIONS:
+            exclude(path, content, "unsupported_file_type", "content_type", False)
             continue
 
         if len(included) >= settings.max_file_count:

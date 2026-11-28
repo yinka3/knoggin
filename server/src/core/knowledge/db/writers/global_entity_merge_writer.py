@@ -1048,7 +1048,7 @@ class GlobalEntityMergeWriter:
             return await self._fetch_one(
                 cur,
                 """SELECT project_id, entity_id, user_name, entity_type, topic,
-                          last_mentioned_ms
+                          last_mentioned_ms, human_correction_review_id
                    FROM public.project_entity_contexts
                    WHERE project_id = %s AND entity_id = %s""",
                 (key, int(after["entity_id"])),
@@ -1272,6 +1272,19 @@ class GlobalEntityMergeWriter:
                             {k: current.get(k) for k in ("episode_id", "project_id", "relationship_id", "source_message_count")},
                             {k: expected.get(k) for k in ("episode_id", "project_id", "relationship_id", "source_message_count")},
                         )
+                elif mutation["object_kind"] == "project_context":
+                    # A moved context journals every merge column (including
+                    # its human correction); a merged one journals six.
+                    # Compare the columns the merge recorded, so a moved-only
+                    # context is not a conflict forever, while a later
+                    # correction of it still is.
+                    matches = (
+                        current is not None
+                        and isinstance(expected, dict)
+                        and self._json_equal(
+                            {key: current.get(key) for key in expected}, expected
+                        )
+                    )
                 else:
                     matches = self._json_equal(current, expected)
                 if matches:

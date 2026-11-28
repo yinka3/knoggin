@@ -851,17 +851,6 @@ class RuntimeHealthService:
             return None, "read_failed"
 
     @staticmethod
-    def _age_seconds(value: Any) -> float | None:
-        if not isinstance(value, str):
-            return None
-        timestamp = parse_iso_time(value)
-        if timestamp is None:
-            return None
-        if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=get_now().tzinfo)
-        return max((get_now() - timestamp).total_seconds(), 0.0)
-
-    @staticmethod
     def _timestamp_age_seconds(value: Any) -> float | None:
         if isinstance(value, datetime):
             timestamp = value

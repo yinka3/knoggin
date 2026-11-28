@@ -1,7 +1,6 @@
 import json
 import re
-from datetime import timedelta
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from loguru import logger
 
@@ -11,7 +10,6 @@ from common.scoping import (
     require_scope_value,
     require_visible_project_ids,
 )
-from common.utils.time_utils import get_now
 from infrastructure.postgres_client import PostgresClient
 
 _MAX_QUERY_LIMIT = 100
@@ -68,19 +66,6 @@ class EntityReader:
                 f"{_MAX_ENTITY_LIST_OFFSET}"
             )
         return offset
-
-    @staticmethod
-    def _validate_activity_days(days: int) -> int:
-        if (
-            not isinstance(days, int)
-            or isinstance(days, bool)
-            or not 1 <= days <= 365
-        ):
-            raise ValueError(
-                "get_recently_active_entities: days must be an integer "
-                "between 1 and 365"
-            )
-        return days
 
     def _parse_aliases(self, value) -> List[str]:
         aliases = self._parse_json_value(value) or []
@@ -179,7 +164,7 @@ class EntityReader:
             visible_project_ids,
             "list_entities",
         )
-        where_clauses = ["context.project_id = ANY(%s)"]
+        where_clauses = ["context.project_id = ANY(%s)", "e.status = 'active'"]
         params = [visible_project_ids]
 
         if entity_type:
@@ -187,8 +172,10 @@ class EntityReader:
             params.append(entity_type)
 
         if search:
-            where_clauses.append("lower(e.canonical_name) LIKE lower(%s)")
-            params.append(f"%{search}%")
+            # Match the text literally: % and _ in it are not wildcards.
+            where_clauses.append(r"lower(e.canonical_name) LIKE lower(%s) ESCAPE '\'")
+            escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            params.append(f"%{escaped}%")
 
         if topic:
             where_clauses.append("context.topic = %s")
@@ -207,7 +194,7 @@ class EntityReader:
         JOIN project_entity_contexts context ON context.entity_id = e.entity_id
         {where_str}
         GROUP BY e.entity_id, e.canonical_name
-        ORDER BY max(context.last_mentioned_ms) DESC NULLS LAST
+        ORDER BY max(context.last_mentioned_ms) DESC NULLS LAST, e.entity_id
         OFFSET %s
         LIMIT %s
         """
@@ -562,38 +549,45 @@ class EntityReader:
         except Exception as exc:
             self._raise_storage_read("search_by_name", exc)
 
-
+    @staticmethod
     async def validate_existing_ids(
-        self,
-        ids: List[int],
+        cur,
+        ids,
         *,
+        user_name: str,
         visible_project_ids: List[str],
-    ) -> Set[int]:
+    ) -> set[int]:
+        """Return which of ``ids`` are active entities this user can see in
+        the given projects (the identity entity is always visible).
+
+        It runs on the caller's cursor, so a writer can check every ID it is
+        about to touch in one query inside its own transaction.
+        """
+
+        user_name = require_scope_value(user_name, "user_name", "validate_existing_ids")
         visible_project_ids = require_visible_project_ids(
-            visible_project_ids,
-            "validate_existing_ids",
+            visible_project_ids, "validate_existing_ids"
         )
+        ids = sorted({int(entity_id) for entity_id in ids})
         if not ids:
             return set()
-        query = """
-        SELECT entity_id AS id
-        FROM entities
-        WHERE entity_id = ANY(%s)
-          AND status = 'active'
-          AND (entity_id = %s OR EXISTS (
-              SELECT 1 FROM project_entity_contexts context
-              WHERE context.entity_id = entities.entity_id
-                AND context.project_id = ANY(%s)
-          ))
-        """
-        try:
-            res = await self.client.fetch_all(
-                query,
-                (ids, IDENTITY_ENTITY_ID, visible_project_ids),
-            )
-            return {int(r["id"]) for r in res}
-        except Exception as e:
-            self._raise_storage_read("validate_existing_ids", e)
+        await cur.execute(
+            """
+            SELECT entity.entity_id
+            FROM public.entities AS entity
+            WHERE entity.entity_id = ANY(%s)
+              AND entity.user_name = %s
+              AND entity.status = 'active'
+              AND (entity.entity_id = %s OR EXISTS (
+                  SELECT 1 FROM public.project_entity_contexts AS context
+                  WHERE context.entity_id = entity.entity_id
+                    AND context.user_name = %s
+                    AND context.project_id = ANY(%s)
+              ))
+            """,
+            (ids, user_name, IDENTITY_ENTITY_ID, user_name, visible_project_ids),
+        )
+        return {int(row["entity_id"]) for row in await cur.fetchall()}
 
     async def preview_project_entity_cleanup(
         self,
@@ -664,11 +658,12 @@ class EntityReader:
             "get_entity_count_by_type",
         )
         query = """
-        SELECT entity_type AS type, count(*) AS count
-        FROM project_entity_contexts
-        WHERE project_id = ANY(%s)
-        GROUP BY entity_type
-        ORDER BY count DESC
+        SELECT context.entity_type AS type, count(DISTINCT context.entity_id) AS count
+        FROM project_entity_contexts context
+        JOIN entities e ON e.entity_id = context.entity_id AND e.status = 'active'
+        WHERE context.project_id = ANY(%s)
+        GROUP BY context.entity_type
+        ORDER BY count DESC, type
         """
         try:
             res = await self.client.fetch_all(
@@ -693,11 +688,12 @@ class EntityReader:
             "get_entity_count_by_topic",
         )
         query = """
-        SELECT topic, count(*) AS count
-        FROM project_entity_contexts
-        WHERE project_id = ANY(%s)
-        GROUP BY topic
-        ORDER BY count DESC
+        SELECT context.topic AS topic, count(DISTINCT context.entity_id) AS count
+        FROM project_entity_contexts context
+        JOIN entities e ON e.entity_id = context.entity_id AND e.status = 'active'
+        WHERE context.project_id = ANY(%s)
+        GROUP BY context.topic
+        ORDER BY count DESC, topic
         """
         try:
             res = await self.client.fetch_all(
@@ -713,53 +709,6 @@ class EntityReader:
             ]
         except Exception as e:
             self._raise_storage_read("get_entity_count_by_topic", e)
-
-    async def get_top_connected_entities(
-        self, *, visible_project_ids: List[str], limit: int = 10
-    ) -> List[Dict]:
-        limit = self._validate_query_limit(limit, "get_top_connected_entities")
-        visible_project_ids = require_visible_project_ids(
-            visible_project_ids,
-            "get_top_connected_entities",
-        )
-        query = """
-        WITH edge_ends AS (
-            SELECT entity_a_id AS entity_id
-            FROM relationships
-            WHERE project_id = ANY(%s)
-            UNION ALL
-            SELECT entity_b_id AS entity_id
-            FROM relationships
-            WHERE project_id = ANY(%s)
-        )
-        SELECT
-            e.canonical_name AS name,
-            min(context.entity_type) AS type,
-            count(*) AS connections
-        FROM edge_ends ee
-        JOIN entities e ON e.entity_id = ee.entity_id
-        JOIN project_entity_contexts context
-          ON context.entity_id = e.entity_id
-         AND context.project_id = ANY(%s)
-        GROUP BY e.entity_id, e.canonical_name
-        ORDER BY connections DESC, e.canonical_name
-        LIMIT %s
-        """
-        try:
-            res = await self.client.fetch_all(
-                query,
-                (visible_project_ids, visible_project_ids, visible_project_ids, limit),
-            )
-            return [
-                {
-                    "name": self._clean_string(r["name"]),
-                    "type": self._clean_string(r["type"]),
-                    "connections": int(r["connections"]),
-                }
-                for r in res
-            ]
-        except Exception as e:
-            self._raise_storage_read("get_top_connected_entities", e)
 
     async def get_related_entities(
         self,
@@ -893,191 +842,3 @@ class EntityReader:
         except Exception as exc:
             self._raise_storage_read("get_related_entities", exc)
 
-    async def get_entity_relationships(
-        self,
-        entity_id: int,
-        *,
-        visible_project_ids: List[str],
-    ) -> List[Dict]:
-        visible_project_ids = require_visible_project_ids(
-            visible_project_ids,
-            "get_entity_relationships",
-        )
-        query = """
-        SELECT
-            CASE
-                WHEN r.entity_a_id = %s THEN r.entity_b_id
-                ELSE r.entity_a_id
-            END AS neighbor_id,
-            neighbor.canonical_name AS neighbor_name,
-            COUNT(ref.observation_id) AS evidence_count,
-            COALESCE(
-                json_agg(
-                    json_build_object(
-                        'user_name', ref.user_name,
-                        'session_id', ref.session_id,
-                        'message_id', ref.message_id
-                    )
-                    ORDER BY ref.message_id
-                ) FILTER (WHERE ref.message_id IS NOT NULL),
-                '[]'::json
-            ) AS message_refs,
-            (array_agg(ref.context ORDER BY ref.observed_at_ms DESC)
-                FILTER (WHERE ref.context IS NOT NULL))[1] AS context,
-            COUNT(ref.observation_id) AS observation_count
-        FROM relationships r
-        JOIN entities neighbor
-          ON neighbor.entity_id = CASE
-              WHEN r.entity_a_id = %s THEN r.entity_b_id
-              ELSE r.entity_a_id
-          END
-        LEFT JOIN relationship_observations ref
-          ON ref.relationship_id = r.relationship_id
-         AND ref.project_id = r.project_id
-        WHERE %s IN (r.entity_a_id, r.entity_b_id)
-          AND r.project_id = ANY(%s)
-        GROUP BY
-            r.relationship_id,
-            r.entity_a_id,
-            r.entity_b_id,
-            neighbor.canonical_name
-        ORDER BY MAX(ref.observed_at_ms) DESC NULLS LAST
-        """
-        try:
-            res = await self.client.fetch_all(
-                query,
-                (
-                    entity_id,
-                    entity_id,
-                    entity_id,
-                    visible_project_ids,
-                ),
-            )
-            return [
-                {
-                    "neighbor_id": int(r["neighbor_id"]),
-                    "neighbor_name": self._clean_string(r["neighbor_name"]),
-                    "evidence_count": int(r["evidence_count"] or 0),
-                    "message_refs": r["message_refs"] or [],
-                    "context": self._clean_string(r["context"]),
-                    "observation_count": int(r["observation_count"] or 0),
-                }
-                for r in res
-            ]
-        except Exception as e:
-            self._raise_storage_read("get_entity_relationships", e)
-
-    async def get_recently_active_entities(
-        self,
-        *,
-        visible_project_ids: List[str],
-        days: int = 7,
-        limit: int = 10,
-    ) -> List[Dict]:
-        days = self._validate_activity_days(days)
-        limit = self._validate_query_limit(limit, "get_recently_active_entities")
-        visible_project_ids = require_visible_project_ids(
-            visible_project_ids,
-            "get_recently_active_entities",
-        )
-        cutoff = get_now() - timedelta(days=days)
-        query = """
-        SELECT
-            e.entity_id AS id,
-            e.canonical_name AS name,
-            context.entity_type AS type,
-            context.topic,
-            count(DISTINCT episode_entity.episode_id) AS recent_episode_count,
-            max(episode.updated_at) AS last_activity
-        FROM entities e
-        JOIN project_entity_contexts context ON context.entity_id = e.entity_id
-        JOIN episode_entities episode_entity
-          ON episode_entity.entity_id = e.entity_id
-        JOIN episodes episode
-          ON episode.episode_id = episode_entity.episode_id
-        WHERE context.project_id = ANY(%s)
-          AND episode.project_id = ANY(%s)
-          AND episode.updated_at > %s
-        GROUP BY e.entity_id, context.entity_type, context.topic
-        ORDER BY recent_episode_count DESC, last_activity DESC
-        LIMIT %s
-        """
-        try:
-            res = await self.client.fetch_all(
-                query,
-                (visible_project_ids, visible_project_ids, cutoff, limit),
-            )
-            return [
-                {
-                    "id": int(r["id"]),
-                    "name": r["name"],
-                    "type": r["type"],
-                    "topic": r["topic"],
-                    "recent_episode_count": int(r["recent_episode_count"]),
-                    "last_activity": r["last_activity"],
-                }
-                for r in res
-            ]
-        except Exception as e:
-            self._raise_storage_read("get_recently_active_entities", e)
-
-    async def get_notable_entities(
-        self, *, visible_project_ids: List[str], limit: int = 10
-    ) -> List[Dict]:
-        limit = self._validate_query_limit(limit, "get_notable_entities")
-        visible_project_ids = require_visible_project_ids(
-            visible_project_ids,
-            "get_notable_entities",
-        )
-        query = """
-        SELECT
-            e.entity_id AS id,
-            e.canonical_name AS name,
-            context.entity_type AS type,
-            context.topic,
-            (
-                SELECT count(*)
-                FROM relationships relationship
-                WHERE relationship.project_id = ANY(%s)
-                  AND (
-                      relationship.entity_a_id = e.entity_id
-                      OR relationship.entity_b_id = e.entity_id
-                  )
-            ) AS connection_count,
-            (
-                SELECT count(*)
-                FROM episode_entities episode_entity
-                JOIN episodes episode ON episode.episode_id = episode_entity.episode_id
-                WHERE episode_entity.entity_id = e.entity_id
-                  AND episode.project_id = ANY(%s)
-            ) AS episode_count
-        FROM entities e
-        JOIN project_entity_contexts context ON context.entity_id = e.entity_id
-        WHERE e.canonical_name IS NOT NULL
-          AND context.project_id = ANY(%s)
-        ORDER BY connection_count DESC, episode_count DESC
-        LIMIT %s
-        """
-        try:
-            res = await self.client.fetch_all(
-                query,
-                (
-                    visible_project_ids,
-                    visible_project_ids,
-                    visible_project_ids,
-                    limit,
-                ),
-            )
-            return [
-                {
-                    "id": int(r["id"]),
-                    "name": r["name"],
-                    "type": r["type"],
-                    "topic": r["topic"],
-                    "connection_count": int(r["connection_count"]),
-                    "episode_count": int(r["episode_count"]),
-                }
-                for r in res
-            ]
-        except Exception as e:
-            self._raise_storage_read("get_notable_entities", e)

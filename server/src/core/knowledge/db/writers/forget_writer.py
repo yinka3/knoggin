@@ -85,6 +85,21 @@ class ForgetWriter:
                 'DELETE FROM exchange_embeddings WHERE project_id = %s AND user_message_id = ANY(%s)',
                 (project_id, erased_ids),
             )
+            # An erased answer's artifact goes with it (revisions cascade), as
+            # the retention purge removes artifacts.
+            await cur.execute(
+                """DELETE FROM project_artifacts WHERE project_id = %s AND user_name = %s
+                   AND originating_message_id = ANY(%s)""",
+                (project_id, user_name, erased_ids),
+            )
+            # No excerpt keeps erased text: neither the sources an erased answer
+            # cited nor a citation of an erased message from another answer.
+            # Rows stay, since Context block supports point at them.
+            await cur.execute(
+                """UPDATE message_source_refs SET excerpt = %s WHERE project_id = %s
+                   AND (message_id = ANY(%s) OR source_message_id = ANY(%s))""",
+                (ERASED_CONTEXT, project_id, erased_ids, erased_ids),
+            )
             await cur.execute(
                 """UPDATE project_context_blocks SET markdown = %s, content_hash = %s
                    WHERE project_id = %s AND block_id = ANY(%s)""",

@@ -122,6 +122,35 @@ async def test_model_work_cancelling_a_queued_caller_does_not_run_or_leak(model_
 
 
 @pytest.mark.no_network
+async def test_model_work_failure_without_a_message_settles_and_keeps_the_worker(model_work):
+    scope = WorkScope(
+        user_name="ada", project_id="project-1", session_id="session-1"
+    )
+    record = WorkRecord.for_model_operation("embedding", scope)
+
+    async def fail():
+        raise TimeoutError()
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(model_work.submit(
+            fail,
+            priority=ModelWorkPriority.BACKGROUND,
+            name="embedding",
+            work_record=record,
+        ), 2)
+    assert record.status is WorkStatus.FAILED
+    assert record.summary == "TimeoutError"
+
+    # The lane's only worker survived the failure.
+    result = await asyncio.wait_for(model_work.submit(
+        lambda: asyncio.sleep(0, result="embedded"),
+        priority=ModelWorkPriority.BACKGROUND,
+        name="embedding",
+    ), 2)
+    assert result == "embedded"
+
+
+@pytest.mark.no_network
 async def test_model_work_records_terminal_state_and_parent_summary(model_work):
     scope = WorkScope(
         user_name="ada", project_id="project-1", session_id="session-1"

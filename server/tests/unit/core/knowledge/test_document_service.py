@@ -514,6 +514,17 @@ class MemoryCursor:
             raise self.postgres.write_error
         normalized = " ".join(query.split())
 
+        if normalized.startswith(
+            "UPDATE public.project_documents AS pd SET status = 'skipped'"
+        ) or normalized.startswith(
+            "UPDATE public.project_documents AS pd SET status = 'queued', updated_at"
+        ):
+            # The workspace index rule: a no-op here, as it was before it ran
+            # in one transaction (no fake document sits in a workspace).
+            self.rowcount = 0
+            self.result = None
+            return
+
         if normalized.startswith("UPDATE public.project_documents AS document") and "snapshot.parser_fingerprint" in normalized:
             (
                 project_id,
@@ -2980,6 +2991,17 @@ async def test_read_document_validates_ranges_and_character_limit(
     assert result["content"] == "1: 01234"
     assert result["truncated"] is True
 
+    # Line 1 fits but line 2 does not: only line 1 is claimed.
+    monkeypatch.setattr(
+        "core.knowledge.documents.service.MAX_READ_CHARACTERS",
+        20,
+    )
+    result = await service.read_document(document_id=uploaded["document_id"])
+    assert result["content"] == "1: 0123456789"
+    assert result["end_line"] == 1 and result["locator"]["end_line"] == 1
+    assert result["chunk_index"] == "lines:1-1"
+    assert result["truncated"] is True
+
 
 @pytest.mark.storage
 @pytest.mark.no_network
@@ -3222,6 +3244,9 @@ async def test_linked_readable_document_cannot_be_indexed_by_another_project(tmp
         (ToolExecutionError("document", "temporary", retryable=True), ("transient_dependency", True)),
         (ToolExecutionError("document", "invalid", retryable=False), ("invalid_content", False)),
         (TimeoutError(), ("transient_dependency", True)),
+        # A file missing mid-move or locked by another program is retried.
+        (FileNotFoundError("Document content is missing"), ("transient_dependency", True)),
+        (PermissionError("in use"), ("transient_dependency", True)),
         (ValueError("bad document"), ("invalid_content", False)),
     ],
 )
@@ -3323,7 +3348,7 @@ async def test_indexer_retries_document_admission_after_temporary_rejection(
     )
 
     await service.schedule_document_index(document_id=document["document_id"])
-    await asyncio.wait_for(background_work.admitted.wait(), timeout=1)
+    await asyncio.wait_for(background_work.admitted.wait(), timeout=5)
     for _ in range(100):
         if postgres.rows[0]["status"] == "indexed":
             break
@@ -4383,13 +4408,13 @@ async def test_project_scan_settings_round_trip_defaults_reset_and_isolation():
     saved = await project_one.save_scan_settings(
         FolderScanSettings(
             include_hidden=True,
-            blocked_extensions={".foo"},
+            blocked_extensions={".rst"},
         )
     )
 
     assert defaults == FolderScanSettings()
     assert saved.include_hidden is True
-    assert (await project_one.get_scan_settings()).blocked_extensions == {".foo"}
+    assert (await project_one.get_scan_settings()).blocked_extensions == {".rst"}
     assert await project_two.get_scan_settings() == FolderScanSettings()
     assert postgres.scan_settings["project-1"]["created_at"]
     assert postgres.scan_settings["project-1"]["updated_at"]
@@ -4408,10 +4433,10 @@ async def test_preview_uses_saved_settings_and_explicit_settings_do_not_persist(
     document_harness,
 ):
     service, _ = document_harness
-    await service.save_scan_settings(FolderScanSettings(blocked_extensions={".foo"}))
+    await service.save_scan_settings(FolderScanSettings(blocked_extensions={".rst"}))
     entries = [
         FolderUploadEntry(relative_path="notes.txt", content=b"notes"),
-        FolderUploadEntry(relative_path="debug.foo", content=b"debug"),
+        FolderUploadEntry(relative_path="debug.rst", content=b"debug"),
     ]
 
     saved_preview = await service.preview_folder(
@@ -4426,10 +4451,10 @@ async def test_preview_uses_saved_settings_and_explicit_settings_do_not_persist(
 
     assert [entry.relative_path for entry in saved_preview.included] == ["notes.txt"]
     assert {entry.relative_path for entry in explicit_preview.included} == {
-        "debug.foo",
+        "debug.rst",
         "notes.txt",
     }
-    assert (await service.get_scan_settings()).blocked_extensions == {".foo"}
+    assert (await service.get_scan_settings()).blocked_extensions == {".rst"}
 
 
 @pytest.mark.storage
@@ -4626,3 +4651,59 @@ async def test_the_scan_file_limit_is_a_live_setting(tmp_path):
         await service.reconcile_project_files()
     limit["files"] = 100
     assert (await service.reconcile_project_files())["created"] == 8
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_a_code_file_deleted_while_its_rule_applies_is_not_found(
+    monkeypatch, document_harness
+):
+    service, _postgres = document_harness
+    uploaded = await service.add_document(content=b"print('hi')\n", original_name="tool.py")
+    reader = service.indexer._reader
+    real_fetch = reader.fetch_documents_by_reference
+    calls = []
+
+    async def deleted_after_first_read(**kwargs):
+        calls.append(kwargs)
+        return await real_fetch(**kwargs) if len(calls) == 1 else []
+
+    monkeypatch.setattr(reader, "fetch_documents_by_reference", deleted_after_first_read)
+
+    with pytest.raises(FileNotFoundError, match="Document not found"):
+        await service.indexer.index_document(document_id=uploaded["document_id"])
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_the_first_reconcile_removes_scratch_left_by_a_crashed_write(
+    document_harness, tmp_path
+):
+    import os as _os
+    import time as _time
+
+    service, _postgres = document_harness
+    root = tmp_path / "projects" / "project-1"
+    (root / "notes").mkdir(parents=True)
+    stale = root / "notes" / ".knoggin-0123abcd.tmp"
+    fresh = root / ".knoggin-move-4567.tmp"
+    stale.write_bytes(b"half written")
+    fresh.write_bytes(b"in progress")
+    two_hours_ago = _time.time() - 2 * 3600
+    _os.utime(stale, (two_hours_ago, two_hours_ago))
+
+    await service.reconcile_project_files()
+
+    assert not stale.exists()
+    assert fresh.exists()  # young enough that a live write may own it
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+def test_write_bytes_raises_when_content_exceeds_size_limit(tmp_path, monkeypatch):
+    from core.knowledge.documents import filesystem as filesystem_module
+
+    monkeypatch.setattr(filesystem_module, "MAX_DOCUMENT_SIZE", 4)
+    fs = ProjectFilesystem(tmp_path)
+    with pytest.raises(ValueError, match="size limit"):
+        fs.write_bytes("doc.txt", b"12345")

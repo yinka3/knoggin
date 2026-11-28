@@ -78,16 +78,8 @@ async def test_entity_reader_rejects_invalid_bounded_query_inputs_before_queryin
     client = RecordingPostgresClient()
     reader = EntityReader(client)
 
-    with pytest.raises(ValueError, match="get_top_connected_entities"):
-        await reader.get_top_connected_entities(
-            visible_project_ids=["project-1"],
-            limit=0,
-        )
-    with pytest.raises(ValueError, match="get_recently_active_entities: days"):
-        await reader.get_recently_active_entities(
-            visible_project_ids=["project-1"],
-            days=366,
-        )
+    with pytest.raises(ValueError, match="list_entities"):
+        await reader.list_entities(visible_project_ids=["project-1"], limit=0)
 
     assert client.calls == []
 

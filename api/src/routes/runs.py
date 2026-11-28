@@ -10,6 +10,7 @@ from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
 from common.exceptions import (
+    DependencyError,
     IdempotencyConflictError,
     RequestInProgressError,
     SessionBusyError,
@@ -23,7 +24,7 @@ from core.project.notebook_store import NotebookConflict
 from contracts.sessions import QueueFollowUp, StartRun, SteerRun
 from annotations import resolve_annotations, with_annotations
 from runtime.session_runtime import FollowUpQueueFull, SteerQueueFull
-from routes.project_settings import _error, _json
+from routes.project_settings import _error, _json, _project_error
 
 
 def _stream_response(frames: AsyncIterator[bytes]) -> StreamingResponse:
@@ -186,9 +187,8 @@ async def start_run(request):
     metadata = (await runtime.sessions.list_sessions()).get(session_id)
     if metadata is None:
         return _error("session_not_found", "Session not found", 404)
-    project = await runtime.projects.get_project(metadata["project_id"])
-    if project is None or project["status"] != "active":
-        return _error("project_unavailable", "Project is unavailable", 409)
+    if error := await _project_error(runtime, metadata["project_id"], write=True):
+        return error
     try:
         session = await runtime.sessions.get_or_resume_session(session_id)
         if session is None:
@@ -218,9 +218,15 @@ async def start_run(request):
     except ValueError:
         return _error("invalid_run", "Invalid run request", 422)
     events = request.app.state.run_events
-    events.start(session_id, run_id, ClosingAsyncIterator(
-        _events(raw, run_id, runtime=runtime, session=session, selected_notebook=selected_notebook), raw,
-    ))
+    try:
+        events.start(session_id, run_id, ClosingAsyncIterator(
+            _events(raw, run_id, runtime=runtime, session=session, selected_notebook=selected_notebook), raw,
+        ))
+    except BaseException:
+        # The run is admitted; closing it releases the session, which would
+        # otherwise stay busy with no stream to finish it.
+        await raw.aclose()
+        raise
     return _stream_response(events.stream(events.get(session_id, run_id)))
 
 
@@ -456,7 +462,8 @@ async def _request_focus(session, body):
         return None
     service = session.document_service
     if service is None:
-        raise RuntimeError("Session document service is unavailable")
+        # 503 through the global handler, not a 500: the service is missing.
+        raise DependencyError("Session document service is unavailable")
     target = await service.resolve_focus_target(
         document_id=requested.document_id if requested.target_type == "document" else None,
         path_prefix=requested.path_prefix if requested.target_type == "subtree" else None,

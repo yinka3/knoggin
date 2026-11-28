@@ -40,15 +40,15 @@ async def test_message_read_failure_is_not_reported_as_missing_message():
     )
 
     with pytest.raises(StorageReadError) as error:
-        await reader.get_message_text(
+        await reader.get_user_agent_exchange(
             7,
             user_name="ada",
+            project_id="project-1",
             session_id="session-1",
-            visible_project_ids=["project-1"],
         )
 
     assert error.value.code == "storage_read_error"
-    assert error.value.details["operation"] == "get_message_text"
+    assert error.value.details["operation"] == "get_user_agent_exchange"
 
 
 @pytest.mark.storage
@@ -56,12 +56,12 @@ async def test_message_read_failure_is_not_reported_as_missing_message():
 async def test_message_read_keeps_a_missing_message_as_normal_absence():
     reader = MessageReader(RecordingPostgresClient(fetch_one_results=[None]))
 
-    assert await reader.get_message_text(
+    assert await reader.get_user_agent_exchange(
         7,
         user_name="ada",
+        project_id="project-1",
         session_id="session-1",
-        visible_project_ids=["project-1"],
-    ) == ""
+    ) is None
 
 
 @pytest.mark.storage

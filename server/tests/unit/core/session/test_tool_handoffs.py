@@ -119,3 +119,20 @@ async def test_a_stopped_run_keeps_its_work_unless_the_user_asked_to_stop(user_p
         assert not work_cancelled.is_set()
         assert handoffs.list(session_id="s1")[0]["state"] == "completed"
         assert "done" in chat.reports[0][2]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_work_stopped_before_its_follower_starts_is_still_cancelled():
+    handoffs, _chat = _handoffs()
+    work = asyncio.create_task(asyncio.Event().wait())
+
+    item = handoffs.adopt(work, project_id="p1", session_id="s1",
+                          tool="run_command", label="server")
+    # No yield: the follower has not taken its first step yet.
+    stopped = await handoffs.stop(item["item_id"], session_id="s1")
+    await asyncio.gather(work, return_exceptions=True)
+
+    assert work.cancelled()
+    assert stopped["state"] == "stopped"
+    assert handoffs._tasks == {}

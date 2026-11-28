@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import httpx
 
 from app import create_app
+from common.exceptions import DocumentNotReadyError
 
 
 def test_archived_documents_and_links_remain_readable_without_a_runtime(monkeypatch, tmp_path):
@@ -25,7 +26,7 @@ def test_archived_documents_and_links_remain_readable_without_a_runtime(monkeypa
 
         async def read_document(self, *, document_id, page_number, start_line, end_line):
             if document_id == "pending":
-                raise RuntimeError("Document has not been indexed")
+                raise DocumentNotReadyError("Document has not been indexed")
             if page_number == 4:
                 raise ValueError("page_number 4 exceeds document page count 3")
             return {"document_id": document_id, "content": "1: hello", "start_line": start_line,

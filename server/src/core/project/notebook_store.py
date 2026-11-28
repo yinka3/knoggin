@@ -278,12 +278,19 @@ class ProjectNotebookStore:
             raise NotebookConflict("Notebook is not an evidence board")
         visible = deepcopy(notebook)
         board = BoardState.model_validate(visible["board_state"])
+        # From the stored board, before anything below marks claims stale, so
+        # the result does not depend on question order and matches how
+        # record_board_judgment computed the fingerprint.
+        dependencies = {
+            question.question_id: self._dependency_fingerprint(board, question)
+            for question in board.questions
+        }
         async with self.client.transaction() as cursor:
             for question in board.questions:
                 for claim in question.claims:
                     if (claim.judgment is not None and
                             claim.judgment.dependency_fingerprint !=
-                            self._dependency_fingerprint(board, question)):
+                            dependencies[question.question_id]):
                         claim.judgment.stale = True
                     for ref_id in claim.source_ref_ids:
                         source = await self._source(cursor, project_id, "source_ref", str(ref_id))
@@ -395,8 +402,11 @@ class ProjectNotebookStore:
         self, project_id: str, notebook_id: str, *, expected_revision: int,
         question_id: str, claim_id: str,
     ) -> dict:
-        notebook = await self.evidence_board(project_id, notebook_id)
-        if notebook is None:
+        # The stored board, as record_board_judgment reads it: the read-time
+        # stale flags of evidence_board() would change the dependency
+        # fingerprint and make every later record look like a conflict.
+        notebook = await self.get(project_id, notebook_id)
+        if notebook is None or notebook["view"] != "evidence_board":
             raise NotebookConflict("Evidence board not found")
         if notebook["revision"] != expected_revision:
             raise NotebookConflict("Notebook revision changed")

@@ -23,9 +23,19 @@ This README covers the rules the route list cannot show.
 - **Edits that can race** (domain, notebooks, episodes, project files) take an
   expected version, revision, or content hash and return 409 when it is stale.
 - **Archived projects** stay readable; changes return `project_archived` (409).
-- **Credentials** are only read from the environment (`OPENROUTER_API_KEY`,
-  `BRAVE_API_KEY`, `TAVILY_API_KEY`, `JEV_API_KEY`) and appear in settings only
-  as `*_configured` flags. Restart after changing one.
+- **Credentials** come from the environment first (`OPENROUTER_API_KEY`,
+  `BRAVE_API_KEY`, `TAVILY_API_KEY`, `JEV_API_KEY`, `HF_TOKEN`, `KAGGLE_USERNAME`
+  + `KAGGLE_KEY`, `GITHUB_TOKEN`), then from logins saved with
+  `PUT /v1/connections/{service}` (`{"values": {...}}`, every field of the
+  service). Saved logins live in `credentials.json` in the config folder, owner
+  readable only, and are never returned: `GET /v1/connections` shows only
+  `configured` and `source` (`environment` or `saved`). `DELETE` forgets a saved
+  one. A saved OpenRouter key takes effect immediately. Hugging Face, Kaggle
+  and GitHub logins reach sandbox commands only in projects that list them in
+  `connections` (set on create or `PATCH /v1/projects/{id}`).
+- **Sandbox reset:** `POST /v1/projects/{id}/sandbox/reset` discards the
+  project's command container; the next command starts a fresh one. Installed
+  packages and downloads under `/home/sandbox` are kept.
 - **Settings** are edited with `PATCH /v1/settings/{section}`. Check
   `fully_applied` and `restart_required_fields` in the response. Every limit
   mentioned below lives under `developer_settings`.

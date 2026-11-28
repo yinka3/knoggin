@@ -447,6 +447,7 @@ async def test_application_start_establishes_identity_before_managers(
     )
     config_manager = SimpleNamespace(
         config=RootConfig(user_aliases=["Ada"]),
+        config_dir=tmp_path,
         resolve_path=lambda path: tmp_path / path,
     )
     monkeypatch.setattr(

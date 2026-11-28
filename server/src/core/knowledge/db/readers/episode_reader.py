@@ -81,7 +81,7 @@ class EpisodeReader:
             """,
             (visible_project_ids, user_name, *date_params, limit, offset),
         )
-        return [await self._hydrate_episode_card(row) for row in rows]
+        return await self._hydrate_episode_cards(rows)
 
     async def search_project_episodes(
         self,
@@ -119,7 +119,7 @@ class EpisodeReader:
             """,
             (query, visible_project_ids, user_name, *date_params, limit),
         )
-        return [await self._hydrate_episode_card(row) for row in rows]
+        return await self._hydrate_episode_cards(rows)
 
     async def search_project_episodes_by_events(
         self,
@@ -164,7 +164,7 @@ class EpisodeReader:
             """,
             (query, visible_project_ids, user_name, *date_params, limit),
         )
-        return [await self._hydrate_episode_card(row) for row in rows]
+        return await self._hydrate_episode_cards(rows)
 
     async def list_project_events(
         self,
@@ -287,10 +287,8 @@ class EpisodeReader:
                 limit,
             ),
         )
-        return [
-            (await self._hydrate_episode_card(row), float(row["similarity"]))
-            for row in rows
-        ]
+        cards = await self._hydrate_episode_cards(rows)
+        return [(card, float(row["similarity"])) for card, row in zip(cards, rows)]
 
     async def get_project_episodes_for_entities(
         self,
@@ -302,7 +300,10 @@ class EpisodeReader:
         visible_project_ids: Optional[List[str]] = None,
         after: Optional[datetime] = None,
         before: Optional[datetime] = None,
+        offset: int = 0,
     ) -> List[EpisodeCard]:
+        if offset < 0:
+            raise ValueError("offset must not be negative")
         if not entity_ids or limit <= 0:
             return []
         user_name, visible_project_ids = self._project_scope(
@@ -321,11 +322,11 @@ class EpisodeReader:
             WHERE e.project_id = ANY(%s) AND p.user_name = %s AND ee.entity_id = ANY(%s) {date_sql}
             GROUP BY e.episode_id
             ORDER BY entity_overlap DESC, e.last_message_at DESC NULLS LAST,
-                     e.episode_id DESC LIMIT %s
+                     e.episode_id DESC LIMIT %s OFFSET %s
             """,
-            (visible_project_ids, user_name, entity_ids, *date_params, limit),
+            (visible_project_ids, user_name, entity_ids, *date_params, limit, offset),
         )
-        return [await self._hydrate_episode_card(row) for row in rows]
+        return await self._hydrate_episode_cards(rows)
 
     async def get_episode_context_links(
         self, episode_ids: List[str], *, user_name: str, project_id: str,
@@ -477,8 +478,8 @@ class EpisodeReader:
     async def _hydrate_episode(self, row: Dict) -> Episode:
         episode_id = str(row["episode_id"])
         messages = await self._load_messages(episode_id)
-        entities = await self._load_entities(episode_id)
-        relationships = await self._load_relationships(episode_id)
+        entities = (await self._load_entities([episode_id]))[episode_id]
+        relationships = (await self._load_relationships([episode_id]))[episode_id]
         return Episode(
             episode_id=episode_id,
             project_id=str(row["project_id"]),
@@ -500,27 +501,39 @@ class EpisodeReader:
         )
 
     async def _hydrate_episode_card(self, row: Dict) -> EpisodeCard:
-        """Hydrate discovery metadata without loading source-message rows."""
+        return (await self._hydrate_episode_cards([row]))[0]
 
-        episode_id = str(row["episode_id"])
-        return EpisodeCard(
-            episode_id=episode_id,
-            project_id=str(row["project_id"]),
-            summary=str(row["summary"]),
-            new_developments=self._json_list(row.get("new_developments")),
-            updates=self._json_list(row.get("updates")),
-            unresolved=self._json_list(row.get("unresolved")),
-            source_message_count=int(row.get("source_message_count") or 0),
-            first_message_at=row.get("first_message_at"),
-            last_message_at=row.get("last_message_at"),
-            entities=await self._load_entities(episode_id),
-            relationships=await self._load_relationships(episode_id),
-            events=await self._load_events(episode_id),
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-            generator_metadata=self._json_dict(row.get("generator_metadata")),
-            user_modified=bool(row.get("user_modified", False)),
-        )
+    async def _hydrate_episode_cards(self, rows: List[Dict]) -> List[EpisodeCard]:
+        """Hydrate discovery metadata without loading source-message rows:
+        three queries for the whole page, not three per episode."""
+
+        ids = [str(row["episode_id"]) for row in rows]
+        if not ids:
+            return []
+        entities = await self._load_entities(ids)
+        relationships = await self._load_relationships(ids)
+        events = await self._load_events(ids)
+        return [
+            EpisodeCard(
+                episode_id=episode_id,
+                project_id=str(row["project_id"]),
+                summary=str(row["summary"]),
+                new_developments=self._json_list(row.get("new_developments")),
+                updates=self._json_list(row.get("updates")),
+                unresolved=self._json_list(row.get("unresolved")),
+                source_message_count=int(row.get("source_message_count") or 0),
+                first_message_at=row.get("first_message_at"),
+                last_message_at=row.get("last_message_at"),
+                entities=entities[episode_id],
+                relationships=relationships[episode_id],
+                events=events[episode_id],
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+                generator_metadata=self._json_dict(row.get("generator_metadata")),
+                user_modified=bool(row.get("user_modified", False)),
+            )
+            for episode_id, row in zip(ids, rows)
+        ]
 
     async def _load_messages(self, episode_id: str) -> List[MessageEpisode]:
         rows = await self.client.fetch_all(
@@ -546,10 +559,18 @@ class EpisodeReader:
             for row in rows
         ]
 
-    async def _load_entities(self, episode_id: str) -> List[EntityEpisode]:
+    @staticmethod
+    def _by_episode(ids: List[str], rows: List[Dict], build) -> Dict[str, list]:
+        grouped: Dict[str, list] = {episode_id: [] for episode_id in ids}
+        for row in rows:
+            grouped[str(row["episode_id"])].append(build(row))
+        return grouped
+
+    async def _load_entities(self, ids: List[str]) -> Dict[str, List[EntityEpisode]]:
         rows = await self.client.fetch_all(
             """
             SELECT
+                link.episode_id,
                 link.entity_id,
                 entity.canonical_name,
                 link.source_message_count,
@@ -557,42 +578,41 @@ class EpisodeReader:
                 link.last_seen_at
             FROM episode_entities link
             JOIN entities entity ON entity.entity_id = link.entity_id
-            WHERE link.episode_id = %s
-            ORDER BY link.entity_id
+            WHERE link.episode_id = ANY(%s)
+            ORDER BY link.episode_id, link.entity_id
             """,
-            (episode_id,),
+            (ids,),
         )
-        return [
-            EntityEpisode(
-                entity_id=int(row["entity_id"]),
-                name=row["canonical_name"],
-                source_message_count=int(row["source_message_count"]),
-                first_seen_at=row.get("first_seen_at"),
-                last_seen_at=row.get("last_seen_at"),
-            )
-            for row in rows
-        ]
+        return self._by_episode(ids, rows, lambda row: EntityEpisode(
+            entity_id=int(row["entity_id"]),
+            name=row["canonical_name"],
+            source_message_count=int(row["source_message_count"]),
+            first_seen_at=row.get("first_seen_at"),
+            last_seen_at=row.get("last_seen_at"),
+        ))
 
-    async def _load_events(self, episode_id: str) -> List[EpisodeEvent]:
+    async def _load_events(self, ids: List[str]) -> Dict[str, List[EpisodeEvent]]:
         rows = await self.client.fetch_all(
             """
-            SELECT what, kind, start_date, end_date, precision, date_text,
+            SELECT episode_id, what, kind, start_date, end_date, precision, date_text,
                    source_message_ids
-            FROM episode_events WHERE episode_id = %s ORDER BY ordinal
+            FROM episode_events WHERE episode_id = ANY(%s)
+            ORDER BY episode_id, ordinal
             """,
-            (episode_id,),
+            (ids,),
         )
-        return [
-            EpisodeEvent(
-                **{**row, "source_message_ids": [int(i) for i in row["source_message_ids"]]}
-            )
-            for row in rows
-        ]
+        return self._by_episode(ids, rows, lambda row: EpisodeEvent(**{
+            **{key: value for key, value in row.items() if key != "episode_id"},
+            "source_message_ids": [int(i) for i in row["source_message_ids"]],
+        }))
 
-    async def _load_relationships(self, episode_id: str) -> List[RelationshipEpisode]:
+    async def _load_relationships(
+        self, ids: List[str]
+    ) -> Dict[str, List[RelationshipEpisode]]:
         rows = await self.client.fetch_all(
             """
             SELECT
+                link.episode_id,
                 link.relationship_id,
                 source.canonical_name AS source,
                 relationship.relationship_type,
@@ -603,21 +623,18 @@ class EpisodeReader:
               ON relationship.relationship_id = link.relationship_id
             JOIN entities source ON source.entity_id = relationship.entity_a_id
             JOIN entities target ON target.entity_id = relationship.entity_b_id
-            WHERE link.episode_id = %s
-            ORDER BY link.relationship_id
+            WHERE link.episode_id = ANY(%s)
+            ORDER BY link.episode_id, link.relationship_id
             """,
-            (episode_id,),
+            (ids,),
         )
-        return [
-            RelationshipEpisode(
-                relationship_id=str(row["relationship_id"]),
-                source=row["source"],
-                relationship_type=row["relationship_type"],
-                target=row["target"],
-                source_message_count=int(row["source_message_count"]),
-            )
-            for row in rows
-        ]
+        return self._by_episode(ids, rows, lambda row: RelationshipEpisode(
+            relationship_id=str(row["relationship_id"]),
+            source=row["source"],
+            relationship_type=row["relationship_type"],
+            target=row["target"],
+            source_message_count=int(row["source_message_count"]),
+        ))
 
     @staticmethod
     def _date_range(

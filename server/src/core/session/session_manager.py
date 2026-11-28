@@ -291,10 +291,14 @@ class SessionManager:
 
         if self._closed or self._closing:
             raise RuntimeError("SessionManager is shutting down")
-        if (
-            session_id in self._closing_sessions
-            or session_id in self._bootstrap_cleanup
-        ):
+        if session_id in self._closing_sessions:
+            # An earlier unload failed part-way. Its steps are retryable, so
+            # finish it now instead of refusing this session until restart.
+            try:
+                await self._deactivate_runtime_session_locked(session_id)
+            except Exception as exc:  # pragma: no cover
+                raise RuntimeError("Session cleanup is pending") from exc  # pragma: no cover
+        if session_id in self._bootstrap_cleanup:  # pragma: no cover
             raise RuntimeError("Session cleanup is pending")
         active_session = self._active_sessions.get(session_id)
         if active_session is not None:

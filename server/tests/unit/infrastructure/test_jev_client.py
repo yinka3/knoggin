@@ -88,6 +88,19 @@ async def test_valid_choice_noul_and_shared_accounting():
     await client.close()
 
 
+async def test_ledger_charges_the_cost_the_provider_reported():
+    # Settings price this at about $0.0000042; the provider billed $0.25.
+    payload = deepcopy(RESPONSE)
+    payload["usage"]["cost"] = 0.25
+    client, policy, ledger = setup_client(lambda _: httpx.Response(200, json=payload))
+
+    result = await evaluate(client, policy)
+
+    assert result.cost_usd == pytest.approx(0.25)
+    assert (await ledger.snapshot())["spent_usd"] == pytest.approx(0.25)
+    await client.close()
+
+
 async def test_disabled_missing_key_and_closed_make_no_requests(monkeypatch):
     def handler(_):
         pytest.fail("No network work expected")

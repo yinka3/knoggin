@@ -5,7 +5,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from contracts.sessions import StartBackgroundTask
-from routes.project_settings import _error, _json
+from routes.project_settings import _error, _json, _project_error
 
 
 async def _session_project(request):
@@ -23,9 +23,8 @@ async def start_job(request):
     project_id = await _session_project(request)
     if project_id is None:
         return _error("session_not_found", "Session not found", 404)
-    project = await runtime.projects.get_project(project_id)
-    if project is None or project["status"] != "active":
-        return _error("project_unavailable", "Project is unavailable", 409)
+    if error := await _project_error(runtime, project_id, write=True):
+        return error
     try:
         job = await runtime.sessions.background_tasks.start(
             project_id=project_id, parent_session_id=request.path_params["session_id"],
@@ -47,6 +46,8 @@ async def list_jobs(request):
 
 
 async def cancel_job(request):
+    # Stopping work is always allowed, even in an archived project or after
+    # the chat was deleted, so spending can be halted; only ownership counts.
     jobs = request.app.state.runtime.sessions.background_tasks
     job = jobs.get(request.path_params["job_id"])
     if job is None or job["parent_session_id"] != request.path_params["session_id"]:
@@ -60,9 +61,8 @@ async def resume_job(request):
     job = jobs.get(request.path_params["job_id"])
     if job is None or job["parent_session_id"] != request.path_params["session_id"]:
         return _error("background_task_not_found", "Background task not found", 404)
-    project = await runtime.projects.get_project(job["project_id"])
-    if project is None or project["status"] != "active":
-        return _error("project_unavailable", "Project is unavailable", 409)
+    if error := await _project_error(runtime, job["project_id"], write=True):
+        return error
     try:
         resumed = await jobs.resume_job(job["job_id"])
     except ValueError as exc:
@@ -80,6 +80,7 @@ async def list_handoffs(request):
 
 
 async def stop_handoff(request):
+    # Like cancel_job: stopping is always allowed for the item's own chat.
     item = await request.app.state.runtime.sessions.tool_handoffs.stop(
         request.path_params["item_id"], session_id=request.path_params["session_id"]
     )

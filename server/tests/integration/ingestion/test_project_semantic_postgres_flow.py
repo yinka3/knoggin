@@ -1698,6 +1698,33 @@ async def test_forgetting_a_block_forgets_what_the_user_said_in_other_words(
     assert all(not value for directions in (await store.get_episode_context_links(
         episode_ids, user_name=user_name, project_id=project_id)).values() for value in directions.values())
 
+    # An artifact of a forgotten answer, and a citation quoting a forgotten
+    # message from a kept one, must not outlive the erase. Kept ones stay.
+    import json
+    from uuid import uuid4
+    erased_artifact, kept_artifact = uuid4(), uuid4()
+    for artifact_id, message_id, title in (
+        (erased_artifact, 401, "Release notes"), (kept_artifact, 402, "Pottery notes"),
+    ):
+        await postgres.execute(
+            "INSERT INTO project_artifacts (artifact_id, user_name, project_id, session_id, "
+            "originating_message_id, kind, title) VALUES (%s, %s, %s, %s, %s, 'general', %s)",
+            (artifact_id, user_name, project_id, scope['session_id'], message_id, title))
+        await postgres.execute(
+            "INSERT INTO project_artifact_revisions (artifact_id, revision, schema_version, kind, "
+            "title, status, blocks, markdown, content_hash) VALUES (%s, 1, 1, 'general', %s, "
+            "'complete', %s::jsonb, %s, %s)",
+            (artifact_id, title, json.dumps([{"type": "markdown", "content": title}]), title, "a" * 64))
+    for quoted_id, excerpt in ((401, "The team ships every merge."), (402, "I like pottery.")):
+        await postgres.execute(
+            "INSERT INTO message_source_refs (source_ref_id, project_id, session_id, message_id, "
+            "source_kind, source_message_id, content_hash, locator, excerpt, encounter_kind, "
+            "agent_run_id, result_position, idempotency_key) VALUES (%s, %s, %s, 402, "
+            "'user_pasted_text', %s, %s, %s::jsonb, %s, 'user_pasted_text', 'run-1', 0, %s)",
+            (uuid4(), project_id, scope['session_id'], quoted_id, "b" * 64,
+             json.dumps({"kind": "character_span", "start_char": 0, "end_char": len(excerpt)}),
+             excerpt, f"quote-{quoted_id}"))
+
     # The erase job must retain recent requests and never erase incomplete cleanup.
     from common.schema.settings import ForgetSettings
     from core.knowledge.context.render import context_block_hash
@@ -1756,6 +1783,13 @@ async def test_forgetting_a_block_forgets_what_the_user_said_in_other_words(
     assert len(blocks) == 3
     assert sorted(row['markdown'] for row in blocks) == ['I like pottery.', '[Erased at the user’s request.]', '[Erased at the user’s request.]']
     assert all(row['content_hash'] == context_block_hash(row['markdown']) for row in blocks)
+    assert [row['artifact_id'] for row in await postgres.fetch_all(
+        "SELECT artifact_id FROM project_artifacts WHERE project_id = %s", (project_id,))] == [kept_artifact]
+    assert not await postgres.fetch_all(
+        "SELECT 1 FROM project_artifact_revisions WHERE artifact_id = %s", (erased_artifact,))
+    assert {row['source_message_id']: row['excerpt'] for row in await postgres.fetch_all(
+        "SELECT source_message_id, excerpt FROM message_source_refs WHERE project_id = %s", (project_id,),
+    )} == {401: '[Erased at the user’s request.]', 402: 'I like pottery.'}
     assert not await postgres.fetch_all("SELECT 1 FROM project_context_revisions WHERE edit_summary LIKE '%%continuous deploy%%'")
     after = await ProjectContextReader(postgres).get_snapshot(revision.revision_id, user_name=user_name, project_id=project_id)
     assert after.blocks == current.blocks and after.content_hash == current.content_hash

@@ -28,6 +28,7 @@ from routes.project_settings import routes as project_settings_routes
 from routes.project_control import routes as project_control_routes
 from routes.projects import routes as project_routes
 from routes.settings import routes as settings_routes
+from routes.connections import routes as connection_routes
 from errors import handle_error
 from folder_staging import FolderStaging
 from run_events import RunEvents
@@ -85,7 +86,7 @@ def create_app(
                         del app.state.runtime
 
     app = Starlette(
-        routes=[*docs_routes, *health_routes, *settings_routes, *project_routes, *project_settings_routes, *project_control_routes, *notebook_routes, *agent_routes, *session_routes, *run_routes, *background_task_routes, *community_routes, *document_routes, *artifact_routes, *maintenance_routes, *episode_routes, *knowledge_routes, *workspace_routes, *context_note_routes],
+        routes=[*docs_routes, *health_routes, *settings_routes, *connection_routes, *project_routes, *project_settings_routes, *project_control_routes, *notebook_routes, *agent_routes, *session_routes, *run_routes, *background_task_routes, *community_routes, *document_routes, *artifact_routes, *maintenance_routes, *episode_routes, *knowledge_routes, *workspace_routes, *context_note_routes],
         lifespan=lifespan,
         exception_handlers={Exception: handle_error},
     )

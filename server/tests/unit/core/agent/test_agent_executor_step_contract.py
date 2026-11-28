@@ -620,6 +620,15 @@ async def test_reply_cut_off_by_the_output_limit_is_reported_as_cut_off():
 
 
 @pytest.mark.no_network
+async def test_text_reply_cut_off_by_the_output_limit_is_not_submitted_as_the_answer():
+    events = await _plain_reply_events("The answer is", finish_reason="length")
+
+    assert not any(e["event"] == "tool_calls" for e in events)
+    error = next(e for e in events if e["event"] == "step_error")["data"]
+    assert error["kind"] == "truncated"
+
+
+@pytest.mark.no_network
 async def test_empty_reply_that_finished_normally_is_still_a_formatting_error():
     events = await _plain_reply_events("", finish_reason="stop")
 

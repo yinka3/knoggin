@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple, cast
@@ -916,6 +917,14 @@ class AgentRun:
         """Whether this run has called a tool that returns web content."""
         return any(self.tool_call_counts.get(name) for name in WEB_CONTENT_TOOL_NAMES)
 
+    def forget_tool_call(self, tool_name: str, args: Dict) -> None:
+        """Let a retryable failure be retried with the same arguments.
+
+        The call still counts toward the run and per-tool limits.
+        """
+        call_sig = (tool_name, json.dumps(args, sort_keys=True, default=str))
+        self.previous_calls.discard(call_sig)
+
     def record_tool_call(self, tool_name: str, args: Dict) -> None:
         self._require_active()
         if not self.can_call_tool(tool_name, args):
@@ -942,14 +951,6 @@ class AgentRun:
 
     def record_tool_success(self) -> None:
         self._require_active()
-        self.consecutive_errors = 0
-        self.last_error = None
-
-    def record_tool_result(self, result: Dict) -> None:
-        self._require_active()
-        if result.get("error"):
-            self.record_error(str(result["error"]))
-            return
         self.consecutive_errors = 0
         self.last_error = None
 
@@ -1067,7 +1068,12 @@ class AgentRun:
         """Start a bounded notebook generation while preserving references."""
 
         self._require_active()
-        return self.notebook.rollover(summary)
+        # Roll a copy and adopt it only on success: a summary over capacity
+        # must not leave a half-rolled notebook behind.
+        candidate = deepcopy(self.notebook)
+        result = candidate.rollover(summary)
+        self.notebook._adopt_from(candidate)
+        return result
 
     def finalize(self, content: str) -> None:
         self._require_active()

@@ -73,14 +73,30 @@ class ToolHandoffs:
             "error": None, "created_at": get_now_iso(), "finished_at": None,
         }
         self._remember(item)
-        self._tasks[item["item_id"]] = asyncio.create_task(
+        follower = asyncio.create_task(
             self._follow(item, work, describe), name=f"tool-handoff:{item['item_id']}"
         )
+        self._tasks[item["item_id"]] = follower
+
+        def stopped_before_start(task: asyncio.Task) -> None:
+            # A follower cancelled before its first step never runs its
+            # handlers, so end the adopted work here instead of leaking it.
+            if task.cancelled():
+                if not work.done():  # pragma: no cover
+                    work.cancel()  # pragma: no cover
+                self._tasks.pop(item["item_id"], None)
+                item.update(
+                    state="interrupted" if self._closed else "stopped",
+                    finished_at=get_now_iso(),
+                )
+
+        follower.add_done_callback(stopped_before_start)
         return dict(item)
 
     async def _follow(self, item: dict[str, Any], work: asyncio.Task, describe) -> None:
-        await self._persist(item)
         try:
+            # Inside the try: a stop or failure here must still end the work.
+            await self._persist(item)
             result = await work
             item.update(state="completed", result=describe(result)[:_MAX_RESULT_CHARS])
         except asyncio.CancelledError:
@@ -89,6 +105,9 @@ class ToolHandoffs:
                 await asyncio.gather(work, return_exceptions=True)
             item["state"] = "interrupted" if self._closed else "stopped"
         except Exception as exc:
+            if not work.done():  # pragma: no cover
+                work.cancel()  # pragma: no cover
+                await asyncio.gather(work, return_exceptions=True)  # pragma: no cover
             logger.exception("Background {} failed", item["label"])
             item.update(state="failed", error=(str(exc) or type(exc).__name__)[:500])
         item["finished_at"] = get_now_iso()

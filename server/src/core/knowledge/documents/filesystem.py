@@ -375,7 +375,9 @@ class ProjectFilesystem:
         if not content and not _allow_empty:
             raise ValueError("project file content must not be empty")
         if len(content) > MAX_DOCUMENT_SIZE:
-            raise ValueError("document exceeds the 50 MB size limit")
+            raise ValueError(
+                f"document exceeds the {MAX_DOCUMENT_SIZE // (1024 * 1024)} MiB size limit"
+            )
         if expected_content_hash is not None and (
             not isinstance(expected_content_hash, str) or not expected_content_hash
         ):

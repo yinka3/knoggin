@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -162,6 +163,60 @@ async def test_shutdown_cancels_running_follow_up(context):
     assert (await ctx.get_follow_up(queued["queue_id"]))["state"] == "running"
     await asyncio.wait_for(ctx.shutdown(), 2)
     assert (await ctx.get_follow_up(queued["queue_id"]))["state"] == "cancelled"
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_background_reports_keep_the_follow_up_record_bounded(context):
+    # Reports skip the queue limit and used to add entries without evicting.
+    ctx, _ = context
+    for index in range(100):
+        ctx._follow_ups[f"old-{index}"] = {
+            "queue_id": f"old-{index}", "after_run_id": None, "run_id": f"run-{index}",
+            "state": "completed", "assistant_message_id": None, "error_code": None,
+        }
+
+    report = await ctx.queue_report(
+        "Folder import finished.", origin="folder_ingestion_report", metadata={},
+    )
+
+    assert len(ctx._follow_ups) <= 100
+    assert "old-0" not in ctx._follow_ups
+    assert report["queue_id"] in ctx._follow_ups
+    await ctx.shutdown()
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_stopping_a_follow_up_run_keeps_draining_the_queue(context):
+    ctx, _ = context
+    started = asyncio.Event()
+
+    async def handler(kwargs):
+        if kwargs["user_query"] == "slow":
+            started.set()
+            await asyncio.Event().wait()
+        yield _response_event(f"Answer to {kwargs['user_query']}")
+
+    ctx.agent_orchestrator = _FakeTurnOrchestrator(handler)
+    first = await ctx.open_agent_run_stream(Message(content="first"))
+    slow = await ctx.queue_follow_up(first.run_id, "slow")
+    after = await ctx.queue_follow_up(first.run_id, "after")
+    await _collect_stream(first)
+    await asyncio.wait_for(started.wait(), 2)
+
+    assert await asyncio.wait_for(ctx.cancel_active_agent_run(run_id=slow["run_id"]), 2)
+
+    async def completed():
+        while (await ctx.get_follow_up(after["queue_id"]))["state"] != "completed":
+            await asyncio.sleep(0.01)
+    await asyncio.wait_for(completed(), 2)
+    assert (await ctx.get_follow_up(slow["queue_id"]))["state"] == "cancelled"
+    # The session is not left busy behind a dead queue.
+    events = await asyncio.wait_for(
+        _collect_turn(ctx, Message(content="fresh"), ctx.agent_orchestrator), 2
+    )
+    assert events[-1]["event"] == "response"
 
 
 @pytest.mark.runtime
@@ -980,9 +1035,10 @@ async def test_run_agent_stream_persists_the_final_answer_and_sources_before_res
     persisted = False
     source_handoffs = []
 
-    async def history(limit, up_to_msg_id=None):
+    async def history(*, limit, up_to_msg_id=None, **_scope):
         history_calls.append((limit, up_to_msg_id))
-        return [{"role": "assistant", "content": "A prior durable answer."}]
+        return [{"role": "assistant", "content": "A prior durable answer.",
+                 "timestamp": 1000, "metadata": {}}]
 
     async def persist_assistant(
         message, candidates, *, readable_project_ids, artifact=None
@@ -1008,7 +1064,7 @@ async def test_run_agent_stream_persists_the_final_answer_and_sources_before_res
             "data": {"message": "must not follow a response"},
         }
 
-    ctx.get_conversation_context = history
+    resources.knowledge_store.get_session_history = history
     resources.knowledge_store.finalize_assistant_exchange = persist_assistant
     orchestrator = _FakeTurnOrchestrator(handler)
     events = []
@@ -1025,9 +1081,10 @@ async def test_run_agent_stream_persists_the_final_answer_and_sources_before_res
     # History is read in pages, newest first, only as far as the budget needs.
     assert history_calls == [(200, 0)]
     assert orchestrator.calls[0]["user_query"] == "What did we decide?"
-    assert orchestrator.calls[0]["conversation_history"] == [
-        {"role": "assistant", "content": "A prior durable answer."}
-    ]
+    assert [
+        {key: turn[key] for key in ("role", "content")}
+        for turn in orchestrator.calls[0]["conversation_history"]
+    ] == [{"role": "assistant", "content": "A prior durable answer."}]
     assert orchestrator.calls[0]["user_message_id"] == 1
     assistant_message, candidates, readable_project_ids = source_handoffs[0]
     assert assistant_message["content"] == "Durable final answer"
@@ -1892,15 +1949,17 @@ async def test_history_pages_stop_once_they_could_fill_the_budget():
     ctx = object.__new__(SessionRuntime)
     calls = []
 
-    async def history(limit, up_to_msg_id=None):
+    async def history(*, limit, up_to_msg_id=None, **_scope):
         calls.append(up_to_msg_id)
         newest = up_to_msg_id
         return [
-            {"message_id": message_id, "content": "x" * 100}
+            {"message_id": message_id, "content": "x" * 100, "role": "user",
+             "timestamp": 1000, "metadata": {}}
             for message_id in range(newest - limit + 1, newest + 1)
         ]
 
-    ctx.get_conversation_context = history
+    ctx.user_name, ctx.session_id = "ada", "s1"
+    ctx.resources = SimpleNamespace(knowledge_store=SimpleNamespace(get_session_history=history))
 
     # 1,000 tokens is about 4,000 characters, so one 200-message page of
     # 100 characters each already could fill it.
@@ -2034,3 +2093,177 @@ async def test_tool_work_outlives_an_unwatched_run_but_not_a_stop(context, how):
         await asyncio.gather(consumer, return_exceptions=True)
         assert work_cancelled.is_set()
         assert handoffs.list(session_id=ctx.session_id) == []
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_a_cancel_during_the_reply_save_keeps_the_saved_outcome(context, monkeypatch):
+    ctx, _resources = context
+    saving = asyncio.Event()
+    finish_save = asyncio.Event()
+    closed = []
+
+    async def slow_save(**_kwargs):
+        saving.set()
+        await finish_save.wait()  # the commit lands while the cancel is pending
+        return {"message_id": 99, "source_ref_ids": []}
+
+    async def record_close(user_message_id, *, outcome, terminal_error=None):
+        closed.append(outcome)
+
+    monkeypatch.setattr(ctx, "add_assistant_turn", slow_save)
+    monkeypatch.setattr(ctx, "_close_user_exchange", record_close)
+
+    async def handler(_kwargs):
+        yield _response_event("saved reply")
+
+    task = asyncio.create_task(
+        _collect_turn(ctx, Message(content="save me"), _FakeTurnOrchestrator(handler))
+    )
+    await saving.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    finish_save.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # The reply was saved, so the turn is not closed again as cancelled.
+    assert closed == []
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_a_stop_pressed_while_history_loads_is_not_forgotten(context, monkeypatch):
+    ctx, _resources = context
+    seen = []
+    real_history = ctx._recent_history_within
+
+    async def stop_during_history(*args, **kwargs):
+        ctx._run_stop_requested = True  # the user presses stop right here
+        return await real_history(*args, **kwargs)
+
+    monkeypatch.setattr(ctx, "_recent_history_within", stop_during_history)
+
+    async def handler(_kwargs):
+        seen.append(ctx._run_stop_requested)
+        yield _response_event("done")
+
+    await _collect_turn(ctx, Message(content="hello"), _FakeTurnOrchestrator(handler))
+
+    assert seen == [True]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_hidden_steers_do_not_end_history_paging_early(context, monkeypatch):
+    ctx, resources = context
+    monkeypatch.setattr(type(ctx), "_HISTORY_PAGE", 3)
+    rows = [
+        {"message_id": index, "role": "user", "content": f"turn {index}",
+         "timestamp": index * 1000, "metadata": {}}
+        for index in range(1, 7)
+    ]
+    # The newest page holds an undelivered steer, which the prompt hides.
+    rows[4]["metadata"] = {"origin": "steer", "run_steer": {"state": "undelivered"}}
+
+    async def history(*, limit, up_to_msg_id, **_kwargs):
+        visible = [row for row in rows if row["message_id"] <= up_to_msg_id]
+        return visible[-limit:]
+
+    resources.knowledge_store.get_session_history = history
+
+    turns = await ctx._recent_history_within(10_000, up_to_msg_id=6)
+
+    assert [turn["message_id"] for turn in turns] == [1, 2, 3, 4, 6]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_make_room_for_follow_up_returns_early_when_under_limit(context):
+    ctx, _ = context
+    for index in range(5):
+        ctx._follow_ups[f"old-{index}"] = {
+            "queue_id": f"old-{index}", "after_run_id": None, "run_id": f"run-{index}",
+            "state": "completed", "assistant_message_id": None, "error_code": None,
+        }
+    before = set(ctx._follow_ups)
+    ctx._make_room_for_follow_up()
+    assert set(ctx._follow_ups) == before
+    await ctx.shutdown()
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_follow_up_records_clarification_state(context):
+    ctx, resources = context
+
+    async def handler(kwargs):
+        if kwargs["user_query"] == "follow-up-question":
+            yield {
+                "event": "clarification",
+                "data": {
+                    "question": "Can you clarify?",
+                    "usage": {
+                        "prompt_tokens": 2,
+                        "completion_tokens": 0,
+                        "total_tokens": 2,
+                        "approximate": False,
+                    },
+                },
+            }
+            return
+        yield _response_event("Done")
+
+    async def finalize_with_outcome(
+        message, candidates, *, readable_project_ids, artifact=None, outcome="assistant_final"
+    ):
+        resources.knowledge_store.saved_message_logs.append([message])
+        return message["id"], [], True
+
+    resources.knowledge_store.finalize_assistant_exchange = finalize_with_outcome
+    ctx.agent_orchestrator = _FakeTurnOrchestrator(handler)
+    first = await ctx.open_agent_run_stream(Message(content="first"))
+    queued = await ctx.queue_follow_up(first.run_id, "follow-up-question")
+    await _collect_stream(first)
+
+    async def settled():
+        while (await ctx.get_follow_up(queued["queue_id"]))["state"] not in {
+            "clarification", "failed", "completed", "cancelled"
+        }:
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(settled(), 2)
+    assert (await ctx.get_follow_up(queued["queue_id"]))["state"] == "clarification"
+    await ctx.shutdown()
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_follow_up_records_recognized_error_code(context):
+    ctx, _ = context
+
+    async def handler(kwargs):
+        if kwargs["user_query"] == "follow-up-error":
+            yield {
+                "event": "error",
+                "data": {"code": "llm_budget_exhausted", "message": "Budget exceeded"},
+            }
+            return
+        yield _response_event("Done")
+
+    ctx.agent_orchestrator = _FakeTurnOrchestrator(handler)
+    first = await ctx.open_agent_run_stream(Message(content="first"))
+    queued = await ctx.queue_follow_up(first.run_id, "follow-up-error")
+    await _collect_stream(first)
+
+    async def settled():
+        while (await ctx.get_follow_up(queued["queue_id"]))["state"] not in {
+            "failed", "completed", "cancelled", "clarification"
+        }:
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(settled(), 2)
+    result = await ctx.get_follow_up(queued["queue_id"])
+    assert result["state"] == "failed"
+    assert result["error_code"] == "llm_budget_exhausted"
+    await ctx.shutdown()

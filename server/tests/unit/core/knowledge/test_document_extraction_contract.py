@@ -17,6 +17,7 @@ from core.knowledge.documents.extraction import (
     PdfPageGroup,
 )
 from core.knowledge.documents.indexer import DocumentIndexer
+from core.knowledge.documents.lines import split_lines
 from tests.fixtures.documents import (
     build_docx_bytes,
     build_notebook_bytes,
@@ -1239,12 +1240,10 @@ def test_split_python_method_retains_qualified_symbol_name():
 @pytest.mark.parametrize(
     ("content", "extension", "error"),
     [
-        (b"value = '" + b"x" * 2_500 + b"LATE_MARKER'\n", ".py", "Code line 1"),
-        (b"name,value\nalpha," + b"x" * 2_100 + b"LATE_MARKER\n", ".csv", "CSV row 1"),
         (b"column" + b"x" * 2_100 + b"\nvalue\n", ".csv", "CSV header"),
     ],
 )
-def test_oversized_code_line_or_csv_row_fails_instead_of_silent_truncation(
+def test_oversized_csv_header_fails_instead_of_silent_truncation(
     content, extension, error
 ):
     with pytest.raises(ValueError, match=error) as failure:
@@ -1253,6 +1252,40 @@ def test_oversized_code_line_or_csv_row_fails_instead_of_silent_truncation(
         "invalid_content",
         False,
     )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("content", "extension", "location"),
+    [
+        (
+            b"first = 1\nvalue = '" + b"x" * 2_500 + b"LATE_MARKER'\nlast = 2\n",
+            ".py",
+            ("start_line", "end_line"),
+        ),
+        (
+            b"name,value\nshort,1\nalpha," + b"x" * 2_100 + b"LATE_MARKER\nomega,2\n",
+            ".csv",
+            ("start_row", "end_row"),
+        ),
+    ],
+)
+def test_oversized_code_line_or_csv_row_is_split_without_truncation(
+    content, extension, location
+):
+    # One long line or row used to fail the whole file permanently.
+    chunks = extraction_module.extract_and_split_document(content, extension).chunks
+    start, end = location
+
+    oversized = [chunk for chunk in chunks if getattr(chunk, start) == 2]
+    # split_text sizes excerpts by tokens, so this may be one excerpt or several.
+    assert oversized
+    # Each excerpt points at exactly that line or row, and none of it is lost.
+    assert all(getattr(chunk, end) == 2 for chunk in oversized)
+    assert oversized[-1].content.rstrip("'").endswith("LATE_MARKER")
+    # The lines or rows around it are still chunked normally.
+    assert {getattr(chunk, start) for chunk in chunks} >= {1, 2, 3}
 
 
 @pytest.mark.unit
@@ -1327,7 +1360,7 @@ def test_large_notebook_cells_split_with_exact_within_cell_line_ranges():
 @pytest.mark.parametrize(
     ("prefix", "line_number"), [("", 1), ("\n\n", 3)]
 )
-def test_notebook_code_cell_with_one_oversized_line_fails_clearly(
+def test_notebook_code_cell_with_one_oversized_line_is_split_on_that_line(
     prefix, line_number
 ):
     notebook = {
@@ -1339,10 +1372,17 @@ def test_notebook_code_cell_with_one_oversized_line_fails_clearly(
         ]
     }
 
-    with pytest.raises(ValueError, match=f"Notebook cell 1: Code line {line_number}"):
-        extraction_module.extract_and_split_document(
-            json.dumps(notebook).encode("utf-8"), ".ipynb"
-        )
+    chunks = extraction_module.extract_and_split_document(
+        json.dumps(notebook).encode("utf-8"), ".ipynb"
+    ).chunks
+
+    assert chunks
+    assert {chunk.chunk_kind for chunk in chunks} == {"notebook_code"}
+    assert {chunk.symbol_name for chunk in chunks} == {"cell 1"}
+    # Every excerpt points at the cell's one line, shifted like whole-line chunks.
+    assert len({(chunk.start_line, chunk.end_line) for chunk in chunks}) == 1
+    assert chunks[0].start_line == chunks[0].end_line
+    assert chunks[-1].content.endswith("LATE_MARKER'")
 
 
 @pytest.mark.unit
@@ -1394,8 +1434,10 @@ def test_notebook_global_lines_handle_carriage_return_at_cell_boundary():
     )
 
     second = extraction.chunks[1]
+    # A lone carriage return does not end a line (only a newline does), so
+    # the line numbers agree with editors and with read_document.
     assert (second.start_line, second.end_line) == (5, 5)
-    assert extraction.snapshot.text.splitlines()[second.start_line - 1] == "second"
+    assert split_lines(extraction.snapshot.text)[second.start_line - 1] == "second"
 
 
 @pytest.mark.unit
@@ -1461,3 +1503,29 @@ def test_empty_image_ocr_is_rejected(monkeypatch):
 
     with pytest.raises(ValueError, match="no readable text"):
         extraction_module.extract_and_split_document(build_png_bytes(), ".png")
+
+
+@pytest.mark.no_network
+async def test_a_failed_input_write_still_removes_the_docling_work_folder(monkeypatch, tmp_path):
+    from pathlib import Path
+
+    from core.knowledge.documents import extraction
+
+    made = []
+
+    def make_folder(prefix):
+        folder = tmp_path / f"{prefix}work"
+        folder.mkdir()
+        made.append(folder)
+        return str(folder)
+
+    def disk_full(self, _data):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(extraction.tempfile, "mkdtemp", make_folder)
+    monkeypatch.setattr(Path, "write_bytes", disk_full)
+
+    with pytest.raises(OSError, match="No space left"):
+        await extraction._extract_and_split_docling_document_unlocked(b"%PDF", ".pdf", "standard")
+
+    assert made and not made[0].exists()

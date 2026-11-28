@@ -257,7 +257,9 @@ class ModelWorkCoordinator:
                 if isinstance(exc, asyncio.CancelledError):
                     self._mark_cancelled(task, "Model work cancelled during execution")
                 elif task.work_record is not None:
-                    task.work_record.mark_failed(str(exc))
+                    # Some exceptions (a bare TimeoutError()) have no message,
+                    # and a failed record requires one.
+                    task.work_record.mark_failed(str(exc).strip() or type(exc).__name__)
                     self._attach_child_summary(task)
                 if not task.future.done():
                     task.future.set_exception(exc)

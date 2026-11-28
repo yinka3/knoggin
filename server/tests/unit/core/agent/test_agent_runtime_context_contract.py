@@ -907,3 +907,24 @@ def test_event_listing_feedback_reports_count_and_next_page():
 
     assert "`list_events`: Found 3 event(s)." in message
     assert "offset=25" in message
+
+
+def test_a_failed_rollover_leaves_the_notebook_as_it_was(monkeypatch):
+    from core.agent.notebook import RunNotebook
+
+    ctx = make_ctx()
+    sources = [
+        {"title": f"Source {index}", "url": f"https://example.test/{index}", "snippet": "s"}
+        for index in range(3)
+    ]
+    ctx.accumulate_tool_result("search_web", {"data": sources})
+    before = (ctx.notebook.generation, ctx.notebook.fingerprint())
+
+    def over_capacity(self, *_args, **_kwargs):
+        raise ValueError("summary exceeds capacity")
+
+    monkeypatch.setattr(RunNotebook, "set_summary", over_capacity)
+    with pytest.raises(ValueError, match="exceeds capacity"):
+        ctx.rollover_notebook("too much")
+
+    assert (ctx.notebook.generation, ctx.notebook.fingerprint()) == before

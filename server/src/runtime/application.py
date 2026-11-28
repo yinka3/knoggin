@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -13,6 +14,7 @@ from loguru import logger
 from common.conf.manager import ConfigManager
 from common.schema.settings import RootConfig
 from common.utils.lifecycle import settle_owned_task
+from common.utils.stale_files import remove_stale_entries
 from common.utils.time_utils import get_now
 from core.agent.agent_manager import AgentManager
 from core.agent.orchestrator import AgentOrchestrator
@@ -71,6 +73,20 @@ class _StartupCleanup:
                     del self.owners[phase]
             if failures:
                 raise ApplicationShutdownError(tuple(failures))
+
+
+def _remove_crash_leftovers(config_dir: Path, library_root: Path) -> None:
+    """Scratch that only exists while work runs; after a hard kill nothing
+    owns it, so startup removes what is old enough to be abandoned."""
+    removed = remove_stale_entries(
+        Path(tempfile.gettempdir()), ("knoggin-docling-*", "knoggin-folder-intake-*"),
+    )
+    removed += remove_stale_entries(Path(config_dir), (".credentials.json.*.tmp",))
+    removed += remove_stale_entries(
+        library_root / ".knoggin-file-locks", (".knoggin-admission-*.tmp",),
+    )
+    if removed:  # pragma: no cover
+        logger.info("Removed {} scratch file(s) left by an earlier process", removed)  # pragma: no cover
 
 
 @dataclass(slots=True)
@@ -140,11 +156,13 @@ class ApplicationRuntime:
                 logger.warning(
                     "Closed {} exchange(s) left open by a previous process", orphaned
                 )
-            filesystem_factory = ProjectFilesystemFactory(
-                config_manager.resolve_path(
-                    config_manager.config.developer_settings.documents.project_library_root
-                )
+            library_root = config_manager.resolve_path(
+                config_manager.config.developer_settings.documents.project_library_root
             )
+            await asyncio.to_thread(
+                _remove_crash_leftovers, config_manager.config_dir, library_root
+            )
+            filesystem_factory = ProjectFilesystemFactory(library_root)
             projects = ProjectManager(
                 resources=resources,
                 user_name=user_name,

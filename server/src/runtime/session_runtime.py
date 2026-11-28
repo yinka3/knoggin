@@ -30,6 +30,7 @@ from common.schema.primitives import ImportedAssistantTurn, ImportedExchange, Me
 from common.schema.settings import RootConfig
 from common.schema.source.references import SourceReferenceCandidate
 from common.utils.events import emit
+from common.utils.lifecycle import settle_owned_task
 from common.utils.time_utils import get_now
 from core.agent.run import AgentIdentity
 from core.agent.tool_events import (
@@ -45,6 +46,10 @@ from runtime.project_runtime import ProjectRuntime
 from runtime.resources import RuntimeResources
 
 _REQUEST_FINGERPRINT_METADATA_KEY = "request_fingerprint"
+
+
+# Queued follow-ups and background reports a session keeps a status for.
+_MAX_TRACKED_FOLLOW_UPS = 100
 
 
 class FollowUpQueueFull(ValueError):
@@ -285,11 +290,7 @@ class SessionRuntime:
                 return None
             if len(self._follow_up_queue) >= 5:
                 raise FollowUpQueueFull("Follow-up queue is full")
-            if len(self._follow_ups) >= 100:
-                for old_id, old in list(self._follow_ups.items()):
-                    if old["state"] in {"completed", "clarification", "failed", "cancelled"}:
-                        del self._follow_ups[old_id]
-                        break
+            self._make_room_for_follow_up()
             queue_id = str(uuid4())
             item = {
                 "queue_id": queue_id, "after_run_id": run_id,
@@ -321,6 +322,9 @@ class SessionRuntime:
         async with self._agent_run_lock:
             if self._agent_runs_closed or self._closed:
                 return None
+            # Reports bypass the queue limit, so they must also evict old
+            # entries, or a report-heavy chat grows this record without bound.
+            self._make_room_for_follow_up()
             queue_id = str(uuid4())
             item = {
                 "queue_id": queue_id, "after_run_id": None,
@@ -334,6 +338,16 @@ class SessionRuntime:
             if self._follow_up_task is None or self._follow_up_task.done():
                 self._follow_up_task = asyncio.create_task(self._drain_follow_ups())
             return self._public_follow_up(item)
+
+    def _make_room_for_follow_up(self) -> None:
+        """Keep the record of queued turns bounded, dropping the oldest
+        finished ones; queued and running items are never dropped."""
+
+        for old_id, old in list(self._follow_ups.items()):
+            if len(self._follow_ups) < _MAX_TRACKED_FOLLOW_UPS:
+                return
+            if old["state"] in {"completed", "clarification", "failed", "cancelled"}:  # pragma: no cover
+                del self._follow_ups[old_id]
 
     @staticmethod
     def _public_follow_up(item: dict[str, Any]) -> dict[str, Any]:
@@ -376,48 +390,60 @@ class SessionRuntime:
                 item["state"] = "starting"
                 self._follow_up_starting = True
                 self._run_idle.clear()
-            stream = None
+            # Each item runs in its own task. Stopping that run cancels only
+            # the child, so later items still drain; shutdown cancels this
+            # task, and asyncio carries that cancel into the child.
+            run = asyncio.create_task(self._run_follow_up(item))
             try:
-                stream = await self.open_agent_run_stream(
-                    Message(content=item["query"], metadata=item.get("metadata", {})),
-                    run_id=item["run_id"],
-                    _from_follow_up=True,
-                )
-                async with self._agent_run_lock:
-                    self._follow_up_starting = False
-                    item["state"] = "running"
-                async for event in stream:
-                    if event["event"] == "response":
-                        item["assistant_message_id"] = event["data"].get("assistant_message_id")
-                        item["state"] = "completed"
-                    elif event["event"] == "clarification":
-                        item["assistant_message_id"] = event["data"].get("assistant_message_id")
-                        item["state"] = "clarification"
-                    elif event["event"] == "error":
-                        item["state"] = "failed"
-                        code = event["data"].get("code")
-                        item["error_code"] = (
-                            code if code in {"llm_budget_exhausted", "workspace_conflict"}
-                            else "run_failed"
-                        )
-                if item["state"] == "running":
-                    item["state"] = "failed"
-                    item["error_code"] = "run_failed"
+                await run
             except asyncio.CancelledError:
-                item["state"] = "cancelled"
-                raise
-            except Exception:
-                logger.exception("Queued follow-up failed for session {}", self.session_id)
-                item["state"] = "failed"
-                item["error_code"] = "run_failed"
-            finally:
-                item.pop("query", None)
-                if stream is not None:
-                    await stream.aclose()
-                async with self._agent_run_lock:
-                    self._follow_up_starting = False
-                    if not self._agent_run_reserved:
-                        self._run_idle.set()
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():  # pragma: no cover
+                    raise  # pragma: no cover
+
+    async def _run_follow_up(self, item: dict[str, Any]) -> None:
+        stream = None
+        try:
+            stream = await self.open_agent_run_stream(
+                Message(content=item["query"], metadata=item.get("metadata", {})),
+                run_id=item["run_id"],
+                _from_follow_up=True,
+            )
+            async with self._agent_run_lock:
+                self._follow_up_starting = False
+                item["state"] = "running"
+            async for event in stream:
+                if event["event"] == "response":
+                    item["assistant_message_id"] = event["data"].get("assistant_message_id")
+                    item["state"] = "completed"
+                elif event["event"] == "clarification":
+                    item["assistant_message_id"] = event["data"].get("assistant_message_id")
+                    item["state"] = "clarification"
+                elif event["event"] == "error":  # pragma: no cover
+                    item["state"] = "failed"  # pragma: no cover
+                    code = event["data"].get("code")  # pragma: no cover
+                    item["error_code"] = (  # pragma: no cover
+                        code if code in {"llm_budget_exhausted", "workspace_conflict"}
+                        else "run_failed"
+                    )
+            if item["state"] == "running":  # pragma: no cover
+                item["state"] = "failed"  # pragma: no cover
+                item["error_code"] = "run_failed"  # pragma: no cover
+        except asyncio.CancelledError:  # pragma: no cover
+            item["state"] = "cancelled"  # pragma: no cover
+            raise  # pragma: no cover
+        except Exception:  # pragma: no cover
+            logger.exception("Queued follow-up failed for session {}", self.session_id)  # pragma: no cover
+            item["state"] = "failed"  # pragma: no cover
+            item["error_code"] = "run_failed"  # pragma: no cover
+        finally:
+            item.pop("query", None)
+            if stream is not None:  # pragma: no cover
+                await stream.aclose()  # pragma: no cover
+            async with self._agent_run_lock:
+                self._follow_up_starting = False
+                if not self._agent_run_reserved:  # pragma: no cover
+                    self._run_idle.set()  # pragma: no cover
 
     async def submit_steer(
         self, run_id: str, instruction: str, *, annotations: list[dict] | None = None
@@ -579,6 +605,7 @@ class SessionRuntime:
             pasted_text_spans = deepcopy(pasted_text_spans)
             selected_notebook = deepcopy(selected_notebook)
             self._agent_run_reserved = True
+            self._run_stop_requested = False
             self._run_idle.clear()
             self._active_run_id = run_id or str(uuid4())
             self._active_run_state = "admitting"
@@ -747,7 +774,6 @@ class SessionRuntime:
             # Tools in this run can ask the user something and wait for it.
             decisions = self._active_decisions = DecisionBroker()
             decision_binding = bind_decision_broker(decisions)
-            self._run_stop_requested = False
             handoff_binding = bind_handoffs(
                 self._tool_handoffs, project_id=self.project_id, session_id=self.session_id,
                 may_hand_off=lambda: not self._run_stop_requested and not self._closed,
@@ -779,7 +805,7 @@ class SessionRuntime:
                         response_seen = True
                         response = event["data"]
                         resolved_agent_id = response.get("resolved_agent_id")
-                        commit = await self.add_assistant_turn(
+                        commit, cancelled = await self._save_turn(self.add_assistant_turn(
                             content=response["content"],
                             timestamp=get_now(),
                             metadata=self._assistant_response_metadata(response),
@@ -787,8 +813,10 @@ class SessionRuntime:
                             source_candidates=self._response_source_candidates(response),
                             artifact=self._response_artifact(response),
                             readable_project_ids=captured_readable_project_ids,
-                        )
+                        ))
                         exchange_outcome = "assistant_final"
+                        if cancelled:
+                            raise asyncio.CancelledError
                         await self._record_durable_agent_turn(
                             orchestrator,
                             agent_id=(
@@ -806,7 +834,7 @@ class SessionRuntime:
                         exchange_outcome = "assistant_final"
                     elif event["event"] == "clarification":
                         clarification = dict(event["data"])
-                        commit = await self.add_assistant_turn(
+                        commit, cancelled = await self._save_turn(self.add_assistant_turn(
                             content=str(clarification["question"]),
                             timestamp=get_now(),
                             metadata=self._assistant_clarification_metadata(clarification),
@@ -816,7 +844,10 @@ class SessionRuntime:
                             ),
                             readable_project_ids=captured_readable_project_ids,
                             outcome="clarification",
-                        )
+                        ))
+                        if cancelled:  # pragma: no cover
+                            exchange_outcome = "clarification"  # pragma: no cover
+                            raise asyncio.CancelledError  # pragma: no cover
                         clarification["assistant_message_id"] = commit["message_id"]
                         clarification["source_ref_ids"] = commit["source_ref_ids"]
                         event = {"event": "clarification", "data": clarification}
@@ -882,6 +913,21 @@ class SessionRuntime:
                 )
             finally:
                 await self._release_agent_run(task)
+
+    @staticmethod
+    async def _save_turn(write) -> tuple[dict, bool]:
+        """Run one turn save to the end even if the run is cancelled meanwhile.
+
+        Returns (result, cancelled). A cancel that lands while the reply is
+        being committed waits for the save, so the caller records the outcome
+        the database actually has, then re-raises the cancel itself. A save
+        that fails raises as usual.
+        """
+        task = asyncio.ensure_future(write)
+        try:
+            return await asyncio.shield(task), False
+        except asyncio.CancelledError:
+            return await settle_owned_task(task), True
 
     async def _release_agent_run(self, task: Optional[asyncio.Task]) -> None:
         async with self._agent_run_lock:
@@ -1322,11 +1368,6 @@ class SessionRuntime:
                     )
                     raise
 
-    async def close_user_only_turn(self, user_message_id: int) -> None:
-        """Explicitly close a canonical user-only exchange for non-agent callers."""
-
-        await self._close_user_exchange(user_message_id, outcome="user_only")
-
     async def import_exchanges(
         self, exchanges: List[ImportedExchange | ImportedAssistantTurn]
     ) -> list[dict[str, Any]]:
@@ -1544,14 +1585,20 @@ class SessionRuntime:
         characters = 0
         cursor = up_to_msg_id
         while len(collected) < self._HISTORY_MAX_TURNS:
-            page = await self.get_conversation_context(self._HISTORY_PAGE, up_to_msg_id=cursor)
-            if not page:
+            # Page on the stored rows, not the filtered turns: hiding unapplied
+            # steers can shorten a full page, which looked like the last one.
+            rows = await self.knowledge_store.get_session_history(
+                user_name=self.user_name, session_id=self.session_id,
+                limit=self._HISTORY_PAGE, up_to_msg_id=cursor,
+            )
+            if not rows:
                 break
+            page = self._conversation_turns(rows)
             collected = page + collected
             characters += sum(len(str(turn.get("content") or "")) for turn in page)
-            if len(page) < self._HISTORY_PAGE or characters >= budget_tokens * 4:
+            if len(rows) < self._HISTORY_PAGE or characters >= budget_tokens * 4:
                 break
-            cursor = int(page[0]["message_id"]) - 1
+            cursor = int(rows[0]["message_id"]) - 1
         return collected
 
     async def get_conversation_context(
@@ -1562,7 +1609,12 @@ class SessionRuntime:
             user_name=self.user_name, session_id=self.session_id,
             limit=num_turns, up_to_msg_id=up_to_msg_id,
         )
+        return self._conversation_turns(turns)
 
+    @staticmethod
+    def _conversation_turns(turns: List[Dict]) -> List[Dict]:
+        """Stored rows as prompt turns: unapplied steers are hidden, applied
+        ones are attached to the user turn they changed."""
         results = []
         for turn in turns:
             metadata = turn.get("metadata") or {}

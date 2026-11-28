@@ -270,19 +270,14 @@ async def test_conversation_observations_become_reviewable_advisory(real_postgre
     )
     assert dismissed.disposition == 'dismissed'
     dismissed_review = (await service.list_maintenance_reviews('project-1'))[-1]
-    suppressed = await service.apply_relationship_advisory_action(
-        'project-1', dismissed_review.review_id, 'suppress'
-    )
-    assert suppressed.disposition == 'suppressed'
     await job.execute(JobContext(user_name='ada', project_id='project-1'))
-    assert len(await service.list_maintenance_reviews('project-1')) == 6
+    assert len(await service.list_maintenance_reviews('project-1')) == 5
     assert await client.fetch_one(
         "SELECT domain_config -> 'relationships' AS relationships "
         "FROM public.projects WHERE project_id = 'project-1'"
     ) == {'relationships': {}}
-    suppressed_review = (await service.list_maintenance_reviews('project-1'))[-1]
     reopened = await service.apply_relationship_advisory_action(
-        'project-1', suppressed_review.review_id, 'reopen'
+        'project-1', dismissed_review.review_id, 'reopen'
     )
     assert reopened.disposition == 'pending'
     domain_store = DomainConfigStore(client)
@@ -303,7 +298,7 @@ async def test_conversation_observations_become_reviewable_advisory(real_postgre
     )
     assert (await service.list_maintenance_reviews('project-1'))[-1].status == 'stale'
     assert await service.refresh_relationship_advisories('project-1') == []
-    assert len(await service.list_maintenance_reviews('project-1')) == 7
+    assert len(await service.list_maintenance_reviews('project-1')) == 6
     assert await client.fetch_one(
         "SELECT domain_config -> 'relationships' AS relationships "
         "FROM public.projects WHERE project_id = 'project-1'"

@@ -129,9 +129,12 @@ class DocumentIndexer:
             await self._writer.apply_workspace_index_rule(
                 extensions=READ_DIRECTLY_EXTENSIONS, document_id=document_id
             )
-            metadata = (await self._reader.fetch_documents_by_reference(
+            rows = await self._reader.fetch_documents_by_reference(
                 document_id=document_id, relative_path=None,
-            ))[0]
+            )
+            if not rows:  # deleted while the rule was applied
+                raise FileNotFoundError("Document not found")
+            metadata = rows[0]
             if metadata["status"] == "skipped":
                 return metadata
         if metadata["status"] == "indexed" and not force:
@@ -312,7 +315,10 @@ class DocumentIndexer:
             )
         if isinstance(
             exc,
-            (ConnectionError, TimeoutError, DependencyError, StorageError, LLMProviderError),
+            # OSError covers a file missing mid-move or locked by another
+            # program: worth retrying. A file that is really gone is
+            # tombstoned by the next reconcile; bad content raises ValueError.
+            (OSError, DependencyError, StorageError, LLMProviderError),
         ):
             return "transient_dependency", True
         return "invalid_content", False
@@ -482,7 +488,13 @@ class DocumentIndexer:
         try:
             task.result()
         except BackgroundWorkRejected as exc:
+            # The work queue is full. Waking the drain loop now would only be
+            # refused again at once, so wake it after a backoff instead.
             logger.warning("Document indexing remains queued: {}", exc.message)
+            asyncio.get_running_loop().call_later(
+                _DRAIN_FAILURE_RETRY_SECONDS, self._request_drain
+            )
+            return
         except Exception as exc:
             logger.error("Background document indexing failed: {}", exc)
         self._request_drain()
@@ -516,10 +528,18 @@ class DocumentIndexer:
                             break
                         retry_at = await self._reader.next_index_retry_at()
                         retry_time = parse_iso_time(retry_at) if retry_at is not None else None
-                        if retry_time is not None and not self._document_tasks:
-                            timeout = max(0.01, (retry_time - get_now()).total_seconds())
+                        if self._document_tasks:  # pragma: no cover
+                            # Each finished task wakes this loop as well.
+                            timeout = _DRAIN_RETRY_SECONDS  # pragma: no cover
                         else:
-                            timeout = _DRAIN_RETRY_SECONDS
+                            timeout = (
+                                (retry_time - get_now()).total_seconds()
+                                if retry_time is not None else 0
+                            )
+                            if timeout <= 0:  # pragma: no cover
+                                # Work is due but none was taken: admission was
+                                # refused (queue full), so back off, not spin.
+                                timeout = _DRAIN_FAILURE_RETRY_SECONDS  # pragma: no cover
                     except Exception as exc:
                         logger.error("Document index admission loop failed: {}", exc)
                         timeout = _DRAIN_FAILURE_RETRY_SECONDS

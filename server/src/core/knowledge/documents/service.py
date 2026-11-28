@@ -1,6 +1,8 @@
 import asyncio
+import fnmatch
 import hashlib
 import json
+import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -21,6 +23,7 @@ from loguru import logger
 from pydantic import TypeAdapter
 
 from common.document_limits import DEFAULT_DOCUMENT_SIZE
+from common.exceptions import DocumentNotReadyError
 from common.schema.document import (
     DocumentExtractionMode,
     DocumentExtractionStrategy,
@@ -43,6 +46,7 @@ from common.utils.lifecycle import settle_owned_task
 from common.utils.time_utils import get_now_iso
 from core.knowledge.db.readers.document_reader import DocumentReader
 from core.knowledge.db.writers.document_writer import DocumentWriter
+from core.knowledge.documents.lines import split_lines
 from core.knowledge.embedding_service import EmbeddingService
 from core.project.project_files import (
     CONTEXT_FILE_PATH,
@@ -147,6 +151,32 @@ def _settle_file_operation(method: Callable[..., Awaitable[Any]]):
     return wrapped
 
 
+# Hidden temp files of atomic writes and moves (".knoggin-<hex>.tmp",
+# ".knoggin-move-<hex>.tmp"). They live for milliseconds, so an hour-old one
+# was left by a crash. Scans skip hidden files, so nothing else removes them.
+_WRITE_SCRATCH_PATTERN = ".knoggin-*.tmp"
+_WRITE_SCRATCH_STALE_NS = 60 * 60 * 1_000_000_000
+
+
+def _remove_stale_write_scratch(filesystem, lease) -> int:
+    cutoff = time.time_ns() - _WRITE_SCRATCH_STALE_NS
+    stale = [
+        path.relative_path for path in filesystem.iter_paths()
+        if fnmatch.fnmatchcase(PurePosixPath(path.relative_path).name, _WRITE_SCRATCH_PATTERN)
+        and path.modified_ns < cutoff
+    ]
+    removed = 0
+    for relative_path in stale:
+        try:
+            filesystem.delete_file(relative_path, _lease=lease)
+            removed += 1
+        except (OSError, ValueError):
+            logger.warning("Could not remove stale write scratch {}", relative_path)
+    if removed:
+        logger.info("Removed {} stale write scratch file(s)", removed)
+    return removed
+
+
 class DocumentService:
     """Project-scoped storage and retrieval boundary for documents."""
 
@@ -192,6 +222,7 @@ class DocumentService:
         ] = {}
         self._reconciliation_settings: FolderScanSettings | None = None
         self._reconciliation_run_count = 0
+        self._scratch_swept = False
         if indexer is None:
             indexing_policy = DocumentIndexPolicy.capture(
                 inline_index_max_bytes=inline_index_max_bytes,
@@ -289,6 +320,11 @@ class DocumentService:
         filesystem = self._filesystem
         if filesystem is None:
             return {"created": 0, "changed": 0, "deleted": 0, "excluded": 0}
+        if not self._scratch_swept:
+            # Once per process, before the scan's generation is read: only an
+            # earlier, crashed process leaves atomic-write scratch behind.
+            self._scratch_swept = True
+            await self._run_blocking(_remove_stale_write_scratch, filesystem, lease)
 
         scan_generation = await self._run_blocking(
             filesystem.get_mutation_generation, _lease=lease
@@ -738,7 +774,7 @@ class DocumentService:
                     content = filesystem.read_bytes(relative).decode("utf-8")
                 except (UnicodeDecodeError, OSError, ValueError):
                     continue
-                for number, line in enumerate(content.splitlines(), start=1):
+                for number, line in enumerate(split_lines(content), start=1):
                     if needle in (line if case_sensitive else line.casefold()):
                         matches.append({"path": relative, "line": number, "text": line[:300]})
                         if len(matches) >= max_matches:
@@ -827,7 +863,7 @@ class DocumentService:
             text = content.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise ValueError("project file is not UTF-8 text") from exc
-        lines = text.splitlines(keepends=True) or [text]
+        lines = split_lines(text, keepends=True) or [text]
         if start_line > len(lines):
             raise ValueError(f"start_line {start_line} exceeds document length {len(lines)}")
         requested_end = min(
@@ -1229,7 +1265,7 @@ class DocumentService:
             content_hash=document["content_hash"],
         )
         if snapshot is None:
-            raise RuntimeError("Document has not been indexed")
+            raise DocumentNotReadyError("Document has not been indexed")
         payload = snapshot.get("snapshot")
         if not isinstance(payload, dict) or not isinstance(payload.get("text"), str):
             raise RuntimeError("Document parse snapshot is invalid")
@@ -1333,14 +1369,14 @@ class DocumentService:
                 "end_row": end_line,
             }
         elif selected_page is None:
-            lines = text.splitlines() or [text]
+            lines = split_lines(text) or [text]
             locator = {
                 "kind": "text_lines",
                 "start_line": start_line,
                 "end_line": end_line,
             }
         else:
-            lines = text.splitlines() or [text]
+            lines = split_lines(text) or [text]
 
         total_lines = len(lines)
         if start_line > total_lines:
@@ -1353,19 +1389,28 @@ class DocumentService:
             start_line + MAX_READ_LINES - 1,
         )
         requested_end = min(requested_end, total_lines)
+        selected = lines[start_line - 1 : requested_end]
+        # Keep whole lines within the character cap, so end_line and the
+        # locator name only the lines actually returned.
+        numbered_lines: List[str] = []
+        size = 0
+        for line_number, line in enumerate(selected, start=start_line):
+            entry = f"{line_number}: {line}"
+            added = len(entry) + (1 if numbered_lines else 0)
+            if size + added > MAX_READ_CHARACTERS:
+                break
+            numbered_lines.append(entry)
+            size += added
+        character_truncated = len(numbered_lines) < len(selected)
+        if not numbered_lines:
+            # The first line alone is over the cap: return its start.
+            numbered_lines = [f"{start_line}: {selected[0]}"[:MAX_READ_CHARACTERS]]
+        requested_end = start_line + len(numbered_lines) - 1
         if extension == ".csv":
             locator["end_row"] = requested_end
         elif selected_page is None:
             locator["end_line"] = requested_end
-        selected = lines[start_line - 1 : requested_end]
-        numbered_lines = [
-            f"{line_number}: {line}"
-            for line_number, line in enumerate(selected, start=start_line)
-        ]
         content = "\n".join(numbered_lines)
-        character_truncated = len(content) > MAX_READ_CHARACTERS
-        if character_truncated:
-            content = content[:MAX_READ_CHARACTERS]
 
         result = self._public_metadata(document_metadata)
         result.update(
